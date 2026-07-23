@@ -1,0 +1,31 @@
+schema_version = 1
+
+[workspace]
+name = "example-polyrepo"
+
+[layout]
+anchors = "repositories"
+lines = "versions"
+hotfixes = "hotfixes"
+tasks = "worktrees"
+
+[policy]
+default_base = "main"
+task_branch_prefix = "task/"
+allow_push = false
+require_clean_merge = true
+
+[adapters.codex]
+launch = ["codex", "-C", "{workspace}"]
+read = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "{prompt}"]
+write = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "{prompt}"]
+
+[repositories.api]
+path = "repositories/services/api"
+mount = "services/api"
+verify = [["python3", "-m", "pytest", "-q"]]
+
+[repositories.web]
+path = "repositories/clients/web"
+mount = "clients/web"
+verify = [["npm", "test", "--", "--runInBand"]]

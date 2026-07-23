@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dyro"
+version = "0.3.0"
+description = "DyroEngineeringFlow: local-first automation and delivery control for multi-repository teams"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "DandreYang" }]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["agent", "automation", "delivery", "git-worktree", "multi-repository"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
+
+[project.urls]
+Homepage = "https://github.com/DandreYang/DyroEngineeringFlow"
+Repository = "https://github.com/DandreYang/DyroEngineeringFlow"
+Issues = "https://github.com/DandreYang/DyroEngineeringFlow/issues"
+Changelog = "https://github.com/DandreYang/DyroEngineeringFlow/blob/main/CHANGELOG.md"
+
+[project.scripts]
+dyro = "dyro.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.unittest]
+start-directory = "tests"
