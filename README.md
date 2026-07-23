@@ -35,16 +35,16 @@ To upgrade later, run `pipx upgrade dyro`. If your team manages Python packages 
 python3 -m pip install --user --upgrade dyro
 ```
 
-Place your repositories in a workspace, then initialize it:
+Place your repositories in a workspace, then use the newcomer path to discover them, create the safe state directories, and create the first development line in one command:
 
 ```bash
 
 mkdir my-workspace && cd my-workspace
 # Clone or move your Git repositories under this directory first.
-dyro init . --discover --name my-workspace
+dyro setup . --name my-workspace --line dev --yes
 ```
 
-`--discover` scans local Git repositories, records their workspace-relative paths, derives their development-line mounts, and reads `origin` when available—no TOML editing. If the workspace has no repositories yet, use the guided fallback:
+`setup` scans local Git repositories, records their workspace-relative paths, derives their development-line mounts, and reads `origin` when available—no TOML editing. `--yes` is required only because the first line creates Git worktrees. Use `--no-line` when you want the Profile first and will create a line later. If the workspace has no repositories yet, use the guided fallback:
 
 ```bash
 dyro init . --wizard --name my-workspace
@@ -55,6 +55,15 @@ Add a repository later without opening `dyro.toml`:
 ```bash
 dyro repo add repositories/services/payments
 dyro repo list
+```
+
+Manage common delivery policy and Agent adapters without opening `dyro.toml`:
+
+```bash
+dyro config set policy.execution_mode external
+dyro config get policy.execution_mode
+dyro agent add ci-runner --preset noop
+dyro agent test ci-runner
 ```
 
 If a Profile contains remotes, missing repository anchors can be created safely:
@@ -100,7 +109,10 @@ For a Profile whose execution and approval are run by a separate trusted system,
 
 ```bash
 dyro task claim API-101 --by isolated-runner-1
-dyro task evidence execution API-101 --receipt /runner/out/receipt.md --gates /runner/out/gates.json --heads /runner/out/task-heads.json
+# In the isolated runner: run declared gates and package receipt, logs, and exact HEADs.
+dyro task evidence build API-101 --workspace /runner/workspace --receipt /runner/out/receipt.md --output /runner/out/API-101.zip
+# In the control plane: validate and import the one portable package.
+dyro task evidence execution API-101 --bundle /runner/out/API-101.zip
 dyro task evidence review API-101 --file /review/out/review.md
 dyro task signoff API-101 --by release-manager
 ```
@@ -116,15 +128,15 @@ dyro --dry-run task run API-101
 
 | Command | Purpose |
 | --- | --- |
-| `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | Onboard a teammate without TOML edits, manage anchors, and choose a line and agent. |
+| `setup` / `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | Onboard a teammate without TOML edits, manage anchors, and choose a line and agent. |
 | `doctor` / `status` | Validate and display control-plane state. |
 | `line create/list` | Create, register, and inspect feature development lines. |
 | `hotfix create` | Create a hotfix line from an explicit production base. |
 | `changeset create/list/verify` | Pin and verify the exact clean Git heads that make up a multi-repository delivery. |
-| `agent list` / `open` | Inspect adapters or open an agent in the correct development line. |
+| `config get/set` / `agent list/add/test` / `open` | Safely manage common policy and adapters, validate an executable, or open an agent in the correct development line. |
 | `task create/list/board/status/next` | Manage task manifests, the state machine, and the next actionable task. |
 | `task run/answer/gates/review/signoff` | Run tasks, resolve questions, execute gates, request independent review, and record external sign-off when a Profile requires it. |
-| `task claim` / `task evidence execution/review` | One-time claim and receipt-, gate-, task-HEAD-, and review-evidence import for an external isolated runner. |
+| `task claim` / `task evidence build/execution/review` | One-time claim, portable execution-evidence build/import, and receipt-bound review import for an external isolated runner. |
 | `task merge` | Merge a reviewed task branch into its owning development line. |
 | `task loop/daemon/stats/decisions` | Run controlled batches, scheduling, ledger reporting, and decision gates. |
 
@@ -136,4 +148,4 @@ This README is maintained in English, Simplified Chinese, Japanese, Korean, and 
 
 ## Current boundaries
 
-DyroEngineeringFlow provides a complete local workflow loop and policy controls for keeping stricter teams in planning-only local mode. It does not create remote repositories, ship SaaS credentials, or include an external runner implementation; external runner integration belongs in a Profile extension. Local multi-repository merges are preflighted and recovered as one operation; remote Git servers cannot provide atomic cross-repository push, so partial push failure is recorded for recovery. Automatic merge requires permission in both the task manifest and local policy. It is available under the [MIT License](LICENSE) and as [`dyro` on PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow provides a complete local workflow loop and policy controls for keeping stricter teams in planning-only local mode. It does not create remote repositories, ship SaaS credentials, or provision an external runner; it does provide a portable evidence-package contract for one. Local multi-repository merges are preflighted and recovered as one operation; remote Git servers cannot provide atomic cross-repository push, so partial push failure is recorded for recovery. Automatic merge requires permission in both the task manifest and local policy. It is available under the [MIT License](LICENSE) and as [`dyro` on PyPI](https://pypi.org/project/dyro/).

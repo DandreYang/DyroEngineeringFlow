@@ -12,6 +12,7 @@ from typing import Any, Iterable
 from .config import Config, expand_argv, strict_bool, validate_id
 from .errors import DyroError, ValidationError
 from .process import git, require_ok, run
+from .state import append_text, atomic_write_bytes, atomic_write_text, exclusive_lock
 from .workspace import Line, get_line, line_repository_path, repository_path
 
 
@@ -178,6 +179,22 @@ def _claim_path(task: Task) -> Path:
     return task.directory / "claim.json"
 
 
+def _state_lock_path(task: Task) -> Path:
+    return task.directory / ".state.lock"
+
+
+def _dispatch_lock_path(config: Config) -> Path:
+    return config.root / ".dyro" / "dispatch.lock"
+
+
+def _execution_lock_path(task: Task) -> Path:
+    return task.directory / ".execution.lock"
+
+
+def _review_lock_path(task: Task) -> Path:
+    return task.directory / ".review.lock"
+
+
 def _claim(task: Task) -> dict[str, object] | None:
     path = _claim_path(task)
     if not path.is_file():
@@ -198,51 +215,48 @@ def claim_task(config: Config, task: Task, *, runner: str, dry_run: bool = False
     runner = runner.strip()
     if not runner:
         raise ValidationError("执行器标识不能为空")
-    check_dispatchable(config, task)
-    current = status(config, task)
-    if current not in ("backlog", "assigned"):
-        raise DyroError(f"仅 backlog 或 assigned 任务可领取：{task.id}")
-    if _claim(task) is not None:
-        raise DyroError(f"任务 {task.id} 已被领取")
-    if dry_run:
-        return "assigned"
-    payload = {
-        "task_id": task.id,
-        "runner": runner,
-        "claimed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
-    try:
-        with _claim_path(task).open("x", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
-            handle.write("\n")
-    except FileExistsError as exc:
-        raise DyroError(f"任务 {task.id} 已被另一个执行器领取") from exc
-    if current == "backlog":
-        set_status(config, task, "assigned")
-    ledger(config, task.id, "claim", runner=runner)
-    return "assigned"
+    with exclusive_lock(_dispatch_lock_path(config)):
+        with exclusive_lock(_state_lock_path(task)):
+            check_dispatchable(config, task)
+            current = status(config, task)
+            if current not in ("backlog", "assigned"):
+                raise DyroError(f"仅 backlog 或 assigned 任务可领取：{task.id}")
+            if _claim(task) is not None:
+                raise DyroError(f"任务 {task.id} 已被领取")
+            if dry_run:
+                return "assigned"
+            payload = {
+                "task_id": task.id,
+                "runner": runner,
+                "claimed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+            atomic_write_text(_claim_path(task), json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+            if current == "backlog":
+                set_status(config, task, "assigned")
+            ledger(config, task.id, "claim", runner=runner)
+            return "assigned"
 
 
 def set_status(config: Config, task: Task, next_status: str, *, force: bool = False, dry_run: bool = False) -> None:
     if next_status not in STATUSES:
         raise ValidationError(f"非法状态 {next_status}，可选：{', '.join(STATUSES)}")
-    current = status(config, task)
-    if current == next_status:
-        return
-    if config.policy.require_external_signoff and next_status == "done" and not _valid_external_signoff(config, task):
-        raise DyroError("当前 Profile 要求外部签收；请先使用 task signoff 写入与回执、复核绑定的签收记录")
-    if not force and next_status not in TRANSITIONS[current]:
-        raise DyroError(f"拒绝状态跳转 {current} -> {next_status}；如确有人工恢复需求，使用 --force 并留下审计记录")
-    if not dry_run:
-        (task.directory / "status").write_text(next_status + "\n", encoding="utf-8")
-        ledger(config, task.id, "status", from_status=current, to_status=next_status)
+    with exclusive_lock(_state_lock_path(task)):
+        current = status(config, task)
+        if current == next_status:
+            return
+        if config.policy.require_external_signoff and next_status == "done" and not _valid_external_signoff(config, task):
+            raise DyroError("当前 Profile 要求外部签收；请先使用 task signoff 写入与回执、复核绑定的签收记录")
+        if not force and next_status not in TRANSITIONS[current]:
+            raise DyroError(f"拒绝状态跳转 {current} -> {next_status}；如确有人工恢复需求，使用 --force 并留下审计记录")
+        if not dry_run:
+            atomic_write_text(task.directory / "status", next_status + "\n")
+            ledger(config, task.id, "status", from_status=current, to_status=next_status)
 
 
 def ledger(config: Config, task_id: str, phase: str, **fields: object) -> None:
-    config.ledger_file.parent.mkdir(parents=True, exist_ok=True)
     payload = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "task_id": task_id, "phase": phase, **fields}
-    with config.ledger_file.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    with exclusive_lock(config.root / ".dyro" / "ledger.lock"):
+        append_text(config.ledger_file, json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def decisions(config: Config) -> dict[str, str]:
@@ -268,9 +282,38 @@ def check_dispatchable(config: Config, task: Task) -> None:
         if status(config, dependency_task) != "done":
             raise DyroError(f"任务 {task.id} 依赖 {dependency}，当前状态为 {status(config, dependency_task)}")
     if task.conflict_group:
-        active = [other.id for other in list_tasks(config) if other.id != task.id and other.conflict_group == task.conflict_group and status(config, other) == "in_progress"]
+        active_states = ("assigned", "in_progress") if config.policy.execution_mode == "external" else ("in_progress",)
+        active = [
+            other.id
+            for other in list_tasks(config)
+            if other.id != task.id
+            and other.conflict_group == task.conflict_group
+            and status(config, other) in active_states
+        ]
         if active:
-            raise DyroError(f"任务 {task.id} 与进行中任务 {', '.join(active)} 共用冲突组 {task.conflict_group}")
+            raise DyroError(f"任务 {task.id} 与活跃任务 {', '.join(active)} 共用冲突组 {task.conflict_group}")
+
+
+def _reserve_local_execution(
+    config: Config,
+    task: Task,
+    *,
+    allowed: tuple[str, ...],
+    action: str,
+    dry_run: bool,
+) -> None:
+    """Check dispatch constraints and atomically reserve the task before starting an Agent."""
+    with exclusive_lock(_dispatch_lock_path(config)):
+        with exclusive_lock(_state_lock_path(task)):
+            current = status(config, task)
+            if current not in allowed:
+                raise DyroError(f"任务 {task.id} 当前为 {current}，不能{action}")
+            check_dispatchable(config, task)
+            if dry_run:
+                return
+            if current in ("backlog", "failed"):
+                set_status(config, task, "assigned", force=current == "failed")
+            set_status(config, task, "in_progress")
 
 
 def worktree_root(config: Config, task: Task) -> Path:
@@ -381,7 +424,7 @@ def _serialize_task_heads(config: Config, task: Task, heads: dict[str, str]) -> 
 def _record_task_heads(config: Config, task: Task) -> str:
     content = _serialize_task_heads(config, task, _collect_task_heads(config, task))
     target = task.directory / TASK_HEADS_FILE
-    target.write_bytes(content)
+    atomic_write_bytes(target, content)
     return hashlib.sha256(content).hexdigest()
 
 
@@ -515,18 +558,19 @@ def _prompt(task: Task, phase: str, workspace: Path) -> str:
 def _capture(task: Task, filename: str, output: str, *, dry_run: bool = False) -> Path:
     target = task.directory / "logs" / filename
     if not dry_run:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(output, encoding="utf-8")
+        atomic_write_text(target, output)
     return target
 
 
 def _copy_external_evidence(task: Task, source: Path, target_name: str, *, dry_run: bool = False) -> Path:
     if not source.is_file():
         raise DyroError(f"外部证据文件不存在：{source}")
-    target = task.directory / target_name
+    relative = Path(target_name)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValidationError(f"外部证据目标路径非法：{target_name}")
+    target = task.directory / relative
     if not dry_run:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(source.read_bytes())
+        atomic_write_bytes(target, source.read_bytes())
     return target
 
 
@@ -615,7 +659,7 @@ def run_gates(config: Config, task: Task, *, dry_run: bool = False) -> bool:
         cwd = root / gate.cwd
         argv = expand_argv(gate.argv, workspace=root, root=config.root, task=task.id, line=task.line)
         result = run(argv, cwd=cwd, timeout=gate.timeout_seconds, dry_run=dry_run)
-        _capture(task, f"gate-{index}-{gate.name}.log", result.stdout, dry_run=dry_run)
+        _capture(task, f"gate-{index}.log", result.stdout, dry_run=dry_run)
         passed = result.code == 0
         all_passed = all_passed and passed
         if not dry_run:
@@ -625,15 +669,27 @@ def run_gates(config: Config, task: Task, *, dry_run: bool = False) -> bool:
 
 def run_task(config: Config, task: Task, *, dry_run: bool = False) -> str:
     _require_local_execution(config, "任务", dry_run=dry_run)
-    current = status(config, task)
-    if current not in ("backlog", "assigned", "failed"):
-        raise DyroError(f"任务 {task.id} 当前为 {current}，不能启动执行")
-    check_dispatchable(config, task)
-    line = get_line(config, task.line)
-    workspace = _ensure_task_worktrees(config, task, line, dry_run=dry_run)
-    if current in ("backlog", "failed"):
-        set_status(config, task, "assigned", force=current == "failed", dry_run=dry_run)
-    set_status(config, task, "in_progress", force=current in ("backlog", "failed"), dry_run=dry_run)
+    if dry_run:
+        return _run_task(config, task, dry_run=True)
+    with exclusive_lock(_execution_lock_path(task), timeout_seconds=1.0):
+        return _run_task(config, task, dry_run=False)
+
+
+def _run_task(config: Config, task: Task, *, dry_run: bool) -> str:
+    _reserve_local_execution(
+        config,
+        task,
+        allowed=("backlog", "assigned", "failed"),
+        action="启动执行",
+        dry_run=dry_run,
+    )
+    try:
+        line = get_line(config, task.line)
+        workspace = _ensure_task_worktrees(config, task, line, dry_run=dry_run)
+    except (DyroError, ValidationError):
+        if not dry_run:
+            set_status(config, task, "failed")
+        raise
     argv = _adapter_argv(config, task.executor, "write" if task.risk == "write" else "read", workspace=workspace, prompt=_prompt(task, "executor", workspace), task=task)
     result = run(argv, cwd=workspace, timeout=task.timeout_minutes * 60, dry_run=dry_run)
     _capture(task, "executor.log", result.stdout, dry_run=dry_run)
@@ -673,6 +729,26 @@ def import_execution_evidence(
     heads: Path | None = None,
     dry_run: bool = False,
 ) -> str:
+    with exclusive_lock(_state_lock_path(task)):
+        return _import_execution_evidence(
+            config,
+            task,
+            receipt=receipt,
+            gates=gates,
+            heads=heads,
+            dry_run=dry_run,
+        )
+
+
+def _import_execution_evidence(
+    config: Config,
+    task: Task,
+    *,
+    receipt: Path,
+    gates: Path | None = None,
+    heads: Path | None = None,
+    dry_run: bool = False,
+) -> str:
     """Import execution proof produced by the runner that claimed this task."""
     claim = _require_external_claim(config, task)
     current = status(config, task)
@@ -693,12 +769,11 @@ def import_execution_evidence(
         set_status(config, task, "in_progress")
     _copy_external_evidence(task, receipt, "receipt.md")
     if gate_bytes:
-        (task.directory / "evidence").mkdir(parents=True, exist_ok=True)
-        (task.directory / "evidence" / "external-gates.json").write_bytes(gate_bytes)
+        atomic_write_bytes(task.directory / "evidence" / "external-gates.json", gate_bytes)
         for index, (_, log_path) in enumerate(gate_logs, start=1):
             _copy_external_evidence(task, log_path, f"evidence/gates/gate-{index}.log")
     if task_heads_bytes:
-        (task.directory / TASK_HEADS_FILE).write_bytes(task_heads_bytes)
+        atomic_write_bytes(task.directory / TASK_HEADS_FILE, task_heads_bytes)
     ledger(
         config,
         task.id,
@@ -719,13 +794,29 @@ def import_execution_evidence(
 
 def answer_task(config: Config, task: Task, answer: str, *, dry_run: bool = False) -> str:
     _require_local_execution(config, "任务续跑", dry_run=dry_run)
-    if status(config, task) != "waiting_answer":
-        raise DyroError(f"仅 waiting_answer 任务可继续：{task.id}")
+    if dry_run:
+        return _answer_task(config, task, answer, dry_run=True)
+    with exclusive_lock(_execution_lock_path(task), timeout_seconds=1.0):
+        return _answer_task(config, task, answer, dry_run=False)
+
+
+def _answer_task(config: Config, task: Task, answer: str, *, dry_run: bool) -> str:
+    _reserve_local_execution(
+        config,
+        task,
+        allowed=("waiting_answer",),
+        action="继续执行",
+        dry_run=dry_run,
+    )
     if not dry_run:
-        (task.directory / "answers.md").write_text(answer.rstrip() + "\n", encoding="utf-8")
-    set_status(config, task, "in_progress", dry_run=dry_run)
-    line = get_line(config, task.line)
-    workspace = _ensure_task_worktrees(config, task, line, dry_run=dry_run)
+        atomic_write_text(task.directory / "answers.md", answer.rstrip() + "\n")
+    try:
+        line = get_line(config, task.line)
+        workspace = _ensure_task_worktrees(config, task, line, dry_run=dry_run)
+    except (DyroError, ValidationError):
+        if not dry_run:
+            set_status(config, task, "failed")
+        raise
     argv = _adapter_argv(config, task.executor, "write" if task.risk == "write" else "read", workspace=workspace, prompt=_prompt(task, "continuation", workspace), task=task)
     result = run(argv, cwd=workspace, timeout=task.timeout_minutes * 60, dry_run=dry_run)
     _capture(task, "executor-continuation.log", result.stdout, dry_run=dry_run)
@@ -800,6 +891,13 @@ def _apply_review_decision(config: Config, task: Task, *, dry_run: bool = False)
 
 def review_task(config: Config, task: Task, *, dry_run: bool = False) -> str:
     _require_local_execution(config, "复核", dry_run=dry_run)
+    if dry_run:
+        return _review_task(config, task, dry_run=True)
+    with exclusive_lock(_review_lock_path(task), timeout_seconds=1.0):
+        return _review_task(config, task, dry_run=False)
+
+
+def _review_task(config: Config, task: Task, *, dry_run: bool) -> str:
     if status(config, task) != "review":
         raise DyroError(f"仅 review 任务可启动复核：{task.id}")
     workspace = worktree_root(config, task)
@@ -825,6 +923,11 @@ def review_task(config: Config, task: Task, *, dry_run: bool = False) -> str:
 
 
 def import_review_evidence(config: Config, task: Task, *, review: Path, dry_run: bool = False) -> str:
+    with exclusive_lock(_state_lock_path(task)):
+        return _import_review_evidence(config, task, review=review, dry_run=dry_run)
+
+
+def _import_review_evidence(config: Config, task: Task, *, review: Path, dry_run: bool = False) -> str:
     """Import a receipt-bound review emitted by the runner that claimed the task."""
     claim = _require_external_claim(config, task)
     if status(config, task) != "review":
@@ -838,6 +941,12 @@ def import_review_evidence(config: Config, task: Task, *, review: Path, dry_run:
 
 def signoff_task(config: Config, task: Task, *, approver: str, dry_run: bool = False) -> str:
     """Record a human or external-system approval for a receipt-bound review."""
+    with exclusive_lock(_state_lock_path(task)):
+        return _signoff_task(config, task, approver=approver, dry_run=dry_run)
+
+
+def _signoff_task(config: Config, task: Task, *, approver: str, dry_run: bool = False) -> str:
+    """Perform one lock-held external sign-off state transition."""
     if not config.policy.require_external_signoff:
         raise DyroError("当前 Profile 未启用 require_external_signoff，无需签收")
     if status(config, task) != "review_pending_signoff":
@@ -863,7 +972,7 @@ def signoff_task(config: Config, task: Task, *, approver: str, dry_run: bool = F
         "signed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     if not dry_run:
-        (task.directory / "signoff.json").write_text(json.dumps(signoff, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        atomic_write_text(task.directory / "signoff.json", json.dumps(signoff, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
         set_status(config, task, "done")
         ledger(
             config,

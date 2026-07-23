@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 import os
 from pathlib import Path
 import shlex
@@ -10,6 +11,7 @@ import time
 from . import __version__
 from .changesets import create_changeset, get_changeset, list_changesets, verify_changeset
 from .config import CONFIG_NAME, Config, expand_argv, load, validate_id
+from .evidence import build_execution_bundle, unpack_execution_bundle
 from .errors import DyroError
 from .onboarding import (
     append_repository,
@@ -19,6 +21,8 @@ from .onboarding import (
     render_config,
     repository_input_from_path,
 )
+from .profile import append_adapter, command_adapter, config_value, preset_adapter, set_config_value, test_adapter
+from .state import atomic_write_text, exclusive_lock
 from .tasks import (
     STATUSES,
     answer_task,
@@ -144,7 +148,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         content = render_config(args.name, repositories, args.base)
     else:
         content = CONFIG_TEMPLATE.format(name=args.name)
-    config_file.write_text(content, encoding="utf-8")
+    atomic_write_text(config_file, content)
     for relative in (".dyro/tasks", ".dyro/lines", ".dyro/hotfixes", ".dyro/changes"):
         (root / relative).mkdir(parents=True, exist_ok=True)
     print(f"已初始化 {root}")
@@ -152,6 +156,71 @@ def cmd_init(args: argparse.Namespace) -> None:
         print(f"已自动登记 {len(repositories)} 个本地 Git 仓库；下一步：运行 dyro doctor")
     else:
         print("下一步：登记 repositories，随后运行 dyro doctor")
+
+
+def _default_workspace_name(root: Path) -> str:
+    candidate = "".join(character if character.isascii() and character.isalnum() else "-" for character in root.name).strip("-._")
+    candidate = candidate or "my-workspace"
+    if not candidate[0].isalnum():
+        candidate = "workspace-" + candidate
+    return candidate[:80]
+
+
+def _ensure_state_directories(root: Path) -> None:
+    for relative in (".dyro/tasks", ".dyro/lines", ".dyro/hotfixes", ".dyro/changes"):
+        (root / relative).mkdir(parents=True, exist_ok=True)
+
+
+def cmd_setup(args: argparse.Namespace) -> None:
+    """Create a usable Profile and, optionally, its first safe development line."""
+    root = Path(args.path).expanduser().resolve()
+    config_file = root / CONFIG_NAME
+    created = False
+    if config_file.exists():
+        config = load(root)
+        print(f"复用已有 Profile：{config_file}")
+    else:
+        repositories = discover_repositories(root)
+        if not repositories:
+            raise DyroError("未发现 Git 仓库；请先 clone 仓库到工作区，或使用 dyro init --wizard")
+        name = args.name or _default_workspace_name(root)
+        validate_id(name, "workspace 名称")
+        if args.dry_run:
+            print(f"DRY RUN: 将创建 {config_file}，自动登记 {len(repositories)} 个 Git 仓库")
+            if not args.no_line:
+                print(f"DRY RUN: 将创建开发线 {args.line}（分支 {args.branch or f'feat/{args.line}'}）")
+            return
+        root.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(config_file, render_config(name, repositories, args.base or "main"))
+        config = load(root)
+        created = True
+        print(f"已创建 Profile，并自动登记 {len(repositories)} 个 Git 仓库")
+    if not args.dry_run:
+        _ensure_state_directories(config.root)
+    if not args.no_line:
+        _require_yes(args, "setup 创建开发线")
+        try:
+            existing = get_line(config, args.line, "line")
+        except DyroError:
+            branch = args.branch or f"feat/{args.line}"
+            line = create_line(
+                config,
+                line_id=args.line,
+                branch=branch,
+                base=args.base or config.policy.default_base,
+                kind="line",
+                dry_run=args.dry_run,
+            )
+            print(f"{'DRY RUN: ' if args.dry_run else ''}已创建开发线 {line.id}（{line.branch}）")
+        else:
+            print(f"开发线已存在：{existing.id}（{existing.branch}）")
+    findings = doctor(config)
+    for finding in findings:
+        print(finding)
+    if any(finding.startswith("FAIL") for finding in findings):
+        raise DyroError("setup 已完成基础配置，但 doctor 仍发现结构错误")
+    if created:
+        print("下一步：dyro start --line " + args.line if not args.no_line else "下一步：dyro line create <id> --yes")
 
 
 def cmd_repo_list(args: argparse.Namespace) -> None:
@@ -212,6 +281,44 @@ def cmd_agent_list(args: argparse.Namespace) -> None:
     config = _config(args)
     for adapter_id, adapter in sorted(config.adapters.items()):
         print(f"{adapter_id:16} launch={shlex.join(adapter.launch)}")
+
+
+def cmd_agent_add(args: argparse.Namespace) -> None:
+    config = _config(args)
+    if args.preset:
+        adapter = preset_adapter(args.id, args.preset)
+    else:
+        try:
+            command = shlex.split(args.command)
+        except ValueError as exc:
+            raise DyroError(f"Agent command 解析失败：{exc}") from exc
+        adapter = command_adapter(args.id, command)
+    append_adapter(config, adapter, dry_run=args.dry_run)
+    print(f"{'DRY RUN: 将添加' if args.dry_run else '已添加'} Agent adapter：{adapter.id}")
+
+
+def cmd_agent_test(args: argparse.Namespace) -> None:
+    checks = test_adapter(_config(args), args.id)
+    failures = []
+    for mode, available, executable in checks:
+        print(f"{'PASS' if available else 'FAIL'} {args.id}.{mode}: {executable}")
+        if not available:
+            failures.append(mode)
+    if failures:
+        raise DyroError(f"Agent adapter 不可用：{args.id}（{', '.join(failures)}）")
+
+
+def cmd_config_get(args: argparse.Namespace) -> None:
+    value = config_value(_config(args), args.key)
+    print(json.dumps(value, ensure_ascii=False))
+
+
+def cmd_config_set(args: argparse.Namespace) -> None:
+    config = _config(args)
+    value = set_config_value(config, args.key, args.value, dry_run=args.dry_run)
+    if not args.dry_run:
+        load(config.root)
+    print(f"{'DRY RUN: 将设置' if args.dry_run else '已设置'} {args.key} = {json.dumps(value, ensure_ascii=False)}")
 
 
 def cmd_open(args: argparse.Namespace) -> None:
@@ -346,15 +453,16 @@ def cmd_task_create(args: argparse.Namespace) -> None:
     if args.repository not in config.repositories:
         raise DyroError(f"未配置仓库：{args.repository}")
     path = config.task_specs_dir / args.id
-    if path.exists():
-        raise DyroError(f"任务目录已存在：{path}")
     if args.dry_run:
         print(f"DRY RUN: 将创建 {path}")
         return
-    path.mkdir(parents=True)
-    mount = config.repositories[args.repository].mount
-    (path / "task.toml").write_text(task_template(args.id, args.title, args.line, args.repository, mount), encoding="utf-8")
-    (path / "handoff.md").write_text(f"# {args.title}\n\n- 目标：\n- 范围：\n- 验收：\n", encoding="utf-8")
+    with exclusive_lock(config.task_specs_dir / ".tasks.lock"):
+        if path.exists():
+            raise DyroError(f"任务目录已存在：{path}")
+        path.mkdir(parents=True)
+        mount = config.repositories[args.repository].mount
+        atomic_write_text(path / "task.toml", task_template(args.id, args.title, args.line, args.repository, mount))
+        atomic_write_text(path / "handoff.md", f"# {args.title}\n\n- 目标：\n- 范围：\n- 验收：\n")
     print(f"已创建任务：{path}")
 
 
@@ -456,12 +564,44 @@ def cmd_task_signoff(args: argparse.Namespace) -> None:
 def cmd_task_evidence_execution(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
-    gates = Path(args.gates) if args.gates else None
-    heads = Path(args.heads) if args.heads else None
-    print(
-        f"{task.id} -> "
-        f"{import_execution_evidence(config, task, receipt=Path(args.receipt), gates=gates, heads=heads, dry_run=args.dry_run)}"
+    if args.bundle:
+        if args.gates or args.heads:
+            raise DyroError("--bundle 不能与 --gates 或 --heads 同时使用")
+        with unpack_execution_bundle(Path(args.bundle)) as evidence:
+            result = import_execution_evidence(
+                config,
+                task,
+                receipt=evidence["receipt"],
+                gates=evidence["gates"] if evidence["gates"].is_file() else None,
+                heads=evidence["heads"] if evidence["heads"].is_file() else None,
+                dry_run=args.dry_run,
+            )
+    else:
+        result = import_execution_evidence(
+            config,
+            task,
+            receipt=Path(args.receipt),
+            gates=Path(args.gates) if args.gates else None,
+            heads=Path(args.heads) if args.heads else None,
+            dry_run=args.dry_run,
+        )
+    print(f"{task.id} -> {result}")
+
+
+def cmd_task_evidence_build(args: argparse.Namespace) -> None:
+    config = _config(args)
+    task = load_task(config, args.id)
+    bundle = build_execution_bundle(
+        config,
+        task,
+        workspace=Path(args.workspace),
+        receipt=Path(args.receipt),
+        output=Path(args.output),
+        dry_run=args.dry_run,
     )
+    print(f"{task.id} -> {bundle.result}: {bundle.output}")
+    if not bundle.gates_passed:
+        raise DyroError("外部门禁失败；已输出证据包供排查，不能导入为 DONE")
 
 
 def cmd_task_evidence_review(args: argparse.Namespace) -> None:
@@ -560,6 +700,16 @@ def build_parser() -> argparse.ArgumentParser:
     init_mode.add_argument("--discover", action="store_true", help="自动发现当前目录下的 Git 仓库并登记 origin")
     init.set_defaults(func=cmd_init)
 
+    setup = sub.add_parser("setup", help="新人一键创建 Profile、目录与首条开发线")
+    setup.add_argument("path", nargs="?", default=".")
+    setup.add_argument("--name", help="新 Profile 的工作区名称；默认由目录名推断")
+    setup.add_argument("--base", help="首条开发线与新 Profile 的默认基线；默认 main")
+    setup.add_argument("--line", default="dev", help="首条功能开发线 ID；默认 dev")
+    setup.add_argument("--branch", help="首条开发线分支；默认 feat/<line>")
+    setup.add_argument("--no-line", action="store_true", help="仅建立 Profile，不创建 Git worktree 开发线")
+    setup.add_argument("--yes", action="store_true", help="确认创建首条 Git worktree 开发线")
+    setup.set_defaults(func=cmd_setup)
+
     sub.add_parser("doctor", help="验证动态工作区结构").set_defaults(func=cmd_doctor)
     sub.add_parser("status", help="显示 anchors 与开发线 Git 状态").set_defaults(func=cmd_status)
     bootstrap_parser = sub.add_parser("bootstrap", help="clone 配置了 remote 的缺失仓库 anchor")
@@ -576,7 +726,25 @@ def build_parser() -> argparse.ArgumentParser:
     repo_add.set_defaults(func=cmd_repo_add)
     agent = sub.add_parser("agent", help="Agent adapters")
     agent_sub = agent.add_subparsers(dest="agent_command", required=True)
-    agent_sub.add_parser("list").set_defaults(func=cmd_agent_list)
+    agent_sub.add_parser("list", help="显示已登记的 Agent adapter").set_defaults(func=cmd_agent_list)
+    agent_add = agent_sub.add_parser("add", help="通过预设或命令登记 Agent，无需编辑 TOML")
+    agent_add.add_argument("id")
+    agent_source = agent_add.add_mutually_exclusive_group(required=True)
+    agent_source.add_argument("--preset", choices=("codex", "noop"))
+    agent_source.add_argument("--command", help="作为 launch/read/write 的 argv 命令行；不会经 shell 执行")
+    agent_add.set_defaults(func=cmd_agent_add)
+    agent_test = agent_sub.add_parser("test", help="仅检查 adapter 可执行文件是否可用，不启动 Agent")
+    agent_test.add_argument("id")
+    agent_test.set_defaults(func=cmd_agent_test)
+    config_command = sub.add_parser("config", help="安全地读取或修改常用 Profile 策略")
+    config_sub = config_command.add_subparsers(dest="config_command", required=True)
+    config_get = config_sub.add_parser("get")
+    config_get.add_argument("key")
+    config_get.set_defaults(func=cmd_config_get)
+    config_set = config_sub.add_parser("set")
+    config_set.add_argument("key")
+    config_set.add_argument("value")
+    config_set.set_defaults(func=cmd_config_set)
     open_cmd = sub.add_parser("open", help="在指定开发线启动 Agent")
     open_cmd.add_argument("line")
     open_cmd.add_argument("--kind", choices=("line", "hotfix"))
@@ -672,14 +840,22 @@ def build_parser() -> argparse.ArgumentParser:
     task_signoff.add_argument("id")
     task_signoff.add_argument("--by", required=True, help="签收人或外部审批标识")
     task_signoff.set_defaults(func=cmd_task_signoff)
-    evidence = task_sub.add_parser("evidence", help="导入隔离执行器生成的证据")
+    evidence = task_sub.add_parser("evidence", help="构建或导入隔离执行器证据")
     evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
     evidence_execution = evidence_sub.add_parser("execution", help="导入执行回执与门禁结果")
     evidence_execution.add_argument("id")
-    evidence_execution.add_argument("--receipt", required=True)
+    evidence_input = evidence_execution.add_mutually_exclusive_group(required=True)
+    evidence_input.add_argument("--receipt")
+    evidence_input.add_argument("--bundle", help="由 task evidence build 生成的可移植 ZIP 证据包")
     evidence_execution.add_argument("--gates", help="外部门禁 JSON；任务含 gates 时必填")
     evidence_execution.add_argument("--heads", help="执行后逐仓 Git HEAD JSON；DONE 回执时必填")
     evidence_execution.set_defaults(func=cmd_task_evidence_execution)
+    evidence_build = evidence_sub.add_parser("build", help="在隔离 runner 中运行门禁并构建可导入 ZIP 证据包")
+    evidence_build.add_argument("id")
+    evidence_build.add_argument("--workspace", required=True, help="隔离 runner 中任务分支的多仓工作区")
+    evidence_build.add_argument("--receipt", required=True, help="执行器写出的 receipt.md")
+    evidence_build.add_argument("--output", required=True, help="新 ZIP 证据包的输出路径；拒绝覆盖已有文件")
+    evidence_build.set_defaults(func=cmd_task_evidence_build)
     evidence_review = evidence_sub.add_parser("review", help="导入 receipt-bound 复核结果")
     evidence_review.add_argument("id")
     evidence_review.add_argument("--file", required=True)

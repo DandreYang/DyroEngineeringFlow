@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 - 2026-07-23
+
+- Add `dyro setup` for one-command Profile discovery, state-directory setup, and an explicitly confirmed first development line.
+- Add safe `config get/set` and `agent add/test` commands so common Profile and adapter changes do not require hand-editing TOML.
+- Add portable external execution evidence bundles that run declared gates, bind clean task HEADs, reject unsafe ZIPs, and import through the existing evidence contract.
+- Make Profile, line, Change Set, task-state, evidence, sign-off, and ledger writes atomic or lock-protected; task claims and state transitions now serialize across Dyro processes.
+- Use deterministic, path-safe gate-log filenames and add Ruff to pull-request CI.
+
 ## 0.3.0 - 2026-07-23
 
 - Fail closed on invalid TOML booleans instead of treating non-empty strings as enabled policy.

@@ -1,8 +1,11 @@
 import hashlib
 import json
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import zipfile
 
 from dyro.config import ValidationError, load
+from dyro.evidence import build_execution_bundle, unpack_execution_bundle
 from dyro.errors import DyroError
 from dyro.tasks import (
     answer_task,
@@ -183,6 +186,148 @@ class TaskTests(WorkspaceCase):
         )
         self.assertEqual(import_review_evidence(config, task, review=review), "done")
         self.assertEqual(status(config, task), "done")
+
+    def test_external_claim_is_serialized_for_two_local_process_threads(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                "require_clean_merge = true", "require_clean_merge = true\nexecution_mode = \"external\""
+            ),
+            encoding="utf-8",
+        )
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-CLAIM-LOCK"
+        task_path.mkdir(parents=True)
+        task_path.joinpath("task.toml").write_text(
+            task_template("TASK-CLAIM-LOCK", "serialized external claim", "alpha", "api", "services/api").replace(
+                'agent = "codex"', 'agent = "noop"'
+            ),
+            encoding="utf-8",
+        )
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task = load_task(config, "TASK-CLAIM-LOCK")
+
+        def claim(runner: str) -> str:
+            try:
+                return claim_task(config, task, runner=runner)
+            except DyroError:
+                return "rejected"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(claim, ("runner-a", "runner-b")))
+        self.assertEqual(sorted(outcomes), ["assigned", "rejected"])
+        self.assertEqual(status(config, task), "assigned")
+
+    def test_external_claim_blocks_another_task_in_the_same_conflict_group(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                "require_clean_merge = true", "require_clean_merge = true\nexecution_mode = \"external\""
+            ),
+            encoding="utf-8",
+        )
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        for task_id in ("TASK-GROUP-A", "TASK-GROUP-B"):
+            task_path = config.task_specs_dir / task_id
+            task_path.mkdir(parents=True)
+            task_path.joinpath("task.toml").write_text(
+                task_template(task_id, "exclusive external claim", "alpha", "api", "services/api")
+                .replace('agent = "codex"', 'agent = "noop"')
+                .replace('conflict_group = ""', 'conflict_group = "shared-resource"'),
+                encoding="utf-8",
+            )
+            task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+
+        self.assertEqual(claim_task(config, load_task(config, "TASK-GROUP-A"), runner="runner-a"), "assigned")
+        with self.assertRaisesRegex(DyroError, "活跃任务"):
+            claim_task(config, load_task(config, "TASK-GROUP-B"), runner="runner-b")
+
+    def test_external_runner_builds_and_imports_a_portable_evidence_bundle(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                "require_clean_merge = true", "require_clean_merge = true\nexecution_mode = \"external\""
+            ),
+            encoding="utf-8",
+        )
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-BUNDLE"
+        task_path.mkdir(parents=True)
+        task_path.joinpath("task.toml").write_text(
+            task_template("TASK-BUNDLE", "portable external evidence", "alpha", "api", "services/api").replace(
+                'agent = "codex"', 'agent = "noop"'
+            ),
+            encoding="utf-8",
+        )
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task = load_task(config, "TASK-BUNDLE")
+
+        workspace = self.root / "isolated-runner"
+        repository = workspace / "services/api"
+        repository.parent.mkdir(parents=True)
+        shell("git", "clone", str(self.anchor), str(repository), cwd=self.root)
+        shell("git", "checkout", "-b", "task/TASK-BUNDLE", cwd=repository)
+        receipt = workspace / "receipt.md"
+        receipt.write_text("result: DONE\n", encoding="utf-8")
+        bundle = self.root / "execution.zip"
+
+        result = build_execution_bundle(config, task, workspace=workspace, receipt=receipt, output=bundle)
+        self.assertEqual(result.result, "DONE")
+        self.assertTrue(result.gates_passed)
+        self.assertTrue(bundle.is_file())
+
+        self.assertEqual(claim_task(config, task, runner="isolated-runner-1"), "assigned")
+        with unpack_execution_bundle(bundle) as evidence:
+            self.assertEqual(
+                import_execution_evidence(
+                    config,
+                    task,
+                    receipt=evidence["receipt"],
+                    gates=evidence["gates"],
+                    heads=evidence["heads"],
+                ),
+                "review",
+            )
+        self.assertEqual(status(config, task), "review")
+
+    def test_external_evidence_bundle_rejects_path_traversal(self) -> None:
+        bundle = self.root / "unsafe-evidence.zip"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.writestr("receipt.md", "result: DONE\n")
+            archive.writestr("../escape.txt", "nope")
+        with self.assertRaisesRegex(ValidationError, "不安全路径"):
+            with unpack_execution_bundle(bundle):
+                pass
+
+    def test_external_evidence_bundle_rejects_windows_style_path_traversal(self) -> None:
+        bundle = self.root / "unsafe-windows-evidence.zip"
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.writestr("receipt.md", "result: DONE\n")
+            archive.writestr("gates/..\\..\\escape.log", "nope")
+        with self.assertRaisesRegex(ValidationError, "POSIX 分隔符"):
+            with unpack_execution_bundle(bundle):
+                pass
+
+    def test_allows_a_human_gate_name_without_using_it_as_a_log_path(self) -> None:
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-GATE-NAME"
+        task_path.mkdir(parents=True)
+        task_path.joinpath("task.toml").write_text(
+            task_template("TASK-GATE-NAME", "safe gate names", "alpha", "api", "services/api")
+            .replace('agent = "codex"', 'agent = "noop"')
+            .replace('name = "diff-check"', 'name = "unit tests / edge cases"'),
+            encoding="utf-8",
+        )
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
+        task = load_task(config, "TASK-GATE-NAME")
+        self.assertEqual(run_task(config, task), "review")
+        self.assertTrue((task_path / "logs/gate-1.log").is_file())
+        self.assertFalse((task_path / "logs/unit tests / edge cases.log").exists())
 
     def test_rejects_string_merge_booleans(self) -> None:
         config = load(self.root)

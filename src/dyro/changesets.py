@@ -10,6 +10,7 @@ from typing import Iterable
 from .config import Config, validate_id
 from .errors import DyroError, ValidationError
 from .process import git, require_ok
+from .state import atomic_write_text
 from .workspace import get_line, line_repository_path
 
 
@@ -47,7 +48,7 @@ def _write(config: Config, changeset: ChangeSet) -> None:
         "[heads]",
     ]
     chunks.extend(f"{_toml_string(repository)} = {_toml_string(changeset.heads[repository])}" for repository in changeset.repositories)
-    path.write_text("\n".join((*chunks, "")), encoding="utf-8")
+    atomic_write_text(path, "\n".join((*chunks, "")))
 
 
 def _parse(path: Path) -> ChangeSet:

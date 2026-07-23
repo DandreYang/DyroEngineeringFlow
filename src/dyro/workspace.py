@@ -8,6 +8,7 @@ from typing import Iterable, Mapping
 from .config import Config, validate_id
 from .errors import DyroError, ValidationError
 from .process import git, require_ok
+from .state import atomic_write_text
 
 
 STORAGE_MODES = frozenset({"linked-worktree", "anchor-reference"})
@@ -70,10 +71,7 @@ def _write_line(config: Config, line: Line, *, dry_run: bool = False) -> None:
         chunks.extend(("", "[storage_modes]"))
         chunks.extend(f"{_toml_key(repo_id)} = {_toml_string(mode)}" for repo_id, mode in storage)
     chunks.append("")
-    path.write_text(
-        "\n".join(chunks),
-        encoding="utf-8",
-    )
+    atomic_write_text(path, "\n".join(chunks))
 
 
 def _parse_line(path: Path) -> Line:

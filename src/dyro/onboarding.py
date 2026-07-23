@@ -7,9 +7,10 @@ from pathlib import Path
 import re
 from typing import Callable
 
-from .config import CONFIG_NAME, Config, validate_id
+from .config import CONFIG_NAME, Config, load, validate_id
 from .errors import DyroError, ValidationError
 from .process import run
+from .state import atomic_write_text, exclusive_lock
 
 
 @dataclass(frozen=True)
@@ -148,8 +149,6 @@ def repository_input_from_path(
 
 def append_repository(config: Config, repository: RepositoryInput, *, dry_run: bool = False) -> None:
     """Append a repository table without reformatting or discarding existing Profile comments."""
-    if repository.id in config.repositories:
-        raise DyroError(f"仓库已配置：{repository.id}")
     validate_id(repository.id, "repository id")
     _relative_path(repository.path, "repository path")
     _relative_path(repository.mount, "repository mount")
@@ -164,8 +163,12 @@ def append_repository(config: Config, repository: RepositoryInput, *, dry_run: b
     chunks.append("verify = []")
     if dry_run:
         return
-    content = config_file.read_text(encoding="utf-8").rstrip() + "\n\n" + "\n".join(chunks) + "\n"
-    config_file.write_text(content, encoding="utf-8")
+    with exclusive_lock(config.root / ".dyro" / "profile.lock"):
+        current = load(config.root)
+        if repository.id in current.repositories:
+            raise DyroError(f"仓库已配置：{repository.id}")
+        content = config_file.read_text(encoding="utf-8").rstrip() + "\n\n" + "\n".join(chunks) + "\n"
+        atomic_write_text(config_file, content)
 
 
 def _quote(value: str) -> str:
@@ -193,6 +196,8 @@ def render_config(name: str, repositories: list[RepositoryInput], default_base: 
         'task_branch_prefix = "task/"',
         "allow_push = false",
         "require_clean_merge = true",
+        "require_external_signoff = false",
+        'execution_mode = "local"',
         "",
         "[adapters.codex]",
         'launch = ["codex", "-C", "{workspace}"]',

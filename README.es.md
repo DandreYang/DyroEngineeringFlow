@@ -35,16 +35,16 @@ Para actualizar después, ejecuta `pipx upgrade dyro`. Si el equipo gestiona los
 python3 -m pip install --user --upgrade dyro
 ```
 
-Coloca los repositorios en un workspace y luego inicialízalo:
+Coloca los repositorios en un workspace y usa la ruta para personas nuevas: descubre repositorios, crea directorios de estado y crea la primera línea de desarrollo con un solo comando.
 
 ```bash
 
 mkdir my-workspace && cd my-workspace
 # Primero clona o mueve los repositorios Git bajo este directorio.
-dyro init . --discover --name my-workspace
+dyro setup . --name my-workspace --line dev --yes
 ```
 
-`--discover` explora los repositorios Git locales, registra rutas relativas al workspace, deriva su ubicación en la línea de desarrollo y lee `origin` si está disponible; no hay que editar TOML. Si aún no hay repositorios, usa la alternativa guiada:
+`setup` explora los repositorios Git locales, registra rutas relativas al workspace, deriva su ubicación en la línea de desarrollo y lee `origin` si está disponible; no hay que editar TOML. `--yes` solo confirma la primera línea, que crea Git worktrees. Usa `--no-line` si primero quieres crear solo el Profile. Si aún no hay repositorios, usa la alternativa guiada:
 
 ```bash
 dyro init . --wizard --name my-workspace
@@ -55,6 +55,15 @@ Para añadir un repositorio después tampoco hay que abrir `dyro.toml`:
 ```bash
 dyro repo add repositories/services/payments
 dyro repo list
+```
+
+También puedes gestionar políticas de entrega habituales y adaptadores de Agent sin abrir `dyro.toml`:
+
+```bash
+dyro config set policy.execution_mode external
+dyro config get policy.execution_mode
+dyro agent add ci-runner --preset noop
+dyro agent test ci-runner
 ```
 
 Si el Profile contiene remotes, puede completar de forma segura los repository anchors que falten.
@@ -98,7 +107,9 @@ Para un Profile cuya ejecución y aprobación se realizan en un sistema de confi
 
 ```bash
 dyro task claim API-101 --by isolated-runner-1
-dyro task evidence execution API-101 --receipt /runner/out/receipt.md --gates /runner/out/gates.json --heads /runner/out/task-heads.json
+# En el runner aislado, empaqueta las puertas declaradas, receipt, logs y HEAD exactos.
+dyro task evidence build API-101 --workspace /runner/workspace --receipt /runner/out/receipt.md --output /runner/out/API-101.zip
+dyro task evidence execution API-101 --bundle /runner/out/API-101.zip
 dyro task evidence review API-101 --file /review/out/review.md
 dyro task signoff API-101 --by release-manager
 ```
@@ -114,18 +125,18 @@ dyro --dry-run task run API-101
 
 | Comando | Propósito |
 | --- | --- |
-| `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | Onboarding sin editar TOML, gestión de anchors y selección de línea y Agent. |
+| `setup` / `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | Onboarding sin editar TOML, gestión de anchors y selección de línea y Agent. |
 | `doctor` / `status` | Validar y mostrar el estado del plano de control. |
 | `line create/list` / `hotfix create` | Crear líneas de funcionalidad o Hotfix desde una base de producción explícita. |
 | `changeset create/list/verify` | Fijar y verificar los HEAD de Git limpios y exactos que componen una entrega multirreposición. |
-| `agent list` / `open` | Consultar adaptadores o abrir un Agent en la línea correcta. |
+| `config get/set` / `agent list/add/test` / `open` | Gestionar de forma segura políticas y adaptadores habituales, comprobar el ejecutable o abrir un Agent en la línea correcta. |
 | `task create/list/board/status/next` | Gestionar manifiestos, estado y la siguiente tarea ejecutable. |
 | `task run/answer/gates/review/signoff/merge` | Ejecutar, resolver preguntas, aplicar puertas, revisar, firmar y fusionar. |
-| `task claim` / `task evidence execution/review` | Reclamo único e importación de pruebas de receipt, puertas, HEAD de tarea y revisión para un runner aislado. |
+| `task claim` / `task evidence build/execution/review` | Reclamo único, creación/importación de un paquete de evidencia ejecutable portátil e importación de revisión para un runner aislado. |
 | `task loop/daemon/stats/decisions` | Lotes controlados, planificación, libro mayor y puertas de decisión. |
 
 ## Idiomas y alcance actual
 
 El README se mantiene en inglés, chino simplificado, japonés, coreano y español. Los comandos, claves de configuración, nombres de directorio y reglas de seguridad son iguales en todas las traducciones. Los mensajes de la CLI y las guías técnicas extensas siguen siendo principalmente chinos. El README multilingüe no implica todavía cambio de idioma en tiempo de ejecución.
 
-DyroEngineeringFlow proporciona un ciclo local completo y controles de política para mantener a equipos más estrictos en modo local de solo planificación. No crea repositorios remotos, no incluye credenciales SaaS ni implementa un runner externo; este se integra mediante una extensión de Profile. Se distribuye con la [licencia MIT](LICENSE) y como [`dyro` en PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow proporciona un ciclo local completo y controles de política para mantener a equipos más estrictos en modo local de solo planificación. No crea repositorios remotos, no incluye credenciales SaaS ni aprovisiona un runner externo; sí ofrece el contrato para crear y validar paquetes de evidencia portátiles. Se distribuye con la [licencia MIT](LICENSE) y como [`dyro` en PyPI](https://pypi.org/project/dyro/).

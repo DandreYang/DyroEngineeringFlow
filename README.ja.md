@@ -35,16 +35,16 @@ dyro --version
 python3 -m pip install --user --upgrade dyro
 ```
 
-リポジトリをワークスペースに置いてから初期化します。
+リポジトリをワークスペースに置いたら、新規メンバー向けの一つのコマンドで検出、状態ディレクトリ作成、最初の開発ライン作成まで行えます。
 
 ```bash
 
 mkdir my-workspace && cd my-workspace
 # 先に Git リポジトリをこのディレクトリ配下へ clone または移動します。
-dyro init . --discover --name my-workspace
+dyro setup . --name my-workspace --line dev --yes
 ```
 
-`--discover` はローカル Git リポジトリを走査し、ワークスペース相対パス、開発ライン内の配置、利用可能な場合は `origin` を自動登録します。TOML の編集は不要です。まだリポジトリがない場合は、対話式の代替を使います。
+`setup` はローカル Git リポジトリを走査し、ワークスペース相対パス、開発ライン内の配置、利用可能な場合は `origin` を自動登録します。TOML の編集は不要です。`--yes` は Git worktree を作成する最初の開発ラインだけに必要です。Profile だけ先に作る場合は `--no-line` を使用します。まだリポジトリがない場合は、対話式の代替を使います。
 
 ```bash
 dyro init . --wizard --name my-workspace
@@ -55,6 +55,15 @@ dyro init . --wizard --name my-workspace
 ```bash
 dyro repo add repositories/services/payments
 dyro repo list
+```
+
+よく使うデリバリーポリシーと Agent adapter も、`dyro.toml` を開かずに管理できます。
+
+```bash
+dyro config set policy.execution_mode external
+dyro config get policy.execution_mode
+dyro agent add ci-runner --preset noop
+dyro agent test ci-runner
 ```
 
 Profile に remote がある場合、不足している repository anchor を安全に補完できます。
@@ -98,7 +107,9 @@ dyro hotfix create incident-123 --base v2026.09.7 --repos api,web --yes
 
 ```bash
 dyro task claim API-101 --by isolated-runner-1
-dyro task evidence execution API-101 --receipt /runner/out/receipt.md --gates /runner/out/gates.json --heads /runner/out/task-heads.json
+# 隔離 runner 側で、宣言された gate と receipt、ログ、正確な HEAD を一つのパッケージにします。
+dyro task evidence build API-101 --workspace /runner/workspace --receipt /runner/out/receipt.md --output /runner/out/API-101.zip
+dyro task evidence execution API-101 --bundle /runner/out/API-101.zip
 dyro task evidence review API-101 --file /review/out/review.md
 dyro task signoff API-101 --by release-manager
 ```
@@ -114,18 +125,18 @@ dyro --dry-run task run API-101
 
 | コマンド | 用途 |
 | --- | --- |
-| `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | TOML 編集なしの導入、anchor 管理、開発ラインと Agent の選択。 |
+| `setup` / `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | TOML 編集なしの導入、anchor 管理、開発ラインと Agent の選択。 |
 | `doctor` / `status` | 制御プレーンの検証と状態表示。 |
 | `line create/list` / `hotfix create` | 機能開発ラインまたは明示的な本番ベースからの Hotfix を作成。 |
 | `changeset create/list/verify` | 複数リポジトリのデリバリーを構成する、クリーンで正確な Git HEAD を固定・検証。 |
-| `agent list` / `open` | adapter の確認、正しい開発ラインでの Agent 起動。 |
+| `config get/set` / `agent list/add/test` / `open` | よく使うポリシーと adapter の安全な管理、実行可能ファイルの確認、正しい開発ラインでの Agent 起動。 |
 | `task create/list/board/status/next` | タスク定義、状態、次の実行可能な作業を管理。 |
 | `task run/answer/gates/review/signoff/merge` | 実行、質問解決、ゲート、独立レビュー、署名、マージ。 |
-| `task claim` / `task evidence execution/review` | 隔離 runner による一度だけの取得と、回執・ゲート・タスク HEAD・レビュー証拠の取り込み。 |
+| `task claim` / `task evidence build/execution/review` | 隔離 runner による一度だけの取得、ポータブルな実行証拠パッケージの作成・取り込み、レビュー証拠の取り込み。 |
 | `task loop/daemon/stats/decisions` | 制御されたバッチ、スケジューリング、台帳、決定ゲート。 |
 
 ## 言語と現在の範囲
 
 README は英語、簡体字中国語、日本語、韓国語、スペイン語で提供します。コマンド、設定キー、ディレクトリ名、安全規則は各訳で同一です。現在、CLI のメッセージと詳細技術文書は主に中国語です。README の多言語化は実行時の言語切替を意味しません。
 
-DyroEngineeringFlow はローカルのワークフローを完結させ、より厳格なチームをローカルの計画専用モードに保つポリシーを提供します。remote リポジトリ作成、SaaS 認証情報、外部 runner 実装は含みません。外部 runner は Profile 拡張として接続します。[MIT License](LICENSE) で提供し、[PyPI の `dyro`](https://pypi.org/project/dyro/) として公開済みです。
+DyroEngineeringFlow はローカルのワークフローを完結させ、より厳格なチームをローカルの計画専用モードに保つポリシーを提供します。remote リポジトリ作成、SaaS 認証情報、外部 runner の供給は含みませんが、ポータブルな証拠パッケージの作成・検証契約を提供します。[MIT License](LICENSE) で提供し、[PyPI の `dyro`](https://pypi.org/project/dyro/) として公開済みです。

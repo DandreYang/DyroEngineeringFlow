@@ -48,6 +48,28 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(sorted(load(root).repositories), ["api"])
 
+    def test_setup_discovers_repositories_and_creates_a_first_line(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            root = Path(tmp) / "workspace"
+            repository = root / "repositories/api"
+            repository.mkdir(parents=True)
+            from .support import shell
+
+            shell("git", "init", "-b", "main", cwd=repository)
+            shell("git", "config", "user.name", "Test User", cwd=repository)
+            shell("git", "config", "user.email", "test@example.com", cwd=repository)
+            repository.joinpath("README.md").write_text("anchor\n", encoding="utf-8")
+            shell("git", "add", "README.md", cwd=repository)
+            shell("git", "commit", "-m", "chore: initial", cwd=repository)
+
+            main(["setup", str(root), "--name", "demo", "--line", "dev", "--yes"])
+
+            config = load(root)
+            self.assertEqual(config.name, "demo")
+            self.assertTrue((root / ".dyro/tasks").is_dir())
+            self.assertEqual(get_line(config, "dev").branch, "feat/dev")
+            self.assertTrue((root / "versions/dev/api").is_dir())
+
 
 class StartTests(WorkspaceCase):
     def test_start_dry_run_uses_selected_line_and_adapter(self) -> None:
@@ -100,3 +122,13 @@ class RepositoryCommandsTests(WorkspaceCase):
         self.assertEqual(config.repositories["web"].path, "repositories/web")
         self.assertEqual(config.repositories["web"].mount, "web")
         self.assertEqual(config.repositories["web"].remote, "https://example.test/acme/web.git")
+
+
+class ProfileCommandsTests(WorkspaceCase):
+    def test_config_and_agent_management_do_not_require_manual_toml_edits(self) -> None:
+        main(["--root", str(self.root), "config", "set", "policy.execution_mode", "external"])
+        self.assertEqual(load(self.root).policy.execution_mode, "external")
+
+        main(["--root", str(self.root), "agent", "add", "isolated", "--preset", "noop"])
+        self.assertIn("isolated", load(self.root).adapters)
+        main(["--root", str(self.root), "agent", "test", "isolated"])
