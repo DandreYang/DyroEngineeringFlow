@@ -519,6 +519,51 @@ class TaskTests(WorkspaceCase):
         self.assertEqual(subprocess_output("git", "status", "--porcelain=v1", "-uall", cwd=line_api), "")
         self.assertEqual(subprocess_output("git", "status", "--porcelain=v1", "-uall", cwd=line_web), "")
 
+    def test_merge_serializes_on_delivery_line_lock(self) -> None:
+        import dyro.tasks as tasks_mod
+        from dyro.state import exclusive_lock
+        from dyro.tasks import MERGE_LOCK_TIMEOUT_SECONDS, _merge_lock_path
+
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-LOCK"
+        task_path.mkdir(parents=True)
+        task_path.joinpath("task.toml").write_text(
+            task_template("TASK-LOCK", "merge lock", "alpha", "api", "services/api").replace(
+                'agent = "codex"', 'agent = "noop"'
+            ),
+            encoding="utf-8",
+        )
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
+        task = load_task(config, "TASK-LOCK")
+        self.assertEqual(run_task(config, task), "review")
+        self._write_bound_review(task_path)
+        self.assertEqual(review_task(config, task), "done")
+
+        lock_path = _merge_lock_path(config, task.line)
+        errors: list[str] = []
+        previous_timeout = tasks_mod.MERGE_LOCK_TIMEOUT_SECONDS
+        tasks_mod.MERGE_LOCK_TIMEOUT_SECONDS = 0.4
+
+        def blocked_merge() -> None:
+            try:
+                merge_task(config, task)
+            except DyroError as exc:
+                errors.append(str(exc))
+
+        try:
+            with exclusive_lock(lock_path, timeout_seconds=5.0):
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(blocked_merge)
+                    future.result(timeout=5)
+        finally:
+            tasks_mod.MERGE_LOCK_TIMEOUT_SECONDS = previous_timeout
+
+        self.assertTrue(errors)
+        self.assertTrue(any("等待状态锁超时" in item for item in errors), errors)
+        self.assertEqual(MERGE_LOCK_TIMEOUT_SECONDS, 1800.0)
+
 
 def subprocess_output(*args: str, cwd: Path) -> str:
     import subprocess

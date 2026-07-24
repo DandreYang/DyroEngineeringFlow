@@ -132,3 +132,58 @@ class ProfileCommandsTests(WorkspaceCase):
         main(["--root", str(self.root), "agent", "add", "isolated", "--preset", "noop"])
         self.assertIn("isolated", load(self.root).adapters)
         main(["--root", str(self.root), "agent", "test", "isolated"])
+
+
+class DaemonSelectionTests(WorkspaceCase):
+    def test_daemon_selects_backlog_tasks_like_loop(self) -> None:
+        from dyro.cli import _daemon_select_runnable
+        from dyro.tasks import list_tasks, status, task_template
+        from dyro.workspace import create_line
+
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-DAEMON"
+        task_path.mkdir(parents=True)
+        task_path.joinpath("task.toml").write_text(
+            task_template("TASK-DAEMON", "daemon backlog", "alpha", "api", "services/api").replace(
+                'agent = "codex"', 'agent = "noop"'
+            ),
+            encoding="utf-8",
+        )
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        tasks = list_tasks(config)
+        self.assertEqual(status(config, tasks[0]), "backlog")
+
+        selected = _daemon_select_runnable(config, tasks, limit=2)
+        self.assertEqual([task.id for task in selected], ["TASK-DAEMON"])
+
+    def test_daemon_once_dispatches_backlog_task(self) -> None:
+        from dyro.tasks import load_task, status, task_template
+        from dyro.workspace import create_line
+
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-ONCE"
+        task_path.mkdir(parents=True)
+        task_path.joinpath("task.toml").write_text(
+            task_template("TASK-ONCE", "daemon once", "alpha", "api", "services/api").replace(
+                'agent = "codex"', 'agent = "noop"'
+            ),
+            encoding="utf-8",
+        )
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
+
+        main(["--root", str(self.root), "task", "daemon", "--once", "--parallel", "1"])
+        self.assertEqual(status(config, load_task(config, "TASK-ONCE")), "review")
+
+
+class VersionTests(unittest.TestCase):
+    def test_package_version_matches_pyproject(self) -> None:
+        import tomllib
+        from pathlib import Path
+
+        from dyro import __version__
+
+        metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(__version__, metadata["project"]["version"])

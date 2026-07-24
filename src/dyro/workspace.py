@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+import shutil
 from typing import Iterable, Mapping
 
 from .config import Config, validate_id
@@ -159,6 +160,52 @@ def _ensure_clean(path: Path) -> None:
         raise DyroError(f"仓库不干净，拒绝创建或合并 worktree：{path}")
 
 
+def _remove_line_worktree(config: Config, line: Line, repo_id: str, destination: Path) -> str | None:
+    """Best-effort cleanup for one worktree or anchor-reference created during line setup."""
+    try:
+        if line.storage_for(repo_id) == "anchor-reference" or destination.is_symlink():
+            if destination.is_symlink() or destination.exists():
+                destination.unlink()
+            return None
+        if destination.exists() or destination.is_symlink():
+            anchor = repository_path(config, repo_id)
+            result = git(anchor, "worktree", "remove", "--force", str(destination), timeout=120)
+            if result.code != 0:
+                # Fall back to deleting the path when Git no longer tracks it as a worktree.
+                if destination.is_symlink():
+                    destination.unlink()
+                elif destination.exists():
+                    shutil.rmtree(destination)
+                    prune = git(anchor, "worktree", "prune", timeout=60)
+                    if prune.code != 0:
+                        return f"{repo_id}: worktree remove failed: {result.stdout.strip() or 'unknown error'}"
+            return None
+    except OSError as exc:
+        return f"{repo_id}: {exc}"
+    return None
+
+
+def _rollback_line_creations(config: Config, line: Line, created: list[str]) -> list[str]:
+    failures: list[str] = []
+    for repo_id in reversed(created):
+        destination = line_repository_path(config, line, repo_id)
+        failure = _remove_line_worktree(config, line, repo_id, destination)
+        if failure:
+            failures.append(failure)
+    target_root = line_root(config, line)
+    if target_root.exists():
+        try:
+            # Remove empty parents left behind after a partial multi-repo create.
+            for path in sorted(target_root.rglob("*"), reverse=True):
+                if path.is_dir() and not any(path.iterdir()):
+                    path.rmdir()
+            if target_root.is_dir() and not any(target_root.iterdir()):
+                target_root.rmdir()
+        except OSError:
+            pass
+    return failures
+
+
 def create_line(
     config: Config,
     *,
@@ -202,6 +249,8 @@ def create_line(
     if target_root.exists() and any(target_root.iterdir()):
         raise DyroError(f"目标工作区已存在且非空：{target_root}")
 
+    # Validate every repository before mutating any worktree so partial creates are rare.
+    planned: list[tuple[str, Path, tuple[str, ...]]] = []
     for repo_id in selected:
         anchor = repository_path(config, repo_id)
         destination = line_repository_path(config, line, repo_id)
@@ -221,18 +270,39 @@ def create_line(
             anchor_branch = require_ok(git(anchor, "branch", "--show-current"), f"读取 {repo_id} anchor 分支").stdout.strip()
             if anchor_branch != branch:
                 raise DyroError(f"{repo_id} 的 anchor-reference 要求 anchor 正位于 {branch}，当前为 {anchor_branch or 'DETACHED'}")
-            if not dry_run:
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.symlink_to(anchor, target_is_directory=True)
+            planned.append((repo_id, destination, ()))
             continue
         command = ("worktree", "add")
         if branch_check.code != 0:
             command += ("-b", branch)
         command += (str(destination), branch if branch_check.code == 0 else repo_base)
-        if not dry_run:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-        require_ok(git(anchor, *command, dry_run=dry_run, timeout=300), f"创建 {repo_id} worktree")
-    _write_line(config, line, dry_run=dry_run)
+        planned.append((repo_id, destination, command))
+
+    created: list[str] = []
+    try:
+        for repo_id, destination, command in planned:
+            if line.storage_for(repo_id) == "anchor-reference":
+                if not dry_run:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.symlink_to(repository_path(config, repo_id), target_is_directory=True)
+                    created.append(repo_id)
+                continue
+            if not dry_run:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+            require_ok(
+                git(repository_path(config, repo_id), *command, dry_run=dry_run, timeout=300),
+                f"创建 {repo_id} worktree",
+            )
+            if not dry_run:
+                created.append(repo_id)
+        _write_line(config, line, dry_run=dry_run)
+    except Exception as exc:
+        if created:
+            recovery_failures = _rollback_line_creations(config, line, created)
+            if recovery_failures:
+                detail = "; ".join(recovery_failures)
+                raise DyroError(f"{exc}\n自动清理未完全成功：{detail}") from exc
+        raise
     return line
 
 

@@ -33,6 +33,7 @@ RECEIPT_SHA_RE = re.compile(r"^receipt_sha256:\s*([0-9a-f]{64})\s*$", re.IGNOREC
 TASK_HEADS_SHA_RE = re.compile(r"^task_heads_sha256:\s*([0-9a-f]{64})\s*$", re.IGNORECASE | re.MULTILINE)
 GIT_HEAD_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$", re.IGNORECASE)
 TASK_HEADS_FILE = "task-heads.json"
+MERGE_LOCK_TIMEOUT_SECONDS = 1800.0
 
 
 @dataclass(frozen=True)
@@ -193,6 +194,11 @@ def _execution_lock_path(task: Task) -> Path:
 
 def _review_lock_path(task: Task) -> Path:
     return task.directory / ".review.lock"
+
+
+def _merge_lock_path(config: Config, line_id: str) -> Path:
+    validate_id(line_id, "开发线 ID")
+    return config.root / ".dyro" / "lines" / f"{line_id}.merge.lock"
 
 
 def _claim(task: Task) -> dict[str, object] | None:
@@ -1042,6 +1048,12 @@ def _rollback_merges(plans: Iterable[MergePlan], committed_heads: dict[str, str]
 
 
 def _merge_task_repositories(config: Config, task: Task, *, push: bool, dry_run: bool) -> None:
+    # Serialize merges into the same delivery line across concurrent dyro processes.
+    with exclusive_lock(_merge_lock_path(config, task.line), timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS):
+        _merge_task_repositories_locked(config, task, push=push, dry_run=dry_run)
+
+
+def _merge_task_repositories_locked(config: Config, task: Task, *, push: bool, dry_run: bool) -> None:
     line, plans = _prepare_merge(config, task, push=push, dry_run=dry_run)
     message = f"merge(task): {task.id} {task.title}"
     if dry_run:

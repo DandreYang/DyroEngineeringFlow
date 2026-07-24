@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 - 2026-07-24
+
+- Roll back partially created development-line worktrees when a later repository fails during `line create` / `hotfix create`.
+- Serialize task merges into the same delivery line with a per-line merge lock (covers manual and auto-merge).
+- Align `task daemon` with `task loop`: dispatch `backlog` and `assigned` tasks, honor dependencies/conflict groups via `check_dispatchable`.
+- Read the package version from installed distribution metadata so `pyproject.toml` is the single source of truth.
+
 ## 0.4.0 - 2026-07-23
 
 - Add `dyro setup` for one-command Profile discovery, state-directory setup, and an explicitly confirmed first development line.

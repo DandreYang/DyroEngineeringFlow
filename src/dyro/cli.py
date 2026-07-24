@@ -642,20 +642,46 @@ def cmd_task_loop(args: argparse.Namespace) -> None:
         print(f"{task_id} -> {result}")
 
 
+def _daemon_active_conflict_groups(config: Config, tasks: list) -> set[str]:
+    """Conflict groups already reserved by running or claimed work.
+
+    Matches check_dispatchable: local mode treats only in_progress as active;
+    external mode also treats assigned claims as occupying the group.
+    """
+    active_states = ("assigned", "in_progress") if config.policy.execution_mode == "external" else ("in_progress",)
+    return {
+        task.conflict_group
+        for task in tasks
+        if task.conflict_group and task_status(config, task) in active_states
+    }
+
+
+def _daemon_select_runnable(config: Config, tasks: list, *, limit: int) -> list:
+    """Select backlog/assigned tasks for one daemon tick, aligned with task loop."""
+    active_groups = _daemon_active_conflict_groups(config, tasks)
+    queued: list = []
+    for task in tasks:
+        if len(queued) >= max(1, limit):
+            break
+        if task_status(config, task) not in ("backlog", "assigned"):
+            continue
+        if task.conflict_group and task.conflict_group in active_groups:
+            continue
+        try:
+            check_dispatchable(config, task)
+        except DyroError:
+            continue
+        queued.append(task)
+        if task.conflict_group:
+            active_groups.add(task.conflict_group)
+    return queued
+
+
 def cmd_task_daemon(args: argparse.Namespace) -> None:
     config = _config(args)
     while True:
         tasks = list_tasks(config)
-        active_groups = {task.conflict_group for task in tasks if task.conflict_group and task_status(config, task) == "in_progress"}
-        queued = []
-        for task in tasks:
-            if task_status(config, task) != "assigned" or len(queued) >= max(1, args.parallel):
-                continue
-            if task.conflict_group and task.conflict_group in active_groups:
-                continue
-            queued.append(task)
-            if task.conflict_group:
-                active_groups.add(task.conflict_group)
+        queued = _daemon_select_runnable(config, tasks, limit=max(1, args.parallel))
         if queued:
             with ThreadPoolExecutor(max_workers=max(1, args.parallel), thread_name_prefix="dyro-dispatch") as pool:
                 futures = {pool.submit(run_task, config, task, dry_run=args.dry_run): task for task in queued}
