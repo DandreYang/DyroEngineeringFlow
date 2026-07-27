@@ -714,16 +714,49 @@ def cmd_key_trust(args: argparse.Namespace) -> None:
         args.id,
         purpose=args.purpose,
         source=Path(args.public_key),
+        not_before=args.not_before,
+        not_after=args.not_after,
     )
     print(f"{args.id} -> trusted: {target}")
 
 
-def cmd_key_list(args: argparse.Namespace) -> None:
-    from .signing import trusted_key_ids
+def cmd_key_revoke(args: argparse.Namespace) -> None:
+    from .signing import revoke_public_key
 
     config = _config(args)
+    if args.dry_run:
+        print(f"{args.id} -> dry-run")
+        return
+    target = revoke_public_key(
+        config.root,
+        args.id,
+        purpose=args.purpose,
+        reason=args.reason,
+    )
+    print(f"{args.id} -> revoked: {target}")
+
+
+def cmd_key_list(args: argparse.Namespace) -> None:
+    from .signing import trusted_key_ids, trusted_key_records
+
+    config = _config(args)
+    if args.show_status:
+        for record in trusted_key_records(config.root, args.purpose):
+            print(
+                f"{record['key_id']}\t{record['status']}\t"
+                f"{record['not_before'] or '-'}\t{record['not_after'] or '-'}"
+            )
+        return
     for key_id in trusted_key_ids(config.root, args.purpose):
         print(key_id)
+
+
+def cmd_key_audit(args: argparse.Namespace) -> None:
+    from .signing import read_trust_audit
+
+    config = _config(args)
+    for record in read_trust_audit(config.root):
+        print(json.dumps(record, ensure_ascii=False, sort_keys=True))
 
 
 def cmd_task_evidence_review(args: argparse.Namespace) -> None:
@@ -916,10 +949,19 @@ def build_parser() -> argparse.ArgumentParser:
     key_trust.add_argument("id")
     key_trust.add_argument("--purpose", choices=("execution", "review", "signoff"), required=True)
     key_trust.add_argument("--public-key", required=True)
+    key_trust.add_argument("--not-before", help="ISO-8601 生效时间；必须包含时区")
+    key_trust.add_argument("--not-after", help="ISO-8601 失效时间；必须包含时区")
     key_trust.set_defaults(func=cmd_key_trust)
+    key_revoke = key_sub.add_parser("revoke", help="撤销指定用途的 trusted key ID；保留公钥与审计记录")
+    key_revoke.add_argument("id")
+    key_revoke.add_argument("--purpose", choices=("execution", "review", "signoff"), required=True)
+    key_revoke.add_argument("--reason", required=True)
+    key_revoke.set_defaults(func=cmd_key_revoke)
     key_list = key_sub.add_parser("list", help="列出指定用途的 trusted key IDs")
     key_list.add_argument("--purpose", choices=("execution", "review", "signoff"), required=True)
+    key_list.add_argument("--show-status", action="store_true", help="同时显示 pending、expired 与 revoked key")
     key_list.set_defaults(func=cmd_key_list)
+    key_sub.add_parser("audit", help="输出 trust/revoke JSONL 审计记录").set_defaults(func=cmd_key_audit)
     open_cmd = sub.add_parser("open", help="在指定开发线启动 Agent")
     open_cmd.add_argument("line")
     open_cmd.add_argument("--kind", choices=("line", "hotfix"))

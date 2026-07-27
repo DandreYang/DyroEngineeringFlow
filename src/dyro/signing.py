@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 import re
 from pathlib import Path
+import stat
+import tempfile
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -19,6 +23,9 @@ from .errors import ValidationError
 SIGNATURE_ALGORITHM = "ed25519"
 TRUST_PURPOSES = ("execution", "review", "signoff")
 KEY_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+KEY_METADATA_SUFFIX = ".metadata.json"
+KEY_REVOCATION_SUFFIX = ".revoked.json"
+TRUST_AUDIT_FILE = "audit.jsonl"
 
 
 def validate_key_id(key_id: str) -> str:
@@ -38,11 +45,179 @@ def trusted_keys_directory(root: Path, purpose: str) -> Path:
     return root / ".dyro" / "trust" / "ed25519" / validate_purpose(purpose)
 
 
-def trusted_key_ids(root: Path, purpose: str) -> tuple[str, ...]:
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_effective_at(value: str | None, label: str) -> datetime | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValidationError(f"{label} 必须是带时区的 ISO-8601 时间") from exc
+    if parsed.tzinfo is None:
+        raise ValidationError(f"{label} 必须包含时区")
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_effective_at(value: datetime | None) -> str:
+    return value.isoformat(timespec="seconds") if value is not None else ""
+
+
+def _ensure_real_directory(path: Path) -> None:
+    resolved_root = path.anchor
+    current = Path(resolved_root) if resolved_root else Path()
+    parts = path.parts[1:] if resolved_root else path.parts
+    for part in parts:
+        current /= part
+        if current.exists() or current.is_symlink():
+            try:
+                mode = current.lstat().st_mode
+            except FileNotFoundError:
+                raise ValidationError(f"信任库目录状态发生并发变化：{current}") from None
+            if not stat.S_ISDIR(mode):
+                raise ValidationError(f"信任库路径必须是普通目录且不能是符号链接：{current}")
+            continue
+        try:
+            current.mkdir(mode=0o700)
+        except FileExistsError:
+            mode = current.lstat().st_mode
+            if not stat.S_ISDIR(mode):
+                raise ValidationError(f"信任库路径必须是普通目录且不能是符号链接：{current}") from None
+
+
+def _read_regular_file(path: Path, label: str) -> bytes:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        raise ValidationError(f"{label}不存在：{path}") from None
+    if not stat.S_ISREG(mode):
+        raise ValidationError(f"{label}必须是普通文件且不能是符号链接：{path}")
+    return path.read_bytes()
+
+
+def _validate_trust_directory(directory: Path) -> None:
+    try:
+        mode = directory.lstat().st_mode
+    except FileNotFoundError:
+        raise ValidationError(f"信任库目录不存在：{directory}") from None
+    if not stat.S_ISDIR(mode):
+        raise ValidationError(f"信任库路径必须是普通目录且不能是符号链接：{directory}")
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_install(path: Path, content: bytes, mode: int = 0o600) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.link(temporary, path, follow_symlinks=False)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _metadata_path(directory: Path, key_id: str) -> Path:
+    return directory / f"{key_id}{KEY_METADATA_SUFFIX}"
+
+
+def _revocation_path(directory: Path, key_id: str) -> Path:
+    return directory / f"{key_id}{KEY_REVOCATION_SUFFIX}"
+
+
+def _read_json_file(path: Path, label: str) -> dict[str, object]:
+    try:
+        value = json.loads(_read_regular_file(path, label))
+    except json.JSONDecodeError as exc:
+        raise ValidationError(f"{label}不是有效 JSON：{path}") from exc
+    if not isinstance(value, dict):
+        raise ValidationError(f"{label}必须是 JSON 对象：{path}")
+    return value
+
+
+def _key_status(
+    directory: Path,
+    key_id: str,
+    *,
+    at: datetime | None = None,
+) -> tuple[str, dict[str, object] | None]:
+    revoked = _revocation_path(directory, key_id)
+    if revoked.exists() or revoked.is_symlink():
+        record = _read_json_file(revoked, "密钥撤销记录")
+        if record.get("schema_version") != 1 or record.get("key_id") != key_id:
+            raise ValidationError(f"密钥撤销记录格式无效：{revoked}")
+        return "revoked", record
+    metadata_path = _metadata_path(directory, key_id)
+    if not metadata_path.exists() and not metadata_path.is_symlink():
+        return "active", None
+    metadata = _read_json_file(metadata_path, "密钥元数据")
+    if (
+        metadata.get("schema_version") != 1
+        or metadata.get("key_id") != key_id
+        or metadata.get("purpose") != directory.name
+        or not isinstance(metadata.get("fingerprint_sha256"), str)
+    ):
+        raise ValidationError(f"密钥元数据格式无效：{metadata_path}")
+    now = (at or _utc_now()).astimezone(timezone.utc)
+    not_before = _parse_effective_at(str(metadata.get("not_before") or "") or None, "not_before")
+    not_after = _parse_effective_at(str(metadata.get("not_after") or "") or None, "not_after")
+    if not_before is not None and now < not_before:
+        return "pending", metadata
+    if not_after is not None and now > not_after:
+        return "expired", metadata
+    return "active", metadata
+
+
+def trusted_key_records(root: Path, purpose: str) -> tuple[dict[str, object], ...]:
     directory = trusted_keys_directory(root, purpose)
-    if not directory.is_dir():
+    if not directory.exists() and not directory.is_symlink():
         return ()
-    return tuple(sorted(path.stem for path in directory.glob("*.pem") if path.is_file()))
+    try:
+        mode = directory.lstat().st_mode
+    except FileNotFoundError:
+        return ()
+    if not stat.S_ISDIR(mode):
+        raise ValidationError(f"信任库路径必须是普通目录且不能是符号链接：{directory}")
+    records: list[dict[str, object]] = []
+    for path in sorted(directory.glob("*.pem")):
+        key_id = validate_key_id(path.stem)
+        _read_regular_file(path, "信任公钥")
+        status, metadata = _key_status(directory, key_id)
+        records.append(
+            {
+                "key_id": key_id,
+                "status": status,
+                "not_before": str((metadata or {}).get("not_before", "")),
+                "not_after": str((metadata or {}).get("not_after", "")),
+            }
+        )
+    return tuple(records)
+
+
+def trusted_key_ids(root: Path, purpose: str) -> tuple[str, ...]:
+    return tuple(
+        str(record["key_id"])
+        for record in trusted_key_records(root, purpose)
+        if record["status"] == "active"
+    )
 
 
 def _canonical_record(record: dict[str, object]) -> bytes:
@@ -61,8 +236,14 @@ def _signature_message(record: dict[str, object], purpose: str) -> bytes:
 
 
 def _load_private_key(path: Path) -> Ed25519PrivateKey:
-    if not path.is_file():
-        raise ValidationError(f"Ed25519 私钥不存在：{path}")
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        raise ValidationError(f"Ed25519 私钥不存在：{path}") from None
+    if not stat.S_ISREG(mode):
+        raise ValidationError(f"Ed25519 私钥必须是普通文件且不能是符号链接：{path}")
+    if os.name != "nt" and stat.S_IMODE(mode) & 0o077:
+        raise ValidationError(f"Ed25519 私钥权限过宽，必须限制为 0600：{path}")
     try:
         key = serialization.load_pem_private_key(path.read_bytes(), password=None)
     except (OSError, TypeError, ValueError) as exc:
@@ -128,10 +309,24 @@ def verify_record(
     ):
         raise ValidationError("Ed25519 signature envelope 无效")
     key_id = validate_key_id(str(signature["key_id"]))
+    _validate_trust_directory(trust_directory)
     public_key_path = trust_directory / f"{key_id}.pem"
-    if not public_key_path.is_file():
-        raise ValidationError(f"签名 key ID 未受信任：{key_id}")
-    public_key = _load_public_key_bytes(public_key_path.read_bytes(), public_key_path)
+    try:
+        public_key_bytes = _read_regular_file(public_key_path, "信任公钥")
+    except ValidationError as exc:
+        if not public_key_path.exists() and not public_key_path.is_symlink():
+            raise ValidationError(f"签名 key ID 未受信任：{key_id}") from exc
+        raise
+    status, metadata = _key_status(trust_directory, key_id)
+    if status != "active":
+        raise ValidationError(f"签名 key ID 当前不可用：{key_id} ({status})")
+    public_key = _load_public_key_bytes(public_key_bytes, public_key_path)
+    normalized = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    if metadata is not None and hashlib.sha256(normalized).hexdigest() != metadata["fingerprint_sha256"]:
+        raise ValidationError(f"信任公钥与元数据指纹不匹配：{key_id}")
     try:
         signature_bytes = base64.b64decode(str(signature["value"]), validate=True)
     except (binascii.Error, ValueError) as exc:
@@ -185,7 +380,50 @@ def generate_keypair(key_id: str, *, private_key: Path, public_key: Path) -> Non
         raise
 
 
-def trust_public_key(root: Path, key_id: str, *, purpose: str, source: Path) -> Path:
+def _append_trust_audit(root: Path, record: dict[str, object]) -> None:
+    base = root.resolve() / ".dyro" / "trust" / "ed25519"
+    _ensure_real_directory(base)
+    audit_path = base / TRUST_AUDIT_FILE
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(audit_path, flags, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValidationError(f"信任审计日志必须是普通文件：{audit_path}")
+        line = (_canonical_record(record) + b"\n")
+        os.write(descriptor, line)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    _fsync_directory(base)
+
+
+def read_trust_audit(root: Path) -> tuple[dict[str, object], ...]:
+    path = root.resolve() / ".dyro" / "trust" / "ed25519" / TRUST_AUDIT_FILE
+    if not path.exists() and not path.is_symlink():
+        return ()
+    records: list[dict[str, object]] = []
+    for line_number, line in enumerate(_read_regular_file(path, "信任审计日志").splitlines(), start=1):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValidationError(f"信任审计日志第 {line_number} 行损坏") from exc
+        if not isinstance(record, dict):
+            raise ValidationError(f"信任审计日志第 {line_number} 行格式无效")
+        records.append(record)
+    return tuple(records)
+
+
+def trust_public_key(
+    root: Path,
+    key_id: str,
+    *,
+    purpose: str,
+    source: Path,
+    not_before: str | None = None,
+    not_after: str | None = None,
+) -> Path:
     key_id = validate_key_id(key_id)
     purpose = validate_purpose(purpose)
     source = source.expanduser().resolve()
@@ -196,11 +434,112 @@ def trust_public_key(root: Path, key_id: str, *, purpose: str, source: Path) -> 
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
-    target = trusted_keys_directory(root, purpose) / f"{key_id}.pem"
-    if target.is_file():
-        if target.read_bytes() == normalized:
+    effective_from = _parse_effective_at(not_before, "not_before")
+    effective_until = _parse_effective_at(not_after, "not_after")
+    if effective_from is not None and effective_until is not None and effective_from >= effective_until:
+        raise ValidationError("not_before 必须早于 not_after")
+    directory = trusted_keys_directory(root.resolve(), purpose)
+    _ensure_real_directory(directory)
+    target = directory / f"{key_id}.pem"
+    if _revocation_path(directory, key_id).exists() or _revocation_path(directory, key_id).is_symlink():
+        raise ValidationError(f"key ID 已撤销，不能重新绑定：{key_id}")
+    if target.exists() or target.is_symlink():
+        if _read_regular_file(target, "信任公钥") == normalized:
             return target
         raise ValidationError(f"key ID 已绑定其他公钥：{key_id}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(normalized)
+    trusted_at = _utc_now().isoformat(timespec="seconds")
+    metadata = {
+        "schema_version": 1,
+        "key_id": key_id,
+        "purpose": purpose,
+        "fingerprint_sha256": hashlib.sha256(normalized).hexdigest(),
+        "not_before": _format_effective_at(effective_from),
+        "not_after": _format_effective_at(effective_until),
+        "trusted_at": trusted_at,
+    }
+    metadata_path = _metadata_path(directory, key_id)
+    metadata_bytes = (_canonical_record(metadata) + b"\n")
+    if metadata_path.exists() or metadata_path.is_symlink():
+        existing = _read_json_file(metadata_path, "密钥元数据")
+        comparable = dict(existing)
+        comparable.pop("trusted_at", None)
+        expected = dict(metadata)
+        expected.pop("trusted_at", None)
+        if comparable != expected:
+            raise ValidationError(f"key ID 存在冲突的信任元数据：{key_id}")
+        metadata = existing
+    else:
+        _atomic_install(metadata_path, metadata_bytes)
+    try:
+        _atomic_install(target, normalized)
+    except FileExistsError:
+        if _read_regular_file(target, "信任公钥") != normalized:
+            raise ValidationError(f"key ID 已绑定其他公钥：{key_id}") from None
+    _append_trust_audit(
+        root,
+        {
+            "schema_version": 1,
+            "event": "trust",
+            "key_id": key_id,
+            "purpose": purpose,
+            "fingerprint_sha256": hashlib.sha256(normalized).hexdigest(),
+            "not_before": metadata.get("not_before", ""),
+            "not_after": metadata.get("not_after", ""),
+            "occurred_at": trusted_at,
+        },
+    )
+    return target
+
+
+def revoke_public_key(
+    root: Path,
+    key_id: str,
+    *,
+    purpose: str,
+    reason: str,
+) -> Path:
+    key_id = validate_key_id(key_id)
+    purpose = validate_purpose(purpose)
+    reason = reason.strip()
+    if not reason:
+        raise ValidationError("撤销原因不能为空")
+    directory = trusted_keys_directory(root.resolve(), purpose)
+    _ensure_real_directory(directory)
+    public_key_path = directory / f"{key_id}.pem"
+    public_key_bytes = _read_regular_file(public_key_path, "待撤销信任公钥")
+    public_key = _load_public_key_bytes(public_key_bytes, public_key_path)
+    normalized = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    revoked_at = _utc_now().isoformat(timespec="seconds")
+    record = {
+        "schema_version": 1,
+        "key_id": key_id,
+        "purpose": purpose,
+        "fingerprint_sha256": hashlib.sha256(normalized).hexdigest(),
+        "reason": reason,
+        "revoked_at": revoked_at,
+    }
+    target = _revocation_path(directory, key_id)
+    if target.exists() or target.is_symlink():
+        _read_json_file(target, "密钥撤销记录")
+        return target
+    try:
+        _atomic_install(target, _canonical_record(record) + b"\n")
+    except FileExistsError:
+        _read_json_file(target, "密钥撤销记录")
+        return target
+    _append_trust_audit(
+        root,
+        {
+            "schema_version": 1,
+            "event": "revoke",
+            "key_id": key_id,
+            "purpose": purpose,
+            "fingerprint_sha256": record["fingerprint_sha256"],
+            "reason": reason,
+            "occurred_at": revoked_at,
+        },
+    )
     return target

@@ -7,9 +7,12 @@ from pathlib import Path
 from dyro.errors import ValidationError
 from dyro.signing import (
     generate_keypair,
+    read_trust_audit,
+    revoke_public_key,
     sign_record,
     trust_public_key,
     trusted_key_ids,
+    trusted_key_records,
     trusted_keys_directory,
     verify_record,
 )
@@ -107,6 +110,95 @@ class Ed25519SigningTests(unittest.TestCase):
                 trusted_key_ids(root, "execution"),
                 ("runner-new", "runner-old"),
             )
+
+    def test_revoked_and_out_of_window_keys_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            private_key = root / "private.pem"
+            public_key = root / "public.pem"
+            generate_keypair("runner", private_key=private_key, public_key=public_key)
+            trust_public_key(
+                root,
+                "runner",
+                purpose="execution",
+                source=public_key,
+                not_after="2999-01-01T00:00:00+00:00",
+            )
+            signed = sign_record(
+                {"schema_version": 1, "task_id": "A"},
+                purpose="execution",
+                key_id="runner",
+                private_key=private_key,
+            )
+            self.assertTrue(
+                verify_record(
+                    signed,
+                    purpose="execution",
+                    trust_directory=trusted_keys_directory(root, "execution"),
+                )
+            )
+
+            revoke_public_key(root, "runner", purpose="execution", reason="runner retired")
+
+            with self.assertRaisesRegex(ValidationError, "revoked"):
+                verify_record(
+                    signed,
+                    purpose="execution",
+                    trust_directory=trusted_keys_directory(root, "execution"),
+                )
+            self.assertEqual(trusted_key_ids(root, "execution"), ())
+            self.assertEqual(trusted_key_records(root, "execution")[0]["status"], "revoked")
+            self.assertEqual([record["event"] for record in read_trust_audit(root)], ["trust", "revoke"])
+
+    def test_future_key_and_wide_private_key_permissions_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            private_key = root / "private.pem"
+            public_key = root / "public.pem"
+            generate_keypair("future", private_key=private_key, public_key=public_key)
+            trust_public_key(
+                root,
+                "future",
+                purpose="execution",
+                source=public_key,
+                not_before="2999-01-01T00:00:00+00:00",
+            )
+            private_key.chmod(0o644)
+            with self.assertRaisesRegex(ValidationError, "0600"):
+                sign_record(
+                    {"schema_version": 1},
+                    purpose="execution",
+                    key_id="future",
+                    private_key=private_key,
+                )
+            private_key.chmod(0o600)
+            signed = sign_record(
+                {"schema_version": 1},
+                purpose="execution",
+                key_id="future",
+                private_key=private_key,
+            )
+            with self.assertRaisesRegex(ValidationError, "pending"):
+                verify_record(
+                    signed,
+                    purpose="execution",
+                    trust_directory=trusted_keys_directory(root, "execution"),
+                )
+
+    def test_trust_rejects_dangling_symlink_without_following_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            private_key = root / "private.pem"
+            public_key = root / "public.pem"
+            generate_keypair("runner", private_key=private_key, public_key=public_key)
+            directory = trusted_keys_directory(root, "execution")
+            directory.mkdir(parents=True)
+            outside = root / "outside.pem"
+            (directory / "runner.pem").symlink_to(outside)
+
+            with self.assertRaisesRegex(ValidationError, "不能是符号链接"):
+                trust_public_key(root, "runner", purpose="execution", source=public_key)
+            self.assertFalse(outside.exists())
 
 
 if __name__ == "__main__":
