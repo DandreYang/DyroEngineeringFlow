@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "purpose": "execution",
+  "key_id": "runner-ts-fixture",
+  "record": {
+    "schema_version": 1,
+    "task_id": "TS-INTEROP",
+    "result": "DONE",
+    "plan": {
+      "claim": {
+        "generation": 7,
+        "runner": "typescript-runner"
+      },
+      "repositories": [
+        "api",
+        "web"
+      ]
+    },
+    "metric": -0.0
+  },
+  "canonical_json": "{\"metric\":0,\"plan\":{\"claim\":{\"generation\":7,\"runner\":\"typescript-runner\"},\"repositories\":[\"api\",\"web\"]},\"result\":\"DONE\",\"schema_version\":1,\"task_id\":\"TS-INTEROP\"}",
+  "private_key_pem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g\n-----END PRIVATE KEY-----\n",
+  "expected_signature_base64": "8S0btpU0DjzC9vfJ533+po1scTaSIAnQQ6lbfk6bFpnl/dLOLUKiZycRLjdSyhihNnBqn5iE21UAyPPSpQDmCg=="
+}

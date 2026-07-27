@@ -171,6 +171,8 @@ dyro key audit
 
 Signature enforcement is controlled explicitly by `policy.require_signed_execution`, `policy.require_signed_review`, and `policy.require_signed_signoff`; deleting every trusted key never disables an enabled policy. Signed execution claims bind `claim_id`, generation, runner, and execution key ID. Signature messages and execution plan hashes use RFC 8785 JSON Canonicalization Scheme bytes, so non-Python runners can reproduce the exact signed payload. Independent reviewers produce a signed JSON envelope with `dyro task evidence review-build`. Rotation is non-disruptive: trust the new key ID before switching signers, retain the old key during the overlap window, then revoke it through the workspace's controlled key-management process.
 
+A minimal TypeScript reference signer and Python/Node interoperability vector live in `examples/typescript-runner/`. It demonstrates the exact canonical bytes, signature domain, Ed25519 call, and signature envelope expected by the control plane.
+
 Every write-capable operation has a planning mode:
 
 ```bash
