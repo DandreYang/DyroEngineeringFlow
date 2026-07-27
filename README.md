@@ -15,6 +15,7 @@ DyroEngineeringFlow is not coupled to Codex, Claude, or any business domain. Eac
 - Gates are executed by the orchestrator; an agent's self-report is not evidence of success.
 - Review is bound to the execution receipt and exact per-repository task HEADs; source drift invalidates it.
 - A task needs independent review before it becomes `done`; merge and push require explicit confirmation by default.
+- A completed dependency releases downstream work only after its exact task HEADs are integrated into the owning development line.
 - Executable configuration is represented as argv arrays. The core never runs TOML-provided shell strings.
 
 ## Quick start
@@ -91,8 +92,13 @@ dyro line create release-2026-10 --base origin/main --yes
 dyro line create release-2026-10 --base origin/main --repo-base web=v2026.10.0 --yes
 dyro open release-2026-10 --agent codex
 dyro task create API-101 --title "Implement API contract" --line release-2026-10 --repository api
+dyro task graph check --line release-2026-10
+dyro task graph --line release-2026-10 --format mermaid
+dyro task explain API-101
 dyro task next
 dyro task next --run --yes
+dyro task attempts API-101
+dyro task binding API-101
 dyro task review API-101
 dyro task merge API-101 --yes
 dyro changeset create release-2026-10-ready --line release-2026-10
@@ -108,14 +114,49 @@ dyro hotfix create incident-123 --base v2026.09.7 --repos api,web --yes
 For a Profile whose execution and approval are run by a separate trusted system, set `policy.execution_mode = "external"` and `policy.require_external_signoff = true`. Local Dyro will then allow only planning; a review bound to the receipt and exact task HEADs must be signed explicitly before a task becomes `done`:
 
 ```bash
-dyro task claim API-101 --by isolated-runner-1
+dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026
+# Long-running work must renew its bounded claim before expiry.
+dyro task claim-renew API-101 --by isolated-runner-1 --lease-seconds 3600
 # In the isolated runner: run declared gates and package receipt, logs, and exact HEADs.
 dyro task evidence build API-101 --workspace /runner/workspace --receipt /runner/out/receipt.md --output /runner/out/API-101.zip
 # In the control plane: validate and import the one portable package.
 dyro task evidence execution API-101 --bundle /runner/out/API-101.zip
 dyro task evidence review API-101 --file /review/out/review.md
 dyro task signoff API-101 --by release-manager
+# An abandoned assignment can be released explicitly.
+dyro task claim-release API-101 --by isolated-runner-1
 ```
+
+New evidence bundles must include `provenance.json`. Importing a pre-provenance legacy bundle is a deliberate migration action and requires `dyro task evidence execution API-101 --bundle ... --allow-legacy`. If an external runner returns `QUESTION`, record the answer with `dyro task answer API-101 --text "..."`; the existing claim is preserved and the task returns to `assigned` for the next evidence submission.
+
+For cryptographic runner and approver identity, generate keys outside the workspace, then install only public keys into purpose-separated trust stores:
+
+```bash
+dyro config set policy.execution_mode external
+dyro config set policy.require_signed_execution true
+dyro config set policy.require_signed_review true
+dyro config set policy.require_external_signoff true
+dyro config set policy.require_signed_signoff true
+
+dyro key generate runner-2026 --private-key /secure/runner.pem --public-key /secure/runner.pub.pem
+dyro key trust runner-2026 --purpose execution --public-key /secure/runner.pub.pem
+dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026
+dyro task evidence build API-101 --workspace /runner/workspace --receipt /runner/out/receipt.md \
+  --output /runner/out/API-101.zip --claim /runner/in/claim.json \
+  --signing-key /secure/runner.pem --key-id runner-2026
+
+dyro key generate reviewer-2026 --private-key /secure/reviewer.pem --public-key /secure/reviewer.pub.pem
+dyro key trust reviewer-2026 --purpose review --public-key /secure/reviewer.pub.pem
+dyro task evidence review-build API-101 --file /review/out/review.md --reviewer independent-reviewer \
+  --output /review/out/review.json --signing-key /secure/reviewer.pem --key-id reviewer-2026
+dyro task evidence review API-101 --file /review/out/review.json
+
+dyro key generate approver-2026 --private-key /secure/approver.pem --public-key /secure/approver.pub.pem
+dyro key trust approver-2026 --purpose signoff --public-key /secure/approver.pub.pem
+dyro task signoff API-101 --by release-manager --signing-key /secure/approver.pem --key-id approver-2026
+```
+
+Signature enforcement is controlled explicitly by `policy.require_signed_execution`, `policy.require_signed_review`, and `policy.require_signed_signoff`; deleting every trusted key never disables an enabled policy. Signed execution claims bind `claim_id`, generation, runner, and execution key ID. Independent reviewers produce a signed JSON envelope with `dyro task evidence review-build`. Rotation is non-disruptive: trust the new key ID before switching signers, retain the old key during the overlap window, then remove it through the workspace's controlled key-management process.
 
 Every write-capable operation has a planning mode:
 
@@ -134,7 +175,7 @@ dyro --dry-run task run API-101
 | `hotfix create` | Create a hotfix line from an explicit production base. |
 | `changeset create/list/verify` | Pin and verify the exact clean Git heads that make up a multi-repository delivery. |
 | `config get/set` / `agent list/add/test` / `open` | Safely manage common policy and adapters, validate an executable, or open an agent in the correct development line. |
-| `task create/list/board/status/next` | Manage task manifests, the state machine, and the next actionable task. |
+| `task create/list/board/status/next/graph/explain/attempts/binding` | Manage task manifests and state, compile or validate the task graph, explain scheduling decisions, inspect provenance, and output the exact review binding. |
 | `task run/answer/gates/review/signoff` | Run tasks, resolve questions, execute gates, request independent review, and record external sign-off when a Profile requires it. |
 | `task claim` / `task evidence build/execution/review` | One-time claim, portable execution-evidence build/import, and receipt-bound review import for an external isolated runner. |
 | `task merge` | Merge a reviewed task branch into its owning development line. |
