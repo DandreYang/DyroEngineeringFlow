@@ -1,0 +1,46 @@
+services:
+  witness:
+    build:
+      context: ../..
+      dockerfile: deploy/witness/Dockerfile
+    command:
+      - --storage-root
+      - /var/lib/dyro-witness
+      - --client-trust-root
+      - /etc/dyro-witness/trust-root
+      - --witness-id
+      - primary
+      - --receipt-key-id
+      - witness-2026
+      - --receipt-signing-key
+      - /run/secrets/witness-2026.pem
+      - --record-archive-root
+      - /var/lib/dyro-witness-records
+      - --workspace-id
+      - ${DYRO_WORKSPACE_ID:?set_the_single_tenant_workspace_id}
+      - --expected-endpoint
+      - https://audit.example.com/v1/dyro/batches
+      - --tls-cert
+      - /run/secrets/tls.crt
+      - --tls-key
+      - /run/secrets/tls.key
+      - --host
+      - 0.0.0.0
+    environment:
+      DYRO_WITNESS_TOKEN: ${DYRO_WITNESS_TOKEN:?set_a_random_token}
+    ports:
+      - "8443:8443"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    volumes:
+      - witness-ledger:/var/lib/dyro-witness
+      - witness-records:/var/lib/dyro-witness-records
+      - ./trust-root:/etc/dyro-witness/trust-root:ro
+      - ./secrets:/run/secrets:ro
+
+volumes:
+  witness-ledger:
+  witness-records:

@@ -105,7 +105,7 @@ def _unlock(handle: TextIO) -> None:
 @contextmanager
 def exclusive_lock(path: Path, *, timeout_seconds: float = 15.0) -> Iterator[None]:
     """Acquire a process-safe, thread-reentrant lock for a small state transition."""
-    resolved = path.resolve()
+    resolved = path.absolute()
     owner = threading.get_ident()
     deadline = time.monotonic() + timeout_seconds
     reentrant = False
@@ -128,7 +128,14 @@ def exclusive_lock(path: Path, *, timeout_seconds: float = 15.0) -> Iterator[Non
     try:
         if not reentrant:
             resolved.parent.mkdir(parents=True, exist_ok=True)
-            handle = resolved.open("a+", encoding="utf-8")
+            flags = os.O_RDWR | os.O_CREAT
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            try:
+                descriptor = os.open(resolved, flags, 0o600)
+            except OSError as exc:
+                raise DyroError(f"无法安全打开状态锁：{path}") from exc
+            handle = os.fdopen(descriptor, "a+", encoding="utf-8")
             while not _try_lock(handle):
                 if time.monotonic() >= deadline:
                     raise DyroError(f"等待状态锁超时：{path}")

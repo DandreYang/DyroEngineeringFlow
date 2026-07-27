@@ -790,6 +790,70 @@ def cmd_key_audit_sync(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_witness_serve(args: argparse.Namespace) -> None:
+    from .witness import WitnessConfig, serve_witness
+
+    if args.dry_run:
+        raise ValidationError("dry-run 不支持启动常驻 Witness 服务")
+    token = os.environ.get(args.auth_token_env)
+    if not token and not args.allow_unauthenticated:
+        raise ValidationError(
+            f"环境变量 {args.auth_token_env} 未设置；本地测试才可使用 --allow-unauthenticated"
+        )
+    if args.allow_unauthenticated and args.host not in {"127.0.0.1", "::1", "localhost"}:
+        raise ValidationError("--allow-unauthenticated 只能绑定 loopback host")
+    if (args.tls_cert is None) != (args.tls_key is None):
+        raise ValidationError("Witness TLS cert 与 key 必须同时设置")
+    if args.tls_cert is None:
+        if not args.allow_http:
+            raise ValidationError("Witness 必须设置 TLS，或显式使用仅本地的 --allow-http")
+        if args.host not in {"127.0.0.1", "::1", "localhost"}:
+            raise ValidationError("--allow-http 只能绑定 loopback host")
+    bindings: dict[str, str] = {}
+    for value in args.client_workspace_binding:
+        key_id, separator, workspace_id = value.partition("=")
+        if not separator or not key_id or not workspace_id:
+            raise ValidationError("--client-workspace-binding 必须为 KEY_ID=WORKSPACE_ID")
+        if key_id in bindings:
+            raise ValidationError(f"--client-workspace-binding 重复：{key_id}")
+        bindings[key_id] = workspace_id
+    config = WitnessConfig(
+        storage_root=Path(args.storage_root),
+        client_trust_root=Path(args.client_trust_root),
+        witness_id=args.witness_id,
+        receipt_key_id=args.receipt_key_id,
+        receipt_signing_key=Path(args.receipt_signing_key),
+        record_archive_root=(
+            Path(args.record_archive_root)
+            if args.record_archive_root is not None
+            else None
+        ),
+        auth_token=token,
+        workspace_id=args.workspace_id,
+        client_workspace_bindings=bindings or None,
+        expected_endpoint=args.expected_endpoint,
+        transition_key_id=args.transition_key_id,
+        transition_signing_key=(
+            Path(args.transition_signing_key)
+            if args.transition_signing_key is not None
+            else None
+        ),
+        transition_purpose=args.transition_purpose,
+    )
+    serve_witness(
+        config,
+        host=args.host,
+        port=args.port,
+        tls_cert=Path(args.tls_cert) if args.tls_cert is not None else None,
+        tls_key=Path(args.tls_key) if args.tls_key is not None else None,
+        max_concurrent_requests=args.max_concurrent_requests,
+        read_timeout_seconds=args.read_timeout_seconds,
+        on_listening=lambda: print(
+            f"Witness {args.witness_id} listening on {args.host}:{args.port}"
+        ),
+    )
+
+
 def cmd_task_evidence_review(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
@@ -1052,6 +1116,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="仅为本地测试允许 HTTP",
     )
     key_audit_sync.set_defaults(func=cmd_key_audit_sync)
+    witness = sub.add_parser("witness", help="运行独立的远程 audit Witness 服务")
+    witness_sub = witness.add_subparsers(dest="witness_command", required=True)
+    witness_serve = witness_sub.add_parser("serve", help="验证批次、签发回执并持久化 Witness ledger")
+    witness_serve.add_argument("--storage-root", required=True)
+    witness_serve.add_argument("--client-trust-root", required=True)
+    witness_serve.add_argument("--witness-id", required=True)
+    witness_serve.add_argument("--receipt-key-id", required=True)
+    witness_serve.add_argument("--receipt-signing-key", required=True)
+    witness_serve.add_argument("--record-archive-root")
+    witness_serve.add_argument("--workspace-id")
+    witness_serve.add_argument(
+        "--client-workspace-binding",
+        action="append",
+        default=[],
+        metavar="KEY_ID=WORKSPACE_ID",
+        help="多工作区模式中将 client audit-export key 绑定到唯一 workspace，可重复指定",
+    )
+    witness_serve.add_argument("--expected-endpoint")
+    witness_serve.add_argument("--auth-token-env", default="DYRO_WITNESS_TOKEN")
+    witness_serve.add_argument("--allow-unauthenticated", action="store_true")
+    witness_serve.add_argument("--host", default="127.0.0.1")
+    witness_serve.add_argument("--port", type=int, default=8443)
+    witness_serve.add_argument("--max-concurrent-requests", type=int, default=32)
+    witness_serve.add_argument("--read-timeout-seconds", type=float, default=15.0)
+    witness_serve.add_argument("--tls-cert")
+    witness_serve.add_argument("--tls-key")
+    witness_serve.add_argument("--allow-http", action="store_true")
+    witness_serve.add_argument("--transition-key-id")
+    witness_serve.add_argument("--transition-signing-key")
+    witness_serve.add_argument(
+        "--transition-purpose",
+        choices=("audit-receipt", "audit-recovery"),
+    )
+    witness_serve.set_defaults(func=cmd_witness_serve)
     open_cmd = sub.add_parser("open", help="在指定开发线启动 Agent")
     open_cmd.add_argument("line")
     open_cmd.add_argument("--kind", choices=("line", "hotfix"))
