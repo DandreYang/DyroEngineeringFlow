@@ -19,6 +19,9 @@ _MANAGED_VALUES = frozenset(
         "policy.task_branch_prefix",
         "policy.allow_push",
         "policy.require_external_signoff",
+        "policy.require_signed_execution",
+        "policy.require_signed_review",
+        "policy.require_signed_signoff",
         "policy.execution_mode",
         "policy.require_clean_merge",
     }
@@ -91,7 +94,14 @@ def config_value(config: Config, key: str) -> str | bool:
 def _parse_value(key: str, raw: str) -> str | bool:
     if key not in _MANAGED_VALUES:
         raise ValidationError(f"不支持的配置键：{key}")
-    if key in ("policy.allow_push", "policy.require_external_signoff", "policy.require_clean_merge"):
+    if key in (
+        "policy.allow_push",
+        "policy.require_external_signoff",
+        "policy.require_signed_execution",
+        "policy.require_signed_review",
+        "policy.require_signed_signoff",
+        "policy.require_clean_merge",
+    ):
         normalized = raw.strip().lower()
         if normalized not in ("true", "false"):
             raise ValidationError(f"{key} 只能是 true 或 false")

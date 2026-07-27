@@ -52,6 +52,9 @@ class Policy:
     allow_push: bool = False
     require_clean_merge: bool = True
     require_external_signoff: bool = False
+    require_signed_execution: bool = False
+    require_signed_review: bool = False
+    require_signed_signoff: bool = False
     execution_mode: str = "local"
 
 
@@ -156,12 +159,29 @@ def load(root: Path | None = None) -> Config:
         require_external_signoff=strict_bool(
             policy_raw.get("require_external_signoff", False), "policy.require_external_signoff"
         ),
+        require_signed_execution=strict_bool(
+            policy_raw.get("require_signed_execution", False), "policy.require_signed_execution"
+        ),
+        require_signed_review=strict_bool(
+            policy_raw.get("require_signed_review", False), "policy.require_signed_review"
+        ),
+        require_signed_signoff=strict_bool(
+            policy_raw.get("require_signed_signoff", False), "policy.require_signed_signoff"
+        ),
         execution_mode=_string(policy_raw.get("execution_mode", "local"), "policy.execution_mode"),
     )
     if policy.execution_mode not in ("local", "external"):
         raise ValidationError("policy.execution_mode 只能是 local 或 external")
     if not policy.require_clean_merge:
         raise ValidationError("policy.require_clean_merge 必须为 true；事务合并不允许脏工作区")
+    if (
+        policy.require_signed_execution
+        or policy.require_signed_review
+        or policy.require_signed_signoff
+    ) and policy.execution_mode != "external":
+        raise ValidationError("require_signed_* 策略仅适用于 execution_mode = external")
+    if policy.require_signed_signoff and not policy.require_external_signoff:
+        raise ValidationError("require_signed_signoff = true 要求 require_external_signoff = true")
 
     repositories: dict[str, Repository] = {}
     for repo_id, entry in raw.get("repositories", {}).items():

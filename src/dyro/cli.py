@@ -23,11 +23,23 @@ from .onboarding import (
 )
 from .profile import append_adapter, command_adapter, config_value, preset_adapter, set_config_value, test_adapter
 from .state import atomic_write_text, exclusive_lock
+from .graph import (
+    build_task_graph,
+    explain_task,
+    render_task_explanation,
+    render_task_graph,
+    validate_task_graph,
+)
+from .provenance import (
+    list_execution_attempts,
+    render_execution_attempts,
+    render_review_binding,
+    review_binding,
+)
 from .tasks import (
     STATUSES,
     answer_task,
     board,
-    check_dispatchable,
     claim_task,
     decisions,
     import_execution_evidence,
@@ -36,9 +48,11 @@ from .tasks import (
     load_task,
     loop_tasks,
     merge_task,
+    plan_tasks,
     review_task,
     run_gates,
     run_task,
+    select_task_wave,
     set_status,
     signoff_task,
     stats,
@@ -69,6 +83,9 @@ require_clean_merge = true
 execution_mode = "local"
 # Keep false for lightweight teams. When true, PASS review waits for task signoff.
 require_external_signoff = false
+require_signed_execution = false
+require_signed_review = false
+require_signed_signoff = false
 
 # Commands are argv arrays, not shell strings.  DyroEngineeringFlow expands only
 # {{workspace}}, {{root}}, {{task}}, {{line}} and {{prompt}}.
@@ -466,6 +483,39 @@ def cmd_task_create(args: argparse.Namespace) -> None:
     print(f"已创建任务：{path}")
 
 
+def cmd_task_graph(args: argparse.Namespace) -> None:
+    config = _config(args)
+    if args.line:
+        get_line(config, args.line)
+    graph = build_task_graph(config, line=args.line)
+    if args.action == "check":
+        issues = validate_task_graph(graph)
+        if issues:
+            for issue in issues:
+                print(f"FAIL [{issue.code}] {issue.message}")
+            raise DyroError(f"任务图存在 {len(issues)} 个结构问题")
+        print(f"PASS: 任务图结构有效，共 {len(graph.tasks)} 个任务")
+        return
+    print(render_task_graph(config, graph, output_format=args.format), end="")
+
+
+def cmd_task_explain(args: argparse.Namespace) -> None:
+    print(render_task_explanation(explain_task(_config(args), args.id)), end="")
+
+
+def cmd_task_attempts(args: argparse.Namespace) -> None:
+    config = _config(args)
+    task = load_task(config, args.id)
+    attempts = list_execution_attempts(task.directory)
+    print(render_execution_attempts(task.id, attempts), end="")
+
+
+def cmd_task_binding(args: argparse.Namespace) -> None:
+    config = _config(args)
+    task = load_task(config, args.id)
+    print(render_review_binding(task.id, review_binding(task.directory)), end="")
+
+
 def cmd_task_list(args: argparse.Namespace) -> None:
     config = _config(args)
     for task in list_tasks(config):
@@ -496,20 +546,39 @@ def cmd_task_run(args: argparse.Namespace) -> None:
 def cmd_task_claim(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
-    print(f"{task.id} -> {claim_task(config, task, runner=args.by, dry_run=args.dry_run)}")
+    result = claim_task(
+        config,
+        task,
+        runner=args.by,
+        key_id=args.key_id,
+        lease_seconds=args.lease_seconds,
+        dry_run=args.dry_run,
+    )
+    print(f"{task.id} -> {result}")
+
+
+def cmd_task_claim_renew(args: argparse.Namespace) -> None:
+    from .tasks import renew_task_claim
+
+    config = _config(args)
+    task = load_task(config, args.id)
+    print(
+        f"{task.id} -> "
+        f"{renew_task_claim(config, task, runner=args.by, lease_seconds=args.lease_seconds, dry_run=args.dry_run)}"
+    )
+
+
+def cmd_task_claim_release(args: argparse.Namespace) -> None:
+    from .tasks import release_task_claim
+
+    config = _config(args)
+    task = load_task(config, args.id)
+    print(f"{task.id} -> {release_task_claim(config, task, runner=args.by, dry_run=args.dry_run)}")
 
 
 def cmd_task_next(args: argparse.Namespace) -> None:
     config = _config(args)
-    candidates = []
-    for task in list_tasks(config):
-        if task_status(config, task) not in ("backlog", "assigned"):
-            continue
-        try:
-            check_dispatchable(config, task)
-            candidates.append(task)
-        except DyroError:
-            continue
+    candidates = list(plan_tasks(config).ready)
     if args.id:
         candidates = [task for task in candidates if task.id == args.id]
     if not candidates:
@@ -558,7 +627,16 @@ def cmd_task_review(args: argparse.Namespace) -> None:
 def cmd_task_signoff(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
-    print(f"{task.id} -> {signoff_task(config, task, approver=args.by, dry_run=args.dry_run)}")
+    result = signoff_task(
+        config,
+        task,
+        approver=args.by,
+        signing_key=Path(args.signing_key) if args.signing_key else None,
+        key_id=args.key_id,
+        claim=Path(args.claim) if args.claim else None,
+        dry_run=args.dry_run,
+    )
+    print(f"{task.id} -> {result}")
 
 
 def cmd_task_evidence_execution(args: argparse.Namespace) -> None:
@@ -574,6 +652,8 @@ def cmd_task_evidence_execution(args: argparse.Namespace) -> None:
                 receipt=evidence["receipt"],
                 gates=evidence["gates"] if evidence["gates"].is_file() else None,
                 heads=evidence["heads"] if evidence["heads"].is_file() else None,
+                provenance=evidence["provenance"] if evidence["provenance"].is_file() else None,
+                allow_legacy_provenance=args.allow_legacy,
                 dry_run=args.dry_run,
             )
     else:
@@ -583,6 +663,8 @@ def cmd_task_evidence_execution(args: argparse.Namespace) -> None:
             receipt=Path(args.receipt),
             gates=Path(args.gates) if args.gates else None,
             heads=Path(args.heads) if args.heads else None,
+            provenance=Path(args.provenance) if args.provenance else None,
+            allow_legacy_provenance=args.allow_legacy,
             dry_run=args.dry_run,
         )
     print(f"{task.id} -> {result}")
@@ -597,6 +679,8 @@ def cmd_task_evidence_build(args: argparse.Namespace) -> None:
         workspace=Path(args.workspace),
         receipt=Path(args.receipt),
         output=Path(args.output),
+        signing_key=Path(args.signing_key) if args.signing_key else None,
+        key_id=args.key_id,
         dry_run=args.dry_run,
     )
     print(f"{task.id} -> {bundle.result}: {bundle.output}")
@@ -604,10 +688,75 @@ def cmd_task_evidence_build(args: argparse.Namespace) -> None:
         raise DyroError("外部门禁失败；已输出证据包供排查，不能导入为 DONE")
 
 
+def cmd_key_generate(args: argparse.Namespace) -> None:
+    from .signing import generate_keypair
+
+    if args.dry_run:
+        print(f"{args.id} -> dry-run")
+        return
+    generate_keypair(
+        args.id,
+        private_key=Path(args.private_key),
+        public_key=Path(args.public_key),
+    )
+    print(f"{args.id} -> generated")
+
+
+def cmd_key_trust(args: argparse.Namespace) -> None:
+    from .signing import trust_public_key
+
+    config = _config(args)
+    if args.dry_run:
+        print(f"{args.id} -> dry-run")
+        return
+    target = trust_public_key(
+        config.root,
+        args.id,
+        purpose=args.purpose,
+        source=Path(args.public_key),
+    )
+    print(f"{args.id} -> trusted: {target}")
+
+
+def cmd_key_list(args: argparse.Namespace) -> None:
+    from .signing import trusted_key_ids
+
+    config = _config(args)
+    for key_id in trusted_key_ids(config.root, args.purpose):
+        print(key_id)
+
+
 def cmd_task_evidence_review(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
     print(f"{task.id} -> {import_review_evidence(config, task, review=Path(args.file), dry_run=args.dry_run)}")
+
+
+def cmd_task_evidence_review_build(args: argparse.Namespace) -> None:
+    from .reviews import build_signed_review_record
+    from .state import atomic_write_bytes
+
+    config = _config(args)
+    task = load_task(config, args.id)
+    output = Path(args.output).expanduser().resolve()
+    if output.exists():
+        raise ValidationError(f"拒绝覆盖已有 signed review：{output}")
+    review_content = Path(args.file).expanduser().resolve().read_bytes()
+    record = build_signed_review_record(
+        task.id,
+        reviewer=args.reviewer,
+        review_content=review_content,
+        signing_key=Path(args.signing_key).expanduser().resolve(),
+        key_id=args.key_id,
+    )
+    if args.dry_run:
+        print(f"{task.id} -> dry-run")
+        return
+    atomic_write_bytes(
+        output,
+        json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8") + b"\n",
+    )
+    print(f"{task.id} -> signed review: {output}")
 
 
 def cmd_task_merge(args: argparse.Namespace) -> None:
@@ -657,24 +806,9 @@ def _daemon_active_conflict_groups(config: Config, tasks: list) -> set[str]:
 
 
 def _daemon_select_runnable(config: Config, tasks: list, *, limit: int) -> list:
-    """Select backlog/assigned tasks for one daemon tick, aligned with task loop."""
-    active_groups = _daemon_active_conflict_groups(config, tasks)
-    queued: list = []
-    for task in tasks:
-        if len(queued) >= max(1, limit):
-            break
-        if task_status(config, task) not in ("backlog", "assigned"):
-            continue
-        if task.conflict_group and task.conflict_group in active_groups:
-            continue
-        try:
-            check_dispatchable(config, task)
-        except DyroError:
-            continue
-        queued.append(task)
-        if task.conflict_group:
-            active_groups.add(task.conflict_group)
-    return queued
+    """Compatibility wrapper around the shared deterministic scheduler."""
+    plan = plan_tasks(config, candidates=tasks)
+    return list(select_task_wave(plan, limit=limit).tasks)
 
 
 def cmd_task_daemon(args: argparse.Namespace) -> None:
@@ -771,6 +905,21 @@ def build_parser() -> argparse.ArgumentParser:
     config_set.add_argument("key")
     config_set.add_argument("value")
     config_set.set_defaults(func=cmd_config_set)
+    key = sub.add_parser("key", help="Ed25519 签名密钥与工作区信任根")
+    key_sub = key.add_subparsers(dest="key_command", required=True)
+    key_generate = key_sub.add_parser("generate", help="生成 runner 或 approver Ed25519 密钥对")
+    key_generate.add_argument("id")
+    key_generate.add_argument("--private-key", required=True)
+    key_generate.add_argument("--public-key", required=True)
+    key_generate.set_defaults(func=cmd_key_generate)
+    key_trust = key_sub.add_parser("trust", help="将公钥安装到用途隔离的工作区 trust store")
+    key_trust.add_argument("id")
+    key_trust.add_argument("--purpose", choices=("execution", "review", "signoff"), required=True)
+    key_trust.add_argument("--public-key", required=True)
+    key_trust.set_defaults(func=cmd_key_trust)
+    key_list = key_sub.add_parser("list", help="列出指定用途的 trusted key IDs")
+    key_list.add_argument("--purpose", choices=("execution", "review", "signoff"), required=True)
+    key_list.set_defaults(func=cmd_key_list)
     open_cmd = sub.add_parser("open", help="在指定开发线启动 Agent")
     open_cmd.add_argument("line")
     open_cmd.add_argument("--kind", choices=("line", "hotfix"))
@@ -825,6 +974,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     task = sub.add_parser("task", help="任务编排")
     task_sub = task.add_subparsers(dest="task_command", required=True)
+    task_graph = task_sub.add_parser("graph", help="编译、校验或渲染任务图")
+    task_graph.add_argument("action", nargs="?", choices=("show", "check"), default="show")
+    task_graph.add_argument("--line", help="只显示或校验指定开发线")
+    task_graph.add_argument("--format", choices=("mermaid", "json"), default="mermaid")
+    task_graph.set_defaults(func=cmd_task_graph)
+    task_explain = task_sub.add_parser("explain", help="解释任务当前为什么可调度或被阻塞")
+    task_explain.add_argument("id")
+    task_explain.set_defaults(func=cmd_task_explain)
+    task_attempts = task_sub.add_parser("attempts", help="显示任务的本地执行 provenance")
+    task_attempts.add_argument("id")
+    task_attempts.set_defaults(func=cmd_task_attempts)
+    task_binding = task_sub.add_parser("binding", help="输出 review 所需的完整 attempt 与 plan binding")
+    task_binding.add_argument("id")
+    task_binding.set_defaults(func=cmd_task_binding)
     task_create = task_sub.add_parser("create")
     task_create.add_argument("id")
     task_create.add_argument("--title", required=True)
@@ -844,7 +1007,18 @@ def build_parser() -> argparse.ArgumentParser:
     task_claim = task_sub.add_parser("claim", help="由隔离执行器一次性领取任务")
     task_claim.add_argument("id")
     task_claim.add_argument("--by", required=True, help="执行器实例或受信任身份")
+    task_claim.add_argument("--key-id", help="与 claim 绑定的 trusted execution key ID")
+    task_claim.add_argument("--lease-seconds", type=int, default=3600, help="claim 租约秒数；默认 3600")
     task_claim.set_defaults(func=cmd_task_claim)
+    task_claim_renew = task_sub.add_parser("claim-renew", help="由当前 runner 续租未过期 claim")
+    task_claim_renew.add_argument("id")
+    task_claim_renew.add_argument("--by", required=True, help="当前执行器实例或受信任身份")
+    task_claim_renew.add_argument("--lease-seconds", type=int, default=3600, help="续租秒数；默认 3600")
+    task_claim_renew.set_defaults(func=cmd_task_claim_renew)
+    task_claim_release = task_sub.add_parser("claim-release", help="释放当前 runner 的 claim")
+    task_claim_release.add_argument("id")
+    task_claim_release.add_argument("--by", required=True, help="当前执行器实例或受信任身份")
+    task_claim_release.set_defaults(func=cmd_task_claim_release)
     task_next = task_sub.add_parser("next", help="显示或启动下一个满足依赖的任务")
     task_next.add_argument("--id")
     task_next.add_argument("--run", action="store_true")
@@ -865,6 +1039,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_signoff = task_sub.add_parser("signoff", help="记录 receipt-bound 外部签收")
     task_signoff.add_argument("id")
     task_signoff.add_argument("--by", required=True, help="签收人或外部审批标识")
+    task_signoff.add_argument("--signing-key", help="Ed25519 approver 私钥 PEM")
+    task_signoff.add_argument("--key-id", help="已安装到 signoff trust store 的 key ID")
     task_signoff.set_defaults(func=cmd_task_signoff)
     evidence = task_sub.add_parser("evidence", help="构建或导入隔离执行器证据")
     evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
@@ -875,17 +1051,30 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_input.add_argument("--bundle", help="由 task evidence build 生成的可移植 ZIP 证据包")
     evidence_execution.add_argument("--gates", help="外部门禁 JSON；任务含 gates 时必填")
     evidence_execution.add_argument("--heads", help="执行后逐仓 Git HEAD JSON；DONE 回执时必填")
+    evidence_execution.add_argument("--provenance", help="可选的外部 execution provenance JSON")
+    evidence_execution.add_argument("--allow-legacy", action="store_true", help="显式允许导入缺少 provenance 的旧证据")
     evidence_execution.set_defaults(func=cmd_task_evidence_execution)
     evidence_build = evidence_sub.add_parser("build", help="在隔离 runner 中运行门禁并构建可导入 ZIP 证据包")
     evidence_build.add_argument("id")
     evidence_build.add_argument("--workspace", required=True, help="隔离 runner 中任务分支的多仓工作区")
     evidence_build.add_argument("--receipt", required=True, help="执行器写出的 receipt.md")
     evidence_build.add_argument("--output", required=True, help="新 ZIP 证据包的输出路径；拒绝覆盖已有文件")
+    evidence_build.add_argument("--signing-key", help="Ed25519 runner 私钥 PEM")
+    evidence_build.add_argument("--key-id", help="已安装到 execution trust store 的 key ID")
+    evidence_build.add_argument("--claim", help="控制面导出的 claim.json；默认读取任务目录")
     evidence_build.set_defaults(func=cmd_task_evidence_build)
     evidence_review = evidence_sub.add_parser("review", help="导入 receipt-bound 复核结果")
     evidence_review.add_argument("id")
     evidence_review.add_argument("--file", required=True)
     evidence_review.set_defaults(func=cmd_task_evidence_review)
+    evidence_review_build = evidence_sub.add_parser("review-build", help="构建独立 reviewer 签名的 review JSON")
+    evidence_review_build.add_argument("id")
+    evidence_review_build.add_argument("--file", required=True, help="包含 verdict 与绑定字段的 review.md")
+    evidence_review_build.add_argument("--reviewer", required=True)
+    evidence_review_build.add_argument("--output", required=True)
+    evidence_review_build.add_argument("--signing-key", required=True)
+    evidence_review_build.add_argument("--key-id", required=True)
+    evidence_review_build.set_defaults(func=cmd_task_evidence_review_build)
     task_merge = task_sub.add_parser("merge")
     task_merge.add_argument("id")
     task_merge.add_argument("--yes", action="store_true")

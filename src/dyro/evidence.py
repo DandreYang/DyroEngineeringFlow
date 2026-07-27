@@ -150,6 +150,9 @@ def build_execution_bundle(
     workspace: Path,
     receipt: Path,
     output: Path,
+    signing_key: Path | None = None,
+    key_id: str | None = None,
+    claim: Path | None = None,
     dry_run: bool = False,
 ) -> ExecutionBundle:
     """Package the receipt, gate logs, and exact HEADs generated in an isolated runner."""
@@ -161,6 +164,20 @@ def build_execution_bundle(
     output = output.expanduser().resolve()
     if output.exists():
         raise DyroError(f"拒绝覆盖已有证据包：{output}")
+    if (signing_key is None) != (key_id is None):
+        raise ValidationError("--signing-key 与 --key-id 必须同时提供")
+    claim_binding: dict[str, object] | None = None
+    if getattr(config.policy, "require_signed_execution", False):
+        if signing_key is None or key_id is None:
+            raise ValidationError("策略要求 evidence build 提供 --signing-key 与 --key-id")
+        from .tasks import execution_claim_binding
+
+        claim_binding = execution_claim_binding(
+            task,
+            claim_file=claim.expanduser().resolve() if claim is not None else None,
+        )
+        if claim_binding["execution_key_id"] != key_id:
+            raise ValidationError("evidence signing key ID 与 claim execution_key_id 不匹配")
     result, receipt_bytes = _receipt_result(receipt.expanduser().resolve())
     if dry_run:
         return ExecutionBundle("dry-run", output, True)
@@ -169,10 +186,41 @@ def build_execution_bundle(
         staging = Path(temporary)
         atomic_write_bytes(staging / "receipt.md", receipt_bytes)
         gates_passed = True
+        gates_bytes = b""
+        task_heads_bytes = b""
         if result == "DONE":
             gates_bytes, gates_passed = _gate_artifacts(config, task, workspace, staging, dry_run=False)
             atomic_write_bytes(staging / "gates.json", gates_bytes)
-            atomic_write_bytes(staging / "task-heads.json", _task_heads_bytes(config, task, _collect_external_heads(config, task, workspace)))
+            task_heads_bytes = _task_heads_bytes(config, task, _collect_external_heads(config, task, workspace))
+            atomic_write_bytes(staging / "task-heads.json", task_heads_bytes)
+        from .provenance import build_external_attempt_record, external_execution_plan
+
+        provenance = build_external_attempt_record(
+            task.directory,
+            task.id,
+            external_execution_plan(
+                task,
+                config.policy.execution_mode,
+                claim_binding=claim_binding,
+            ),
+            result=result,
+            receipt_sha256=hashlib.sha256(receipt_bytes).hexdigest(),
+            gates_sha256=hashlib.sha256(gates_bytes).hexdigest() if gates_bytes else "",
+            task_heads_sha256=hashlib.sha256(task_heads_bytes).hexdigest() if task_heads_bytes else "",
+        )
+        if signing_key is not None and key_id is not None:
+            from .signing import sign_record
+
+            provenance = sign_record(
+                provenance,
+                purpose="execution",
+                key_id=key_id,
+                private_key=signing_key.expanduser().resolve(),
+            )
+        atomic_write_bytes(
+            staging / "provenance.json",
+            json.dumps(provenance, ensure_ascii=False, indent=2).encode("utf-8") + b"\n",
+        )
         _write_bundle(staging, output)
     return ExecutionBundle(result, output, gates_passed)
 
@@ -186,7 +234,12 @@ def _safe_bundle_member(info: zipfile.ZipInfo) -> PurePosixPath:
     mode = info.external_attr >> 16
     if stat.S_ISLNK(mode):
         raise ValidationError(f"证据包不允许符号链接：{info.filename!r}")
-    allowed = path == PurePosixPath("receipt.md") or path == PurePosixPath("gates.json") or path == PurePosixPath("task-heads.json")
+    allowed = (
+        path == PurePosixPath("receipt.md")
+        or path == PurePosixPath("gates.json")
+        or path == PurePosixPath("task-heads.json")
+        or path == PurePosixPath("provenance.json")
+    )
     allowed = allowed or (len(path.parts) == 2 and path.parts[0] == "gates" and path.suffix == ".log")
     if not allowed:
         raise ValidationError(f"证据包包含未声明文件：{info.filename!r}")
@@ -234,4 +287,5 @@ def unpack_execution_bundle(bundle: Path) -> Iterator[dict[str, Path]]:
                 "receipt": destination / "receipt.md",
                 "gates": destination / "gates.json",
                 "heads": destination / "task-heads.json",
+                "provenance": destination / "provenance.json",
             }

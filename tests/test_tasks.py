@@ -29,10 +29,18 @@ from .support import WorkspaceCase, shell
 class TaskTests(WorkspaceCase):
     @staticmethod
     def _write_bound_review(task_path: Path) -> None:
+        from dyro.provenance import review_binding
+
         receipt_hash = hashlib.sha256(task_path.joinpath("receipt.md").read_bytes()).hexdigest()
         heads_hash = hashlib.sha256(task_path.joinpath("task-heads.json").read_bytes()).hexdigest()
+        binding = review_binding(task_path)
+        provenance = (
+            f"attempt_id: {binding[0]}\nplan_sha256: {binding[1]}\n"
+            if binding is not None
+            else ""
+        )
         task_path.joinpath("review.md").write_text(
-            f"verdict: PASS\nreceipt_sha256: {receipt_hash}\ntask_heads_sha256: {heads_hash}\n",
+            f"verdict: PASS\nreceipt_sha256: {receipt_hash}\ntask_heads_sha256: {heads_hash}\n{provenance}",
             encoding="utf-8",
         )
 
@@ -175,13 +183,28 @@ class TaskTests(WorkspaceCase):
         )
 
         self.assertEqual(claim_task(config, task, runner="isolated-runner-1"), "assigned")
-        self.assertEqual(import_execution_evidence(config, task, receipt=receipt, gates=gates, heads=heads), "review")
+        self.assertEqual(
+            import_execution_evidence(
+                config,
+                task,
+                receipt=receipt,
+                gates=gates,
+                heads=heads,
+                allow_legacy_provenance=True,
+            ),
+            "review",
+        )
         self.assertEqual(status(config, task), "review")
         self.assertEqual((task_path / "evidence/gates/gate-1.log").read_text(encoding="utf-8"), "diff check passed\n")
         review = runner_dir / "review.md"
         heads_hash = hashlib.sha256(heads.read_bytes()).hexdigest()
+        from dyro.provenance import review_binding
+
+        binding = review_binding(task_path)
+        self.assertIsNotNone(binding)
         review.write_text(
-            f"verdict: PASS\nreceipt_sha256: {receipt_hash}\ntask_heads_sha256: {heads_hash}\n",
+            f"verdict: PASS\nreceipt_sha256: {receipt_hash}\ntask_heads_sha256: {heads_hash}\n"
+            f"attempt_id: {binding[0]}\nplan_sha256: {binding[1]}\n",
             encoding="utf-8",
         )
         self.assertEqual(import_review_evidence(config, task, review=review), "done")
@@ -288,10 +311,51 @@ class TaskTests(WorkspaceCase):
                     receipt=evidence["receipt"],
                     gates=evidence["gates"],
                     heads=evidence["heads"],
+                    provenance=evidence["provenance"],
                 ),
                 "review",
             )
         self.assertEqual(status(config, task), "review")
+
+    def test_external_question_can_be_answered_by_the_claimed_runner(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                "require_clean_merge = true", "require_clean_merge = true\nexecution_mode = \"external\""
+            ),
+            encoding="utf-8",
+        )
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-QUESTION"
+        task_path.mkdir(parents=True)
+        task_path.joinpath("task.toml").write_text(
+            task_template("TASK-QUESTION", "external question", "alpha", "api", "services/api").replace(
+                'agent = "codex"', 'agent = "noop"'
+            ),
+            encoding="utf-8",
+        )
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task = load_task(config, "TASK-QUESTION")
+        receipt = self.root / "question-receipt.md"
+        receipt.write_text("result: QUESTION\n", encoding="utf-8")
+
+        self.assertEqual(claim_task(config, task, runner="isolated-runner-1"), "assigned")
+        self.assertEqual(
+            import_execution_evidence(
+                config,
+                task,
+                receipt=receipt,
+                allow_legacy_provenance=True,
+            ),
+            "waiting_answer",
+        )
+        self.assertEqual(answer_task(config, task, "Use the stable API contract."), "assigned")
+        self.assertEqual(status(config, task), "assigned")
+        self.assertEqual(
+            task_path.joinpath("answers.md").read_text(encoding="utf-8"),
+            "Use the stable API contract.\n",
+        )
 
     def test_external_evidence_bundle_rejects_path_traversal(self) -> None:
         bundle = self.root / "unsafe-evidence.zip"

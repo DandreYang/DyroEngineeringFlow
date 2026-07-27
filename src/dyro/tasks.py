@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
 import re
 import tomllib
+import uuid
 from typing import Any, Iterable
 
 from .config import Config, expand_argv, strict_bool, validate_id
@@ -21,7 +22,7 @@ TRANSITIONS = {
     "backlog": {"assigned"},
     "assigned": {"in_progress", "failed"},
     "in_progress": {"waiting_answer", "review", "failed"},
-    "waiting_answer": {"in_progress", "failed"},
+    "waiting_answer": {"assigned", "in_progress", "failed"},
     "review": {"review_pending_signoff", "done", "failed"},
     "review_pending_signoff": {"done", "failed"},
     "failed": {"assigned"},
@@ -34,6 +35,18 @@ TASK_HEADS_SHA_RE = re.compile(r"^task_heads_sha256:\s*([0-9a-f]{64})\s*$", re.I
 GIT_HEAD_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$", re.IGNORECASE)
 TASK_HEADS_FILE = "task-heads.json"
 MERGE_LOCK_TIMEOUT_SECONDS = 1800.0
+
+
+from .provenance import (
+    ExecutionAttempt,
+    begin_execution_attempt,
+    current_execution_attempt_id,
+    external_execution_plan,
+    finish_execution_attempt,
+    import_external_execution_attempt,
+    review_binding,
+    validate_review_binding,
+)
 
 
 @dataclass(frozen=True)
@@ -214,33 +227,192 @@ def _claim(task: Task) -> dict[str, object] | None:
     return payload
 
 
-def claim_task(config: Config, task: Task, *, runner: str, dry_run: bool = False) -> str:
+DEFAULT_CLAIM_LEASE_SECONDS = 3600
+MAX_CLAIM_LEASE_SECONDS = 604800
+
+
+def _claim_lease_seconds(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValidationError("claim lease seconds 必须是正整数")
+    if value > MAX_CLAIM_LEASE_SECONDS:
+        raise ValidationError(f"claim lease seconds 不能超过 {MAX_CLAIM_LEASE_SECONDS}")
+    return value
+
+
+def _claim_expired(claim: dict[str, object], *, now: datetime | None = None) -> bool:
+    expires_at = claim.get("lease_expires_at")
+    if expires_at is None:
+        return False
+    if not isinstance(expires_at, str):
+        raise ValidationError("claim lease_expires_at 无效")
+    try:
+        expires = datetime.fromisoformat(expires_at)
+    except ValueError as exc:
+        raise ValidationError("claim lease_expires_at 格式错误") from exc
+    if expires.tzinfo is None:
+        raise ValidationError("claim lease_expires_at 必须包含时区")
+    return expires <= (now or datetime.now(timezone.utc))
+
+
+def external_claim_active(task: Task) -> bool:
+    claim = _claim(task)
+    return claim is not None and not _claim_expired(claim)
+
+
+def execution_claim_binding(task: Task, *, claim_file: Path | None = None) -> dict[str, object]:
+    if claim_file is None:
+        claim = _claim(task)
+    else:
+        if not claim_file.is_file():
+            raise ValidationError(f"claim 文件不存在：{claim_file}")
+        try:
+            claim = json.loads(claim_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValidationError(f"claim 文件损坏：{claim_file}") from exc
+    required = ("claim_id", "runner", "execution_key_id")
+    if (
+        not isinstance(claim, dict)
+        or claim.get("task_id") != task.id
+        or any(not isinstance(claim.get(field), str) or not claim.get(field) for field in required)
+        or not isinstance(claim.get("generation"), int)
+        or int(claim["generation"]) < 1
+    ):
+        raise ValidationError(f"任务 {task.id} 的 signed execution claim 无效")
+    if _claim_expired(claim):
+        raise DyroError(f"任务 {task.id} 的 claim 已过期")
+    return {
+        "claim_id": str(claim["claim_id"]),
+        "generation": int(claim["generation"]),
+        "runner": str(claim["runner"]),
+        "execution_key_id": str(claim["execution_key_id"]),
+    }
+
+
+def claim_task(
+    config: Config,
+    task: Task,
+    *,
+    runner: str,
+    key_id: str | None = None,
+    lease_seconds: int = DEFAULT_CLAIM_LEASE_SECONDS,
+    dry_run: bool = False,
+) -> str:
     """Atomically reserve an external task for one runner identity."""
     if config.policy.execution_mode != "external":
         raise DyroError("task claim 仅用于 execution_mode = external 的 Profile")
     runner = runner.strip()
     if not runner:
         raise ValidationError("执行器标识不能为空")
+    require_signed_execution = getattr(config.policy, "require_signed_execution", False)
+    if require_signed_execution and not key_id:
+        raise ValidationError("require_signed_execution = true 时 claim 必须提供 --key-id")
+    if key_id:
+        from .signing import trusted_key_ids, validate_key_id
+
+        key_id = validate_key_id(key_id)
+        if key_id not in trusted_key_ids(config.root, "execution"):
+            raise ValidationError(f"execution key ID 尚未受信任：{key_id}")
+    lease_seconds = _claim_lease_seconds(lease_seconds)
     with exclusive_lock(_dispatch_lock_path(config)):
         with exclusive_lock(_state_lock_path(task)):
             check_dispatchable(config, task)
             current = status(config, task)
-            if current not in ("backlog", "assigned"):
-                raise DyroError(f"仅 backlog 或 assigned 任务可领取：{task.id}")
-            if _claim(task) is not None:
+            existing = _claim(task)
+            expired = existing is not None and _claim_expired(existing)
+            if current not in ("backlog", "assigned", "waiting_answer") and not (
+                current == "in_progress" and expired
+            ):
+                raise DyroError(f"仅 backlog、assigned 或 waiting_answer 任务可领取：{task.id}")
+            if existing is not None and not expired:
                 raise DyroError(f"任务 {task.id} 已被领取")
+            target_status = "waiting_answer" if current == "waiting_answer" else "assigned"
             if dry_run:
-                return "assigned"
+                return target_status
+            now = datetime.now(timezone.utc)
             payload = {
                 "task_id": task.id,
+                "claim_id": uuid.uuid4().hex,
                 "runner": runner,
-                "claimed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "execution_key_id": key_id or "",
+                "claimed_at": now.isoformat(timespec="seconds"),
+                "lease_expires_at": (now + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds"),
+                "generation": int(existing.get("generation", 0)) + 1 if existing else 1,
             }
             atomic_write_text(_claim_path(task), json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-            if current == "backlog":
-                set_status(config, task, "assigned")
-            ledger(config, task.id, "claim", runner=runner)
-            return "assigned"
+            if current in ("backlog", "in_progress"):
+                set_status(config, task, "assigned", force=current == "in_progress")
+            ledger(
+                config,
+                task.id,
+                "claim_takeover" if expired else "claim",
+                runner=runner,
+                lease_seconds=lease_seconds,
+                previous_runner=existing.get("runner", "") if expired and existing else "",
+                claim_id=payload["claim_id"],
+                generation=payload["generation"],
+                execution_key_id=payload["execution_key_id"],
+            )
+            return target_status
+
+
+def renew_task_claim(
+    config: Config,
+    task: Task,
+    *,
+    runner: str,
+    lease_seconds: int = DEFAULT_CLAIM_LEASE_SECONDS,
+    dry_run: bool = False,
+) -> str:
+    if config.policy.execution_mode != "external":
+        raise DyroError("task claim renew 仅用于 execution_mode = external 的 Profile")
+    runner = runner.strip()
+    lease_seconds = _claim_lease_seconds(lease_seconds)
+    with exclusive_lock(_dispatch_lock_path(config)):
+        with exclusive_lock(_state_lock_path(task)):
+            claim = _claim(task)
+            if claim is None:
+                raise DyroError(f"任务 {task.id} 尚未领取")
+            if _claim_expired(claim):
+                raise DyroError(f"任务 {task.id} 的 claim 已过期；请重新领取")
+            if claim["runner"] != runner:
+                raise DyroError(f"任务 {task.id} 由其他 runner 领取")
+            if dry_run:
+                return status(config, task)
+            now = datetime.now(timezone.utc)
+            renewed = dict(claim)
+            renewed["lease_expires_at"] = (now + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds")
+            renewed["renewed_at"] = now.isoformat(timespec="seconds")
+            atomic_write_text(_claim_path(task), json.dumps(renewed, ensure_ascii=False, sort_keys=True) + "\n")
+            ledger(config, task.id, "claim_renew", runner=runner, lease_seconds=lease_seconds)
+            return status(config, task)
+
+
+def release_task_claim(
+    config: Config,
+    task: Task,
+    *,
+    runner: str,
+    dry_run: bool = False,
+) -> str:
+    if config.policy.execution_mode != "external":
+        raise DyroError("task claim release 仅用于 execution_mode = external 的 Profile")
+    runner = runner.strip()
+    with exclusive_lock(_dispatch_lock_path(config)):
+        with exclusive_lock(_state_lock_path(task)):
+            claim = _claim(task)
+            if claim is None:
+                raise DyroError(f"任务 {task.id} 尚未领取")
+            if claim["runner"] != runner:
+                raise DyroError(f"任务 {task.id} 由其他 runner 领取")
+            current = status(config, task)
+            next_status = "backlog" if current == "assigned" else "assigned" if current == "in_progress" else current
+            if dry_run:
+                return next_status
+            _claim_path(task).unlink()
+            if next_status != current:
+                set_status(config, task, next_status, force=True)
+            ledger(config, task.id, "claim_release", runner=runner, from_status=current, to_status=next_status)
+            return next_status
 
 
 def set_status(config: Config, task: Task, next_status: str, *, force: bool = False, dry_run: bool = False) -> None:
@@ -278,7 +450,19 @@ def decisions(config: Config) -> dict[str, str]:
     return {str(key): str(value.get("status", "open")) for key, value in entries.items() if isinstance(value, dict)}
 
 
-def check_dispatchable(config: Config, task: Task) -> None:
+def _assert_task_graph_valid(config: Config) -> None:
+    from .graph import build_task_graph, validate_task_graph
+
+    issues = validate_task_graph(build_task_graph(config))
+    if issues:
+        details = "; ".join(issue.message for issue in issues[:5])
+        suffix = f"；另有 {len(issues) - 5} 项" if len(issues) > 5 else ""
+        raise ValidationError(f"任务图结构无效：{details}{suffix}")
+
+
+def check_dispatchable(config: Config, task: Task, *, validate_graph: bool = True) -> None:
+    if validate_graph:
+        _assert_task_graph_valid(config)
     states = decisions(config)
     unresolved = [decision for decision in task.blocked_on if states.get(decision) != "resolved"]
     if unresolved:
@@ -287,17 +471,247 @@ def check_dispatchable(config: Config, task: Task) -> None:
         dependency_task = load_task(config, dependency)
         if status(config, dependency_task) != "done":
             raise DyroError(f"任务 {task.id} 依赖 {dependency}，当前状态为 {status(config, dependency_task)}")
+        _assert_dependency_integrated(config, dependency_task)
     if task.conflict_group:
-        active_states = ("assigned", "in_progress") if config.policy.execution_mode == "external" else ("in_progress",)
         active = [
             other.id
             for other in list_tasks(config)
             if other.id != task.id
             and other.conflict_group == task.conflict_group
-            and status(config, other) in active_states
+            and (
+                status(config, other) == "in_progress"
+                or (
+                    config.policy.execution_mode == "external"
+                    and status(config, other) == "assigned"
+                    and external_claim_active(other)
+                )
+            )
         ]
         if active:
             raise DyroError(f"任务 {task.id} 与活跃任务 {', '.join(active)} 共用冲突组 {task.conflict_group}")
+
+
+@dataclass(frozen=True)
+class ScheduleBlock:
+    task: Task
+    reason: str
+
+
+@dataclass(frozen=True)
+class SchedulePlan:
+    ready: tuple[Task, ...]
+    blocked: tuple[ScheduleBlock, ...]
+
+
+@dataclass(frozen=True)
+class ScheduleWave:
+    tasks: tuple[Task, ...]
+    deferred: tuple[ScheduleBlock, ...]
+
+
+def plan_tasks(
+    config: Config,
+    *,
+    candidates: tuple[Task, ...] | list[Task] | None = None,
+) -> SchedulePlan:
+    """Build one immutable scheduling snapshot and derive its deterministic ready set."""
+    from .graph import build_task_graph, validate_task_graph
+
+    graph = build_task_graph(config)
+    issues = validate_task_graph(graph)
+    if issues:
+        details = "; ".join(issue.message for issue in issues[:5])
+        suffix = f"；另有 {len(issues) - 5} 项" if len(issues) > 5 else ""
+        raise ValidationError(f"任务图结构无效：{details}{suffix}")
+    known_by_id = {task.id: task for task in graph.known_tasks}
+    statuses = {task.id: status(config, task) for task in graph.known_tasks}
+    queued = tuple(graph.known_tasks if candidates is None else candidates)
+    active_conflicts: dict[str, list[str]] = {}
+    for other in graph.known_tasks:
+        other_status = statuses[other.id]
+        active = other_status == "in_progress" or (
+            config.policy.execution_mode == "external"
+            and other_status == "assigned"
+            and external_claim_active(other)
+        )
+        if active and other.conflict_group:
+            active_conflicts.setdefault(other.conflict_group, []).append(other.id)
+    integration_errors: dict[str, str | None] = {}
+    ready: list[Task] = []
+    blocked: list[ScheduleBlock] = []
+    for task in sorted(queued, key=lambda item: item.id):
+        task_status = statuses.get(task.id)
+        if task_status is None:
+            task_status = status(config, task)
+        if task_status not in ("backlog", "assigned"):
+            continue
+        try:
+            unresolved = [
+                decision for decision in task.blocked_on if graph.decisions.get(decision) != "resolved"
+            ]
+            if unresolved:
+                raise DyroError(
+                    f"任务 {task.id} 被未 resolved 的决策点阻塞：{', '.join(unresolved)}"
+                )
+            for dependency in task.depends_on:
+                dependency_task = known_by_id[dependency]
+                dependency_status = statuses[dependency]
+                if dependency_status != "done":
+                    raise DyroError(
+                        f"任务 {task.id} 依赖 {dependency}，当前状态为 {dependency_status}"
+                    )
+                if dependency not in integration_errors:
+                    try:
+                        _assert_dependency_integrated(config, dependency_task)
+                    except DyroError as exc:
+                        integration_errors[dependency] = str(exc)
+                    else:
+                        integration_errors[dependency] = None
+                if integration_errors[dependency]:
+                    raise DyroError(integration_errors[dependency])
+            conflicts = [
+                task_id
+                for task_id in active_conflicts.get(task.conflict_group, ())
+                if task_id != task.id
+            ]
+            if conflicts:
+                raise DyroError(
+                    f"任务 {task.id} 与活跃任务 {', '.join(conflicts)} 共用冲突组 {task.conflict_group}"
+                )
+        except DyroError as exc:
+            blocked.append(ScheduleBlock(task=task, reason=str(exc)))
+            continue
+        ready.append(task)
+    return SchedulePlan(ready=tuple(ready), blocked=tuple(blocked))
+
+
+def select_task_wave(plan: SchedulePlan, *, limit: int) -> ScheduleWave:
+    """Select one deterministic parallel wave from a ready task set."""
+    capacity = max(1, limit)
+    selected: list[Task] = []
+    deferred: list[ScheduleBlock] = []
+    reserved_groups: dict[str, str] = {}
+    for task in plan.ready:
+        if task.conflict_group and task.conflict_group in reserved_groups:
+            deferred.append(
+                ScheduleBlock(
+                    task=task,
+                    reason=(
+                        f"冲突组 {task.conflict_group} 已在本轮分配给任务 "
+                        f"{reserved_groups[task.conflict_group]}"
+                    ),
+                )
+            )
+            continue
+        if len(selected) >= capacity:
+            deferred.append(
+                ScheduleBlock(
+                    task=task,
+                    reason=f"本轮并行容量已达到 {capacity}",
+                )
+            )
+            continue
+        selected.append(task)
+        if task.conflict_group:
+            reserved_groups[task.conflict_group] = task.id
+    return ScheduleWave(tasks=tuple(selected), deferred=tuple(deferred))
+
+
+def _execution_plan_snapshot(
+    config: Config,
+    task: Task,
+    *,
+    continuation: dict[str, object] | None = None,
+) -> dict[str, object]:
+    schedule = plan_tasks(config)
+    known_by_id = {candidate.id: candidate for candidate in list_tasks(config)}
+    decision_states = decisions(config)
+    snapshot: dict[str, object] = {
+        "schema_version": 1,
+        "task": {
+            "id": task.id,
+            "line": task.line,
+            "risk": task.risk,
+            "executor": task.executor,
+            "reviewer": task.reviewer,
+            "repositories": list(task.repositories),
+            "depends_on": list(task.depends_on),
+            "blocked_on": list(task.blocked_on),
+            "conflict_group": task.conflict_group,
+            "gates": [
+                {
+                    "name": gate.name,
+                    "argv": list(gate.argv),
+                    "cwd": gate.cwd,
+                    "timeout_seconds": gate.timeout_seconds,
+                }
+                for gate in task.gates
+            ],
+        },
+        "dependency_states": {
+            dependency: (
+                status(config, known_by_id[dependency])
+                if dependency in known_by_id
+                else "missing"
+            )
+            for dependency in task.depends_on
+        },
+        "decision_states": {
+            decision_id: decision_states.get(decision_id, "missing")
+            for decision_id in task.blocked_on
+        },
+        "ready_set": [candidate.id for candidate in schedule.ready],
+        "blocked": [
+            {"task_id": block.task.id, "reason": block.reason}
+            for block in schedule.blocked
+        ],
+        "execution_mode": config.policy.execution_mode,
+    }
+    if continuation is not None:
+        snapshot["continuation"] = continuation
+    return snapshot
+
+
+def _complete_execution_attempt(
+    config: Config,
+    task: Task,
+    attempt: ExecutionAttempt,
+    execute,
+) -> str:
+    ledger(
+        config,
+        task.id,
+        "attempt_started",
+        run_id=attempt.run_id,
+        attempt_id=attempt.attempt_id,
+        attempt_number=attempt.attempt_number,
+        task_contract_sha256=attempt.task_contract_sha256,
+        plan_sha256=attempt.plan_sha256,
+    )
+    try:
+        result = execute()
+    except Exception as exc:
+        finish_execution_attempt(attempt, error=exc)
+        ledger(
+            config,
+            task.id,
+            "attempt_failed",
+            run_id=attempt.run_id,
+            attempt_id=attempt.attempt_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        raise
+    finish_execution_attempt(attempt, result=result)
+    ledger(
+        config,
+        task.id,
+        "attempt_completed",
+        run_id=attempt.run_id,
+        attempt_id=attempt.attempt_id,
+        result=result,
+    )
+    return result
 
 
 def _reserve_local_execution(
@@ -445,6 +859,22 @@ def _load_task_heads(config: Config, task: Task) -> dict[str, str]:
     return _validate_task_heads_payload(config, task, payload)
 
 
+def _assert_dependency_integrated(config: Config, task: Task) -> None:
+    line = get_line(config, task.line)
+    heads = _load_task_heads(config, task)
+    for repository_id, task_head in heads.items():
+        destination = line_repository_path(config, line, repository_id)
+        result = run(
+            ("git", "merge-base", "--is-ancestor", task_head, "HEAD"),
+            cwd=destination,
+        )
+        if result.code != 0:
+            raise DyroError(
+                f"任务 {task.id} 已复核但尚未集成到开发线 {task.line} 的仓库 "
+                f"{repository_id}；请先执行 task merge"
+            )
+
+
 def _assert_task_heads_current(config: Config, task: Task) -> dict[str, str]:
     expected = _load_task_heads(config, task)
     current = _collect_task_heads(config, task)
@@ -495,12 +925,27 @@ def _valid_external_signoff(config: Config, task: Task) -> bool:
         return False
     if not isinstance(signoff, dict) or not isinstance(signoff.get("approver"), str) or not signoff["approver"].strip():
         return False
+    try:
+        from .signing import trusted_keys_directory, verify_record
+
+        verify_record(
+            signoff,
+            purpose="signoff",
+            trust_directory=trusted_keys_directory(config.root, "signoff"),
+            required=getattr(config.policy, "require_signed_signoff", False),
+        )
+    except ValidationError:
+        return False
     verdict, reviewed_receipt_hash, reviewed_task_heads_hash = _review_decision(task)
     try:
         receipt_hash = _file_sha256(task.directory / "receipt.md")
         review_hash = _file_sha256(task.directory / "review.md")
         task_heads_hash = _file_sha256(task.directory / TASK_HEADS_FILE)
     except DyroError:
+        return False
+    review_content = (task.directory / "review.md").read_text(encoding="utf-8")
+    binding_matches, expected_binding, _ = validate_review_binding(task.directory, review_content)
+    if not binding_matches:
         return False
     if config.policy.execution_mode == "local":
         try:
@@ -515,6 +960,13 @@ def _valid_external_signoff(config: Config, task: Task) -> bool:
         and signoff.get("receipt_sha256") == receipt_hash
         and signoff.get("task_heads_sha256") == task_heads_hash
         and signoff.get("review_sha256") == review_hash
+        and (
+            expected_binding is None
+            or (
+                signoff.get("attempt_id") == expected_binding[0]
+                and signoff.get("plan_sha256") == expected_binding[1]
+            )
+        )
     )
 
 
@@ -551,12 +1003,19 @@ def _prompt(task: Task, phase: str, workspace: Path) -> str:
             f"{task.directory / 'answers.md'}；此前成果保留在 {workspace}。完成后更新 {receipt}，首行必须为 "
             "result: DONE、result: BLOCKED 或 result: QUESTION。禁止 push、禁止合并开发线。"
         )
+    binding = review_binding(task.directory)
+    provenance_requirement = ""
+    if binding is not None:
+        provenance_requirement = (
+            f"同时写入 attempt_id: {binding[0]} 与 plan_sha256: {binding[1]}；"
+        )
     return (
         f"你是独立复核位。阅读 {handoff}、{receipt} 与 {task_heads}；"
         f"在 {workspace} 用只读证据核验规格、回归、测试和越界改动。"
         f"在 {review} 写复核，首行必须是 verdict: PASS 或 verdict: FAIL，并写入 "
         "receipt_sha256: <所读取回执的 SHA-256> 与 "
         "task_heads_sha256: <所读取任务 HEAD 证据的 SHA-256>；"
+        f"{provenance_requirement}"
         "禁止修改任何源码、push 或合并。"
     )
 
@@ -580,7 +1039,7 @@ def _copy_external_evidence(task: Task, source: Path, target_name: str, *, dry_r
     return target
 
 
-def _validate_external_gates(task: Task, receipt_sha256: str, gates: Path | None) -> tuple[bytes, tuple[tuple[str, Path], ...]]:
+def _validate_external_gates(task: Task, receipt_sha256: str, gates: Path | None) -> tuple[bytes, tuple[tuple[str, bytes], ...]]:
     if gates is None:
         if task.gates:
             raise DyroError(f"任务 {task.id} 配置了门禁，导入执行证据时必须提供 --gates")
@@ -601,7 +1060,7 @@ def _validate_external_gates(task: Task, receipt_sha256: str, gates: Path | None
         raise ValidationError("外部门禁证据必须包含 gates 数组")
     expected = {gate.name for gate in task.gates}
     observed: dict[str, int] = {}
-    logs: list[tuple[str, Path]] = []
+    logs: list[tuple[str, bytes]] = []
     evidence_root = gates.parent.resolve()
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or isinstance(entry.get("exit_code"), bool) or not isinstance(entry.get("exit_code"), int):
@@ -622,10 +1081,11 @@ def _validate_external_gates(task: Task, receipt_sha256: str, gates: Path | None
             raise ValidationError(f"外部门禁 {name} 的 log 不得位于 gates JSON 目录外") from exc
         if not log_path.is_file():
             raise DyroError(f"外部门禁 {name} 的日志不存在：{log_path}")
-        if _file_sha256(log_path) != log_sha256.lower():
+        log_bytes = log_path.read_bytes()
+        if hashlib.sha256(log_bytes).hexdigest() != log_sha256.lower():
             raise DyroError(f"外部门禁 {name} 的日志哈希不匹配")
         observed[name] = entry["exit_code"]
-        logs.append((name, log_path))
+        logs.append((name, log_bytes))
     if set(observed) != expected:
         raise DyroError(f"外部门禁集合与任务不一致；期望 {', '.join(sorted(expected)) or '-'}")
     failures = [name for name, exit_code in observed.items() if exit_code != 0]
@@ -654,6 +1114,8 @@ def _require_external_claim(config: Config, task: Task) -> dict[str, object]:
     claim = _claim(task)
     if claim is None:
         raise DyroError(f"任务 {task.id} 尚未领取；请先运行 task claim")
+    if _claim_expired(claim):
+        raise DyroError(f"任务 {task.id} 的 claim 已过期；请重新领取")
     return claim
 
 
@@ -678,17 +1140,40 @@ def run_task(config: Config, task: Task, *, dry_run: bool = False) -> str:
     if dry_run:
         return _run_task(config, task, dry_run=True)
     with exclusive_lock(_execution_lock_path(task), timeout_seconds=1.0):
-        return _run_task(config, task, dry_run=False)
+        try:
+            _reserve_local_execution(
+                config,
+                task,
+                allowed=("backlog", "assigned", "failed"),
+                action="启动执行",
+                dry_run=False,
+            )
+            attempt = begin_execution_attempt(
+                task.directory,
+                task.id,
+                _execution_plan_snapshot(config, task),
+            )
+        except Exception:
+            if status(config, task) == "in_progress":
+                set_status(config, task, "failed")
+            raise
+        return _complete_execution_attempt(
+            config,
+            task,
+            attempt,
+            lambda: _run_task(config, task, dry_run=False, reserved=True),
+        )
 
 
-def _run_task(config: Config, task: Task, *, dry_run: bool) -> str:
-    _reserve_local_execution(
-        config,
-        task,
-        allowed=("backlog", "assigned", "failed"),
-        action="启动执行",
-        dry_run=dry_run,
-    )
+def _run_task(config: Config, task: Task, *, dry_run: bool, reserved: bool = False) -> str:
+    if not reserved:
+        _reserve_local_execution(
+            config,
+            task,
+            allowed=("backlog", "assigned", "failed"),
+            action="启动执行",
+            dry_run=dry_run,
+        )
     try:
         line = get_line(config, task.line)
         workspace = _ensure_task_worktrees(config, task, line, dry_run=dry_run)
@@ -733,6 +1218,8 @@ def import_execution_evidence(
     receipt: Path,
     gates: Path | None = None,
     heads: Path | None = None,
+    provenance: Path | None = None,
+    allow_legacy_provenance: bool = False,
     dry_run: bool = False,
 ) -> str:
     with exclusive_lock(_state_lock_path(task)):
@@ -742,6 +1229,8 @@ def import_execution_evidence(
             receipt=receipt,
             gates=gates,
             heads=heads,
+            provenance=provenance,
+            allow_legacy_provenance=allow_legacy_provenance,
             dry_run=dry_run,
         )
 
@@ -753,6 +1242,8 @@ def _import_execution_evidence(
     receipt: Path,
     gates: Path | None = None,
     heads: Path | None = None,
+    provenance: Path | None = None,
+    allow_legacy_provenance: bool = False,
     dry_run: bool = False,
 ) -> str:
     """Import execution proof produced by the runner that claimed this task."""
@@ -762,6 +1253,8 @@ def _import_execution_evidence(
         raise DyroError(f"仅 assigned 或 in_progress 任务可导入执行证据：{task.id}")
     if not receipt.is_file():
         raise DyroError(f"外部回执文件不存在：{receipt}")
+    if provenance is None and not allow_legacy_provenance:
+        raise DyroError("外部执行证据缺少 provenance；旧证据必须显式使用 --allow-legacy")
     receipt_bytes = receipt.read_bytes()
     receipt_hash = hashlib.sha256(receipt_bytes).hexdigest()
     receipt_lines = receipt_bytes.decode("utf-8").splitlines()
@@ -769,17 +1262,63 @@ def _import_execution_evidence(
     result = receipt_match.group(1).upper() if receipt_match else ""
     gate_bytes, gate_logs = _validate_external_gates(task, receipt_hash, gates) if result == "DONE" else (b"", ())
     task_heads_bytes = _validate_external_heads(config, task, heads) if result == "DONE" else b""
+    claim_binding = (
+        execution_claim_binding(task)
+        if getattr(config.policy, "require_signed_execution", False)
+        else None
+    )
+    expected_plan = external_execution_plan(
+        task,
+        config.policy.execution_mode,
+        claim_binding=claim_binding,
+    )
+    from .signing import signature_key_id, trusted_keys_directory
+
+    external_attempt = import_external_execution_attempt(
+        task.directory,
+        task.id,
+        provenance=provenance,
+        receipt_sha256=receipt_hash,
+        result=result,
+        expected_plan=expected_plan,
+        gates_sha256=hashlib.sha256(gate_bytes).hexdigest() if gate_bytes else "",
+        task_heads_sha256=hashlib.sha256(task_heads_bytes).hexdigest() if task_heads_bytes else "",
+        trusted_keys_dir=trusted_keys_directory(config.root, "execution"),
+        require_signature=getattr(config.policy, "require_signed_execution", False),
+        dry_run=True,
+    )
+    if claim_binding is not None and signature_key_id(external_attempt) != claim_binding["execution_key_id"]:
+        raise ValidationError("execution signature key ID 与当前 claim 不匹配")
     if dry_run:
         return "review" if result == "DONE" else "waiting_answer" if result == "QUESTION" else "failed"
+    from .provenance import persist_external_execution_attempt
+    from .transactions import FileTransaction
+
+    transaction = FileTransaction(task.directory)
+    try:
+        transaction.stage_path(task.directory / "receipt.md", receipt_bytes)
+        if gate_bytes:
+            transaction.stage_path(task.directory / "evidence" / "external-gates.json", gate_bytes)
+            for index, (_, log_bytes) in enumerate(gate_logs, start=1):
+                transaction.stage_path(
+                    task.directory / "evidence" / "gates" / f"gate-{index}.log",
+                    log_bytes,
+                )
+        if task_heads_bytes:
+            transaction.stage_path(task.directory / TASK_HEADS_FILE, task_heads_bytes)
+        persist_external_execution_attempt(
+            task.directory,
+            task.id,
+            external_attempt,
+            result=result,
+            writer=transaction.stage_path,
+        )
+        transaction.commit()
+    except Exception:
+        transaction.abort()
+        raise
     if current == "assigned":
         set_status(config, task, "in_progress")
-    _copy_external_evidence(task, receipt, "receipt.md")
-    if gate_bytes:
-        atomic_write_bytes(task.directory / "evidence" / "external-gates.json", gate_bytes)
-        for index, (_, log_path) in enumerate(gate_logs, start=1):
-            _copy_external_evidence(task, log_path, f"evidence/gates/gate-{index}.log")
-    if task_heads_bytes:
-        atomic_write_bytes(task.directory / TASK_HEADS_FILE, task_heads_bytes)
     ledger(
         config,
         task.id,
@@ -787,6 +1326,10 @@ def _import_execution_evidence(
         runner=claim["runner"],
         receipt_sha256=receipt_hash,
         task_heads_sha256=hashlib.sha256(task_heads_bytes).hexdigest() if task_heads_bytes else "",
+        run_id=external_attempt["run_id"],
+        attempt_id=external_attempt["attempt_id"],
+        plan_sha256=external_attempt["plan_sha256"],
+        legacy_provenance=bool(external_attempt.get("legacy_provenance", False)),
     )
     if result == "QUESTION":
         set_status(config, task, "waiting_answer")
@@ -799,21 +1342,65 @@ def _import_execution_evidence(
 
 
 def answer_task(config: Config, task: Task, answer: str, *, dry_run: bool = False) -> str:
+    if config.policy.execution_mode == "external":
+        with exclusive_lock(_execution_lock_path(task), timeout_seconds=1.0):
+            claim = _require_external_claim(config, task)
+            if status(config, task) != "waiting_answer":
+                raise DyroError(f"任务 {task.id} 当前不是 waiting_answer，不能记录外部续跑答案")
+            if dry_run:
+                return "dry-run"
+            atomic_write_text(task.directory / "answers.md", answer.rstrip() + "\n")
+            set_status(config, task, "assigned")
+            ledger(
+                config,
+                task.id,
+                "external_answer_recorded",
+                runner=claim["runner"],
+                answer_sha256=hashlib.sha256(answer.encode("utf-8")).hexdigest(),
+            )
+            return "assigned"
     _require_local_execution(config, "任务续跑", dry_run=dry_run)
     if dry_run:
         return _answer_task(config, task, answer, dry_run=True)
     with exclusive_lock(_execution_lock_path(task), timeout_seconds=1.0):
-        return _answer_task(config, task, answer, dry_run=False)
+        _reserve_local_execution(
+            config,
+            task,
+            allowed=("waiting_answer",),
+            action="继续执行",
+            dry_run=False,
+        )
+        parent_attempt_id = current_execution_attempt_id(task.directory)
+        attempt = begin_execution_attempt(
+            task.directory,
+            task.id,
+            _execution_plan_snapshot(
+                config,
+                task,
+                continuation={
+                    "parent_attempt_id": parent_attempt_id or "",
+                    "answer_sha256": hashlib.sha256(answer.encode("utf-8")).hexdigest(),
+                },
+            ),
+            parent_attempt_id=parent_attempt_id,
+        )
+        return _complete_execution_attempt(
+            config,
+            task,
+            attempt,
+            lambda: _answer_task(config, task, answer, dry_run=False, reserved=True),
+        )
 
 
-def _answer_task(config: Config, task: Task, answer: str, *, dry_run: bool) -> str:
-    _reserve_local_execution(
-        config,
-        task,
-        allowed=("waiting_answer",),
-        action="继续执行",
-        dry_run=dry_run,
-    )
+def _answer_task(config: Config, task: Task, answer: str, *, dry_run: bool, reserved: bool = False) -> str:
+    if not reserved:
+        _reserve_local_execution(
+            config,
+            task,
+            allowed=("waiting_answer",),
+            action="继续执行",
+            dry_run=dry_run,
+        )
     if not dry_run:
         atomic_write_text(task.directory / "answers.md", answer.rstrip() + "\n")
     try:
@@ -852,6 +1439,21 @@ def _apply_review_decision(config: Config, task: Task, *, dry_run: bool = False)
     verdict, reviewed_receipt_hash, reviewed_task_heads_hash = _review_decision(task)
     receipt_hash = _file_sha256(task.directory / "receipt.md")
     task_heads_hash = _file_sha256(task.directory / TASK_HEADS_FILE)
+    review_content = (task.directory / "review.md").read_text(encoding="utf-8") if (task.directory / "review.md").is_file() else ""
+    binding_matches, expected_binding, reviewed_binding = validate_review_binding(task.directory, review_content)
+    if verdict in ("PASS", "FAIL") and not binding_matches:
+        if not dry_run:
+            ledger(
+                config,
+                task.id,
+                "review_rejected",
+                reason="attempt_id or plan_sha256 mismatch or missing",
+                expected_attempt_id=expected_binding[0] if expected_binding else "",
+                reviewed_attempt_id=reviewed_binding[0],
+                expected_plan_sha256=expected_binding[1] if expected_binding else "",
+                reviewed_plan_sha256=reviewed_binding[1],
+            )
+        return "review"
     if verdict == "PASS":
         if reviewed_receipt_hash != receipt_hash or reviewed_task_heads_hash != task_heads_hash:
             if not dry_run:
@@ -885,6 +1487,8 @@ def _apply_review_decision(config: Config, task: Task, *, dry_run: bool = False)
                 receipt_sha256=receipt_hash,
                 task_heads_sha256=task_heads_hash,
                 review_sha256=_file_sha256(task.directory / "review.md"),
+                attempt_id=expected_binding[0] if expected_binding else "",
+                plan_sha256=expected_binding[1] if expected_binding else "",
             )
         if next_status != "done":
             return next_status
@@ -934,24 +1538,68 @@ def import_review_evidence(config: Config, task: Task, *, review: Path, dry_run:
 
 
 def _import_review_evidence(config: Config, task: Task, *, review: Path, dry_run: bool = False) -> str:
-    """Import a receipt-bound review emitted by the runner that claimed the task."""
-    claim = _require_external_claim(config, task)
+    """Import a receipt-bound independent review, signed when policy requires it."""
     if status(config, task) != "review":
         raise DyroError(f"仅 review 任务可导入复核证据：{task.id}")
+    from .reviews import load_review_evidence
+    from .signing import trusted_keys_directory
+
+    evidence = load_review_evidence(
+        review,
+        task_id=task.id,
+        trust_directory=trusted_keys_directory(config.root, "review"),
+        require_signature=getattr(config.policy, "require_signed_review", False),
+    )
+    if not evidence.signed:
+        claim = _require_external_claim(config, task)
+        reviewer = str(claim["runner"])
+    else:
+        reviewer = evidence.reviewer
     if dry_run:
         return "dry-run"
-    _copy_external_evidence(task, review, "review.md")
-    ledger(config, task.id, "external_review_import", runner=claim["runner"], review_sha256=_file_sha256(task.directory / "review.md"))
+    atomic_write_bytes(task.directory / "review.md", evidence.content)
+    ledger(
+        config,
+        task.id,
+        "external_review_import",
+        reviewer=reviewer,
+        review_key_id=evidence.key_id or "",
+        signed=evidence.signed,
+        review_sha256=_file_sha256(task.directory / "review.md"),
+    )
     return _apply_review_decision(config, task)
 
 
-def signoff_task(config: Config, task: Task, *, approver: str, dry_run: bool = False) -> str:
+def signoff_task(
+    config: Config,
+    task: Task,
+    *,
+    approver: str,
+    signing_key: Path | None = None,
+    key_id: str | None = None,
+    dry_run: bool = False,
+) -> str:
     """Record a human or external-system approval for a receipt-bound review."""
     with exclusive_lock(_state_lock_path(task)):
-        return _signoff_task(config, task, approver=approver, dry_run=dry_run)
+        return _signoff_task(
+            config,
+            task,
+            approver=approver,
+            signing_key=signing_key,
+            key_id=key_id,
+            dry_run=dry_run,
+        )
 
 
-def _signoff_task(config: Config, task: Task, *, approver: str, dry_run: bool = False) -> str:
+def _signoff_task(
+    config: Config,
+    task: Task,
+    *,
+    approver: str,
+    signing_key: Path | None = None,
+    key_id: str | None = None,
+    dry_run: bool = False,
+) -> str:
     """Perform one lock-held external sign-off state transition."""
     if not config.policy.require_external_signoff:
         raise DyroError("当前 Profile 未启用 require_external_signoff，无需签收")
@@ -969,14 +1617,37 @@ def _signoff_task(config: Config, task: Task, *, approver: str, dry_run: bool = 
         or reviewed_task_heads_hash != task_heads_hash
     ):
         raise DyroError("复核结论未通过或未绑定当前回执与任务 HEAD；请重新复核")
+    review_content = (task.directory / "review.md").read_text(encoding="utf-8")
+    binding_matches, expected_binding, _ = validate_review_binding(task.directory, review_content)
+    if not binding_matches:
+        raise DyroError("复核结论未绑定当前 execution attempt 与 plan；请重新复核")
     signoff = {
         "task_id": task.id,
         "approver": approver,
         "receipt_sha256": receipt_hash,
         "task_heads_sha256": task_heads_hash,
         "review_sha256": _file_sha256(task.directory / "review.md"),
+        "attempt_id": expected_binding[0] if expected_binding else "",
+        "plan_sha256": expected_binding[1] if expected_binding else "",
         "signed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    if (signing_key is None) != (key_id is None):
+        raise ValidationError("--signing-key 与 --key-id 必须同时提供")
+    from .signing import sign_record, trusted_keys_directory, verify_record
+
+    if signing_key is not None and key_id is not None:
+        signoff = sign_record(
+            signoff,
+            purpose="signoff",
+            key_id=key_id,
+            private_key=signing_key.expanduser().resolve(),
+        )
+    verify_record(
+        signoff,
+        purpose="signoff",
+        trust_directory=trusted_keys_directory(config.root, "signoff"),
+        required=getattr(config.policy, "require_signed_signoff", False),
+    )
     if not dry_run:
         atomic_write_text(task.directory / "signoff.json", json.dumps(signoff, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
         set_status(config, task, "done")
@@ -987,6 +1658,9 @@ def _signoff_task(config: Config, task: Task, *, approver: str, dry_run: bool = 
             approver=approver,
             receipt_sha256=receipt_hash,
             task_heads_sha256=task_heads_hash,
+            attempt_id=expected_binding[0] if expected_binding else "",
+            plan_sha256=expected_binding[1] if expected_binding else "",
+            signature_key_id=key_id or "",
         )
     return "done" if not dry_run else "dry-run"
 
@@ -1170,6 +1844,12 @@ def loop_tasks(config: Config, *, dry_run: bool = False) -> list[tuple[str, str]
     outcomes: list[tuple[str, str]] = []
     for task in list_tasks(config):
         if status(config, task) not in ("backlog", "assigned"):
+            continue
+        plan = plan_tasks(config, candidates=(task,))
+        if plan.blocked:
+            outcomes.append((task.id, f"skipped: {plan.blocked[0].reason}"))
+            continue
+        if not plan.ready:
             continue
         try:
             outcomes.append((task.id, run_task(config, task, dry_run=dry_run)))
