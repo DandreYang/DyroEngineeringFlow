@@ -80,8 +80,8 @@ write = ["codex", "exec", "--sandbox", "workspace-write", "{prompt}"]
   hotfixes/<id>.toml    Hotfix 登记
   tasks/<id>/task.toml  任务机读契约
   tasks/<id>/handoff.md 人类规格
-  tasks/<id>/receipt.md 执行回执
-  tasks/<id>/task-heads.json 执行完成时的逐仓 Git HEAD
+  tasks/<id>/evidence-imports/<attempt-id>/ 不可变外部证据世代
+  tasks/<id>/current-evidence.json 原子切换的当前证据指针
   tasks/<id>/review.md  独立复核裁决（绑定 receipt 与 task-heads）
   tasks/<id>/signoff.json 外部签收记录（可选策略）
   tasks/<id>/execution-run.json 本地执行 run 身份与最新 attempt 序号
@@ -183,9 +183,9 @@ dyro task signoff TASK-42 --by release-manager  # 仅 require_external_signoff =
 
 新生成的证据包还包含 `provenance.json`，记录外部 run/attempt、任务契约哈希、由控制面重建的规范化计划，以及 receipt、gates、task-heads 的 SHA-256 闭包；导入端会重新计算并验证这些内容。相同 attempt 的重复提交只有在规范化记录逐字节一致时才幂等成功。缺少 provenance 的旧证据默认拒绝，迁移时必须显式传入 `--allow-legacy`；控制面会为它合成带 `legacy_provenance` 标记的 attempt，且仍不能绕过后续 review binding。
 
-Ed25519 信任根位于 `.dyro/trust/ed25519/execution/`、`.dyro/trust/ed25519/review/` 与 `.dyro/trust/ed25519/signoff/`，三个用途使用不同签名 domain，不能跨用途重放。signature envelope 包含 algorithm、purpose、key ID 与 Base64 signature，签名消息是固定 domain 前缀加去除 signature 后的 canonical JSON。私钥必须位于工作区外，只通过命令行显式传入；工作区仅保存 PEM 公钥。是否强制签名只由 `require_signed_execution`、`require_signed_review`、`require_signed_signoff` 决定；策略启用后，即使 trust store 为空也 fail-closed，未签名记录和 `--allow-legacy` 都不能绕过。signed execution plan 绑定当前 claim ID、generation、runner 与 execution key ID，过期 claim 的延迟证据无法在接管后重放。独立 reviewer 使用 signed review JSON 认证完整 review 原文和 reviewer 身份。轮换通过重叠信任多个 key ID 完成。
+Ed25519 信任根位于 `.dyro/trust/ed25519/execution/`、`.dyro/trust/ed25519/review/` 与 `.dyro/trust/ed25519/signoff/`，三个用途使用不同签名 domain，不能跨用途重放。signature envelope 包含 algorithm、purpose、key ID 与 Base64 signature，签名消息是固定 domain 前缀加去除 signature 后的 RFC 8785 JCS bytes；跨语言 runner 必须按该标准复现消息。私钥必须位于工作区外，只通过命令行显式传入，且权限不能宽于 `0600`；工作区仅保存 PEM 公钥。是否强制签名只由 `require_signed_execution`、`require_signed_review`、`require_signed_signoff` 决定；策略启用后，即使 trust store 为空也 fail-closed，未签名记录和 `--allow-legacy` 都不能绕过。signed execution plan 绑定当前 claim ID、generation、runner 与 execution key ID，过期 claim 的延迟证据无法在接管后重放。独立 reviewer 使用 signed review JSON 认证完整 review 原文和 reviewer 身份。公钥通过原子 create-if-absent 安装，可设置 `not_before`/`not_after`，撤销时保留原公钥并创建不可变撤销记录；trust/revoke 事件写入 `.dyro/trust/ed25519/audit.jsonl`。
 
-导入端只读取一次 receipt、gates、日志、HEAD 与 provenance，再把已验证字节及 attempt/run-state 写入任务目录内的 staging。整组文件使用带备份的可回滚替换提交；任一文件替换失败都会恢复本轮已覆盖文件，不留下半份证据。提交后，Dyro 会保存回执、门禁 JSON、日志、HEAD 与 provenance 证据副本。复核文件首行仍为 `verdict: PASS` 或 `verdict: FAIL`，并且必须同时包含 `receipt_sha256: <hash>`、`task_heads_sha256: <hash>`、`attempt_id: <id>` 与 `plan_sha256: <hash>`；任一不匹配时任务继续保持在 `review`。外部签收会再次验证当前 review 与 `review_attempt_id`/plan 的绑定，并把同一绑定写入 `signoff.json`。外部执行返回 `QUESTION` 后，原 claim 保持有效；`task answer` 记录答案哈希并把任务恢复为 `assigned`，供同一 runner 提交下一份证据。升级前已经处于 review 且没有 execution attempt 的历史任务仅沿用旧的 receipt/HEAD 绑定。外部 runner 的认证、容器、云平台或审批系统由 Profile 扩展实现，核心只定义不可绕过的交接证据。
+导入端只读取一次 receipt、gates、日志、HEAD 与 provenance，再把已验证字节及 attempt/run-state 写入 `evidence-imports/<attempt-id>/`。逐文件与目录 `fsync` 后发布只读不可变世代，最后只用一次原子替换切换 `current-evidence.json`；进程崩溃最多留下未引用世代，读侧始终解析一个完整世代，并按 manifest 哈希验证每个文件。没有指针的旧任务仍兼容读取根目录证据。复核文件首行仍为 `verdict: PASS` 或 `verdict: FAIL`，并且必须同时包含 `receipt_sha256: <hash>`、`task_heads_sha256: <hash>`、`attempt_id: <id>` 与 `plan_sha256: <hash>`；任一不匹配时任务继续保持在 `review`。外部签收会再次验证当前 review 与 `review_attempt_id`/plan 的绑定，并把同一绑定写入 `signoff.json`。外部执行返回 `QUESTION` 后，原 claim 保持有效；`task answer` 记录答案哈希并把任务恢复为 `assigned`，供同一 runner 提交下一份证据。升级前已经处于 review 且没有 execution attempt 的历史任务仅沿用旧的 receipt/HEAD 绑定。外部 runner 的认证、容器、云平台或审批系统由 Profile 扩展实现，核心只定义不可绕过的交接证据。
 
 ## 安全不变量
 

@@ -139,7 +139,8 @@ dyro config set policy.require_external_signoff true
 dyro config set policy.require_signed_signoff true
 
 dyro key generate runner-2026 --private-key /secure/runner.pem --public-key /secure/runner.pub.pem
-dyro key trust runner-2026 --purpose execution --public-key /secure/runner.pub.pem
+dyro key trust runner-2026 --purpose execution --public-key /secure/runner.pub.pem \
+  --not-after 2027-01-01T00:00:00+00:00
 dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026
 dyro task evidence build API-101 --workspace /runner/workspace --receipt /runner/out/receipt.md \
   --output /runner/out/API-101.zip --claim /runner/in/claim.json \
@@ -154,9 +155,13 @@ dyro task evidence review API-101 --file /review/out/review.json
 dyro key generate approver-2026 --private-key /secure/approver.pem --public-key /secure/approver.pub.pem
 dyro key trust approver-2026 --purpose signoff --public-key /secure/approver.pub.pem
 dyro task signoff API-101 --by release-manager --signing-key /secure/approver.pem --key-id approver-2026
+
+dyro key list --purpose execution --show-status
+dyro key revoke runner-2026 --purpose execution --reason "runner retired"
+dyro key audit
 ```
 
-Signature enforcement is controlled explicitly by `policy.require_signed_execution`, `policy.require_signed_review`, and `policy.require_signed_signoff`; deleting every trusted key never disables an enabled policy. Signed execution claims bind `claim_id`, generation, runner, and execution key ID. Independent reviewers produce a signed JSON envelope with `dyro task evidence review-build`. Rotation is non-disruptive: trust the new key ID before switching signers, retain the old key during the overlap window, then remove it through the workspace's controlled key-management process.
+Signature enforcement is controlled explicitly by `policy.require_signed_execution`, `policy.require_signed_review`, and `policy.require_signed_signoff`; deleting every trusted key never disables an enabled policy. Signed execution claims bind `claim_id`, generation, runner, and execution key ID. Signature messages and execution plan hashes use RFC 8785 JSON Canonicalization Scheme bytes, so non-Python runners can reproduce the exact signed payload. Independent reviewers produce a signed JSON envelope with `dyro task evidence review-build`. Rotation is non-disruptive: trust the new key ID before switching signers, retain the old key during the overlap window, then revoke it through the workspace's controlled key-management process.
 
 Every write-capable operation has a planning mode:
 
