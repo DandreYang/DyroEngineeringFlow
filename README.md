@@ -169,6 +169,31 @@ dyro key revoke runner-2026 --purpose execution --reason "runner retired"
 dyro key audit
 ```
 
+将本地信任审计链同步到独立 Witness：
+
+```bash
+dyro key generate audit-client-2026 \
+  --private-key /secure/audit-client.pem \
+  --public-key /secure/audit-client.pub.pem
+# 通过带外安全通道把 audit-client.pub.pem 安装到 Witness。
+dyro key trust witness-2026 \
+  --purpose audit-receipt \
+  --public-key witness-2026.pub.pem
+dyro key trust witness-recovery \
+  --purpose audit-recovery \
+  --public-key witness-recovery.pub.pem
+
+DYRO_AUDIT_TOKEN=... dyro key audit-sync \
+  --witness primary \
+  --endpoint https://audit.example.com/v1/dyro/batches \
+  --signing-key /secure/audit-client.pem \
+  --key-id audit-client-2026 \
+  --witness-key-id witness-2026 \
+  --witness-recovery-key-id witness-recovery
+```
+
+无新事件时命令仍会发送签名 checkpoint；响应丢失时会原样重放已经持久化的 pending 批次。Witness 必须独立重算事件链、拒绝序列或链头分叉、签发可验证回执，并将批次与回执写入启用保留锁的不可变存储。协议、密钥轮换与部署边界见 [远程审计 Witness 协议](docs/audit-witness-protocol.md)。
+
 Signature enforcement is controlled explicitly by `policy.require_signed_execution`, `policy.require_signed_review`, and `policy.require_signed_signoff`; deleting every trusted key never disables an enabled policy. Signed execution claims bind `claim_id`, generation, runner, and execution key ID. Signature messages and execution plan hashes use RFC 8785 JSON Canonicalization Scheme bytes, so non-Python runners can reproduce the exact signed payload. Independent reviewers produce a signed JSON envelope with `dyro task evidence review-build`. Rotation is non-disruptive: trust the new key ID before switching signers, retain the old key during the overlap window, then revoke it through the workspace's controlled key-management process.
 
 A minimal TypeScript reference signer and Python/Node interoperability vector live in `examples/typescript-runner/`. It demonstrates the exact canonical bytes, signature domain, Ed25519 call, and signature envelope expected by the control plane.

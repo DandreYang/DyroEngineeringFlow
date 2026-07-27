@@ -759,6 +759,37 @@ def cmd_key_audit(args: argparse.Namespace) -> None:
         print(json.dumps(record, ensure_ascii=False, sort_keys=True))
 
 
+def cmd_key_audit_sync(args: argparse.Namespace) -> None:
+    from .audit_remote import default_audit_workspace_id, sync_trust_audit
+
+    config = _config(args)
+    token = os.environ.get(args.token_env) if args.token_env else None
+    result = sync_trust_audit(
+        config.root,
+        workspace_id=args.workspace_id or default_audit_workspace_id(config.name),
+        witness=args.witness,
+        endpoint=args.endpoint,
+        signing_key=Path(args.signing_key),
+        key_id=args.key_id,
+        witness_key_id=args.witness_key_id,
+        recovery_key_id=args.witness_recovery_key_id,
+        token=token,
+        allow_insecure_http=args.allow_insecure_http,
+        timeout_seconds=args.timeout_seconds,
+        dry_run=args.dry_run,
+    )
+    if result.synced and result.batch and result.batch.get("events"):
+        state = "synced"
+    elif result.synced:
+        state = "verified"
+    else:
+        state = "dry-run"
+    print(
+        f"{args.witness} -> {state}: "
+        f"sequence={result.sequence} head={result.head_sha256}"
+    )
+
+
 def cmd_task_evidence_review(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
@@ -975,21 +1006,52 @@ def build_parser() -> argparse.ArgumentParser:
     key_generate.set_defaults(func=cmd_key_generate)
     key_trust = key_sub.add_parser("trust", help="将公钥安装到用途隔离的工作区 trust store")
     key_trust.add_argument("id")
-    key_trust.add_argument("--purpose", choices=("execution", "review", "signoff"), required=True)
+    key_trust.add_argument(
+        "--purpose",
+        choices=("execution", "review", "signoff", "audit-export", "audit-receipt", "audit-recovery"),
+        required=True,
+    )
     key_trust.add_argument("--public-key", required=True)
     key_trust.add_argument("--not-before", help="ISO-8601 生效时间；必须包含时区")
     key_trust.add_argument("--not-after", help="ISO-8601 失效时间；必须包含时区")
     key_trust.set_defaults(func=cmd_key_trust)
     key_revoke = key_sub.add_parser("revoke", help="撤销指定用途的 trusted key ID；保留公钥与审计记录")
     key_revoke.add_argument("id")
-    key_revoke.add_argument("--purpose", choices=("execution", "review", "signoff"), required=True)
+    key_revoke.add_argument(
+        "--purpose",
+        choices=("execution", "review", "signoff", "audit-export", "audit-receipt", "audit-recovery"),
+        required=True,
+    )
     key_revoke.add_argument("--reason", required=True)
     key_revoke.set_defaults(func=cmd_key_revoke)
     key_list = key_sub.add_parser("list", help="列出指定用途的 trusted key IDs")
-    key_list.add_argument("--purpose", choices=("execution", "review", "signoff"), required=True)
+    key_list.add_argument(
+        "--purpose",
+        choices=("execution", "review", "signoff", "audit-export", "audit-receipt", "audit-recovery"),
+        required=True,
+    )
     key_list.add_argument("--show-status", action="store_true", help="同时显示 pending、expired 与 revoked key")
     key_list.set_defaults(func=cmd_key_list)
     key_sub.add_parser("audit", help="输出 trust/revoke JSONL 审计记录").set_defaults(func=cmd_key_audit)
+    key_audit_sync = key_sub.add_parser(
+        "audit-sync",
+        help="将本地 trust 审计链同步到远程 Witness",
+    )
+    key_audit_sync.add_argument("--witness", required=True)
+    key_audit_sync.add_argument("--endpoint", required=True)
+    key_audit_sync.add_argument("--signing-key", required=True)
+    key_audit_sync.add_argument("--key-id", required=True)
+    key_audit_sync.add_argument("--witness-key-id", required=True)
+    key_audit_sync.add_argument("--workspace-id")
+    key_audit_sync.add_argument("--token-env", default="DYRO_AUDIT_TOKEN")
+    key_audit_sync.add_argument("--timeout-seconds", type=float, default=15.0)
+    key_audit_sync.add_argument("--witness-recovery-key-id")
+    key_audit_sync.add_argument(
+        "--allow-insecure-http",
+        action="store_true",
+        help="仅为本地测试允许 HTTP",
+    )
+    key_audit_sync.set_defaults(func=cmd_key_audit_sync)
     open_cmd = sub.add_parser("open", help="在指定开发线启动 Agent")
     open_cmd.add_argument("line")
     open_cmd.add_argument("--kind", choices=("line", "hotfix"))

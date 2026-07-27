@@ -22,7 +22,14 @@ from .canonical import canonical_json_bytes
 from .errors import ValidationError
 
 SIGNATURE_ALGORITHM = "ed25519"
-TRUST_PURPOSES = ("execution", "review", "signoff")
+TRUST_PURPOSES = (
+    "execution",
+    "review",
+    "signoff",
+    "audit-export",
+    "audit-receipt",
+    "audit-recovery",
+)
 KEY_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 KEY_METADATA_SUFFIX = ".metadata.json"
 KEY_REVOCATION_SUFFIX = ".revoked.json"
@@ -159,13 +166,27 @@ def _key_status(
     key_id: str,
     *,
     at: datetime | None = None,
+    ignore_revocation: bool = False,
 ) -> tuple[str, dict[str, object] | None]:
     revoked = _revocation_path(directory, key_id)
     if revoked.exists() or revoked.is_symlink():
         record = _read_json_file(revoked, "密钥撤销记录")
-        if record.get("schema_version") != 1 or record.get("key_id") != key_id:
+        if (
+            record.get("schema_version") != 1
+            or record.get("key_id") != key_id
+            or not isinstance(record.get("revoked_at"), str)
+        ):
             raise ValidationError(f"密钥撤销记录格式无效：{revoked}")
-        return "revoked", record
+        revoked_at = _parse_effective_at(str(record["revoked_at"]), "revoked_at")
+        if (
+            not ignore_revocation
+            and (
+                at is None
+                or revoked_at is None
+                or at.astimezone(timezone.utc) >= revoked_at
+            )
+        ):
+            return "revoked", record
     metadata_path = _metadata_path(directory, key_id)
     if not metadata_path.exists() and not metadata_path.is_symlink():
         return "active", None
@@ -287,6 +308,8 @@ def verify_record(
     purpose: str,
     trust_directory: Path,
     required: bool = False,
+    at: datetime | None = None,
+    ignore_revocation: bool = False,
 ) -> bool:
     purpose = validate_purpose(purpose)
     signature = record.get("signature")
@@ -313,7 +336,12 @@ def verify_record(
         if not public_key_path.exists() and not public_key_path.is_symlink():
             raise ValidationError(f"签名 key ID 未受信任：{key_id}") from exc
         raise
-    status, metadata = _key_status(trust_directory, key_id)
+    status, metadata = _key_status(
+        trust_directory,
+        key_id,
+        at=at,
+        ignore_revocation=ignore_revocation,
+    )
     if status != "active":
         raise ValidationError(f"签名 key ID 当前不可用：{key_id} ({status})")
     public_key = _load_public_key_bytes(public_key_bytes, public_key_path)
@@ -443,7 +471,7 @@ def trust_public_key(
         if _read_regular_file(target, "信任公钥") == normalized:
             return target
         raise ValidationError(f"key ID 已绑定其他公钥：{key_id}")
-    trusted_at = _utc_now().isoformat(timespec="seconds")
+    trusted_at = _utc_now().isoformat(timespec="microseconds")
     metadata = {
         "schema_version": 1,
         "key_id": key_id,
@@ -508,7 +536,7 @@ def revoke_public_key(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
-    revoked_at = _utc_now().isoformat(timespec="seconds")
+    revoked_at = _utc_now().isoformat(timespec="microseconds")
     record = {
         "schema_version": 1,
         "key_id": key_id,
