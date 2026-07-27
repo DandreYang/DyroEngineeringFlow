@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .errors import ValidationError
+from .evidence_store import iter_generation_artifacts, resolve_evidence_path
 from .state import atomic_write_text
 
 
@@ -371,12 +372,12 @@ def persist_external_execution_attempt(
     """Persist one already validated external attempt, optionally into a staging writer."""
     attempt_id = str(record["attempt_id"])
     attempt_path = task_directory / ATTEMPTS_DIR / f"{attempt_id}.json"
-    if attempt_path.exists():
-        try:
-            existing = json.loads(attempt_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValidationError(f"已有外部 provenance attempt 损坏：{attempt_id}: {exc}") from exc
-        if _canonical_json(existing) != _canonical_json(record):
+    existing_attempt = next(
+        (item for item in list_execution_attempts(task_directory) if item.get("attempt_id") == attempt_id),
+        None,
+    )
+    if existing_attempt is not None:
+        if _canonical_json(existing_attempt) != _canonical_json(record):
             raise ValidationError(f"外部 provenance attempt 已存在但内容不同：{attempt_id}")
     else:
         content = (json.dumps(record, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
@@ -385,10 +386,11 @@ def persist_external_execution_attempt(
             atomic_write_text(attempt_path, content.decode("utf-8"))
         else:
             writer(attempt_path, content)  # type: ignore[operator]
+    current_run_state_path = resolve_evidence_path(task_directory, RUN_STATE_FILE)
     run_state_path = task_directory / RUN_STATE_FILE
-    if run_state_path.is_file():
+    if current_run_state_path.is_file():
         try:
-            previous_run_state = json.loads(run_state_path.read_text(encoding="utf-8"))
+            previous_run_state = json.loads(current_run_state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValidationError(f"已有 execution run state 损坏：{task_id}: {exc}") from exc
         previous_number = int(previous_run_state.get("last_attempt", 0))
@@ -418,16 +420,21 @@ def persist_external_execution_attempt(
 
 def list_execution_attempts(task_directory: Path) -> list[dict[str, object]]:
     attempts_directory = task_directory / ATTEMPTS_DIR
-    if not attempts_directory.exists():
-        return []
     attempts: list[dict[str, object]] = []
-    for path in sorted(attempts_directory.glob("*.json")):
+    paths = list(sorted(attempts_directory.glob("*.json"))) if attempts_directory.exists() else []
+    paths.extend(iter_generation_artifacts(task_directory, ATTEMPTS_DIR, suffix=".json"))
+    seen: set[str] = set()
+    for path in paths:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValidationError(f"执行 attempt 记录损坏：{path}: {exc}") from exc
         if not isinstance(raw, dict) or raw.get("schema_version") != 1:
             raise ValidationError(f"执行 attempt 记录格式无效：{path}")
+        attempt_id = str(raw.get("attempt_id", ""))
+        if attempt_id in seen:
+            continue
+        seen.add(attempt_id)
         attempts.append(raw)
     attempts.sort(
         key=lambda item: (
@@ -444,7 +451,7 @@ def latest_execution_attempt(task_directory: Path) -> dict[str, object] | None:
 
 
 def current_execution_attempt_id(task_directory: Path) -> str | None:
-    run_state_path = task_directory / RUN_STATE_FILE
+    run_state_path = resolve_evidence_path(task_directory, RUN_STATE_FILE)
     if not run_state_path.is_file():
         return None
     try:
@@ -461,7 +468,7 @@ def review_binding(task_directory: Path) -> tuple[str, str] | None:
     attempts = list_execution_attempts(task_directory)
     if not attempts:
         return None
-    run_state_path = task_directory / RUN_STATE_FILE
+    run_state_path = resolve_evidence_path(task_directory, RUN_STATE_FILE)
     review_attempt_id = ""
     if run_state_path.is_file():
         try:

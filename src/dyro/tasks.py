@@ -11,6 +11,7 @@ import uuid
 from typing import Any, Iterable
 
 from .config import Config, expand_argv, strict_bool, validate_id
+from .evidence_store import publish_evidence_generation, resolve_evidence_path
 from .errors import DyroError, ValidationError
 from .process import git, require_ok, run
 from .state import append_text, atomic_write_bytes, atomic_write_text, exclusive_lock
@@ -849,7 +850,7 @@ def _record_task_heads(config: Config, task: Task) -> str:
 
 
 def _load_task_heads(config: Config, task: Task) -> dict[str, str]:
-    path = task.directory / TASK_HEADS_FILE
+    path = resolve_evidence_path(task.directory, TASK_HEADS_FILE)
     if not path.is_file():
         raise DyroError(f"缺少任务 HEAD 证据：{path}")
     try:
@@ -885,7 +886,7 @@ def _assert_task_heads_current(config: Config, task: Task) -> dict[str, str]:
 
 
 def _receipt_result(task: Task) -> str:
-    receipt = task.directory / "receipt.md"
+    receipt = resolve_evidence_path(task.directory, "receipt.md")
     if not receipt.exists():
         return ""
     first = receipt.read_text(encoding="utf-8").splitlines()
@@ -938,9 +939,9 @@ def _valid_external_signoff(config: Config, task: Task) -> bool:
         return False
     verdict, reviewed_receipt_hash, reviewed_task_heads_hash = _review_decision(task)
     try:
-        receipt_hash = _file_sha256(task.directory / "receipt.md")
+        receipt_hash = _file_sha256(resolve_evidence_path(task.directory, "receipt.md"))
         review_hash = _file_sha256(task.directory / "review.md")
-        task_heads_hash = _file_sha256(task.directory / TASK_HEADS_FILE)
+        task_heads_hash = _file_sha256(resolve_evidence_path(task.directory, TASK_HEADS_FILE))
     except DyroError:
         return False
     review_content = (task.directory / "review.md").read_text(encoding="utf-8")
@@ -1292,31 +1293,35 @@ def _import_execution_evidence(
     if dry_run:
         return "review" if result == "DONE" else "waiting_answer" if result == "QUESTION" else "failed"
     from .provenance import persist_external_execution_attempt
-    from .transactions import FileTransaction
 
-    transaction = FileTransaction(task.directory)
-    try:
-        transaction.stage_path(task.directory / "receipt.md", receipt_bytes)
-        if gate_bytes:
-            transaction.stage_path(task.directory / "evidence" / "external-gates.json", gate_bytes)
-            for index, (_, log_bytes) in enumerate(gate_logs, start=1):
-                transaction.stage_path(
-                    task.directory / "evidence" / "gates" / f"gate-{index}.log",
-                    log_bytes,
-                )
-        if task_heads_bytes:
-            transaction.stage_path(task.directory / TASK_HEADS_FILE, task_heads_bytes)
-        persist_external_execution_attempt(
-            task.directory,
-            task.id,
-            external_attempt,
-            result=result,
-            writer=transaction.stage_path,
-        )
-        transaction.commit()
-    except Exception:
-        transaction.abort()
-        raise
+    generation_files: dict[str | Path, bytes] = {
+        "receipt.md": receipt_bytes,
+        "provenance.json": (
+            json.dumps(external_attempt, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        ).encode("utf-8"),
+    }
+    if gate_bytes:
+        generation_files["gates.json"] = gate_bytes
+        for index, (_, log_bytes) in enumerate(gate_logs, start=1):
+            generation_files[f"gates/gate-{index}.log"] = log_bytes
+    if task_heads_bytes:
+        generation_files[TASK_HEADS_FILE] = task_heads_bytes
+
+    def collect_attempt_artifact(target: Path, content: bytes) -> None:
+        generation_files[target.relative_to(task.directory)] = content
+
+    persist_external_execution_attempt(
+        task.directory,
+        task.id,
+        external_attempt,
+        result=result,
+        writer=collect_attempt_artifact,
+    )
+    publish_evidence_generation(
+        task.directory,
+        str(external_attempt["attempt_id"]),
+        generation_files,
+    )
     if current == "assigned":
         set_status(config, task, "in_progress")
     ledger(
@@ -1437,8 +1442,8 @@ def _answer_task(config: Config, task: Task, answer: str, *, dry_run: bool, rese
 
 def _apply_review_decision(config: Config, task: Task, *, dry_run: bool = False) -> str:
     verdict, reviewed_receipt_hash, reviewed_task_heads_hash = _review_decision(task)
-    receipt_hash = _file_sha256(task.directory / "receipt.md")
-    task_heads_hash = _file_sha256(task.directory / TASK_HEADS_FILE)
+    receipt_hash = _file_sha256(resolve_evidence_path(task.directory, "receipt.md"))
+    task_heads_hash = _file_sha256(resolve_evidence_path(task.directory, TASK_HEADS_FILE))
     review_content = (task.directory / "review.md").read_text(encoding="utf-8") if (task.directory / "review.md").is_file() else ""
     binding_matches, expected_binding, reviewed_binding = validate_review_binding(task.directory, review_content)
     if verdict in ("PASS", "FAIL") and not binding_matches:
@@ -1609,8 +1614,8 @@ def _signoff_task(
     if not approver:
         raise ValidationError("签收人不能为空")
     verdict, reviewed_receipt_hash, reviewed_task_heads_hash = _review_decision(task)
-    receipt_hash = _file_sha256(task.directory / "receipt.md")
-    task_heads_hash = _file_sha256(task.directory / TASK_HEADS_FILE)
+    receipt_hash = _file_sha256(resolve_evidence_path(task.directory, "receipt.md"))
+    task_heads_hash = _file_sha256(resolve_evidence_path(task.directory, TASK_HEADS_FILE))
     if (
         verdict != "PASS"
         or reviewed_receipt_hash != receipt_hash

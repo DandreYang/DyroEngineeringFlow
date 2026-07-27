@@ -6,6 +6,7 @@ import zipfile
 
 from dyro.config import ValidationError, load
 from dyro.evidence import build_execution_bundle, unpack_execution_bundle
+from dyro.evidence_store import resolve_evidence_path
 from dyro.errors import DyroError
 from dyro.tasks import (
     answer_task,
@@ -195,7 +196,10 @@ class TaskTests(WorkspaceCase):
             "review",
         )
         self.assertEqual(status(config, task), "review")
-        self.assertEqual((task_path / "evidence/gates/gate-1.log").read_text(encoding="utf-8"), "diff check passed\n")
+        self.assertEqual(
+            resolve_evidence_path(task_path, "gates/gate-1.log").read_text(encoding="utf-8"),
+            "diff check passed\n",
+        )
         review = runner_dir / "review.md"
         heads_hash = hashlib.sha256(heads.read_bytes()).hexdigest()
         from dyro.provenance import review_binding
