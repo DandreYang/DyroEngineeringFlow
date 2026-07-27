@@ -8,6 +8,9 @@ version = "0.4.1"
 description = "DyroEngineeringFlow: local-first automation and delivery control for multi-repository teams"
 readme = "README.md"
 requires-python = ">=3.11"
+dependencies = [
+  "cryptography>=44.0.0",
+]
 authors = [{ name = "DandreYang" }]
 license = "MIT"
 license-files = ["LICENSE"]
