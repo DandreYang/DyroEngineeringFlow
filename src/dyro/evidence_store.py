@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -20,6 +21,16 @@ CURRENT_EVIDENCE_FILE = "current-evidence.json"
 EVIDENCE_GENERATIONS_DIR = "evidence-imports"
 MANIFEST_FILE = "manifest.json"
 GENERATION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+
+
+@dataclass(frozen=True)
+class EvidenceGeneration:
+    generation_id: str
+    path: Path
+    current: bool
+    temporary: bool
+    modified_at: datetime
+    size_bytes: int
 
 
 def _canonical_json(value: object) -> bytes:
@@ -155,6 +166,143 @@ def iter_generation_artifacts(
             if relative.parent != prefix or (suffix and relative.suffix != suffix):
                 continue
             yield _verified_generation_path(directory, relative)
+
+
+def _generation_size(directory: Path, *, verify_manifest: bool) -> int:
+    size = 0
+    if verify_manifest:
+        _, manifest = _load_manifest(directory, directory.name)
+        files = manifest["files"]
+        assert isinstance(files, dict)
+        for raw in files:
+            path = _verified_generation_path(directory, _validate_relative_path(raw))
+            size += path.lstat().st_size
+        size += (directory / MANIFEST_FILE).lstat().st_size
+        return size
+    for root, directories, files in os.walk(directory, followlinks=False):
+        root_path = Path(root)
+        for name in directories:
+            path = root_path / name
+            if path.is_symlink():
+                raise ValidationError(f"临时证据目录包含符号链接：{path}")
+        for name in files:
+            path = root_path / name
+            mode = path.lstat().st_mode
+            if not stat.S_ISREG(mode):
+                raise ValidationError(f"临时证据只允许普通文件：{path}")
+            size += path.lstat().st_size
+    return size
+
+
+def list_evidence_generations(task_directory: Path) -> tuple[EvidenceGeneration, ...]:
+    generations = task_directory / EVIDENCE_GENERATIONS_DIR
+    if not generations.exists() and not generations.is_symlink():
+        return ()
+    _ensure_real_directory(generations)
+    current = current_evidence_directory(task_directory)
+    records: list[EvidenceGeneration] = []
+    for directory in sorted(generations.iterdir(), key=lambda item: item.name):
+        try:
+            metadata = directory.lstat()
+        except FileNotFoundError:
+            raise ValidationError(f"证据 generation 状态发生并发变化：{directory}") from None
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValidationError(f"证据 generation 必须是普通目录且不能是符号链接：{directory}")
+        temporary = directory.name.startswith(".")
+        if not temporary:
+            _validate_generation_id(directory.name)
+        records.append(
+            EvidenceGeneration(
+                generation_id=directory.name,
+                path=directory,
+                current=current is not None and directory == current,
+                temporary=temporary,
+                modified_at=datetime.fromtimestamp(metadata.st_mtime, timezone.utc),
+                size_bytes=_generation_size(directory, verify_manifest=not temporary),
+            )
+        )
+    return tuple(records)
+
+
+def plan_evidence_generation_cleanup(
+    task_directory: Path,
+    *,
+    older_than_days: int = 30,
+    keep: int = 10,
+    now: datetime | None = None,
+) -> tuple[EvidenceGeneration, ...]:
+    if older_than_days < 0:
+        raise ValidationError("--older-than-days 不能小于 0")
+    if keep < 0:
+        raise ValidationError("--keep 不能小于 0")
+    cutoff = (now or datetime.now(timezone.utc)).astimezone(timezone.utc) - timedelta(days=older_than_days)
+    records = list_evidence_generations(task_directory)
+    temporary = [record for record in records if record.temporary and record.modified_at <= cutoff]
+    history = sorted(
+        (record for record in records if not record.current and not record.temporary),
+        key=lambda record: (record.modified_at, record.generation_id),
+        reverse=True,
+    )
+    expired_history = [record for record in history[keep:] if record.modified_at <= cutoff]
+    return tuple(sorted((*temporary, *expired_history), key=lambda record: record.generation_id))
+
+
+def _remove_generation(record: EvidenceGeneration) -> None:
+    path = record.path
+    parent = path.parent
+    if parent.name != EVIDENCE_GENERATIONS_DIR or path.name != record.generation_id:
+        raise ValidationError(f"拒绝清理越界证据 generation：{path}")
+    try:
+        root_mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(root_mode):
+        raise ValidationError(f"拒绝清理非普通目录 generation：{path}")
+    for root, directories, files in os.walk(path, topdown=False, followlinks=False):
+        root_path = Path(root)
+        for name in files:
+            child = root_path / name
+            mode = child.lstat().st_mode
+            if not (stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
+                raise ValidationError(f"拒绝清理含特殊文件的 generation：{child}")
+        for name in directories:
+            child = root_path / name
+            mode = child.lstat().st_mode
+            if not (stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
+                raise ValidationError(f"拒绝清理含特殊目录项的 generation：{child}")
+    for root, directories, files in os.walk(path, followlinks=False):
+        root_path = Path(root)
+        os.chmod(root_path, 0o700)
+        for name in files:
+            child = root_path / name
+            if not child.is_symlink():
+                os.chmod(child, 0o600)
+        for name in directories:
+            child = root_path / name
+            if not child.is_symlink():
+                os.chmod(child, 0o700)
+    shutil.rmtree(path)
+    _fsync_directory(parent)
+
+
+def cleanup_evidence_generations(
+    task_directory: Path,
+    *,
+    older_than_days: int = 30,
+    keep: int = 10,
+    dry_run: bool = False,
+) -> tuple[EvidenceGeneration, ...]:
+    targets = plan_evidence_generation_cleanup(
+        task_directory,
+        older_than_days=older_than_days,
+        keep=keep,
+    )
+    if any(record.current for record in targets):
+        raise ValidationError("清理计划包含当前证据 generation，已拒绝执行")
+    if not dry_run:
+        for record in targets:
+            _remove_generation(record)
+    return targets
 
 
 def _write_file(path: Path, content: bytes, mode: int = 0o600) -> None:

@@ -11,9 +11,25 @@ import uuid
 from typing import Any, Iterable
 
 from .config import Config, expand_argv, strict_bool, validate_id
-from .evidence_store import publish_evidence_generation, resolve_evidence_path
+from .evidence_store import (
+    EvidenceGeneration,
+    cleanup_evidence_generations,
+    list_evidence_generations,
+    publish_evidence_generation,
+    resolve_evidence_path,
+)
 from .errors import DyroError, ValidationError
 from .process import git, require_ok, run
+from .provenance import (
+    ExecutionAttempt,
+    begin_execution_attempt,
+    current_execution_attempt_id,
+    external_execution_plan,
+    finish_execution_attempt,
+    import_external_execution_attempt,
+    review_binding,
+    validate_review_binding,
+)
 from .state import append_text, atomic_write_bytes, atomic_write_text, exclusive_lock
 from .workspace import Line, get_line, line_repository_path, repository_path
 
@@ -36,18 +52,6 @@ TASK_HEADS_SHA_RE = re.compile(r"^task_heads_sha256:\s*([0-9a-f]{64})\s*$", re.I
 GIT_HEAD_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$", re.IGNORECASE)
 TASK_HEADS_FILE = "task-heads.json"
 MERGE_LOCK_TIMEOUT_SECONDS = 1800.0
-
-
-from .provenance import (
-    ExecutionAttempt,
-    begin_execution_attempt,
-    current_execution_attempt_id,
-    external_execution_plan,
-    finish_execution_attempt,
-    import_external_execution_attempt,
-    review_binding,
-    validate_review_binding,
-)
 
 
 @dataclass(frozen=True)
@@ -1807,6 +1811,37 @@ def merge_task(config: Config, task: Task, *, push: bool = False, dry_run: bool 
     if status(config, task) != "done":
         raise DyroError(f"仅 done 任务可合并：{task.id}")
     _merge_task_repositories(config, task, push=push, dry_run=dry_run)
+
+
+def maintain_evidence_generations(
+    config: Config,
+    task: Task,
+    *,
+    prune: bool = False,
+    older_than_days: int = 30,
+    keep: int = 10,
+    dry_run: bool = False,
+) -> tuple[tuple[EvidenceGeneration, ...], tuple[EvidenceGeneration, ...]]:
+    with exclusive_lock(_state_lock_path(task)):
+        records = list_evidence_generations(task.directory)
+        targets: tuple[EvidenceGeneration, ...] = ()
+        if prune:
+            targets = cleanup_evidence_generations(
+                task.directory,
+                older_than_days=older_than_days,
+                keep=keep,
+                dry_run=dry_run,
+            )
+            if not dry_run:
+                ledger(
+                    config,
+                    task.id,
+                    "evidence_generation_cleanup",
+                    removed=[record.generation_id for record in targets],
+                    older_than_days=older_than_days,
+                    keep=keep,
+                )
+        return records, targets
 
 
 def board(config: Config) -> str:

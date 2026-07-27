@@ -12,7 +12,7 @@ from . import __version__
 from .changesets import create_changeset, get_changeset, list_changesets, verify_changeset
 from .config import CONFIG_NAME, Config, expand_argv, load, validate_id
 from .evidence import build_execution_bundle, unpack_execution_bundle
-from .errors import DyroError
+from .errors import DyroError, ValidationError
 from .onboarding import (
     append_repository,
     ask_for_workspace,
@@ -792,6 +792,34 @@ def cmd_task_evidence_review_build(args: argparse.Namespace) -> None:
     print(f"{task.id} -> signed review: {output}")
 
 
+def cmd_task_evidence_generations(args: argparse.Namespace) -> None:
+    from .tasks import maintain_evidence_generations
+
+    config = _config(args)
+    task = load_task(config, args.id)
+    if args.prune and not args.dry_run:
+        _require_yes(args, f"清理任务 {task.id} 的历史证据 generation")
+    records, targets = maintain_evidence_generations(
+        config,
+        task,
+        prune=args.prune,
+        older_than_days=args.older_than_days,
+        keep=args.keep,
+        dry_run=args.dry_run,
+    )
+    target_ids = {record.generation_id for record in targets}
+    for record in records:
+        state = "current" if record.current else "temporary" if record.temporary else "history"
+        action = "prune" if record.generation_id in target_ids else "keep"
+        print(
+            f"{record.generation_id}\t{state}\t{record.modified_at.isoformat()}\t"
+            f"{record.size_bytes}\t{action}"
+        )
+    if args.prune:
+        outcome = "would remove" if args.dry_run else "removed"
+        print(f"{task.id} -> {outcome} {len(targets)} generation(s)")
+
+
 def cmd_task_merge(args: argparse.Namespace) -> None:
     _require_yes(args, "合并任务")
     config = _config(args)
@@ -1117,6 +1145,16 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_review_build.add_argument("--signing-key", required=True)
     evidence_review_build.add_argument("--key-id", required=True)
     evidence_review_build.set_defaults(func=cmd_task_evidence_review_build)
+    evidence_generations = evidence_sub.add_parser(
+        "generations",
+        help="列出证据世代，或按年龄与保留数量安全清理非当前世代",
+    )
+    evidence_generations.add_argument("id")
+    evidence_generations.add_argument("--prune", action="store_true", help="执行或预演清理计划")
+    evidence_generations.add_argument("--older-than-days", type=int, default=30)
+    evidence_generations.add_argument("--keep", type=int, default=10)
+    evidence_generations.add_argument("--yes", action="store_true")
+    evidence_generations.set_defaults(func=cmd_task_evidence_generations)
     task_merge = task_sub.add_parser("merge")
     task_merge.add_argument("id")
     task_merge.add_argument("--yes", action="store_true")

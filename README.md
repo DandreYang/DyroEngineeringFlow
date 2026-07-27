@@ -129,6 +129,14 @@ dyro task claim-release API-101 --by isolated-runner-1
 
 New evidence bundles must include `provenance.json`. Importing a pre-provenance legacy bundle is a deliberate migration action and requires `dyro task evidence execution API-101 --bundle ... --allow-legacy`. If an external runner returns `QUESTION`, record the answer with `dyro task answer API-101 --text "..."`; the existing claim is preserved and the task returns to `assigned` for the next evidence submission.
 
+Inspect and safely retain immutable evidence generations:
+
+```bash
+dyro task evidence generations API-101
+dyro --dry-run task evidence generations API-101 --prune --older-than-days 30 --keep 10
+dyro task evidence generations API-101 --prune --older-than-days 30 --keep 10 --yes
+```
+
 For cryptographic runner and approver identity, generate keys outside the workspace, then install only public keys into purpose-separated trust stores:
 
 ```bash
