@@ -12,6 +12,7 @@ import tempfile
 import uuid
 from collections.abc import Iterator, Mapping
 
+from .canonical import canonical_json_bytes
 from .errors import ValidationError
 
 
@@ -22,12 +23,7 @@ GENERATION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
 
 def _canonical_json(value: object) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    return canonical_json_bytes(value)
 
 
 def _validate_generation_id(generation_id: str) -> str:

@@ -633,7 +633,6 @@ def cmd_task_signoff(args: argparse.Namespace) -> None:
         approver=args.by,
         signing_key=Path(args.signing_key) if args.signing_key else None,
         key_id=args.key_id,
-        claim=Path(args.claim) if args.claim else None,
         dry_run=args.dry_run,
     )
     print(f"{task.id} -> {result}")
@@ -681,6 +680,7 @@ def cmd_task_evidence_build(args: argparse.Namespace) -> None:
         output=Path(args.output),
         signing_key=Path(args.signing_key) if args.signing_key else None,
         key_id=args.key_id,
+        claim=Path(args.claim) if args.claim else None,
         dry_run=args.dry_run,
     )
     print(f"{task.id} -> {bundle.result}: {bundle.output}")

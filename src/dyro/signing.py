@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+from .canonical import canonical_json_bytes
 from .errors import ValidationError
 
 SIGNATURE_ALGORITHM = "ed25519"
@@ -223,12 +224,7 @@ def trusted_key_ids(root: Path, purpose: str) -> tuple[str, ...]:
 def _canonical_record(record: dict[str, object]) -> bytes:
     unsigned = dict(record)
     unsigned.pop("signature", None)
-    return json.dumps(
-        unsigned,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    return canonical_json_bytes(unsigned)
 
 
 def _signature_message(record: dict[str, object], purpose: str) -> bytes:

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .canonical import canonical_json_text
 from .errors import ValidationError
 from .evidence_store import iter_generation_artifacts, resolve_evidence_path
 from .state import atomic_write_text
@@ -24,12 +25,7 @@ def _utc_now() -> str:
 
 
 def _canonical_json(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
+    return canonical_json_text(value)
 
 
 def _sha256(content: bytes) -> str:
