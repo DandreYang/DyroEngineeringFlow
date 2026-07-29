@@ -169,13 +169,13 @@ dyro key revoke runner-2026 --purpose execution --reason "runner retired"
 dyro key audit
 ```
 
-将本地信任审计链同步到独立 Witness：
+Sync the local trust audit chain to an independent Witness:
 
 ```bash
 dyro key generate audit-client-2026 \
   --private-key /secure/audit-client.pem \
   --public-key /secure/audit-client.pub.pem
-# 通过带外安全通道把 audit-client.pub.pem 安装到 Witness。
+# Install audit-client.pub.pem on the Witness over an out-of-band secure channel.
 dyro key trust witness-2026 \
   --purpose audit-receipt \
   --public-key witness-2026.pub.pem
@@ -192,9 +192,9 @@ DYRO_AUDIT_TOKEN=... dyro key audit-sync \
   --witness-recovery-key-id witness-recovery
 ```
 
-无新事件时命令仍会发送签名 checkpoint；响应丢失时会原样重放已经持久化的 pending 批次。Witness 必须独立重算事件链、拒绝序列或链头分叉、签发可验证回执，并将批次与回执写入启用保留锁的不可变存储。协议、密钥轮换与部署边界见 [远程审计 Witness 协议](docs/audit-witness-protocol.md)。
+Even with no new events the command still sends a signed checkpoint; if a response is lost, the already-persisted pending batch is replayed as-is. The Witness must independently recompute the event chain, reject sequence or chain-head forks, issue a verifiable receipt, and write batches and receipts to immutable storage with retention lock. Protocol, key rotation, and deployment boundaries are documented in [Audit Witness protocol](docs/audit-witness-protocol.md).
 
-项目提供可部署的标准库 Witness 服务：`dyro witness serve`。它默认要求 bearer token 和 TLS，创建 `records/<batch-sha256>.json` 后才原子推进 checkpoint；崩溃重试会恢复未完成的记录。生产环境必须把可变 checkpoint 与不可变 `records` 归档分离：仅 records 归档使用 WORM/Object Lock，checkpoint 使用独立的耐久可变存储。具体的密钥轮换、容器与 S3 Object Lock 操作见 [Witness 部署手册](docs/witness-deployment.md)。
+The project ships a deployable standard-library Witness service: `dyro witness serve`. By default it requires a bearer token and TLS, and only advances the checkpoint after creating `records/<batch-sha256>.json`; crash recovery restores unfinished records. In production, separate mutable checkpoint storage from immutable `records` archives: use WORM/Object Lock only for the records archive, and durable mutable storage for the checkpoint. Key rotation, containers, and S3 Object Lock operations are covered in the [Witness deployment guide](docs/witness-deployment.md).
 
 Signature enforcement is controlled explicitly by `policy.require_signed_execution`, `policy.require_signed_review`, and `policy.require_signed_signoff`; deleting every trusted key never disables an enabled policy. Signed execution claims bind `claim_id`, generation, runner, and execution key ID. Signature messages and execution plan hashes use RFC 8785 JSON Canonicalization Scheme bytes, so non-Python runners can reproduce the exact signed payload. Independent reviewers produce a signed JSON envelope with `dyro task evidence review-build`. Rotation is non-disruptive: trust the new key ID before switching signers, retain the old key during the overlap window, then revoke it through the workspace's controlled key-management process.
 
