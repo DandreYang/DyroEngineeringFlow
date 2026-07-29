@@ -11,3 +11,4 @@ build/
 dist/
 .tmp-docker/
 .e1-*/
+.e2-*/
