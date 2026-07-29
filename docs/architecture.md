@@ -208,6 +208,20 @@ Ed25519 信任根位于 `.dyro/trust/ed25519/execution/`、`.dyro/trust/ed25519/
 11. Change Set 只记录干净开发线的精确提交组合；`changeset verify` 会拒绝 dirty、分支或 HEAD 漂移。具体发布平台、promotion 与 forward-port 由 Profile 扩展执行并回写其证据。
 12. 下游调度不仅要求依赖任务为 `done`，还要求依赖的逐仓 task HEAD 已进入所属开发线；状态完成不能代替代码集成。
 
+## 与 Graph Engineering 的关系（可选读）
+
+行业里有时把「多节点 + 路由/并行 + 校验/停机」的 agent/工作流拓扑称作 **Graph Engineering**（相对单 agent 的 loop）。
+
+Dyro 的交付拓扑与之**实质相近**：TaskGraph（`depends_on` / conflict_group）、任务状态机、gates、独立复核、signoff、merge，以及可选的 `dyro dispatch` / 语义运行时子图，都是可设计、可版本化的工作图节点与边。`dyro task graph` 与文档中的 Mermaid 图是该拓扑的显式视图。
+
+但产品身份仍是 **本地优先的多仓交付控制面（delivery control plane）**，不是 agent 编排框架，也不是 Knowledge Graph / GraphRAG 检索栈：
+
+- 交付真相在 Core：gates 与 receipt/HEAD 绑定的 review（及可选 signoff），不是 agent 自报或多模型投票。
+- `dyro dispatch` 输出仅为**建议**；`dyro runtime` 生产路径仍为 Stage5 **NOT_READY**。
+- 业务规则留在 Profile；Core 不绑定某家模型或协作品牌。
+
+因此文档主叙事继续用 TaskGraph / gates / evidence；Graph Engineering 仅作概念对照，不作产品更名。
+
 ## 扩展路线
 
 未来的 adapter、通知、签名规则、发布平台与审批系统应使用 Python entry point 或独立 Profile 扩展包接入；不要把某个组织的策略加入 core 默认行为。

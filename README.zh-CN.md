@@ -488,3 +488,7 @@ README 提供英语、简体中文、韩语、西班牙语、法语、德语、�
 ## 当前边界
 
 DyroEngineeringFlow 已具备完整的本地工作流闭环，以及让高保障团队在本机保持“仅计划”模式的策略控制。它不创建远端仓库、不携带 SaaS 凭证，也不负责供给外部 runner；但内置可移植证据包的构建与校验契约。`experiments/` 下的可选能力（外部 workflow runner Stage0–5、本地 agent dispatch L0–L4）**随 `dyro` 安装包一并分发**（`dyro dispatch …`、`import experiments…`）。它们相对 Core 仍是**可选面**：不替代 gates / 复核 / signoff / merge；语义运行时路径生产仍为 Stage5 `NOT_READY`——见 `docs/adr/`。本地多仓 merge 会统一预检并在失败时恢复；不同 Git 远端无法提供原子跨仓 push，因此部分推送失败会写入台账等待恢复。自动 merge 需要任务清单与本地策略双重许可。本项目采用 [MIT License](LICENSE)，并已发布为 [PyPI `dyro`](https://pypi.org/project/dyro/) 包。
+
+### 与 Graph Engineering 的关系（可选读）
+
+行业里有时把「多节点 + 路由/并行 + 校验」的工作拓扑称作 **Graph Engineering**（相对单 agent loop）。Dyro 的交付拓扑与之实质相近（TaskGraph、状态机、gates、复核、merge，以及可选的 dispatch / runtime 子图），但产品身份仍是 **交付控制面**，不是 agent 编排框架，也不是 Knowledge Graph / GraphRAG。dispatch 仅为建议；runtime 生产仍为 **NOT_READY**。详见[架构文档](docs/architecture.md#与-graph-engineering-的关系可选读)。
