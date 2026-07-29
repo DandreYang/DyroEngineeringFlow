@@ -236,7 +236,7 @@ Nicht Teil des installierten `dyro`-Pakets. Dispatch nur beratend.
 sequenceDiagram
   participant H as Host agent
   participant S as DispatchSupervisor
-  participant W as Worker / backend
+  participant W as Worker or backend
   participant P as Review board file
 
   H->>S: run --wait TaskContract
@@ -246,9 +246,9 @@ sequenceDiagram
   S->>S: mark locator verified
   S-->>H: run_id · summary · evidence
   H->>P: write own signed section
-  Note over H,P: Never edit others' sections; source is authority
+  Note over H,P: Do not edit others sections - source is authority
   H->>H: optional code change / PR after final call
-  Note over H: Delivery still goes through dyro task/merge
+  Note over H: Delivery still uses dyro task merge
 ```
 
 ### Externer Semantic Runtime (optionales Experiment)
