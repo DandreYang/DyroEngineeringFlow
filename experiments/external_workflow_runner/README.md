@@ -1,10 +1,11 @@
-# External Workflow Runner Stage 0
+# External Workflow Runner
 
 This removable experiment tests the security assumptions for an optional
 external TypeScript workflow runtime. It is not part of the installed `dyro`
-package and does not change Dyro Core. The verified local result and remaining
-gaps are recorded in
-[`STAGE0_REPORT.md`](STAGE0_REPORT.md).
+package and does not change Dyro Core.
+
+- Stage 0 isolation primitives: [`STAGE0_REPORT.md`](STAGE0_REPORT.md)
+- Stage 1 frozen runtime + Broker IPC: [`stage1/STAGE1_REPORT.md`](stage1/STAGE1_REPORT.md)
 
 ## Current scope
 
@@ -59,15 +60,14 @@ The tests run malicious TypeScript at module top level and verify that:
 
 ## Explicit gaps
 
-Stage 0 does not yet:
+Stage 1 still does not:
 
-- install or execute the selected third-party workflow runtime;
-- expose an Agent Broker IPC protocol or call a real provider;
+- call a real provider or mount provider credentials;
 - build, sign, import, review, or sign off Dyro evidence;
-- mount an execution key;
 - prove a production deployment or multi-host isolation boundary;
 - make external event files part of Dyro-managed immutable evidence.
 
 These gaps are deliberate. A signing key must not be introduced until the
 Sandbox and Broker are gone and cleanup has been independently verified.
-Passing Stage 0 means only that the local Docker isolation path is feasible.
+Passing Stage 1 means the frozen runtime install, fixed bundle, isolated
+fake-provider Broker path, and execution-key gate are feasible locally.
