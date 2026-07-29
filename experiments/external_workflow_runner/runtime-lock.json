@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "workflow_runtime": {
+    "implementation": "evaluated-typescript-runtime",
+    "version": "0.2.0",
+    "npm_dist_integrity": "sha512-sJgf79AHIwx67b570lMOuQjpouXepXSlfTeLXNobEubYzcViQZslnqRw2XEvYjF9+N3VUlpy6ID5qziSS1ICBw==",
+    "same_version_source_tag": "v0.2.0",
+    "source_tag_peeled_commit": "73c61156197445be4a0fad390e3a1d802f2cda4a"
+  },
+  "runtime": {
+    "bun_version": "1.3.11",
+    "container_image": "oven/bun@sha256:478281fdd196871c7e51ba6a820b7803a8ae97042ec86cdbc2e1c6b6626442d9",
+    "container_user": "1000:1000"
+  }
+}

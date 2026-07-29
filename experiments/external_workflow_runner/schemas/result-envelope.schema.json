@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dyro.example/schemas/external-workflow-runner/result-envelope-v1.json",
+  "title": "Dyro External Workflow Runner Stage 0 Result Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "workflow_run_id",
+    "branches",
+    "artifacts",
+    "question"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "status": {
+      "enum": ["DONE", "BLOCKED", "QUESTION"]
+    },
+    "workflow_run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "branches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "critical", "status", "error_code"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "critical": {
+            "type": "boolean"
+          },
+          "status": {
+            "enum": ["success", "failed", "question"]
+          },
+          "error_code": {
+            "type": "string",
+            "maxLength": 128
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repository", "path", "sha256"],
+        "properties": {
+          "repository": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "question": {
+      "type": "string",
+      "maxLength": 4000
+    }
+  }
+}
