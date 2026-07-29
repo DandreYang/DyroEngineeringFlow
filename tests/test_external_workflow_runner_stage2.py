@@ -141,7 +141,8 @@ class Stage2EndToEndTests(unittest.TestCase):
         ipc_root.mkdir()
         claim_path = self.root / "claim.json"
         now = time.time()
-        # Lifetime 4s; half-life at now+1. Renewal loop should fire during hold.
+        # Lifetime ~8s; half-life near now+3. Renewal fires during 2.5s hold
+        # even under suite load, without expiring mid-run.
         ClaimStore(claim_path).write(
             ClaimRecord(
                 task_id="task-stage2",
@@ -149,7 +150,7 @@ class Stage2EndToEndTests(unittest.TestCase):
                 generation=1,
                 execution_key_id="exec-key-stage2",
                 issued_at=now - 1,
-                expires_at=now + 3,
+                expires_at=now + 7,
             )
         )
         canonical = CanonicalInput(

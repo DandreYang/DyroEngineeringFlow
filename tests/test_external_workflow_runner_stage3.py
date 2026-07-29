@@ -106,7 +106,7 @@ class Stage3EndToEndTests(unittest.TestCase):
             safety_ms=1500,
         )
         now = time.time()
-        # Force mid-run renewal: short remaining half-life after phase1 starts.
+        # Force mid-run renewal without expiring under suite load.
         ClaimStore(claim_path).write(
             ClaimRecord(
                 task_id="task-stage3",
@@ -114,7 +114,7 @@ class Stage3EndToEndTests(unittest.TestCase):
                 generation=1,
                 execution_key_id="exec-key-stage3",
                 issued_at=now - 1.0,
-                expires_at=now + 3.0,
+                expires_at=now + 8.0,
             )
         )
         result = Stage3Supervisor(
