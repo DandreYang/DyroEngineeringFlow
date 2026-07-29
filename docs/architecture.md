@@ -1,5 +1,7 @@
 # 架构与 Profile 契约
 
+新人图示导览（架构 / 目录 / 时序 / 用例 / 多智能体）：[`diagrams.md`](diagrams.md) · [English diagrams](diagrams.en.md)
+
 ## 分层
 
 ```text

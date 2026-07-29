@@ -223,7 +223,7 @@ dyro --dry-run task run API-101
 | `task merge` | Merge a reviewed task branch into its owning development line. |
 | `task loop/daemon/stats/decisions` | Run controlled batches, scheduling, ledger reporting, and decision gates. |
 
-See the [architecture and Profile contract](docs/architecture.md) and the [existing control-plane migration guide](docs/migrating-existing-control-planes.md) for implementation detail.
+See the [architecture and Profile contract](docs/architecture.md), the [diagram guide for onboarding](docs/diagrams.en.md) (architecture, sequences, multi-repo layout, multi-agent flow), and the [existing control-plane migration guide](docs/migrating-existing-control-planes.md) for implementation detail.
 
 ## Languages and documentation
 

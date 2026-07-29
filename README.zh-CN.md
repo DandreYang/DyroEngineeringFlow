@@ -142,6 +142,8 @@ dyro --dry-run task run API-101
 
 实现细节见[架构与 Profile 契约](docs/architecture.md)与[既有控制面迁移指南](docs/migrating-existing-control-planes.md)。
 
+图示导览（架构、时序、多仓目录、多智能体协作）：[`docs/diagrams.md`](docs/diagrams.md)
+
 ## 语言与文档
 
 README 提供英语、简体中文、韩语、西班牙语、法语、德语、巴西葡萄牙语和俄语版本。所有译本共享同一组命令、配置键、目录名和安全规则。当前 CLI 提示与扩展技术文档仍主要为中文；README 多语言支持不代表运行时已支持切换语言。

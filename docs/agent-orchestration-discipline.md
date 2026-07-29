@@ -5,6 +5,7 @@
 
 关联：
 
+- [图示导览 §8 多智能体协作](diagrams.md#8-多智能体协作开发侧)
 - [ADR-0002：可选本地 Agent 派发与结果密封](adr/0002-optional-local-agent-dispatch.md)
 - [可选本地 Agent 派发设计](designs/optional-local-agent-dispatch.md)
 - [实现：`experiments/local_agent_dispatch/`](../experiments/local_agent_dispatch/README.md)（L0–L4 CLI）
