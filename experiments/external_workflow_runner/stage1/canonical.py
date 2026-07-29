@@ -50,7 +50,8 @@ class CanonicalInput:
         path.parent.mkdir(parents=True, exist_ok=True)
         text = dumps_strict(self.to_mapping()) + "\n"
         path.write_text(text, encoding="utf-8")
-        path.chmod(0o600)
+        # Readable by the non-root sandbox user (container uid 1000).
+        path.chmod(0o644)
         return self.digest()
 
     @classmethod

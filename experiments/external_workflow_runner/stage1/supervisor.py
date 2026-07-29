@@ -123,6 +123,17 @@ class Stage1Supervisor:
             model=self.config.canonical_input.model,
             max_agent_calls=self.config.canonical_input.max_agent_calls,
         )
+        # Container runs as uid 1000; ensure the run root is writable for results.
+        self.config.run_root.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self.config.run_root, 0o777)
+        except OSError:
+            pass
+        for worktree in self.config.worktrees.values():
+            try:
+                os.chmod(worktree, 0o777)
+            except OSError:
+                pass
         canonical_path = self.config.run_root / "canonical-input.json"
         digest = canonical.write(canonical_path)
 
