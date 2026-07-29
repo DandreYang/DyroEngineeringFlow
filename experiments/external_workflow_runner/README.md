@@ -7,6 +7,7 @@ package and does not change Dyro Core.
 - Stage 0 isolation primitives: [`STAGE0_REPORT.md`](STAGE0_REPORT.md)
 - Stage 1 frozen runtime + Broker IPC: [`stage1/STAGE1_REPORT.md`](stage1/STAGE1_REPORT.md)
 - Stage 2 provider raw isolation + claim renewal: [`stage2/STAGE2_REPORT.md`](stage2/STAGE2_REPORT.md)
+- Stage 3 argv-cli provider + claim matrix: [`stage3/STAGE3_REPORT.md`](stage3/STAGE3_REPORT.md)
 
 ## Current scope
 

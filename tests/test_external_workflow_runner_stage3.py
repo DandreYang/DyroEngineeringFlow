@@ -11,16 +11,15 @@ from experiments.external_workflow_runner.errors import Stage0ValidationError
 from experiments.external_workflow_runner.sandbox import BUN_IMAGE
 from experiments.external_workflow_runner.stage1.canonical import CanonicalInput
 from experiments.external_workflow_runner.stage1.claim import ClaimRecord, ClaimStore
-from experiments.external_workflow_runner.stage2.bundle import assemble_stage2_bundle
-from experiments.external_workflow_runner.stage2.protocol import (
-    SUPPORTED_PROTOCOL_VERSIONS,
-    AgentCallRequestV2,
-)
-from experiments.external_workflow_runner.stage2.supervisor import (
+from experiments.external_workflow_runner.stage3.bundle import assemble_stage3_bundle
+from experiments.external_workflow_runner.stage3.claim_matrix import ClaimDeadlineMatrix
+from experiments.external_workflow_runner.stage3.supervisor import (
     EXECUTION_KEY_ENV,
+    PROVIDER_TOKEN,
     RAW_MARKER,
-    Stage2Supervisor,
-    Stage2SupervisorConfig,
+    STDERR_MARKER,
+    Stage3Supervisor,
+    Stage3SupervisorConfig,
 )
 
 
@@ -36,85 +35,44 @@ def _docker_image_available() -> bool:
 
     if shutil.which("docker") is None:
         return False
-    probe = subprocess.run(
-        ["docker", "image", "inspect", BUN_IMAGE],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    return (
+        subprocess.run(
+            ["docker", "image", "inspect", BUN_IMAGE],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+        == 0
     )
-    return probe.returncode == 0
 
 
 def _tarball_source() -> Path | None:
-    if CACHED_TARBALL.is_file():
-        return CACHED_TARBALL
-    return None
+    return CACHED_TARBALL if CACHED_TARBALL.is_file() else None
 
 
-class ProtocolVersionTests(unittest.TestCase):
-    def test_v1_and_v2_accepted(self) -> None:
-        self.assertEqual(SUPPORTED_PROTOCOL_VERSIONS, frozenset({1, 2}))
-        v1 = AgentCallRequestV2.from_mapping(
-            {
-                "protocol_version": 1,
-                "type": "agent.call",
-                "call_id": "c1",
-                "prompt": "hello",
-                "model": "fake-model",
-                "cwd": "/worktrees/docs",
-                "deadline_ms": 1000,
-            }
+class ClaimMatrixTests(unittest.TestCase):
+    def test_matrix_totals_and_recommendations(self) -> None:
+        matrix = ClaimDeadlineMatrix(
+            phase1_hold_ms=1000,
+            phase2_agent_budget_ms=2000,
+            phase3_hold_ms=1000,
+            cleanup_ms=500,
+            safety_ms=500,
         )
-        self.assertEqual(v1.protocol_version, 1)
-        v2 = AgentCallRequestV2.from_mapping(
-            {
-                "protocol_version": 2,
-                "type": "agent.call",
-                "call_id": "c2",
-                "prompt": "hello",
-                "model": "fake-model",
-                "cwd": "/worktrees/docs",
-                "deadline_ms": 1000,
-                "schema_hint": "text",
-            }
-        )
-        self.assertEqual(v2.schema_hint, "text")
+        self.assertEqual(matrix.total_ms, 5000)
+        self.assertGreaterEqual(matrix.recommend_extend_seconds(), 5.0)
+        self.assertGreaterEqual(matrix.recommend_workflow_timeout_seconds(), 15.0)
 
-    def test_v3_rejected(self) -> None:
-        with self.assertRaisesRegex(Stage0ValidationError, "unsupported"):
-            AgentCallRequestV2.from_mapping(
-                {
-                    "protocol_version": 3,
-                    "type": "agent.call",
-                    "call_id": "c3",
-                    "prompt": "hello",
-                    "model": "fake-model",
-                    "cwd": "/worktrees/docs",
-                    "deadline_ms": 1000,
-                }
-            )
-
-    def test_v1_rejects_schema_hint(self) -> None:
-        with self.assertRaisesRegex(Stage0ValidationError, "schema_hint"):
-            AgentCallRequestV2.from_mapping(
-                {
-                    "protocol_version": 1,
-                    "type": "agent.call",
-                    "call_id": "c4",
-                    "prompt": "hello",
-                    "model": "fake-model",
-                    "cwd": "/worktrees/docs",
-                    "deadline_ms": 1000,
-                    "schema_hint": "text",
-                }
-            )
+    def test_matrix_rejects_negative(self) -> None:
+        with self.assertRaises(Stage0ValidationError):
+            ClaimDeadlineMatrix(phase1_hold_ms=-1)
 
 
 @unittest.skipUnless(_docker_image_available(), f"requires local image {BUN_IMAGE}")
-class Stage2EndToEndTests(unittest.TestCase):
+class Stage3EndToEndTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(
-            prefix=".e2-",
+            prefix=".e3-",
             dir=_DOCKER_TEMP_DIR,
         )
         self.root = Path(self.temporary.name)
@@ -125,13 +83,13 @@ class Stage2EndToEndTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def _assemble(self) -> dict[str, object]:
-        return assemble_stage2_bundle(
+        return assemble_stage3_bundle(
             self.root / "bundle",
             runtime_lock_path=RUNTIME_LOCK,
             tarball_source=_tarball_source(),
         )
 
-    def test_simulated_cli_raw_isolation_and_claim_renewal(self) -> None:
+    def test_argv_cli_raw_isolation_and_claim_matrix(self) -> None:
         assembled = self._assemble()
         worktree = self.root / "worktrees" / "docs"
         worktree.mkdir(parents=True)
@@ -140,32 +98,27 @@ class Stage2EndToEndTests(unittest.TestCase):
         ipc_root = self.root / "ipc"
         ipc_root.mkdir()
         claim_path = self.root / "claim.json"
+        matrix = ClaimDeadlineMatrix(
+            phase1_hold_ms=1200,
+            phase2_agent_budget_ms=4000,
+            phase3_hold_ms=1200,
+            cleanup_ms=1500,
+            safety_ms=1500,
+        )
         now = time.time()
-        # Lifetime ~8s; half-life near now+3. Renewal fires during 2.5s hold
-        # even under suite load, without expiring mid-run.
+        # Force mid-run renewal without expiring under suite load.
         ClaimStore(claim_path).write(
             ClaimRecord(
-                task_id="task-stage2",
-                runner_id="stage2-runner",
+                task_id="task-stage3",
+                runner_id="stage3-runner",
                 generation=1,
-                execution_key_id="exec-key-stage2",
-                issued_at=now - 1,
-                expires_at=now + 7,
+                execution_key_id="exec-key-stage3",
+                issued_at=now - 1.0,
+                expires_at=now + 8.0,
             )
         )
-        canonical = CanonicalInput(
-            workflow_run_id="run-stage2-001",
-            task_id="task-stage2",
-            runner_id="stage2-runner",
-            claim_generation=1,
-            branches=("analysis-a", "analysis-b"),
-            artifact_repository="docs",
-            artifact_path="report.md",
-            model="fake-model",
-            max_agent_calls=4,
-        )
-        result = Stage2Supervisor(
-            Stage2SupervisorConfig(
+        result = Stage3Supervisor(
+            Stage3SupervisorConfig(
                 bundle_root=assembled["bundle_root"],
                 bundle_manifest=assembled["manifest"],
                 bundle_identity=assembled["identity"],
@@ -173,38 +126,50 @@ class Stage2EndToEndTests(unittest.TestCase):
                 worktrees={"docs": worktree},
                 ipc_root=ipc_root,
                 claim_path=claim_path,
-                canonical_input=canonical,
+                canonical_input=CanonicalInput(
+                    workflow_run_id="run-stage3-001",
+                    task_id="task-stage3",
+                    runner_id="stage3-runner",
+                    claim_generation=1,
+                    branches=("analysis-a", "analysis-b"),
+                    artifact_repository="docs",
+                    artifact_path="report.md",
+                    model="fake-model",
+                    max_agent_calls=4,
+                ),
                 artifact_policy=ArtifactPolicy(
                     repository_roots={"docs": worktree},
                     allowed_paths={("docs", "report.md")},
                     max_artifacts=4,
                     max_artifact_bytes=64 * 1024,
                 ),
-                provider_mode="simulated-cli",
-                workflow_hold_ms=2500,
-                claim_extend_seconds=30.0,
-                claim_renewal_interval_seconds=0.2,
+                claim_matrix=matrix,
+                provider_mode="argv-cli",
                 ipc_protocol_version=2,
             )
         ).execute()
 
         self.assertEqual(result.supervised.envelope["status"], "DONE")
         self.assertTrue(result.cleanup_verified)
-        self.assertFalse(result.execution_key_present_during_run)
-        self.assertTrue(result.execution_key_mounted_after_cleanup)
-        self.assertEqual(result.provider_mode, "simulated-cli")
+        self.assertEqual(result.provider_mode, "argv-cli")
         self.assertFalse(result.raw_marker_leaked)
+        self.assertFalse(result.provider_token_leaked_to_sandbox_surface)
         self.assertNotIn(RAW_MARKER, result.telemetry_text)
-        self.assertNotIn("BEGIN PRIVATE KEY", result.telemetry_text)
-        self.assertIn("raw_destroyed", result.telemetry_text)
+        self.assertNotIn(STDERR_MARKER, result.telemetry_text)
+        self.assertNotIn(PROVIDER_TOKEN, result.telemetry_text)
         self.assertRegex(
-            result.telemetry_text.replace(" ", ""), r'"raw_destroyed":true'
+            result.telemetry_text.replace(" ", ""),
+            r'"raw_destroyed":true',
         )
+        self.assertIn("argv-cli", result.telemetry_text)
         self.assertGreaterEqual(result.mid_run_renewals, 1)
         self.assertGreaterEqual(result.claim.generation, 2)
+        self.assertEqual(result.claim_matrix["phase1_hold_ms"], 1200)
         report = (worktree / "report.md").read_text(encoding="utf-8")
-        self.assertIn("Stage 2 workflow report", report)
+        self.assertIn("Stage 3 workflow report", report)
+        self.assertIn("argv-cli", report)
         self.assertNotIn(RAW_MARKER, report)
+        self.assertNotIn(PROVIDER_TOKEN, report)
         self.assertFalse((self.root / ".dyro").exists())
 
     def test_execution_key_before_start_rejected(self) -> None:
@@ -217,18 +182,18 @@ class Stage2EndToEndTests(unittest.TestCase):
         now = time.time()
         ClaimStore(claim_path).write(
             ClaimRecord(
-                task_id="task-stage2",
-                runner_id="stage2-runner",
+                task_id="task-stage3",
+                runner_id="stage3-runner",
                 generation=1,
-                execution_key_id="exec-key-stage2",
+                execution_key_id="exec-key-stage3",
                 issued_at=now,
                 expires_at=now + 300,
             )
         )
-        os.environ[EXECUTION_KEY_ENV] = "should-block"
+        os.environ[EXECUTION_KEY_ENV] = "block"
         with self.assertRaisesRegex(Stage0ValidationError, "execution key"):
-            Stage2Supervisor(
-                Stage2SupervisorConfig(
+            Stage3Supervisor(
+                Stage3SupervisorConfig(
                     bundle_root=assembled["bundle_root"],
                     bundle_manifest=assembled["manifest"],
                     bundle_identity=assembled["identity"],
@@ -237,9 +202,9 @@ class Stage2EndToEndTests(unittest.TestCase):
                     ipc_root=self.root / "ipc",
                     claim_path=claim_path,
                     canonical_input=CanonicalInput(
-                        workflow_run_id="run-stage2-002",
-                        task_id="task-stage2",
-                        runner_id="stage2-runner",
+                        workflow_run_id="run-stage3-002",
+                        task_id="task-stage3",
+                        runner_id="stage3-runner",
                         claim_generation=1,
                         branches=("analysis-a",),
                         artifact_repository="docs",
@@ -253,6 +218,7 @@ class Stage2EndToEndTests(unittest.TestCase):
                         max_artifacts=2,
                         max_artifact_bytes=64 * 1024,
                     ),
+                    claim_matrix=ClaimDeadlineMatrix(),
                 )
             ).execute()
 
