@@ -163,15 +163,32 @@ jobs:
             exit 1
           fi
 
+      - name: Run Stage5 tests with Docker isolation
+        run: |
+          set -euo pipefail
+          uv run python -m unittest tests.test_external_workflow_runner_stage5 -v 2>&1 | tee /tmp/stage5-tests.log
+          if grep -F "skipped 'requires local image" /tmp/stage5-tests.log; then
+            echo "Stage5 Docker tests were skipped; isolation was not exercised." >&2
+            exit 1
+          fi
+          if grep -E '^(FAILED|ERROR:)' /tmp/stage5-tests.log; then
+            echo "Stage5 tests reported failures." >&2
+            exit 1
+          fi
+          if ! grep -E '^OK( |$)' /tmp/stage5-tests.log; then
+            echo "Stage5 unittest did not report OK." >&2
+            exit 1
+          fi
+
       - name: Verify no residual experiment containers
         if: always()
         run: |
           set -euo pipefail
-          leftover="$(docker ps --all --filter name=dyro-stage0 --filter name=dyro-s1 --filter name=dyro-s2 --filter name=dyro-s3 --filter name=dyro-s4 --filter name=dyro-stage1 --filter name=dyro-stage2 --filter name=dyro-stage3 --filter name=dyro-stage4 --format '{{.Names}} {{.Status}}' || true)"
+          leftover="$(docker ps --all --filter name=dyro-stage0 --filter name=dyro-s1 --filter name=dyro-s2 --filter name=dyro-s3 --filter name=dyro-s4 --filter name=dyro-s5 --filter name=dyro-stage1 --filter name=dyro-stage2 --filter name=dyro-stage3 --filter name=dyro-stage4 --filter name=dyro-stage5 --format '{{.Names}} {{.Status}}' || true)"
           if [[ -n "${leftover}" ]]; then
             echo "Residual experiment containers found:" >&2
             echo "${leftover}" >&2
-            docker ps --all --filter name=dyro-stage0 --filter name=dyro-s1 --filter name=dyro-s2 --filter name=dyro-s3 --filter name=dyro-s4 --filter name=dyro-stage1 --filter name=dyro-stage2 --filter name=dyro-stage3 --filter name=dyro-stage4
+            docker ps --all --filter name=dyro-stage0 --filter name=dyro-s1 --filter name=dyro-s2 --filter name=dyro-s3 --filter name=dyro-s4 --filter name=dyro-s5 --filter name=dyro-stage1 --filter name=dyro-stage2 --filter name=dyro-stage3 --filter name=dyro-stage4 --filter name=dyro-stage5
             exit 1
           fi
           echo "No dyro-stage residual containers remain."

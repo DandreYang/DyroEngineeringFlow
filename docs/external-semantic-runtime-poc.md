@@ -58,13 +58,21 @@ vendor/dyro-semantic-flow/
 - 监督 Sandbox / Broker 清理；
 - 清理完成前不得挂载 execution key；
 - Stage4 起可在 **双重清理验证通过后** 打包本地实验 evidence pack；
+- Stage5 起可对 sealed pack 做 **非生产 dry-run** 校验；
   仍不 signoff / merge / push，也不导入 Dyro Core。
 
 ## 验收映射（摘要）
 
 隔离、结果 envelope、产物边界、claim 续租、raw 销毁、provider 钉扎、
-双重清理与清理后 evidence pack 等项由
-`experiments/external_workflow_runner` Stage0–4 测试与报告覆盖。
+双重清理、清理后 evidence pack、host provider、dry-run 与生产门禁等项由
+`experiments/external_workflow_runner` Stage0–5 测试与报告覆盖。
+
+终评见：
+
+- [`experiments/external_workflow_runner/stage5/POC_EVALUATION.md`](../experiments/external_workflow_runner/stage5/POC_EVALUATION.md)
+- [`experiments/external_workflow_runner/stage5/PRODUCTION_NOT_READY.md`](../experiments/external_workflow_runner/stage5/PRODUCTION_NOT_READY.md)
+
+**本地隔离：已证明。生产：NOT_READY。**
 
 ## 停止条件
 
