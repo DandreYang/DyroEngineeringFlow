@@ -50,5 +50,7 @@
 
 ## Recommendation
 
-Keep the experiment **optional and removable**. Do **not** promote into Dyro Core.
-Any productization requires an explicit new decision that clears every production blocker.
+Keep the experiment **optional relative to Core** (may ship in the `dyro` wheel for
+`import` / `dyro runtime`). Do **not** promote into Core delivery control
+(gates / evidence import / merge). Any production authorization requires an
+explicit new decision that clears every production blocker.

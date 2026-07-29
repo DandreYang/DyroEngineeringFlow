@@ -493,6 +493,7 @@ dyro --dry-run task run API-101
 | `task merge` | Merge a reviewed task branch into its owning development line. |
 | `task loop/daemon/stats/decisions` | Run controlled batches, scheduling, ledger reporting, and decision gates. |
 | `dispatch` | Optional local multi-agent dispatch (L0–L4); advisory only — not a substitute for gates/merge. |
+| `runtime` | Optional external semantic runtime status (Stage5 production **NOT_READY**). |
 
 See the [architecture and Profile contract](docs/architecture.md), the [existing control-plane migration guide](docs/migrating-existing-control-planes.md), and the [PyPI publishing runbook](docs/publishing.md) (maintainers) for implementation detail.
 

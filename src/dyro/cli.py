@@ -1007,10 +1007,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(parser)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # Real handling is early-exit in main(); this documents the command in --help.
+    # Real handling is early-exit in main(); these document commands in --help.
     sub.add_parser(
         "dispatch",
         help="可选本地多 Agent 派发（L0–L4；不替代 gates/merge）。用法：dyro dispatch <subcommand> …",
+        add_help=False,
+    )
+    sub.add_parser(
+        "runtime",
+        help="可选外部语义运行时状态（Stage5 生产 NOT_READY）。用法：dyro runtime status|production-gate",
         add_help=False,
     )
 
@@ -1341,13 +1346,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     import sys
 
-    # Local multi-agent dispatch ships in the dyro wheel (optional product surface).
-    # Forward remaining args so `dyro dispatch --help` matches the module CLI.
+    # Optional experiment surfaces ship in the dyro wheel (not Core delivery).
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw and raw[0] == "dispatch":
         from experiments.local_agent_dispatch.cli import main as dispatch_main
 
         raise SystemExit(dispatch_main(raw[1:]))
+    if raw and raw[0] == "runtime":
+        from experiments.external_workflow_runner.cli import main as runtime_main
+
+        raise SystemExit(runtime_main(raw[1:]))
 
     parser = build_parser()
     args = parser.parse_args(argv)

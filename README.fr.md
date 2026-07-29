@@ -476,6 +476,8 @@ dyro --dry-run task run API-101
 | `task claim` / `task evidence build/execution/review` | Claim unique, build/import de preuve portable et import de revue liée au reçu. |
 | `task merge` | Fusionner la branche de tâche revue dans sa ligne propriétaire. |
 | `task loop/daemon/stats/decisions` | Lots contrôlés, ordonnancement, ledger et portes de décision. |
+| `dispatch` | Dispatch multi-agents local optionnel (L0–L4) ; consultatif — ne remplace pas gates/merge. |
+| `runtime` | Statut du runtime sémantique externe optionnel (production Stage5 **NOT_READY**). |
 
 Détail : [architecture et Profile](docs/architecture.md), [diagrammes](docs/diagrams.en.md), [migration](docs/migrating-existing-control-planes.md), [publication PyPI](docs/publishing.md) (mainteneurs).
 

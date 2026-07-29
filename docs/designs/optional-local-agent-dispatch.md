@@ -1,8 +1,8 @@
 # 可选本地 Agent 派发 — 完整设计（first-party）
 
 状态：设计已接受（ADR-0002）；**L0–L4 实现于 `experiments/local_agent_dispatch/`**  
-范围：开发者侧、可移除实验；**非** Dyro Core  
-日期：2026-07-30
+范围：开发者侧 harness；**非** Dyro Core 交付控制；**随 `dyro` wheel 安装**（`dyro dispatch`）  
+日期：2026-07-30（分发面修订同日）
 
 ## 1. 目标
 
@@ -248,7 +248,7 @@ Stage5 dry-run 的 pack 核验与本设计的 locator 核验可共享库思想�
 | **L1** | `RunStore` + 双层槽位租约 + strict 影子接入 | 单测绿 |
 | **L2** | `echo`/`codex`/`claude` 适配器 + CLI `run`/`result` | 单测（echo）+ 本机可选真 CLI |
 | **L3** | `panel`、skill 渲染、routes、`gc` | 单测绿 |
-| **L4** | `stage5-bridge` dry-run（不进 Core） | 模块导入 + CLI |
+| **L4** | `stage5-bridge` dry-run（不替代 Core import） | 模块导入 + `dyro dispatch` |
 
 ## 15. 测试矩阵（L0）
 

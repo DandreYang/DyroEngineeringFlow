@@ -2,7 +2,12 @@
 
 This first-party experiment tests the security assumptions for an optional
 external TypeScript workflow runtime. Python modules ship with the `dyro`
-wheel (`import experiments.external_workflow_runner…`) for PoC and tests.
+wheel:
+
+- `import experiments.external_workflow_runner…`
+- `dyro runtime status` / `dyro runtime production-gate`
+- `python -m experiments.external_workflow_runner production-gate`
+
 It does not change Dyro Core delivery control and remains production
 `NOT_READY` (Stage5).
 

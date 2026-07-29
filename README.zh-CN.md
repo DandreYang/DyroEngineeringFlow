@@ -477,6 +477,7 @@ dyro --dry-run task run API-101
 | `task merge` | 将已复核的任务分支合入所属开发线。 |
 | `task loop/daemon/stats/decisions` | 受控批处理、调度、台账报表和决策门禁。 |
 | `dispatch` | 可选本地多 Agent 派发（L0–L4）；仅建议，不替代 gates/merge。 |
+| `runtime` | 可选外部语义运行时状态（Stage5 生产 **NOT_READY**）。 |
 
 实现细节见[架构与 Profile 契约](docs/architecture.md)、[既有控制面迁移指南](docs/migrating-existing-control-planes.md)，以及维护者用的 [PyPI 发布说明](docs/publishing.md)。
 

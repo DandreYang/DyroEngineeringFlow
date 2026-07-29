@@ -476,6 +476,8 @@ dyro --dry-run task run API-101
 | `task claim` / `task evidence build/execution/review` | 격리 runner를 위한 1회 claim, 이식 가능 실행 증거 빌드/가져오기, receipt 바인딩 검토 가져오기. |
 | `task merge` | 검토된 작업 분기를 소유 개발 라인에 병합. |
 | `task loop/daemon/stats/decisions` | 통제된 배치, 스케줄링, 원장 보고, 의사결정 게이트. |
+| `dispatch` | 선택적 로컬 멀티 에이전트 파견(L0–L4); 권고만 — gates/merge 대체 아님. |
+| `runtime` | 선택적 외부 시맨틱 런타임 상태(Stage5 생산 **NOT_READY**). |
 
 구현 세부사항: [architecture and Profile contract](docs/architecture.md), [diagram guide](docs/diagrams.en.md), [migration guide](docs/migrating-existing-control-planes.md), 유지자용 [PyPI publishing](docs/publishing.md).
 

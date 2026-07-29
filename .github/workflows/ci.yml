@@ -49,6 +49,33 @@ jobs:
       - name: Compile source
         run: uv run python -m compileall -q src tests experiments
 
+  wheel-smoke:
+    name: Wheel install smoke (dispatch/runtime)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Build and install wheel
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip build setuptools wheel
+          python -m build -w -o /tmp/dyro-wheels
+          python -m pip install /tmp/dyro-wheels/dyro-*.whl
+          python -c "import experiments.local_agent_dispatch, experiments.external_workflow_runner"
+          dyro dispatch doctor >/tmp/dispatch-doctor.json
+          python -c "import json; json.load(open('/tmp/dispatch-doctor.json'))"
+          dyro runtime production-gate >/tmp/runtime-gate.json
+          python -c "import json; r=json.load(open('/tmp/runtime-gate.json')); assert r.get('verdict')=='NOT_READY', r"
+
   external-workflow-isolation:
     name: External workflow Docker isolation
     runs-on: ubuntu-latest

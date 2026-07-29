@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0 - 2026-07-30
+
+- Ship first-party `experiments.*` modules in the `dyro` wheel (local agent dispatch L0–L4, external workflow runner Stage0–5).
+- Add `dyro dispatch …` for local multi-agent dispatch (advisory only; never merge/push/signoff).
+- Add `dyro runtime status|production-gate` for external semantic runtime status; production remains **NOT_READY**.
+- Align ADRs, architecture, and multi-language READMEs with the packaging decision; embed Mermaid diagrams in READMEs (no tracked PNGs).
+- Add dispatch boundary tests and CI wheel-install smoke for `dispatch` / `runtime`.
+- Close the 2026-07-30 adversarial review board with Conditional Go (Final Arbitration).
+
 ## 0.4.1 - 2026-07-24
 
 - Roll back partially created development-line worktrees when a later repository fails during `line create` / `hotfix create`.
