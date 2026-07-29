@@ -1,20 +1,20 @@
 flowchart LR
   subgraph Actors
-    Dev["开发工程师"]
-    Lead["版本 / 发布负责人"]
-    Runner["隔离 Runner"]
-    Reviewer["独立复核人"]
+    Dev["Developer"]
+    Lead["Release owner"]
+    Runner["Isolated runner"]
+    Reviewer["Independent reviewer"]
   end
 
-  subgraph UC["主要用例"]
-    U1["初始化工作区 setup/init"]
-    U2["创建开发线 / Hotfix"]
-    U3["创建与调度任务"]
-    U4["本地执行与 gates"]
-    U5["外部证据导入"]
-    U6["独立复核与签收"]
-    U7["合并与 Change Set 校验"]
-    U8["审计同步 Witness"]
+  subgraph UC["Primary use cases"]
+    U1["Init workspace setup/init"]
+    U2["Create line / hotfix"]
+    U3["Create and schedule tasks"]
+    U4["Local run and gates"]
+    U5["Import external evidence"]
+    U6["Independent review and signoff"]
+    U7["Merge and Change Set verify"]
+    U8["Audit sync to Witness"]
   end
 
   Dev --> U1

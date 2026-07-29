@@ -10,6 +10,6 @@ flowchart LR
   T2 -->|depends_on| T3
   T3 --> D1
 
-  CG["conflict_group: db-migrate<br/>mutex within a wave"]
+  CG["conflict_group: db-migrate<br/>同一 wave 互斥"]
   T1 -.-> CG
   T2 -.-> CG

@@ -1,0 +1,16 @@
+sequenceDiagram
+  participant H as 宿主 Agent
+  participant S as DispatchSupervisor
+  participant W as Worker / 后端
+  participant P as 评审板文件
+
+  H->>S: run --wait TaskContract
+  S->>S: 校验 files · secret guard · 占槽
+  S->>W: 自包含 prompt + 白名单上下文
+  W-->>S: ResultEnvelope
+  S->>S: locator verified 标记
+  S-->>H: run_id · summary · evidence
+  H->>P: 写入本人签名区
+  Note over H,P: 不得改他人区；源码为准
+  H->>H: 终裁后可选改代码 / 提 PR
+  Note over H: 合入交付仍走 dyro task/merge

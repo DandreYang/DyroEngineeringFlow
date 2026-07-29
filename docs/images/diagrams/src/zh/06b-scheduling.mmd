@@ -1,0 +1,5 @@
+flowchart TB
+  Snap["不可变调度快照<br/>graph + 状态 + claims"]
+  Ready["ready 集合<br/>依赖已集成 · 决策满足"]
+  Wave["本轮 wave<br/>--parallel × conflict_group"]
+  Snap --> Ready --> Wave

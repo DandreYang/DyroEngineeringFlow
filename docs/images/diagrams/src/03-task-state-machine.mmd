@@ -1,13 +1,13 @@
 stateDiagram-v2
   [*] --> backlog
-  backlog --> assigned: claim / next 领取
-  assigned --> in_progress: run 开始
-  in_progress --> waiting_answer: 需要人工答案
+  backlog --> assigned: claim / next
+  assigned --> in_progress: run starts
+  in_progress --> waiting_answer: human answer needed
   waiting_answer --> in_progress: task answer
-  in_progress --> review: gates 通过 · 进入复核
-  in_progress --> failed: 失败
-  failed --> assigned: 重试领取
+  in_progress --> review: gates pass · enter review
+  in_progress --> failed: failure
+  failed --> assigned: re-claim
   review --> review_pending_signoff: require_external_signoff
-  review --> done: 独立复核 PASS
+  review --> done: independent review PASS
   review_pending_signoff --> done: task signoff
-  done --> [*]: task merge 进开发线
+  done --> [*]: task merge into line

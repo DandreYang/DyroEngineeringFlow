@@ -1,9 +1,9 @@
 flowchart TB
-  WS["workspace root<br/>dyro.toml"]
+  WS["workspace 根<br/>dyro.toml"]
   WS --> REPO["repositories/"]
   WS --> DYRO[".dyro/"]
-  WS --> VER["versions/ or layout.lines"]
-  WS --> WT["worktrees/ or layout.tasks"]
+  WS --> VER["versions/ 或 layout.lines"]
+  WS --> WT["worktrees/ 或 layout.tasks"]
 
   REPO --> API["services/api · Git anchor"]
   REPO --> WEB["services/web · Git anchor"]

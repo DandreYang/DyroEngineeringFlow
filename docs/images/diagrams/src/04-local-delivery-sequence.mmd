@@ -1,19 +1,19 @@
 sequenceDiagram
-  actor Eng as 工程师
+  actor Eng as Engineer
   participant CLI as dyro CLI
-  participant FS as 工作区 Git / .dyro
+  participant FS as Workspace Git / .dyro
   participant Agent as Agent adapter
 
   Eng->>CLI: setup / doctor / line create
-  CLI->>FS: 登记 line · 创建 line worktrees
+  CLI->>FS: register line · create line worktrees
   Eng->>CLI: task create · task next
-  CLI->>FS: 写 task.toml · 分配 worktree
+  CLI->>FS: write task.toml · allocate worktree
   Eng->>CLI: task run / open --agent
-  CLI->>Agent: argv launch 到 task worktree
-  Agent-->>CLI: 工作结束（非 gate 证据）
-  CLI->>CLI: 执行 Profile gates
+  CLI->>Agent: argv launch into task worktree
+  Agent-->>CLI: work finished (not gate evidence)
+  CLI->>CLI: run Profile gates
   CLI->>FS: receipt · heads · attempt
   Eng->>CLI: task review
-  CLI->>FS: 绑定 receipt 的 review
+  CLI->>FS: receipt-bound review
   Eng->>CLI: task merge --yes
-  CLI->>FS: 合入开发线 · 更新 ledger
+  CLI->>FS: merge into line · update ledger

@@ -1,10 +1,10 @@
 flowchart TB
-  Host["宿主 Agent<br/>当前对话"]
-  Disp["local_agent_dispatch<br/>契约 · 守卫 · 租约"]
-  B1["后端 CLI A"]
-  B2["后端 CLI B"]
-  Board["对抗评审板<br/>签名区 + 终裁"]
-  Dyro["Dyro 控制面<br/>claim · gates · merge"]
+  Host["Host agent<br/>current conversation"]
+  Disp["local_agent_dispatch<br/>contract · guards · leases"]
+  B1["Backend CLI A"]
+  B2["Backend CLI B"]
+  Board["Adversarial review board<br/>signed sections + final call"]
+  Dyro["Dyro control plane<br/>claim · gates · merge"]
 
   Host -->|"TaskContract JSON"| Disp
   Disp --> B1
@@ -12,5 +12,5 @@ flowchart TB
   B1 -->|"summary + evidence"| Host
   B2 -->|"summary + evidence"| Host
   Host --> Board
-  Board -.->|"仅建议"| Host
-  Host -->|"显式 dyro 命令"| Dyro
+  Board -.->|"advisory only"| Host
+  Host -->|"explicit dyro commands"| Dyro

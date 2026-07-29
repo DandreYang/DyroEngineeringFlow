@@ -18,6 +18,277 @@ DyroEngineeringFlow is not coupled to Codex, Claude, or any business domain. Eac
 - A completed dependency releases downstream work only after its exact task HEADs are integrated into the owning development line.
 - Executable configuration is represented as argv arrays. The core never runs TOML-provided shell strings.
 
+## Architecture and flow diagrams
+
+The following diagrams render **directly on GitHub** as Mermaid (no image links). The control plane separates **team Profile** (repositories, adapters, gates, policy) from **Dyro Core** (workspace, launch, dispatch, verify, merge). Runtime state lives under `.dyro/`.
+
+### Layered architecture
+
+```mermaid
+flowchart TB
+  subgraph Profile["Project Profile (team-supplied)"]
+    P1["repositories / layout / bases"]
+    P2["Agent adapter argv"]
+    P3["gates / receipt templates / policy"]
+  end
+
+  subgraph Core["Dyro Core · dyro CLI (mechanism)"]
+    W["workspace<br/>anchors · lines · doctor"]
+    L["launch<br/>safe argv templates"]
+    D["dispatch<br/>DAG · claim · state machine"]
+    V["verify<br/>gates · ledger"]
+    M["merge<br/>preflight · recovery · push policy"]
+  end
+
+  subgraph Runtime["Workspace runtime .dyro/"]
+    R1["tasks / lines / changes"]
+    R2["evidence · review · ledger"]
+  end
+
+  Profile --> Core
+  Core --> Runtime
+  Human["Engineer / release owner"] --> Core
+  Agent["Local agent CLI"] --> L
+  Runner["Isolated runner (optional)"] -.->|"evidence ZIP"| D
+```
+
+### Multi-repo workspace layout
+
+```mermaid
+flowchart TB
+  WS["workspace root<br/>dyro.toml"]
+  WS --> REPO["repositories/"]
+  WS --> DYRO[".dyro/"]
+  WS --> VER["versions/ or layout.lines"]
+  WS --> WT["worktrees/ or layout.tasks"]
+
+  REPO --> API["services/api · Git anchor"]
+  REPO --> WEB["services/web · Git anchor"]
+
+  DYRO --> LINES["lines/&lt;id&gt;.toml"]
+  DYRO --> TASKS["tasks/&lt;id&gt;/"]
+  DYRO --> CHG["changes/ · decisions · ledger"]
+
+  TASKS --> TT["task.toml · handoff.md"]
+  TASKS --> EV["evidence-imports/ · review.md"]
+
+  WT --> TAPI["task/API-101/services/api"]
+  WT --> TWEB["task/API-101/services/web"]
+
+  VER --> LAPI["release-…/services/api worktree"]
+  VER --> LWEB["release-…/services/web worktree"]
+```
+
+### Task state machine
+
+```mermaid
+stateDiagram-v2
+  [*] --> backlog
+  backlog --> assigned: claim / next
+  assigned --> in_progress: run starts
+  in_progress --> waiting_answer: human answer needed
+  waiting_answer --> in_progress: task answer
+  in_progress --> review: gates pass · enter review
+  in_progress --> failed: failure
+  failed --> assigned: re-claim
+  review --> review_pending_signoff: require_external_signoff
+  review --> done: independent review PASS
+  review_pending_signoff --> done: task signoff
+  done --> [*]: task merge into line
+```
+
+### Local delivery sequence
+
+```mermaid
+sequenceDiagram
+  actor Eng as Engineer
+  participant CLI as dyro CLI
+  participant FS as Workspace Git / .dyro
+  participant Agent as Agent adapter
+
+  Eng->>CLI: setup / doctor / line create
+  CLI->>FS: register line · create line worktrees
+  Eng->>CLI: task create · task next
+  CLI->>FS: write task.toml · allocate worktree
+  Eng->>CLI: task run / open --agent
+  CLI->>Agent: argv launch into task worktree
+  Agent-->>CLI: work finished (not gate evidence)
+  CLI->>CLI: run Profile gates
+  CLI->>FS: receipt · heads · attempt
+  Eng->>CLI: task review
+  CLI->>FS: receipt-bound review
+  Eng->>CLI: task merge --yes
+  CLI->>FS: merge into line · update ledger
+```
+
+### External evidence sequence
+
+```mermaid
+sequenceDiagram
+  actor Ctrl as Control-plane operator
+  participant CLI as dyro control plane
+  participant Run as Isolated runner
+  participant Rev as Independent reviewer
+
+  Ctrl->>CLI: task claim --by runner-id
+  CLI-->>Run: claim active · conflict group held
+  Run->>Run: execute in isolation · declared gates
+  Run->>CLI: evidence build → ZIP
+  Ctrl->>CLI: evidence execution --bundle
+  CLI->>CLI: validate ZIP · heads · gates · signing policy
+  Rev->>CLI: evidence review / review-build
+  CLI->>CLI: bind receipt + task heads
+  opt require_external_signoff
+    Ctrl->>CLI: task signoff --by approver
+  end
+  Ctrl->>CLI: task merge --yes
+```
+
+### Task graph
+
+```mermaid
+flowchart LR
+  subgraph Nodes
+    T1["Task A"]
+    T2["Task B"]
+    T3["Task C"]
+    D1["Decision<br/>blocked_on"]
+  end
+
+  T1 -->|depends_on| T2
+  T2 -->|depends_on| T3
+  T3 --> D1
+
+  CG["conflict_group: db-migrate<br/>mutex within a wave"]
+  T1 -.-> CG
+  T2 -.-> CG
+```
+
+### Scheduling wave
+
+```mermaid
+flowchart TB
+  Snap["Immutable schedule snapshot<br/>graph + state + claims"]
+  Ready["ready set<br/>deps integrated · decisions OK"]
+  Wave["current wave<br/>--parallel × conflict_group"]
+  Snap --> Ready --> Wave
+```
+
+### Use-case overview
+
+```mermaid
+flowchart LR
+  subgraph Actors
+    Dev["Developer"]
+    Lead["Release owner"]
+    Runner["Isolated runner"]
+    Reviewer["Independent reviewer"]
+  end
+
+  subgraph UC["Primary use cases"]
+    U1["Init workspace setup/init"]
+    U2["Create line / hotfix"]
+    U3["Create and schedule tasks"]
+    U4["Local run and gates"]
+    U5["Import external evidence"]
+    U6["Independent review and signoff"]
+    U7["Merge and Change Set verify"]
+    U8["Audit sync to Witness"]
+  end
+
+  Dev --> U1
+  Dev --> U3
+  Dev --> U4
+  Lead --> U2
+  Lead --> U7
+  Lead --> U8
+  Runner --> U5
+  Reviewer --> U6
+  Dev --> U6
+```
+
+### Multi-agent layers (optional experiment)
+
+```mermaid
+flowchart TB
+  Host["Host agent<br/>current conversation"]
+  Disp["local_agent_dispatch<br/>contract · guards · leases"]
+  B1["Backend CLI A"]
+  B2["Backend CLI B"]
+  Board["Adversarial review board<br/>signed sections + final call"]
+  Dyro["Dyro control plane<br/>claim · gates · merge"]
+
+  Host -->|"TaskContract JSON"| Disp
+  Disp --> B1
+  Disp --> B2
+  B1 -->|"summary + evidence"| Host
+  B2 -->|"summary + evidence"| Host
+  Host --> Board
+  Board -.->|"advisory only"| Host
+  Host -->|"explicit dyro commands"| Dyro
+```
+
+Not part of the installed `dyro` package. Dispatch output is advisory; delivery still uses Dyro gates/merge. See `experiments/local_agent_dispatch/` and `docs/agent-orchestration-discipline.md`.
+
+### Multi-agent sequence (optional experiment)
+
+```mermaid
+sequenceDiagram
+  participant H as Host agent
+  participant S as DispatchSupervisor
+  participant W as Worker / backend
+  participant P as Review board file
+
+  H->>S: run --wait TaskContract
+  S->>S: validate files · secret guard · take slot
+  S->>W: self-contained prompt + allowlisted context
+  W-->>S: ResultEnvelope
+  S->>S: mark locator verified
+  S-->>H: run_id · summary · evidence
+  H->>P: write own signed section
+  Note over H,P: Never edit others' sections; source is authority
+  H->>H: optional code change / PR after final call
+  Note over H: Delivery still goes through dyro task/merge
+```
+
+### External semantic runtime (optional experiment)
+
+```mermaid
+flowchart TB
+  Sup["Trusted Supervisor"]
+  Sand["Workflow Sandbox<br/>pinned TS bundle · no vendor token"]
+  Bro["Agent Broker<br/>argv provider · raw only on tmpfs"]
+  HostP["Optional host provider<br/>Broker-mounted only"]
+
+  Sup -->|start · verify bundle/claim| Sand
+  Sup -->|start · pin| Bro
+  Sand -->|loopback IPC| Bro
+  HostP -.->|RO bind| Bro
+  Sup -->|after dual cleanup| Pack["local evidence pack / dry-run"]
+  Pack -.->|forbidden| Merge["merge / push / Core import"]
+```
+
+Not Core. Tree: `experiments/external_workflow_runner/`. Production status: Stage5 `NOT_READY`.
+
+### Semantic runtime sequence (optional experiment)
+
+```mermaid
+sequenceDiagram
+  participant S as Supervisor
+  participant B as Broker container
+  participant W as Sandbox container
+
+  S->>B: start internal net + pin
+  S->>W: start shared netns · no token
+  W->>B: agent.call JSON-line
+  B->>B: spawn provider · destroy raw
+  B-->>W: sanitized result
+  W-->>S: result-envelope + artifacts
+  S->>W: cleanup verify
+  S->>B: stop · containers absent
+  S->>S: pack only if dual cleanup OK
+```
+
 ## Quick start
 
 For daily CLI use, install `dyro` from PyPI in an isolated `pipx` environment (Python 3.11 or later):
@@ -39,7 +310,6 @@ python3 -m pip install --user --upgrade dyro
 Place your repositories in a workspace, then use the newcomer path to discover them, create the safe state directories, and create the first development line in one command:
 
 ```bash
-
 mkdir my-workspace && cd my-workspace
 # Clone or move your Git repositories under this directory first.
 dyro setup . --name my-workspace --line dev --yes
@@ -223,7 +493,7 @@ dyro --dry-run task run API-101
 | `task merge` | Merge a reviewed task branch into its owning development line. |
 | `task loop/daemon/stats/decisions` | Run controlled batches, scheduling, ledger reporting, and decision gates. |
 
-See the [architecture and Profile contract](docs/architecture.md), the [diagram guide for onboarding](docs/diagrams.en.md) (architecture, sequences, multi-repo layout, multi-agent flow), and the [existing control-plane migration guide](docs/migrating-existing-control-planes.md) for implementation detail.
+See the [architecture and Profile contract](docs/architecture.md), the [existing control-plane migration guide](docs/migrating-existing-control-planes.md), and the [PyPI publishing runbook](docs/publishing.md) (maintainers) for implementation detail.
 
 ## Languages and documentation
 
@@ -231,4 +501,4 @@ This README is maintained in English, Simplified Chinese, Korean, Spanish, Frenc
 
 ## Current boundaries
 
-DyroEngineeringFlow provides a complete local workflow loop and policy controls for keeping stricter teams in planning-only local mode. It does not create remote repositories, ship SaaS credentials, or provision an external runner; it does provide a portable evidence-package contract for one. Local multi-repository merges are preflighted and recovered as one operation; remote Git servers cannot provide atomic cross-repository push, so partial push failure is recorded for recovery. Automatic merge requires permission in both the task manifest and local policy. It is available under the [MIT License](LICENSE) and as [`dyro` on PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow provides a complete local workflow loop and policy controls for keeping stricter teams in planning-only local mode. It does not create remote repositories, ship SaaS credentials, or provision an external runner; it does provide a portable evidence-package contract for one. Optional experiments under `experiments/` (external workflow runner Stage0–5, local agent dispatch L0–L4) are **not** part of the installed `dyro` package—see ADRs under `docs/adr/`. Local multi-repository merges are preflighted and recovered as one operation; remote Git servers cannot provide atomic cross-repository push, so partial push failure is recorded for recovery. Automatic merge requires permission in both the task manifest and local policy. It is available under the [MIT License](LICENSE) and as [`dyro` on PyPI](https://pypi.org/project/dyro/).

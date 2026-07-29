@@ -1,0 +1,12 @@
+flowchart TB
+  Sup["可信 Supervisor"]
+  Sand["Workflow Sandbox<br/>固定 TS bundle · 无供应商 token"]
+  Bro["Agent Broker<br/>argv provider · raw 仅 tmpfs"]
+  HostP["可选 host provider<br/>仅挂 Broker"]
+
+  Sup -->|启动 · 校验 bundle/claim| Sand
+  Sup -->|启动 · pin| Bro
+  Sand -->|loopback IPC| Bro
+  HostP -.->|RO bind| Bro
+  Sup -->|双重清理后| Pack["本地 evidence pack / dry-run"]
+  Pack -.->|禁止| Merge["merge / push / Core import"]

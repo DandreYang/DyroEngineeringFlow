@@ -1,28 +1,51 @@
 #!/usr/bin/env python3
-"""Render docs/images/diagrams/src/*.mmd to PNG via mermaid-cli (npx)."""
+"""Optional local export: Mermaid sources → PNG via mermaid-cli.
+
+Docs on GitHub use embedded Mermaid (English and Chinese sources).
+PNGs are gitignored and not required.
+
+  python3 scripts/render_diagrams.py            # English labels → docs/images/diagrams/*.png
+  python3 scripts/render_diagrams.py --lang zh  # Chinese labels → docs/images/diagrams/zh/*.png
+"""
 
 from __future__ import annotations
 
+import argparse
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "docs" / "images" / "diagrams" / "src"
-OUT = ROOT / "docs" / "images" / "diagrams"
+BASE = ROOT / "docs" / "images" / "diagrams"
 
 
 def main() -> int:
-    if not SRC.is_dir():
-        print(f"missing {SRC}", file=sys.stderr)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--lang",
+        choices=("en", "zh"),
+        default="en",
+        help="en: src/*.mmd; zh: src/zh/*.mmd",
+    )
+    args = parser.parse_args()
+
+    if args.lang == "zh":
+        src = BASE / "src" / "zh"
+        out = BASE / "zh"
+    else:
+        src = BASE / "src"
+        out = BASE
+
+    if not src.is_dir():
+        print(f"missing {src}", file=sys.stderr)
         return 1
-    OUT.mkdir(parents=True, exist_ok=True)
-    files = sorted(SRC.glob("*.mmd"))
+    out.mkdir(parents=True, exist_ok=True)
+    files = sorted(p for p in src.glob("*.mmd") if p.is_file())
     if not files:
-        print("no .mmd sources", file=sys.stderr)
+        print(f"no .mmd sources in {src}", file=sys.stderr)
         return 1
     for mmd in files:
-        png = OUT / f"{mmd.stem}.png"
+        png = out / f"{mmd.stem}.png"
         cmd = [
             "npx",
             "--yes",
@@ -38,12 +61,12 @@ def main() -> int:
             "-w",
             "1600",
         ]
-        print("render", mmd.name, "->", png.name)
+        print("render", mmd.relative_to(ROOT), "->", png.relative_to(ROOT), "(local only, gitignored)")
         proc = subprocess.run(cmd, cwd=ROOT)
         if proc.returncode != 0:
             print(f"failed: {mmd}", file=sys.stderr)
             return proc.returncode
-    print(f"ok: {len(files)} diagrams")
+    print(f"ok: {len(files)} diagrams lang={args.lang} (not tracked by git)")
     return 0
 
 
