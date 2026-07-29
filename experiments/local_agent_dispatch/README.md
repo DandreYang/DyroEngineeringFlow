@@ -1,7 +1,8 @@
 # Local Agent Dispatch (ADR-0002)
 
-Removable first-party experiment for optional **local multi-agent dispatch**.
-Not part of the installed `dyro` package. Never merges, pushes, or signs off.
+First-party **local multi-agent dispatch** (shipped with the `dyro` wheel).
+Entry points: `dyro dispatch …` or `python -m experiments.local_agent_dispatch …`.
+Never merges, pushes, or signs off — delivery still uses Dyro Core gates/review/merge.
 
 Design: [`docs/designs/optional-local-agent-dispatch.md`](../../docs/designs/optional-local-agent-dispatch.md)  
 Discipline: [`docs/agent-orchestration-discipline.md`](../../docs/agent-orchestration-discipline.md)
@@ -19,18 +20,19 @@ Discipline: [`docs/agent-orchestration-discipline.md`](../../docs/agent-orchestr
 ## CLI
 
 ```sh
-# from repo root
+# After pipx/pip install dyro (or from a repo checkout):
+dyro dispatch doctor
+dyro dispatch backends
+
+dyro dispatch run --project . --file task.json --wait --backend echo
+dyro dispatch result <run_id>
+dyro dispatch panel --project . --file task.json --members echo
+dyro dispatch skill-render --write
+dyro dispatch gc --dry-run
+dyro dispatch stage5-bridge /path/to/evidence-pack
+
+# Equivalent module form:
 python3 -m experiments.local_agent_dispatch doctor
-python3 -m experiments.local_agent_dispatch backends
-
-python3 -m experiments.local_agent_dispatch run \
-  --project . --file task.json --wait --backend echo
-
-python3 -m experiments.local_agent_dispatch result <run_id>
-python3 -m experiments.local_agent_dispatch panel --project . --file task.json --members echo
-python3 -m experiments.local_agent_dispatch skill-render --write
-python3 -m experiments.local_agent_dispatch gc --dry-run
-python3 -m experiments.local_agent_dispatch stage5-bridge /path/to/evidence-pack
 ```
 
 State home: `~/.dyro/local-agent-dispatch/` (override with `--home` or `DYRO_LOCAL_AGENT_DISPATCH_HOME`).

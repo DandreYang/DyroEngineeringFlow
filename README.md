@@ -228,7 +228,7 @@ flowchart TB
   Host -->|"explicit dyro commands"| Dyro
 ```
 
-Not part of the installed `dyro` package. Dispatch output is advisory; delivery still uses Dyro gates/merge. See `experiments/local_agent_dispatch/` and `docs/agent-orchestration-discipline.md`.
+Shipped with `dyro` (`dyro dispatch …`). Dispatch output is advisory; delivery still uses Dyro gates/merge. See `docs/agent-orchestration-discipline.md`.
 
 ### Multi-agent sequence (optional experiment)
 
@@ -492,6 +492,7 @@ dyro --dry-run task run API-101
 | `task claim` / `task evidence build/execution/review` | One-time claim, portable execution-evidence build/import, and receipt-bound review import for an external isolated runner. |
 | `task merge` | Merge a reviewed task branch into its owning development line. |
 | `task loop/daemon/stats/decisions` | Run controlled batches, scheduling, ledger reporting, and decision gates. |
+| `dispatch` | Optional local multi-agent dispatch (L0–L4); advisory only — not a substitute for gates/merge. |
 
 See the [architecture and Profile contract](docs/architecture.md), the [existing control-plane migration guide](docs/migrating-existing-control-planes.md), and the [PyPI publishing runbook](docs/publishing.md) (maintainers) for implementation detail.
 
@@ -501,4 +502,4 @@ This README is maintained in English, Simplified Chinese, Korean, Spanish, Frenc
 
 ## Current boundaries
 
-DyroEngineeringFlow provides a complete local workflow loop and policy controls for keeping stricter teams in planning-only local mode. It does not create remote repositories, ship SaaS credentials, or provision an external runner; it does provide a portable evidence-package contract for one. Optional experiments under `experiments/` (external workflow runner Stage0–5, local agent dispatch L0–L4) are **not** part of the installed `dyro` package—see ADRs under `docs/adr/`. Local multi-repository merges are preflighted and recovered as one operation; remote Git servers cannot provide atomic cross-repository push, so partial push failure is recorded for recovery. Automatic merge requires permission in both the task manifest and local policy. It is available under the [MIT License](LICENSE) and as [`dyro` on PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow provides a complete local workflow loop and policy controls for keeping stricter teams in planning-only local mode. It does not create remote repositories, ship SaaS credentials, or provision an external runner; it does provide a portable evidence-package contract for one. Optional modules under `experiments/` (external workflow runner Stage0–5, local agent dispatch L0–L4) **ship in the `dyro` wheel** and are usable after install (`dyro dispatch …`, `import experiments…`). They remain **optional relative to Core**: they do not replace gates, review, signoff, or merge, and the semantic-runtime path is still Stage5 `NOT_READY` for production—see ADRs under `docs/adr/`. Local multi-repository merges are preflighted and recovered as one operation; remote Git servers cannot provide atomic cross-repository push, so partial push failure is recorded for recovery. Automatic merge requires permission in both the task manifest and local policy. It is available under the [MIT License](LICENSE) and as [`dyro` on PyPI](https://pypi.org/project/dyro/).

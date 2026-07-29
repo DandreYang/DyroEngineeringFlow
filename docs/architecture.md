@@ -214,4 +214,4 @@ Ed25519 信任根位于 `.dyro/trust/ed25519/execution/`、`.dyro/trust/ed25519/
 
 任务内部的语义工作流运行时也遵守这一边界。可选外部语义运行时（first-party `@dyro/semantic-flow`，实验目录承载）必须由 Workflow Sandbox、Agent Broker 与可信 Supervisor / Packager 隔离，不能替代 TaskGraph、gates、证据或交付控制；已接受的架构边界见 [`ADR-0001`](adr/0001-optional-external-semantic-runtime.md)，试点范围与退出条件见 [`外部语义运行时 PoC`](external-semantic-runtime-poc.md)。
 
-开发者侧的可选本地多 Agent 派发（五段式任务契约、注入前机密守卫、locator 核验、隔离 patch）与上述控制面分层并列，**不**进入已安装 `dyro` 包，**不**替代 gates/合并；见 [`ADR-0002`](adr/0002-optional-local-agent-dispatch.md)、[`多智能体编排纪律`](agent-orchestration-discipline.md) 与 [`可选本地 Agent 派发设计`](designs/optional-local-agent-dispatch.md)。
+开发者侧的可选本地多 Agent 派发（五段式任务契约、注入前机密守卫、locator 核验、隔离 patch）与上述控制面分层并列，随 `dyro` 安装包分发（`dyro dispatch` / `import experiments.local_agent_dispatch`），但**不**替代 gates/合并；见 [`ADR-0002`](adr/0002-optional-local-agent-dispatch.md)、[`多智能体编排纪律`](agent-orchestration-discipline.md) 与 [`可选本地 Agent 派发设计`](designs/optional-local-agent-dispatch.md)。

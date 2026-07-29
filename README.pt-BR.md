@@ -228,7 +228,7 @@ flowchart TB
   Host -->|"explicit dyro commands"| Dyro
 ```
 
-Não faz parte do pacote instalado `dyro`. Dispatch é apenas consultivo.
+Incluído com `dyro` (`dyro dispatch …`). Dispatch é apenas consultivo; entrega continua via gates/merge Dyro.
 
 ### Sequência multi-agente (experimento opcional)
 
@@ -485,4 +485,4 @@ Este README é mantido em inglês, chinês simplificado, coreano, espanhol, fran
 
 ## Limites atuais
 
-DyroEngineeringFlow oferece um loop de workflow local completo e controles de política para equipes mais rígidas em modo somente planejamento no local. Não cria repositórios remotos, não carrega credenciais SaaS e não provisiona runner externo; fornece um contrato de pacote de evidência portátil. Experimentos opcionais em `experiments/` (workflow runner Stage0–5, local agent dispatch L0–L4) **não** fazem parte do pacote instalado `dyro`—veja ADRs em `docs/adr/`. Merges multi-repo locais são pré-verificados e recuperados como uma operação; servidores Git remotos não oferecem push atômico multi-repo, então falha parcial de push é registrada para recuperação. Merge automático exige permissão no manifesto da tarefa e na política local. [MIT License](LICENSE) e [`dyro` no PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow oferece um loop de workflow local completo e controles de política para equipes mais rígidas em modo somente planejamento no local. Não cria repositórios remotos, não carrega credenciais SaaS e não provisiona runner externo; fornece um contrato de pacote de evidência portátil. Módulos opcionais em `experiments/` (workflow runner Stage0–5, local agent dispatch L0–L4) **vêm no wheel do `dyro`** e ficam disponíveis após a instalação (`dyro dispatch …`, `import experiments…`). Continuam **opcionais em relação ao Core**: não substituem gates, review, signoff nem merge; o runtime semântico segue Stage5 `NOT_READY` em produção—veja ADRs em `docs/adr/`. Merges multi-repo locais são pré-verificados e recuperados como uma operação; servidores Git remotos não oferecem push atômico multi-repo, então falha parcial de push é registrada para recuperação. Merge automático exige permissão no manifesto da tarefa e na política local. [MIT License](LICENSE) e [`dyro` no PyPI](https://pypi.org/project/dyro/).

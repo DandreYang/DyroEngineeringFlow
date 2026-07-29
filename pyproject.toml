@@ -38,11 +38,32 @@ dyro = "dyro.cli:main"
 [project.optional-dependencies]
 dev = ["ruff==0.15.2"]
 
-[tool.setuptools]
-package-dir = { "" = "src" }
+# Core lives under src/; first-party experiments ship in the same wheel as
+# importable packages (experiments.*) and via `dyro dispatch` for L0–L4.
+[tool.setuptools.package-dir]
+"" = "src"
+"experiments" = "experiments"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+packages = [
+  "dyro",
+  "experiments",
+  "experiments.local_agent_dispatch",
+  "experiments.local_agent_dispatch.adapters",
+  "experiments.external_workflow_runner",
+  "experiments.external_workflow_runner.stage1",
+  "experiments.external_workflow_runner.stage2",
+  "experiments.external_workflow_runner.stage3",
+  "experiments.external_workflow_runner.stage4",
+  "experiments.external_workflow_runner.stage5",
+]
+
+[tool.setuptools.package-data]
+"experiments.external_workflow_runner" = [
+  "runtime-lock.json",
+  "schemas/*.json",
+  "fixtures/*",
+]
 
 [tool.unittest]
 start-directory = "tests"

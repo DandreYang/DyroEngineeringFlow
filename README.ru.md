@@ -228,7 +228,7 @@ flowchart TB
   Host -->|"explicit dyro commands"| Dyro
 ```
 
-Не входит в установленный пакет `dyro`. Dispatch только рекомендательный.
+Поставляется с `dyro` (`dyro dispatch …`). Dispatch только рекомендательный; поставка по-прежнему через Dyro gates/merge.
 
 ### Последовательность multi-agent (опциональный эксперимент)
 
@@ -485,4 +485,4 @@ dyro --dry-run task run API-101
 
 ## Текущие границы
 
-DyroEngineeringFlow даёт полный локальный workflow-контур и policy-контроль для более строгих команд в режиме только планирования на локальной машине. Он не создаёт удалённые репозитории, не несёт SaaS credentials и не provision'ит внешний runner; он даёт portable evidence-package contract. Опциональные эксперименты в `experiments/` (external workflow runner Stage0–5, local agent dispatch L0–L4) **не** входят в установленный пакет `dyro` — см. ADR в `docs/adr/`. Локальные multi-repo merge preflight'ятся и восстанавливаются как одна операция; удалённые Git-серверы не дают атомарный multi-repo push, поэтому частичный сбой push записывается для recovery. Автоматический merge требует разрешения и в task manifest, и в локальной policy. [MIT License](LICENSE) и [`dyro` на PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow даёт полный локальный workflow-контур и policy-контроль для более строгих команд в режиме только планирования на локальной машине. Он не создаёт удалённые репозитории, не несёт SaaS credentials и не provision'ит внешний runner; он даёт portable evidence-package contract. Опциональные модули в `experiments/` (external workflow runner Stage0–5, local agent dispatch L0–L4) **входят в wheel `dyro`** и доступны после установки (`dyro dispatch …`, `import experiments…`). Они остаются **опциональными относительно Core**: не заменяют gates, review, signoff и merge; semantic runtime в production по-прежнему Stage5 `NOT_READY` — см. ADR в `docs/adr/`. Локальные multi-repo merge preflight'ятся и восстанавливаются как одна операция; удалённые Git-серверы не дают атомарный multi-repo push, поэтому частичный сбой push записывается для recovery. Автоматический merge требует разрешения и в task manifest, и в локальной policy. [MIT License](LICENSE) и [`dyro` на PyPI](https://pypi.org/project/dyro/).

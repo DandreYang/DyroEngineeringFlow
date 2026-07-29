@@ -228,7 +228,7 @@ flowchart TB
   Host -->|"explicit dyro commands"| Dyro
 ```
 
-No forma parte del paquete instalado `dyro`. El dispatch es solo consultivo.
+Se incluye con `dyro` (`dyro dispatch …`). El dispatch es solo consultivo; la entrega sigue gates/merge de Dyro.
 
 ### Secuencia multi-agente (experimento opcional)
 
@@ -485,4 +485,4 @@ Este README se mantiene en inglés, chino simplificado, coreano, español, franc
 
 ## Límites actuales
 
-DyroEngineeringFlow ofrece un bucle de workflow local completo y controles de política para equipos que deben quedarse en modo solo planificación en local. No crea repositorios remotos, no transporta credenciales SaaS ni aprovisiona un runner externo; sí aporta un contrato de paquete de evidencia portable. Los experimentos opcionales bajo `experiments/` (workflow runner Stage0–5, local agent dispatch L0–L4) **no** forman parte del paquete instalado `dyro`—ver ADRs en `docs/adr/`. Los merges multi-repo locales se preflightan y recuperan como una operación; los servidores Git remotos no ofrecen push atómico multi-repo, por lo que un push parcial se registra para recuperación. El merge automático requiere permiso en el manifiesto de tarea y en la política local. [MIT License](LICENSE) y [`dyro` en PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow ofrece un bucle de workflow local completo y controles de política para equipos que deben quedarse en modo solo planificación en local. No crea repositorios remotos, no transporta credenciales SaaS ni aprovisiona un runner externo; sí aporta un contrato de paquete de evidencia portable. Los módulos opcionales bajo `experiments/` (workflow runner Stage0–5, local agent dispatch L0–L4) **se incluyen en el wheel de `dyro`** y están disponibles tras instalar (`dyro dispatch …`, `import experiments…`). Siguen siendo **opcionales frente a Core**: no sustituyen gates, review, signoff ni merge; el runtime semántico sigue en Stage5 `NOT_READY` para producción—ver ADRs en `docs/adr/`. Los merges multi-repo locales se preflightan y recuperan como una operación; los servidores Git remotos no ofrecen push atómico multi-repo, por lo que un push parcial se registra para recuperación. El merge automático requiere permiso en el manifiesto de tarea y en la política local. [MIT License](LICENSE) y [`dyro` en PyPI](https://pypi.org/project/dyro/).

@@ -228,7 +228,7 @@ flowchart TB
   Host -->|"explicit dyro commands"| Dyro
 ```
 
-설치된 `dyro` 패키지에 포함되지 않습니다. Dispatch 결과는 권고이며 전달은 Dyro gates/merge를 따릅니다.
+`dyro`와 함께 제공됩니다(`dyro dispatch …`). Dispatch 결과는 권고이며 전달은 Dyro gates/merge를 따릅니다.
 
 ### 멀티 에이전트 시퀀스 (선택 실험)
 
@@ -485,4 +485,4 @@ dyro --dry-run task run API-101
 
 ## 현재 경계
 
-DyroEngineeringFlow는 완전한 로컬 워크플로 루프와, 더 엄격한 팀이 로컬에서 계획 전용 모드를 유지하도록 하는 정책 제어를 제공합니다. 원격 저장소를 만들거나 SaaS 자격 증명을 실어 보내거나 외부 runner를 프로비저닝하지 않으며, 이식 가능한 증거 패키지 계약은 제공합니다. `experiments/` 아래 선택 실험(외부 workflow runner Stage0–5, local agent dispatch L0–L4)은 설치된 `dyro` 패키지에 **포함되지 않습니다**—`docs/adr/` 참고. 로컬 다중 저장소 merge는 하나의 작업으로 사전 점검·복구됩니다. 원격 Git 서버는 원자적 교차 저장소 push를 제공하지 않으므로 부분 push 실패는 복구를 위해 기록됩니다. 자동 merge는 작업 매니페스트와 로컬 정책 모두의 허가가 필요합니다. [MIT License](LICENSE) 및 [PyPI `dyro`](https://pypi.org/project/dyro/).
+DyroEngineeringFlow는 완전한 로컬 워크플로 루프와, 더 엄격한 팀이 로컬에서 계획 전용 모드를 유지하도록 하는 정책 제어를 제공합니다. 원격 저장소를 만들거나 SaaS 자격 증명을 실어 보내거나 외부 runner를 프로비저닝하지 않으며, 이식 가능한 증거 패키지 계약은 제공합니다. `experiments/` 아래 선택 모듈(외부 workflow runner Stage0–5, local agent dispatch L0–L4)은 **`dyro` wheel에 포함**되어 설치 후 사용할 수 있습니다(`dyro dispatch …`, `import experiments…`). Core 대비 **선택 면**이며 gates/review/signoff/merge를 대체하지 않고, semantic runtime은 생산 Stage5 `NOT_READY`입니다—`docs/adr/` 참고. 로컬 다중 저장소 merge는 하나의 작업으로 사전 점검·복구됩니다. 원격 Git 서버는 원자적 교차 저장소 push를 제공하지 않으므로 부분 push 실패는 복구를 위해 기록됩니다. 자동 merge는 작업 매니페스트와 로컬 정책 모두의 허가가 필요합니다. [MIT License](LICENSE) 및 [PyPI `dyro`](https://pypi.org/project/dyro/).

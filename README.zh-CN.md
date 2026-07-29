@@ -228,7 +228,7 @@ flowchart TB
   Host -->|"显式 dyro 命令"| Dyro
 ```
 
-**不进**已安装 `dyro` 包。Dispatch 结果仅为建议；交付仍走 Dyro gates/merge。见 `experiments/local_agent_dispatch/` 与 `docs/agent-orchestration-discipline.md`。
+随 `dyro` 安装分发（`dyro dispatch …`）。Dispatch 结果仅为建议；交付仍走 Dyro gates/merge。见 `docs/agent-orchestration-discipline.md`。
 
 ### 多智能体时序（可选实验）
 
@@ -476,6 +476,7 @@ dyro --dry-run task run API-101
 | `task claim` / `task evidence build/execution/review` | 供隔离执行器一次性领取任务、构建/导入可移植执行证据包，并导入与回执绑定的复核证据。 |
 | `task merge` | 将已复核的任务分支合入所属开发线。 |
 | `task loop/daemon/stats/decisions` | 受控批处理、调度、台账报表和决策门禁。 |
+| `dispatch` | 可选本地多 Agent 派发（L0–L4）；仅建议，不替代 gates/merge。 |
 
 实现细节见[架构与 Profile 契约](docs/architecture.md)、[既有控制面迁移指南](docs/migrating-existing-control-planes.md)，以及维护者用的 [PyPI 发布说明](docs/publishing.md)。
 
@@ -485,4 +486,4 @@ README 提供英语、简体中文、韩语、西班牙语、法语、德语、�
 
 ## 当前边界
 
-DyroEngineeringFlow 已具备完整的本地工作流闭环，以及让高保障团队在本机保持“仅计划”模式的策略控制。它不创建远端仓库、不携带 SaaS 凭证，也不负责供给外部 runner；但内置可移植证据包的构建与校验契约。`experiments/` 下的可选实验（外部 workflow runner Stage0–5、本地 agent dispatch L0–L4）**不属于**已安装的 `dyro` 包——见 `docs/adr/`。本地多仓 merge 会统一预检并在失败时恢复；不同 Git 远端无法提供原子跨仓 push，因此部分推送失败会写入台账等待恢复。自动 merge 需要任务清单与本地策略双重许可。本项目采用 [MIT License](LICENSE)，并已发布为 [PyPI `dyro`](https://pypi.org/project/dyro/) 包。
+DyroEngineeringFlow 已具备完整的本地工作流闭环，以及让高保障团队在本机保持“仅计划”模式的策略控制。它不创建远端仓库、不携带 SaaS 凭证，也不负责供给外部 runner；但内置可移植证据包的构建与校验契约。`experiments/` 下的可选能力（外部 workflow runner Stage0–5、本地 agent dispatch L0–L4）**随 `dyro` 安装包一并分发**（`dyro dispatch …`、`import experiments…`）。它们相对 Core 仍是**可选面**：不替代 gates / 复核 / signoff / merge；语义运行时路径生产仍为 Stage5 `NOT_READY`——见 `docs/adr/`。本地多仓 merge 会统一预检并在失败时恢复；不同 Git 远端无法提供原子跨仓 push，因此部分推送失败会写入台账等待恢复。自动 merge 需要任务清单与本地策略双重许可。本项目采用 [MIT License](LICENSE)，并已发布为 [PyPI `dyro`](https://pypi.org/project/dyro/) 包。

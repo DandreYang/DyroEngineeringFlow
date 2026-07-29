@@ -1,4 +1,4 @@
-"""CLI for local agent dispatch (not installed as dyro subcommand)."""
+"""CLI for local agent dispatch (also exposed as ``dyro dispatch``)."""
 
 from __future__ import annotations
 

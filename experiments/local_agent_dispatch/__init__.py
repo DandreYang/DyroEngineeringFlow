@@ -1,5 +1,5 @@
-"""Removable first-party local agent dispatch contracts (ADR-0002, L0).
+"""First-party local agent dispatch (ADR-0002, L0–L4).
 
-Not part of the installed ``dyro`` package. Implements task contract validation,
-context secret guarding, and evidence locator verification only.
+Shipped with the ``dyro`` package (``dyro dispatch`` / ``python -m experiments.local_agent_dispatch``).
+Dispatch output is advisory: it does not replace Dyro gates, review, signoff, or merge.
 """

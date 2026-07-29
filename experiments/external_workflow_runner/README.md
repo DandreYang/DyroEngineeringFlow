@@ -1,8 +1,10 @@
 # External Workflow Runner
 
-This removable experiment tests the security assumptions for an optional
-external TypeScript workflow runtime. It is not part of the installed `dyro`
-package and does not change Dyro Core.
+This first-party experiment tests the security assumptions for an optional
+external TypeScript workflow runtime. Python modules ship with the `dyro`
+wheel (`import experiments.external_workflow_runner…`) for PoC and tests.
+It does not change Dyro Core delivery control and remains production
+`NOT_READY` (Stage5).
 
 - Stage 0 isolation primitives: [`STAGE0_REPORT.md`](STAGE0_REPORT.md)
 - Stage 1 frozen runtime + Broker IPC: [`stage1/STAGE1_REPORT.md`](stage1/STAGE1_REPORT.md)

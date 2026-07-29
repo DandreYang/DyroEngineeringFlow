@@ -110,7 +110,7 @@ docs/reviews/YYYY-MM-DD-<topic>-adversarial-board.md
 | --- | --- |
 | 开发者侧、订阅 CLI、可选 | 任务内固定 TS bundle、Docker 隔离 |
 | 结论建议性 | envelope fail-closed |
-| 不进 `dyro` 安装包 | 实验目录可移除，仍不进 Core |
+| 随 `dyro` 安装、相对 Core 可选 | 可 `import` / `dyro dispatch`；仍不替代 gates/merge |
 | 可 patch 交付，不 merge | dual cleanup 后才可 pack/dry-run |
 
 两者都 **禁止** 把 Agent 自述升级为 gate。

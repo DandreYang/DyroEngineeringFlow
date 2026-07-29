@@ -34,7 +34,7 @@ DyroEngineeringFlow 是跨仓库工程交付控制面。它负责开发线、任
 | 默认 Agent | **无**；必须注入 Broker 后端 |
 | 凭证 | 运行时不读取 `process.env` 中的密钥 |
 | 身份 | 对 `ts_runtime/` 树做 content-hash 锁定 |
-| 产品边界 | 仅 experiment vendor，不进 `dyro` 安装包 |
+| 产品边界 | experiment 模块随 `dyro` wheel 分发；不替代 Core 交付控制，生产 `NOT_READY` |
 
 ## 后果
 

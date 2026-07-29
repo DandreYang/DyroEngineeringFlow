@@ -228,7 +228,7 @@ flowchart TB
   Host -->|"explicit dyro commands"| Dyro
 ```
 
-Nicht Teil des installierten `dyro`-Pakets. Dispatch nur beratend.
+Im `dyro`-Wheel enthalten (`dyro dispatch …`). Dispatch nur beratend; Delivery weiter über Dyro gates/merge.
 
 ### Multi-Agent-Sequenz (optionales Experiment)
 
@@ -485,4 +485,4 @@ Dieses README wird in Englisch, vereinfachtem Chinesisch, Koreanisch, Spanisch, 
 
 ## Aktuelle Grenzen
 
-DyroEngineeringFlow bietet eine vollständige lokale Workflow-Schleife und Policy-Steuerung für strengere Teams im reinen Planungsmodus. Es erzeugt keine Remote-Repositories, transportiert keine SaaS-Credentials und provisioniert keinen externen Runner; es liefert einen portablen Evidence-Paket-Vertrag. Optionale Experimente unter `experiments/` (Workflow-Runner Stage0–5, local agent dispatch L0–L4) sind **nicht** Teil des installierten `dyro`-Pakets—siehe ADRs unter `docs/adr/`. Lokale Multi-Repo-Merges werden als eine Operation vorgeprüft und wiederhergestellt; Remote-Git-Server bieten keinen atomaren Multi-Repo-Push, daher wird Teil-Push-Fehler protokolliert. Automatischer Merge braucht Erlaubnis in Task-Manifest und lokaler Policy. [MIT License](LICENSE) und [`dyro` auf PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow bietet eine vollständige lokale Workflow-Schleife und Policy-Steuerung für strengere Teams im reinen Planungsmodus. Es erzeugt keine Remote-Repositories, transportiert keine SaaS-Credentials und provisioniert keinen externen Runner; es liefert einen portablen Evidence-Paket-Vertrag. Optionale Module unter `experiments/` (Workflow-Runner Stage0–5, local agent dispatch L0–L4) **liegen im `dyro`-Wheel** und sind nach der Installation nutzbar (`dyro dispatch …`, `import experiments…`). Sie bleiben **optional gegenüber Core**: sie ersetzen weder Gates noch Review, Signoff oder Merge; der Semantic Runtime ist in Produktion weiterhin Stage5 `NOT_READY`—siehe ADRs unter `docs/adr/`. Lokale Multi-Repo-Merges werden als eine Operation vorgeprüft und wiederhergestellt; Remote-Git-Server bieten keinen atomaren Multi-Repo-Push, daher wird Teil-Push-Fehler protokolliert. Automatischer Merge braucht Erlaubnis in Task-Manifest und lokaler Policy. [MIT License](LICENSE) und [`dyro` auf PyPI](https://pypi.org/project/dyro/).

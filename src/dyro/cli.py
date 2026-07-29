@@ -1007,6 +1007,13 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(parser)
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # Real handling is early-exit in main(); this documents the command in --help.
+    sub.add_parser(
+        "dispatch",
+        help="可选本地多 Agent 派发（L0–L4；不替代 gates/merge）。用法：dyro dispatch <subcommand> …",
+        add_help=False,
+    )
+
     init = sub.add_parser("init", help="初始化工作区配置")
     init.add_argument("path", nargs="?", default=".")
     init.add_argument("--name", default="my-workspace")
@@ -1332,6 +1339,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    import sys
+
+    # Local multi-agent dispatch ships in the dyro wheel (optional product surface).
+    # Forward remaining args so `dyro dispatch --help` matches the module CLI.
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "dispatch":
+        from experiments.local_agent_dispatch.cli import main as dispatch_main
+
+        raise SystemExit(dispatch_main(raw[1:]))
+
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
