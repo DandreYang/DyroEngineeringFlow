@@ -152,6 +152,11 @@ class Stage1Supervisor:
                     "DYRO_BROKER_HOST": "127.0.0.1",
                     "DYRO_BROKER_PORT": str(broker.port),
                     "DYRO_CANONICAL_INPUT_PATH": "/run/dyro/canonical-input.json",
+                    # Read-only rootfs: force Bun caches onto the tmpfs.
+                    "HOME": "/tmp",
+                    "TMPDIR": "/tmp",
+                    "BUN_INSTALL_CACHE_DIR": "/tmp/bun-cache",
+                    "XDG_CACHE_HOME": "/tmp/xdg-cache",
                 },
             )
             stage0 = Stage0Supervisor(
@@ -168,7 +173,8 @@ class Stage1Supervisor:
             )
             key_during = EXECUTION_KEY_ENV in os.environ
             supervised = stage0.execute(
-                ["bun", "run", "/opt/workflow/workflow.ts"],
+                # Prefer direct file execution over `bun run` (package-script mode).
+                ["bun", "/opt/workflow/workflow.ts"],
                 timeout_seconds=self.config.workflow_timeout_seconds,
             )
             cleanup_verified = supervised.process.cleanup_verified

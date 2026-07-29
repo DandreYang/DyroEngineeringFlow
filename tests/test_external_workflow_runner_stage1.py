@@ -86,13 +86,11 @@ class RuntimeInstallTests(unittest.TestCase):
         )
 
     def test_install_verifies_integrity_and_writes_frozen_lock(self) -> None:
-        source = _tarball_source()
-        if source is None:
-            self.skipTest("cached runtime tarball is unavailable offline")
+        # Prefer a local cache when present; otherwise download (CI has network).
         result = install_verified_runtime(
             self.root / "install",
             runtime_lock_path=RUNTIME_LOCK,
-            tarball_source=source,
+            tarball_source=_tarball_source(),
         )
         self.assertEqual(result.integrity, EXPECTED_INTEGRITY)
         self.assertTrue((result.package_root / "package.json").is_file())
@@ -111,7 +109,13 @@ class RuntimeInstallTests(unittest.TestCase):
     def test_install_rejects_tampered_tarball(self) -> None:
         source = _tarball_source()
         if source is None:
-            self.skipTest("cached runtime tarball is unavailable offline")
+            # Build a verified install once, then tamper a copy of its tarball.
+            good = install_verified_runtime(
+                self.root / "good-install",
+                runtime_lock_path=RUNTIME_LOCK,
+                tarball_source=None,
+            )
+            source = good.tarball_path
         bad = self.root / "bad.tgz"
         bad.write_bytes(source.read_bytes() + b"\x00")
         with self.assertRaisesRegex(Stage0ValidationError, "integrity"):

@@ -110,7 +110,10 @@ const server = createServer((socket) => {
 });
 
 server.listen(port, host, () => {
-  process.stdout.write(`broker-ready ${host}:${port}\n`);
+  // Write readiness to both streams so docker logs always surfaces it.
+  const line = `broker-ready ${host}:${port}\n`;
+  process.stdout.write(line);
+  process.stderr.write(line);
 });
 
 function shutdown(): void {

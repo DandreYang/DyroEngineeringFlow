@@ -103,8 +103,8 @@ jobs:
             echo "Stage1 Docker tests were skipped; isolation was not exercised." >&2
             exit 1
           fi
-          if grep -F "cached runtime tarball is unavailable offline" /tmp/stage1-tests.log; then
-            echo "Stage1 offline tarball skips are not allowed in CI." >&2
+          if grep -E '^(FAILED|ERROR:)' /tmp/stage1-tests.log; then
+            echo "Stage1 tests reported failures." >&2
             exit 1
           fi
           if ! grep -E '^OK( |$)' /tmp/stage1-tests.log; then
