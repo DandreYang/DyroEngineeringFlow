@@ -1,6 +1,6 @@
 # 可选本地 Agent 派发 — 完整设计（first-party）
 
-状态：设计已接受（ADR-0002）  
+状态：设计已接受（ADR-0002）；**L0–L4 实现于 `experiments/local_agent_dispatch/`**  
 范围：开发者侧、可移除实验；**非** Dyro Core  
 日期：2026-07-30
 
@@ -244,11 +244,11 @@ Stage5 dry-run 的 pack 核验与本设计的 locator 核验可共享库思想�
 
 | 阶段 | 交付 | 验收 |
 | --- | --- | --- |
-| **L0**（本 PR） | 纪律文档 + ADR + 本设计 + `TaskContract`/`ContextGuard`/`LocatorVerify` 单测 | 单测绿 |
-| **L1** | RunStore 落盘 + 进程身份租约 + 影子目录 | 单测 + 本地手工 |
-| **L2** | 1–2 个 BackendAdapter + CLI `dispatch run/result` | 本机已登录 CLI |
-| **L3** | panel、动态 skill 渲染、GC | doctor 体检 |
-| **L4** | 与 Stage5 pack 可选桥接（仅 dry-run） | 仍 NOT production |
+| **L0** | 纪律文档 + ADR + 本设计 + `TaskContract`/`ContextGuard`/`LocatorVerify` | 单测绿 |
+| **L1** | `RunStore` + 双层槽位租约 + strict 影子接入 | 单测绿 |
+| **L2** | `echo`/`codex`/`claude` 适配器 + CLI `run`/`result` | 单测（echo）+ 本机可选真 CLI |
+| **L3** | `panel`、skill 渲染、routes、`gc` | 单测绿 |
+| **L4** | `stage5-bridge` dry-run（不进 Core） | 模块导入 + CLI |
 
 ## 15. 测试矩阵（L0）
 

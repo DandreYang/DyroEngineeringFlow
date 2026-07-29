@@ -7,6 +7,7 @@
 
 - [ADR-0002：可选本地 Agent 派发与结果密封](adr/0002-optional-local-agent-dispatch.md)
 - [可选本地 Agent 派发设计](designs/optional-local-agent-dispatch.md)
+- [实现：`experiments/local_agent_dispatch/`](../experiments/local_agent_dispatch/README.md)（L0–L4 CLI）
 - [ADR-0001：可选外部语义运行时](adr/0001-optional-external-semantic-runtime.md)
 
 ## 1. 分层：Harness / 记录 / 控制面
