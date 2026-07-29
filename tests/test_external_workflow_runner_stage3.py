@@ -113,8 +113,9 @@ class Stage3EndToEndTests(unittest.TestCase):
                 runner_id="stage3-runner",
                 generation=1,
                 execution_key_id="exec-key-stage3",
-                issued_at=now - 1.0,
-                expires_at=now + 8.0,
+                # Half-life ~1s into the run so renewal loop fires during phase1 hold.
+                issued_at=now - 4.0,
+                expires_at=now + 6.0,
             )
         )
         result = Stage3Supervisor(
