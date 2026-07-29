@@ -41,13 +41,72 @@ jobs:
         run: uv sync --locked --all-extras --dev
 
       - name: Lint
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests experiments
 
       - name: Run tests
         run: uv run python -m unittest discover -s tests -t . -v
 
       - name: Compile source
-        run: uv run python -m compileall -q src tests
+        run: uv run python -m compileall -q src tests experiments
+
+  stage0-isolation:
+    name: Stage0 Docker isolation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked project
+        run: uv sync --locked --all-extras --dev
+
+      - name: Pull Stage0 runtime image from lock
+        run: |
+          set -euo pipefail
+          image="$(uv run python -c "import json; from pathlib import Path; print(json.loads(Path('experiments/external_workflow_runner/runtime-lock.json').read_text())['runtime']['container_image'])")"
+          echo "Pulling pinned image: ${image}"
+          docker pull "${image}"
+          docker image inspect "${image}" >/dev/null
+
+      - name: Run Stage0 tests with Docker isolation
+        run: |
+          set -euo pipefail
+          # Fail the job if any Stage0 Docker test is still skipped for a missing image.
+          uv run python -m unittest tests.test_external_workflow_runner_stage0 -v 2>&1 | tee /tmp/stage0-tests.log
+          if grep -F "skipped 'requires local image" /tmp/stage0-tests.log; then
+            echo "Stage0 Docker tests were skipped; isolation was not exercised." >&2
+            exit 1
+          fi
+          if ! grep -E '^OK( |$)' /tmp/stage0-tests.log; then
+            echo "Stage0 unittest did not report OK." >&2
+            exit 1
+          fi
+
+      - name: Verify no residual Stage0 containers
+        if: always()
+        run: |
+          set -euo pipefail
+          leftover="$(docker ps --all --filter name=dyro-stage0 --format '{{.Names}} {{.Status}}' || true)"
+          if [[ -n "${leftover}" ]]; then
+            echo "Residual Stage0 containers found:" >&2
+            echo "${leftover}" >&2
+            docker ps --all --filter name=dyro-stage0
+            exit 1
+          fi
+          echo "No dyro-stage0 containers remain."
 
   typescript-interop:
     name: TypeScript protocol interoperability
