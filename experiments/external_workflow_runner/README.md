@@ -9,6 +9,7 @@ package and does not change Dyro Core.
 - Stage 2 provider raw isolation + claim renewal: [`stage2/STAGE2_REPORT.md`](stage2/STAGE2_REPORT.md)
 - Stage 3 argv-cli provider + claim matrix: [`stage3/STAGE3_REPORT.md`](stage3/STAGE3_REPORT.md)
 - Stage 4 pinned provider + dual cleanup + evidence pack: [`stage4/STAGE4_REPORT.md`](stage4/STAGE4_REPORT.md)
+- Stage 5 host provider + dry-run + PoC closeout: [`stage5/STAGE5_REPORT.md`](stage5/STAGE5_REPORT.md) · [`stage5/POC_EVALUATION.md`](stage5/POC_EVALUATION.md)
 
 ## Current scope
 
