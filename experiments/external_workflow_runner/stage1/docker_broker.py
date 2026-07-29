@@ -128,9 +128,16 @@ class DockerBrokerStack:
                 f"DYRO_BROKER_MODEL={model}",
                 "--env",
                 "DYRO_BROKER_TELEMETRY_PATH=/run/dyro/broker-telemetry.jsonl",
+                "--env",
+                "HOME=/tmp",
+                "--env",
+                "TMPDIR=/tmp",
+                "--env",
+                "BUN_INSTALL_CACHE_DIR=/tmp/bun-cache",
+                "--env",
+                "XDG_CACHE_HOME=/tmp/xdg-cache",
                 BUN_IMAGE,
                 "bun",
-                "run",
                 "/opt/workflow/broker_server.ts",
             ]
         )
