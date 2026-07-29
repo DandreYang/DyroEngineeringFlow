@@ -1,6 +1,6 @@
 # DyroEngineeringFlow
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Português (Brasil)](README.pt-BR.md) | [Русский](README.ru.md)
 
 **DyroEngineeringFlow · `dyro` CLI** is a local-first engineering automation and delivery control platform for multi-repository teams. It brings development lines, Git worktrees, agent launchers, task gates, independent review, and merge audit into versioned workspace configuration.
 
@@ -227,7 +227,7 @@ See the [architecture and Profile contract](docs/architecture.md) and the [exist
 
 ## Languages and documentation
 
-This README is maintained in English, Simplified Chinese, Japanese, Korean, and Spanish. Commands, configuration keys, directory names, and safety rules are deliberately identical across translations. The current CLI messages and extended technical guides are primarily Chinese; multilingual README support does not claim that the runtime has language switching yet.
+This README is maintained in English, Simplified Chinese, Korean, Spanish, French, German, Brazilian Portuguese, and Russian. Commands, configuration keys, directory names, and safety rules are deliberately identical across translations. The current CLI messages and extended technical guides are primarily Chinese; multilingual README support does not claim that the runtime has language switching yet.
 
 ## Current boundaries
 

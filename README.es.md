@@ -1,6 +1,6 @@
 # DyroEngineeringFlow
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Português (Brasil)](README.pt-BR.md) | [Русский](README.ru.md)
 
 **DyroEngineeringFlow · `dyro` CLI** es una plataforma local-first de automatización de ingeniería y control de entrega para equipos con varios repositorios. Unifica líneas de desarrollo, Git worktrees, inicio de agentes, puertas de calidad, revisión independiente y auditoría de merge en una configuración de espacio de trabajo versionable.
 
@@ -137,6 +137,6 @@ dyro --dry-run task run API-101
 
 ## Idiomas y alcance actual
 
-El README se mantiene en inglés, chino simplificado, japonés, coreano y español. Los comandos, claves de configuración, nombres de directorio y reglas de seguridad son iguales en todas las traducciones. Los mensajes de la CLI y las guías técnicas extensas siguen siendo principalmente chinos. El README multilingüe no implica todavía cambio de idioma en tiempo de ejecución.
+El README se mantiene en inglés, chino simplificado, coreano, español, francés, alemán, portugués de Brasil y ruso. Los comandos, claves de configuración, nombres de directorio y reglas de seguridad son iguales en todas las traducciones. Los mensajes de la CLI y las guías técnicas extensas siguen siendo principalmente chinos. El README multilingüe no implica todavía cambio de idioma en tiempo de ejecución.
 
 DyroEngineeringFlow proporciona un ciclo local completo y controles de política para mantener a equipos más estrictos en modo local de solo planificación. No crea repositorios remotos, no incluye credenciales SaaS ni aprovisiona un runner externo; sí ofrece el contrato para crear y validar paquetes de evidencia portátiles. Se distribuye con la [licencia MIT](LICENSE) y como [`dyro` en PyPI](https://pypi.org/project/dyro/).

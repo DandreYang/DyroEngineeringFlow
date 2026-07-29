@@ -1,6 +1,6 @@
 # DyroEngineeringFlow
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Português (Brasil)](README.pt-BR.md) | [Русский](README.ru.md)
 
 **DyroEngineeringFlow · `dyro` CLI** 是面向多仓团队的本地优先工程自动化与交付控制平台。它将开发线、Git worktree、Agent 启动、任务门禁、独立复核和合并审计统一到可版本化的工作区配置中。
 
@@ -144,7 +144,7 @@ dyro --dry-run task run API-101
 
 ## 语言与文档
 
-README 提供英语、简体中文、日语、韩语和西语版本。所有译本共享同一组命令、配置键、目录名和安全规则。当前 CLI 提示与扩展技术文档仍主要为中文；README 多语言支持不代表运行时已支持切换语言。
+README 提供英语、简体中文、韩语和西语版本。所有译本共享同一组命令、配置键、目录名和安全规则。当前 CLI 提示与扩展技术文档仍主要为中文；README 多语言支持不代表运行时已支持切换语言。
 
 ## 当前边界
 

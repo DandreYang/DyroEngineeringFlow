@@ -1,6 +1,6 @@
 # DyroEngineeringFlow
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Português (Brasil)](README.pt-BR.md) | [Русский](README.ru.md)
 
 **DyroEngineeringFlow · `dyro` CLI** 는 여러 저장소를 사용하는 팀을 위한 로컬 우선 엔지니어링 자동화 및 배포 제어 플랫폼입니다. 개발 라인, Git worktree, Agent 실행, 작업 게이트, 독립 검토, 병합 감사를 버전 관리 가능한 워크스페이스 설정으로 통합합니다.
 
@@ -137,6 +137,6 @@ dyro --dry-run task run API-101
 
 ## 언어 및 현재 범위
 
-README는 영어, 간체 중국어, 일본어, 한국어, 스페인어를 제공합니다. 명령, 구성 키, 디렉터리 이름, 안전 규칙은 모든 번역에서 동일합니다. 현재 CLI 메시지와 상세 기술 문서는 주로 중국어입니다. README의 다국어 지원은 런타임 언어 전환을 의미하지 않습니다.
+README는 영어, 간체 중국어, 한국어, 스페인어, 프랑스어, 독일어, 브라질 포르투갈어, 러시아어로 제공됩니다. 명령, 설정 키, 디렉터리 이름, 안전 규칙은 모든 번역에서 동일합니다. 현재 CLI 메시지와 상세 기술 문서는 주로 중국어입니다. 다국어 README는 런타임 언어 전환을 의미하지 않습니다.
 
 DyroEngineeringFlow는 로컬 워크플로를 완결하고 엄격한 팀을 로컬 계획 전용 모드로 유지하는 정책 제어를 제공합니다. remote 저장소 생성, SaaS 자격 증명, 외부 runner 공급은 포함하지 않지만 이식 가능한 증거 패키지 생성/검증 계약을 제공합니다. [MIT License](LICENSE)로 제공되며 [PyPI의 `dyro`](https://pypi.org/project/dyro/)로 배포되었습니다.
