@@ -146,15 +146,32 @@ jobs:
             exit 1
           fi
 
+      - name: Run Stage4 tests with Docker isolation
+        run: |
+          set -euo pipefail
+          uv run python -m unittest tests.test_external_workflow_runner_stage4 -v 2>&1 | tee /tmp/stage4-tests.log
+          if grep -F "skipped 'requires local image" /tmp/stage4-tests.log; then
+            echo "Stage4 Docker tests were skipped; isolation was not exercised." >&2
+            exit 1
+          fi
+          if grep -E '^(FAILED|ERROR:)' /tmp/stage4-tests.log; then
+            echo "Stage4 tests reported failures." >&2
+            exit 1
+          fi
+          if ! grep -E '^OK( |$)' /tmp/stage4-tests.log; then
+            echo "Stage4 unittest did not report OK." >&2
+            exit 1
+          fi
+
       - name: Verify no residual experiment containers
         if: always()
         run: |
           set -euo pipefail
-          leftover="$(docker ps --all --filter name=dyro-stage0 --filter name=dyro-s1 --filter name=dyro-s2 --filter name=dyro-s3 --filter name=dyro-stage1 --filter name=dyro-stage2 --filter name=dyro-stage3 --format '{{.Names}} {{.Status}}' || true)"
+          leftover="$(docker ps --all --filter name=dyro-stage0 --filter name=dyro-s1 --filter name=dyro-s2 --filter name=dyro-s3 --filter name=dyro-s4 --filter name=dyro-stage1 --filter name=dyro-stage2 --filter name=dyro-stage3 --filter name=dyro-stage4 --format '{{.Names}} {{.Status}}' || true)"
           if [[ -n "${leftover}" ]]; then
             echo "Residual experiment containers found:" >&2
             echo "${leftover}" >&2
-            docker ps --all --filter name=dyro-stage0 --filter name=dyro-s1 --filter name=dyro-s2 --filter name=dyro-s3 --filter name=dyro-stage1 --filter name=dyro-stage2 --filter name=dyro-stage3
+            docker ps --all --filter name=dyro-stage0 --filter name=dyro-s1 --filter name=dyro-s2 --filter name=dyro-s3 --filter name=dyro-s4 --filter name=dyro-stage1 --filter name=dyro-stage2 --filter name=dyro-stage3 --filter name=dyro-stage4
             exit 1
           fi
           echo "No dyro-stage residual containers remain."

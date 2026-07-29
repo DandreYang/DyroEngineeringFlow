@@ -57,12 +57,14 @@ vendor/dyro-semantic-flow/
 - 验证 claim、bundle、canonical input；
 - 监督 Sandbox / Broker 清理；
 - 清理完成前不得挂载 execution key；
-- 本 PoC 实验阶段不构建 evidence。
+- Stage4 起可在 **双重清理验证通过后** 打包本地实验 evidence pack；
+  仍不 signoff / merge / push，也不导入 Dyro Core。
 
 ## 验收映射（摘要）
 
-隔离、结果 envelope、产物边界、claim 续租、raw 销毁等项由
-`experiments/external_workflow_runner` Stage0–3 测试与报告覆盖。
+隔离、结果 envelope、产物边界、claim 续租、raw 销毁、provider 钉扎、
+双重清理与清理后 evidence pack 等项由
+`experiments/external_workflow_runner` Stage0–4 测试与报告覆盖。
 
 ## 停止条件
 
