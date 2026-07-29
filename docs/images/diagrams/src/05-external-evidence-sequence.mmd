@@ -1,0 +1,18 @@
+sequenceDiagram
+  actor Ctrl as 控制面操作者
+  participant CLI as dyro 控制面
+  participant Run as 隔离 Runner
+  participant Rev as 独立复核方
+
+  Ctrl->>CLI: task claim --by runner-id
+  CLI-->>Run: claim 生效 · 冲突组占用
+  Run->>Run: 在隔离区执行 · 跑声明 gates
+  Run->>CLI: evidence build → ZIP
+  Ctrl->>CLI: evidence execution --bundle
+  CLI->>CLI: 校验 ZIP · heads · gates · 签名策略
+  Rev->>CLI: evidence review / review-build
+  CLI->>CLI: 绑定 receipt + task-heads
+  opt require_external_signoff
+    Ctrl->>CLI: task signoff --by approver
+  end
+  Ctrl->>CLI: task merge --yes

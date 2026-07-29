@@ -1,0 +1,25 @@
+flowchart TB
+  subgraph Profile["Project Profile（团队提供）"]
+    P1["repositories / layout / 基线"]
+    P2["Agent adapters argv"]
+    P3["gates / 回执模板 / 策略"]
+  end
+
+  subgraph Core["Dyro Core · dyro CLI（机制）"]
+    W["workspace<br/>anchors · lines · doctor"]
+    L["launch<br/>安全 argv 模板"]
+    D["dispatch<br/>DAG · claim · 状态机"]
+    V["verify<br/>gates · ledger"]
+    M["merge<br/>预检 · 恢复 · push 策略"]
+  end
+
+  subgraph Runtime["工作区运行态 .dyro/"]
+    R1["tasks / lines / changes"]
+    R2["evidence · review · ledger"]
+  end
+
+  Profile --> Core
+  Core --> Runtime
+  Human["工程师 / 发布负责人"] --> Core
+  Agent["本机 Agent CLI"] --> L
+  Runner["隔离 Runner（可选）"] -.->|"evidence ZIP"| D

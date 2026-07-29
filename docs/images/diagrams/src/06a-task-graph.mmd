@@ -1,0 +1,15 @@
+flowchart LR
+  subgraph Nodes
+    T1["Task A"]
+    T2["Task B"]
+    T3["Task C"]
+    D1["Decision<br/>blocked_on"]
+  end
+
+  T1 -->|depends_on| T2
+  T2 -->|depends_on| T3
+  T3 --> D1
+
+  CG["conflict_group: db-migrate<br/>同一 wave 互斥"]
+  T1 -.-> CG
+  T2 -.-> CG

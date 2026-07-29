@@ -1,0 +1,22 @@
+flowchart TB
+  WS["workspace 根<br/>dyro.toml"]
+  WS --> REPO["repositories/"]
+  WS --> DYRO[".dyro/"]
+  WS --> VER["versions/ 或 layout.lines"]
+  WS --> WT["worktrees/ 或 layout.tasks"]
+
+  REPO --> API["services/api · Git anchor"]
+  REPO --> WEB["services/web · Git anchor"]
+
+  DYRO --> LINES["lines/&lt;id&gt;.toml"]
+  DYRO --> TASKS["tasks/&lt;id&gt;/"]
+  DYRO --> CHG["changes/ · decisions · ledger"]
+
+  TASKS --> TT["task.toml · handoff.md"]
+  TASKS --> EV["evidence-imports/ · review.md"]
+
+  WT --> TAPI["task/API-101/services/api"]
+  WT --> TWEB["task/API-101/services/web"]
+
+  VER --> LAPI["release-…/services/api worktree"]
+  VER --> LWEB["release-…/services/web worktree"]
