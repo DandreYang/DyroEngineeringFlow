@@ -31,10 +31,18 @@ _CLEANUP_LABEL = "com.dyro.external-workflow-runner.cleanup-token"
 _ALLOWED_ENVIRONMENT = {
     "DYRO_WORKFLOW_RUN_ID",
     "DYRO_RESULT_PATH",
+    "DYRO_BROKER_HOST",
+    "DYRO_BROKER_PORT",
+    "DYRO_CANONICAL_INPUT_PATH",
+    "HOME",
+    "TMPDIR",
+    "BUN_INSTALL_CACHE_DIR",
+    "XDG_CACHE_HOME",
     "LANG",
     "LC_ALL",
     "TZ",
 }
+_NETWORK_MODE = re.compile(r"^(?:none|container:[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$")
 
 
 def _docker_environment() -> dict[str, str]:
@@ -79,6 +87,8 @@ class DockerSandboxConfig:
     tmpfs_size: str = "64m"
     max_stdout_bytes: int = 1024 * 1024
     max_stderr_bytes: int = 1024 * 1024
+    ipc_root: Path | None = None
+    network_mode: str = "none"
     cleanup_token: str = field(
         default_factory=lambda: secrets.token_hex(16),
         repr=False,
@@ -94,10 +104,18 @@ class DockerSandboxConfig:
             raise Stage0ValidationError(
                 "Docker image is not the approved Stage 0 runtime"
             )
+        if not _NETWORK_MODE.fullmatch(self.network_mode):
+            raise Stage0ValidationError(
+                "network_mode must be 'none' or container:<name>"
+            )
         object.__setattr__(
             self, "bundle_root", _mount_source(self.bundle_root, "bundle_root")
         )
         object.__setattr__(self, "run_root", _mount_source(self.run_root, "run_root"))
+        if self.ipc_root is not None:
+            object.__setattr__(
+                self, "ipc_root", _mount_source(self.ipc_root, "ipc_root")
+            )
         if not self.worktrees:
             raise Stage0ValidationError("at least one task worktree is required")
         normalized_worktrees: dict[str, Path] = {}
@@ -167,7 +185,7 @@ class DockerSandboxConfig:
             "--label",
             f"{_CLEANUP_LABEL}={self.cleanup_token}",
             "--network",
-            "none",
+            self.network_mode,
             "--read-only",
             "--cap-drop",
             "ALL",
@@ -188,6 +206,13 @@ class DockerSandboxConfig:
             "--mount",
             f"type=bind,src={self.run_root},dst=/run/dyro",
         ]
+        if self.ipc_root is not None:
+            argv.extend(
+                [
+                    "--mount",
+                    f"type=bind,src={self.ipc_root},dst=/run/broker",
+                ]
+            )
         for repository, root in sorted(self.worktrees.items()):
             argv.extend(
                 [

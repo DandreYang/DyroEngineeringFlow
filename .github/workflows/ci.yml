@@ -49,10 +49,10 @@ jobs:
       - name: Compile source
         run: uv run python -m compileall -q src tests experiments
 
-  stage0-isolation:
-    name: Stage0 Docker isolation
+  external-workflow-isolation:
+    name: External workflow Docker isolation
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -73,7 +73,7 @@ jobs:
       - name: Install locked project
         run: uv sync --locked --all-extras --dev
 
-      - name: Pull Stage0 runtime image from lock
+      - name: Pull Stage0/1 runtime image from lock
         run: |
           set -euo pipefail
           image="$(uv run python -c "import json; from pathlib import Path; print(json.loads(Path('experiments/external_workflow_runner/runtime-lock.json').read_text())['runtime']['container_image'])")"
@@ -95,18 +95,35 @@ jobs:
             exit 1
           fi
 
-      - name: Verify no residual Stage0 containers
+      - name: Run Stage1 tests with Docker isolation
+        run: |
+          set -euo pipefail
+          uv run python -m unittest tests.test_external_workflow_runner_stage1 -v 2>&1 | tee /tmp/stage1-tests.log
+          if grep -F "skipped 'requires local image" /tmp/stage1-tests.log; then
+            echo "Stage1 Docker tests were skipped; isolation was not exercised." >&2
+            exit 1
+          fi
+          if grep -E '^(FAILED|ERROR:)' /tmp/stage1-tests.log; then
+            echo "Stage1 tests reported failures." >&2
+            exit 1
+          fi
+          if ! grep -E '^OK( |$)' /tmp/stage1-tests.log; then
+            echo "Stage1 unittest did not report OK." >&2
+            exit 1
+          fi
+
+      - name: Verify no residual experiment containers
         if: always()
         run: |
           set -euo pipefail
-          leftover="$(docker ps --all --filter name=dyro-stage0 --format '{{.Names}} {{.Status}}' || true)"
+          leftover="$(docker ps --all --filter name=dyro-stage0 --filter name=dyro-s1 --filter name=dyro-stage1 --format '{{.Names}} {{.Status}}' || true)"
           if [[ -n "${leftover}" ]]; then
-            echo "Residual Stage0 containers found:" >&2
+            echo "Residual experiment containers found:" >&2
             echo "${leftover}" >&2
-            docker ps --all --filter name=dyro-stage0
+            docker ps --all --filter name=dyro-stage0 --filter name=dyro-s1 --filter name=dyro-stage1
             exit 1
           fi
-          echo "No dyro-stage0 containers remain."
+          echo "No dyro-stage0/dyro-s1/dyro-stage1 containers remain."
 
   typescript-interop:
     name: TypeScript protocol interoperability

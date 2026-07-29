@@ -204,8 +204,12 @@ class Stage0Supervisor:
                 timeout_seconds=timeout_seconds,
             )
             if process.returncode != 0:
+                detail = (process.stderr or process.stdout or "").strip()
+                if len(detail) > 1200:
+                    detail = detail[-1200:]
+                suffix = f": {detail}" if detail else ""
                 raise Stage0ValidationError(
-                    f"Workflow sandbox exited non-zero: {process.returncode}"
+                    f"Workflow sandbox exited non-zero: {process.returncode}{suffix}"
                 )
             envelope = validate_result_envelope(
                 _read_result(
