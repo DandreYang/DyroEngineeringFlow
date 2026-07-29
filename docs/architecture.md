@@ -210,4 +210,4 @@ Ed25519 信任根位于 `.dyro/trust/ed25519/execution/`、`.dyro/trust/ed25519/
 
 未来的 adapter、通知、签名规则、发布平台与审批系统应使用 Python entry point 或独立 Profile 扩展包接入；不要把某个组织的策略加入 core 默认行为。
 
-任务内部的语义工作流运行时也遵守这一边界。外部语义运行时 只能作为可选外部语义运行时，并由 Workflow Sandbox、Agent Broker 与可信 Supervisor / Packager 隔离，不能替代 TaskGraph、gates、证据或交付控制；已接受的架构边界见 [`ADR-0001`](adr/0001-optional-external-semantic-runtime.md)，试点范围与退出条件见 [`外部语义运行时 PoC`](external-semantic-runtime-poc.md)。
+任务内部的语义工作流运行时也遵守这一边界。可选外部语义运行时（first-party `@dyro/semantic-flow`，实验目录承载）必须由 Workflow Sandbox、Agent Broker 与可信 Supervisor / Packager 隔离，不能替代 TaskGraph、gates、证据或交付控制；已接受的架构边界见 [`ADR-0001`](adr/0001-optional-external-semantic-runtime.md)，试点范围与退出条件见 [`外部语义运行时 PoC`](external-semantic-runtime-poc.md)。

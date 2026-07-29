@@ -14,7 +14,7 @@
 | Host | macOS + Colima Docker (local); GitHub Actions ubuntu-latest (CI target) |
 | Python | 3.14 |
 | Bun image | `oven/bun@sha256:478281fdd196871c7e51ba6a820b7803a8ae97042ec86cdbc2e1c6b6626442d9` |
-| Runtime package | `@dyro/semantic-flow@0.2.0` |
+| Runtime | first-party `@dyro/semantic-flow` (content-hashed) |
 | Integrity | `sha512-sJgf79AHIwx67b570lMOuQjpouXepXSlfTeLXNobEubYzcViQZslnqRw2XEvYjF9+N3VUlpy6ID5qziSS1ICBw==` |
 | Source tag / commit | `v0.2.0` / `73c61156197445be4a0fad390e3a1d802f2cda4a` |
 
@@ -22,7 +22,7 @@
 
 | # | Requirement | Stage 1 evidence |
 | --- | --- | --- |
-| 1 | Frozen TS runtime + integrity | `install_verified_runtime()` verifies tarball sha512 against `runtime-lock.json`, vendors package, writes `runtime-package-lock.json` (`transitive_count: 0`) |
+| 1 | First-party TS runtime identity | `package_semantic_flow_runtime()` content-hashes `ts_runtime/`, verifies `runtime-lock.json`, vendors `@dyro/semantic-flow` |
 | 2 | Fixed reviewed bundle | `assemble_stage1_bundle()` copies `bundle_src/{workflow,broker_agent,broker_server}.ts` + vendor; manifest bind |
 | 3 | Narrow Broker IPC in isolation | Docker internal network + shared netns; TCP JSON-line protocol schema in `protocol.py` / TS client |
 | 4 | Fake provider before credentials | `broker_server.ts` returns sanitized fake text only |

@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
-import { parallel } from "./vendor/evaluated-typescript-runtime/src/flow/parallel.ts";
+import { parallelSettled } from "./vendor/dyro-semantic-flow/src/parallel.ts";
 
 type CanonicalInput = {
   schema_version: 1;
@@ -106,7 +106,7 @@ async function main(): Promise<void> {
   const holdMs = Number(process.env.DYRO_STAGE2_HOLD_MS ?? "2500");
   await Bun.sleep(holdMs);
 
-  const results = await parallel(
+  const results = await parallelSettled(
     input.branches.map(
       (branchId, index) => () => analyzeBranch(branchId, input.model, index),
     ),
@@ -114,21 +114,21 @@ async function main(): Promise<void> {
 
   const branches = input.branches.map((branchId, index) => {
     const item = results[index];
-    if (!item) {
+    if (!item || item.status !== "fulfilled") {
       return {
         id: branchId,
         critical: true,
         status: "failed" as const,
-        error_code: "branch_null",
+        error_code: "branch_failed",
         summary: "",
       };
     }
     return {
-      id: item.id,
+      id: item.value.id,
       critical: true,
       status: "success" as const,
       error_code: "",
-      summary: item.summary,
+      summary: item.value.summary,
     };
   });
   const allCriticalOk = branches.every((branch) => branch.status === "success");

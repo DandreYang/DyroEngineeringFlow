@@ -22,7 +22,12 @@ from ..supervisor import Stage0Supervisor, SupervisorConfig, SupervisedResult
 from .canonical import CanonicalInput, expected_branches_map
 from .claim import ClaimLease, ClaimRecord, ClaimStore
 from .docker_broker import DockerBrokerStack
-from .install import EXPECTED_INTEGRITY, IMPLEMENTATION_NAME, PACKAGE_VERSION
+from .package_runtime import (
+    IMPLEMENTATION_NAME,
+    RUNTIME_VERSION,
+    hash_runtime_tree,
+    RUNTIME_SOURCE,
+)
 
 
 EXECUTION_KEY_SENTINEL = "DYRO_EXECUTION_KEY_MATERIAL"
@@ -88,11 +93,11 @@ class Stage1Supervisor:
             or runtime.get("container_image") != BUN_IMAGE
             or runtime.get("container_user") != BUN_USER
             or workflow.get("implementation") != IMPLEMENTATION_NAME
-            or workflow.get("version") != PACKAGE_VERSION
-            or workflow.get("npm_dist_integrity") != EXPECTED_INTEGRITY
+            or workflow.get("version") != RUNTIME_VERSION
+            or workflow.get("content_sha256") != hash_runtime_tree(RUNTIME_SOURCE)
         ):
             raise Stage0ValidationError(
-                "Stage 1 bundle identity is not the approved frozen runtime"
+                "Stage 1 bundle identity is not the approved first-party runtime"
             )
 
     def execute(self) -> Stage1RunResult:

@@ -25,7 +25,6 @@ from experiments.external_workflow_runner.stage3.supervisor import (
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_LOCK = ROOT / "experiments/external_workflow_runner/runtime-lock.json"
-CACHED_TARBALL = Path("/tmp/ewr-tgz/dyro-semantic-flow-0.2.0.tgz")
 _DOCKER_TEMP_DIR = ROOT
 
 
@@ -44,10 +43,6 @@ def _docker_image_available() -> bool:
         ).returncode
         == 0
     )
-
-
-def _tarball_source() -> Path | None:
-    return CACHED_TARBALL if CACHED_TARBALL.is_file() else None
 
 
 class ClaimMatrixTests(unittest.TestCase):
@@ -86,7 +81,6 @@ class Stage3EndToEndTests(unittest.TestCase):
         return assemble_stage3_bundle(
             self.root / "bundle",
             runtime_lock_path=RUNTIME_LOCK,
-            tarball_source=_tarball_source(),
         )
 
     def test_argv_cli_raw_isolation_and_claim_matrix(self) -> None:

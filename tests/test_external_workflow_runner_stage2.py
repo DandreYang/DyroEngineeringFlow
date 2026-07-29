@@ -26,7 +26,6 @@ from experiments.external_workflow_runner.stage2.supervisor import (
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_LOCK = ROOT / "experiments/external_workflow_runner/runtime-lock.json"
-CACHED_TARBALL = Path("/tmp/ewr-tgz/dyro-semantic-flow-0.2.0.tgz")
 _DOCKER_TEMP_DIR = ROOT
 
 
@@ -43,12 +42,6 @@ def _docker_image_available() -> bool:
         stderr=subprocess.DEVNULL,
     )
     return probe.returncode == 0
-
-
-def _tarball_source() -> Path | None:
-    if CACHED_TARBALL.is_file():
-        return CACHED_TARBALL
-    return None
 
 
 class ProtocolVersionTests(unittest.TestCase):
@@ -128,7 +121,6 @@ class Stage2EndToEndTests(unittest.TestCase):
         return assemble_stage2_bundle(
             self.root / "bundle",
             runtime_lock_path=RUNTIME_LOCK,
-            tarball_source=_tarball_source(),
         )
 
     def test_simulated_cli_raw_isolation_and_claim_renewal(self) -> None:

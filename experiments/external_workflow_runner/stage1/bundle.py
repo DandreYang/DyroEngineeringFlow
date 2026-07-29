@@ -1,4 +1,4 @@
-"""Assemble a fixed, reviewed Stage 1 workflow bundle with vendored runtime."""
+"""Assemble Stage 1 bundle with first-party semantic-flow runtime."""
 
 from __future__ import annotations
 
@@ -7,31 +7,29 @@ import shutil
 
 from ..errors import Stage0ValidationError
 from ..manifest import build_bundle_manifest
-from .install import (
-    EXPECTED_INTEGRITY,
-    IMPLEMENTATION_NAME,
-    PACKAGE_NAME,
-    PACKAGE_VERSION,
-    SOURCE_COMMIT,
-    SOURCE_TAG,
-    install_verified_runtime,
-)
 from ..sandbox import BUN_IMAGE, BUN_USER, BUN_VERSION
+from .package_runtime import (
+    IMPLEMENTATION_NAME,
+    RUNTIME_VERSION,
+    VENDOR_DIR_NAME,
+    hash_runtime_tree,
+    package_semantic_flow_runtime,
+    RUNTIME_SOURCE,
+)
 
 STAGE1_DIR = Path(__file__).resolve().parent
 BUNDLE_SRC = STAGE1_DIR / "bundle_src"
 
 
 def stage1_identity() -> dict[str, object]:
+    content_sha256 = hash_runtime_tree(RUNTIME_SOURCE)
     return {
         "schema_version": 1,
         "workflow_runtime": {
             "implementation": IMPLEMENTATION_NAME,
-            "package": PACKAGE_NAME,
-            "version": PACKAGE_VERSION,
-            "npm_dist_integrity": EXPECTED_INTEGRITY,
-            "same_version_source_tag": SOURCE_TAG,
-            "source_tag_peeled_commit": SOURCE_COMMIT,
+            "version": RUNTIME_VERSION,
+            "content_sha256": content_sha256,
+            "origin": "first-party",
         },
         "runtime": {
             "bun_version": BUN_VERSION,
@@ -52,10 +50,13 @@ def assemble_stage1_bundle(
     Build a readonly-ready bundle directory.
 
     Layout:
-      workflow.ts, broker_agent.ts
-      vendor/evaluated-typescript-runtime/...
+      workflow.ts, broker_agent.ts, broker_server.ts
+      vendor/dyro-semantic-flow/...
       package.json, runtime-package-lock.json, install-receipt.json
+
+    tarball_source is ignored (kept for call-site compatibility).
     """
+    del tarball_source
     destination = Path(destination)
     if destination.exists():
         shutil.rmtree(destination)
@@ -67,32 +68,30 @@ def assemble_stage1_bundle(
         if not source.is_file():
             raise Stage0ValidationError(f"Stage 1 bundle source missing: {name}")
         shutil.copy2(source, destination / name)
-    install = install_verified_runtime(
-        destination / "_install",
+
+    packaged = package_semantic_flow_runtime(
+        destination / "_pkg",
         runtime_lock_path=runtime_lock_path,
-        tarball_source=tarball_source,
     )
-    vendor_target = destination / "vendor" / "evaluated-typescript-runtime"
+    vendor_target = destination / "vendor" / VENDOR_DIR_NAME
     vendor_target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(install.package_root, vendor_target)
-    shutil.copy2(install.vendor_root / "package.json", destination / "package.json")
+    shutil.copytree(packaged.package_root, vendor_target)
+    shutil.copy2(packaged.vendor_root / "package.json", destination / "package.json")
     shutil.copy2(
-        install.vendor_root / "runtime-package-lock.json",
+        packaged.vendor_root / "runtime-package-lock.json",
         destination / "runtime-package-lock.json",
     )
     shutil.copy2(
-        install.vendor_root / "install-receipt.json",
+        packaged.vendor_root / "install-receipt.json",
         destination / "install-receipt.json",
     )
-    # Drop the intermediate install tree (tarball kept only if needed by tests).
-    shutil.rmtree(destination / "_install")
+    shutil.rmtree(destination / "_pkg")
+
     identity = stage1_identity()
-    # Manifest is returned separately; writing it into the bundle would create a
-    # circular hash dependency with build_bundle_manifest().
     manifest = build_bundle_manifest(destination, identity=identity)
     return {
         "identity": identity,
         "manifest": manifest,
-        "install_receipt": install.lock_record,
+        "install_receipt": packaged.lock_record,
         "bundle_root": destination,
     }

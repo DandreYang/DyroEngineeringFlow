@@ -7,7 +7,7 @@
  */
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
-import { parallel } from "./vendor/evaluated-typescript-runtime/src/flow/parallel.ts";
+import { parallelSettled } from "./vendor/dyro-semantic-flow/src/parallel.ts";
 import { BrokerAgent, bindAgent } from "./broker_agent.ts";
 
 type CanonicalInput = {
@@ -66,7 +66,7 @@ async function main(): Promise<void> {
     throw new Error("workflow_run_id mismatch");
   }
 
-  const results = await parallel(
+  const results = await parallelSettled(
     input.branches.map(
       (branchId) => () => analyzeBranch(branchId, input.model),
     ),
@@ -74,21 +74,21 @@ async function main(): Promise<void> {
 
   const branches = input.branches.map((branchId, index) => {
     const item = results[index];
-    if (!item) {
+    if (!item || item.status !== "fulfilled") {
       return {
         id: branchId,
         critical: true,
         status: "failed" as const,
-        error_code: "branch_null",
+        error_code: "branch_failed",
         summary: "",
       };
     }
     return {
-      id: item.id,
+      id: item.value.id,
       critical: true,
       status: "success" as const,
       error_code: "",
-      summary: item.summary,
+      summary: item.value.summary,
     };
   });
   const allCriticalOk = branches.every((branch) => branch.status === "success");

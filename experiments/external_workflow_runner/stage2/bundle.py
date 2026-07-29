@@ -1,4 +1,4 @@
-"""Assemble Stage 2 bundle: Stage1 vendor + Stage2 workflow/broker sources."""
+"""Assemble Stage 2 bundle: first-party semantic-flow + Stage2 sources."""
 
 from __future__ import annotations
 
@@ -8,7 +8,10 @@ import shutil
 from ..errors import Stage0ValidationError
 from ..manifest import build_bundle_manifest
 from ..stage1.bundle import stage1_identity
-from ..stage1.install import install_verified_runtime
+from ..stage1.package_runtime import (
+    VENDOR_DIR_NAME,
+    package_semantic_flow_runtime,
+)
 
 STAGE2_DIR = Path(__file__).resolve().parent
 BUNDLE_SRC = STAGE2_DIR / "bundle_src"
@@ -20,6 +23,7 @@ def assemble_stage2_bundle(
     runtime_lock_path: Path,
     tarball_source: Path | None = None,
 ) -> dict[str, object]:
+    del tarball_source
     destination = Path(destination)
     if destination.exists():
         shutil.rmtree(destination)
@@ -32,28 +36,26 @@ def assemble_stage2_bundle(
             raise Stage0ValidationError(f"Stage 2 bundle source missing: {name}")
         shutil.copy2(source, destination / name)
 
-    install = install_verified_runtime(
-        destination / "_install",
+    packaged = package_semantic_flow_runtime(
+        destination / "_pkg",
         runtime_lock_path=runtime_lock_path,
-        tarball_source=tarball_source,
     )
-    vendor_target = destination / "vendor" / "evaluated-typescript-runtime"
+    vendor_target = destination / "vendor" / VENDOR_DIR_NAME
     vendor_target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(install.package_root, vendor_target)
-    shutil.copy2(install.vendor_root / "package.json", destination / "package.json")
+    shutil.copytree(packaged.package_root, vendor_target)
+    shutil.copy2(packaged.vendor_root / "package.json", destination / "package.json")
     shutil.copy2(
-        install.vendor_root / "runtime-package-lock.json",
+        packaged.vendor_root / "runtime-package-lock.json",
         destination / "runtime-package-lock.json",
     )
     shutil.copy2(
-        install.vendor_root / "install-receipt.json",
+        packaged.vendor_root / "install-receipt.json",
         destination / "install-receipt.json",
     )
-    shutil.rmtree(destination / "_install")
+    shutil.rmtree(destination / "_pkg")
 
-    identity = stage1_identity()
     identity = {
-        **identity,
+        **stage1_identity(),
         "stage": 2,
         "provider_modes": ["fake", "simulated-cli"],
         "ipc_protocol_versions": [1, 2],
@@ -62,6 +64,6 @@ def assemble_stage2_bundle(
     return {
         "identity": identity,
         "manifest": manifest,
-        "install_receipt": install.lock_record,
+        "install_receipt": packaged.lock_record,
         "bundle_root": destination,
     }

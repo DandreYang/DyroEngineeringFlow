@@ -20,7 +20,12 @@ from ..sandbox import (
 )
 from ..stage1.canonical import CanonicalInput, expected_branches_map
 from ..stage1.claim import ClaimLease, ClaimRecord, ClaimStore
-from ..stage1.install import EXPECTED_INTEGRITY, IMPLEMENTATION_NAME, PACKAGE_VERSION
+from ..stage1.package_runtime import (
+    IMPLEMENTATION_NAME,
+    RUNTIME_VERSION,
+    RUNTIME_SOURCE,
+    hash_runtime_tree,
+)
 from ..stage2.claim_renewal import ClaimRenewalLoop
 from ..supervisor import Stage0Supervisor, SupervisorConfig, SupervisedResult
 from .claim_matrix import ClaimDeadlineMatrix
@@ -92,12 +97,12 @@ class Stage3Supervisor:
             or runtime.get("container_image") != BUN_IMAGE
             or runtime.get("container_user") != BUN_USER
             or workflow.get("implementation") != IMPLEMENTATION_NAME
-            or workflow.get("version") != PACKAGE_VERSION
-            or workflow.get("npm_dist_integrity") != EXPECTED_INTEGRITY
+            or workflow.get("version") != RUNTIME_VERSION
+            or workflow.get("content_sha256") != hash_runtime_tree(RUNTIME_SOURCE)
             or self._bundle_identity.get("stage") != 3
         ):
             raise Stage0ValidationError(
-                "Stage 3 bundle identity is not the approved frozen runtime"
+                "Stage 3 bundle identity is not the approved first-party runtime"
             )
 
     def execute(self) -> Stage3RunResult:

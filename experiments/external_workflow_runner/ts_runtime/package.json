@@ -1,0 +1,17 @@
+{
+  "name": "@dyro/semantic-flow",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dyro first-party task-local semantic flow primitives for isolated sandbox bundles.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./parallel": "./src/parallel.ts",
+    "./pipeline": "./src/pipeline.ts",
+    "./phase": "./src/phase.ts",
+    "./agent": "./src/agent.ts"
+  },
+  "files": [
+    "src"
+  ]
+}

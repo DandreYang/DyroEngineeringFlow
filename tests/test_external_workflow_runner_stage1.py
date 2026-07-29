@@ -17,10 +17,13 @@ from experiments.external_workflow_runner.stage1.claim import (
     ClaimRecord,
     ClaimStore,
 )
-from experiments.external_workflow_runner.stage1.install import (
-    EXPECTED_INTEGRITY,
-    install_verified_runtime,
+from experiments.external_workflow_runner.stage1.package_runtime import (
+    IMPLEMENTATION_NAME,
+    RUNTIME_VERSION,
+    hash_runtime_tree,
     load_runtime_lock,
+    package_semantic_flow_runtime,
+    RUNTIME_SOURCE,
     verify_runtime_lock,
 )
 from experiments.external_workflow_runner.stage1.protocol import (
@@ -43,7 +46,6 @@ from experiments.external_workflow_runner.stage1.supervisor import (
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_LOCK = ROOT / "experiments/external_workflow_runner/runtime-lock.json"
-CACHED_TARBALL = Path("/tmp/ewr-tgz/dyro-semantic-flow-0.2.0.tgz")
 # Colima (and similar VMs) only share project paths; keep Docker bind mounts under cwd.
 _DOCKER_TEMP_DIR = ROOT
 
@@ -63,38 +65,31 @@ def _docker_image_available() -> bool:
     return probe.returncode == 0
 
 
-def _tarball_source() -> Path | None:
-    if CACHED_TARBALL.is_file():
-        return CACHED_TARBALL
-    return None
-
-
-class RuntimeInstallTests(unittest.TestCase):
+class RuntimePackageTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(prefix="ewr-stage1-install-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="ewr-stage1-pkg-")
         self.root = Path(self.temporary.name)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def test_runtime_lock_matches_approved_identity(self) -> None:
+    def test_runtime_lock_matches_first_party_identity(self) -> None:
         lock = load_runtime_lock(RUNTIME_LOCK)
-        verify_runtime_lock(lock)
+        content = hash_runtime_tree(RUNTIME_SOURCE)
+        verify_runtime_lock(lock, content_sha256=content)
         self.assertEqual(
-            lock["workflow_runtime"]["npm_dist_integrity"],
-            EXPECTED_INTEGRITY,
+            lock["workflow_runtime"]["implementation"], IMPLEMENTATION_NAME
         )
+        self.assertEqual(lock["workflow_runtime"]["version"], RUNTIME_VERSION)
+        self.assertEqual(lock["workflow_runtime"]["content_sha256"], content)
 
-    def test_install_verifies_integrity_and_writes_frozen_lock(self) -> None:
-        # Prefer a local cache when present; otherwise download (CI has network).
-        result = install_verified_runtime(
-            self.root / "install",
+    def test_package_semantic_flow_writes_vendor_tree(self) -> None:
+        result = package_semantic_flow_runtime(
+            self.root / "pkg",
             runtime_lock_path=RUNTIME_LOCK,
-            tarball_source=_tarball_source(),
         )
-        self.assertEqual(result.integrity, EXPECTED_INTEGRITY)
+        self.assertTrue((result.package_root / "src" / "parallel.ts").is_file())
         self.assertTrue((result.package_root / "package.json").is_file())
-        self.assertTrue((result.package_root / "src/index.ts").is_file())
         lock = json.loads(
             (result.vendor_root / "runtime-package-lock.json").read_text(
                 encoding="utf-8"
@@ -102,27 +97,30 @@ class RuntimeInstallTests(unittest.TestCase):
         )
         self.assertEqual(lock["transitive_count"], 0)
         self.assertEqual(
-            lock["packages"]["@dyro/semantic-flow"]["integrity"],
-            EXPECTED_INTEGRITY,
+            lock["packages"]["@dyro/semantic-flow"]["content_sha256"],
+            result.content_sha256,
         )
 
-    def test_install_rejects_tampered_tarball(self) -> None:
-        source = _tarball_source()
-        if source is None:
-            # Build a verified install once, then tamper a copy of its tarball.
-            good = install_verified_runtime(
-                self.root / "good-install",
-                runtime_lock_path=RUNTIME_LOCK,
-                tarball_source=None,
-            )
-            source = good.tarball_path
-        bad = self.root / "bad.tgz"
-        bad.write_bytes(source.read_bytes() + b"\x00")
-        with self.assertRaisesRegex(Stage0ValidationError, "integrity"):
-            install_verified_runtime(
-                self.root / "install",
-                runtime_lock_path=RUNTIME_LOCK,
-                tarball_source=bad,
+    def test_package_rejects_lock_mismatch(self) -> None:
+        bad_lock = self.root / "bad-lock.json"
+        bad_lock.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "workflow_runtime": {
+                        "implementation": IMPLEMENTATION_NAME,
+                        "version": RUNTIME_VERSION,
+                        "content_sha256": "0" * 64,
+                    },
+                    "runtime": load_runtime_lock(RUNTIME_LOCK)["runtime"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(Stage0ValidationError, "first-party|identity"):
+            package_semantic_flow_runtime(
+                self.root / "pkg",
+                runtime_lock_path=bad_lock,
             )
 
 
@@ -241,14 +239,9 @@ class Stage1EndToEndTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_stage1_fixed_bundle_broker_and_key_gate(self) -> None:
-        source = _tarball_source()
-        if source is None:
-            # Fall back to network install for local developers.
-            source = None
         assembled = assemble_stage1_bundle(
             self.root / "bundle",
             runtime_lock_path=RUNTIME_LOCK,
-            tarball_source=source,
         )
         worktree = self.root / "worktrees" / "docs"
         worktree.mkdir(parents=True)
@@ -314,11 +307,9 @@ class Stage1EndToEndTests(unittest.TestCase):
         self.assertFalse((self.root / ".dyro").exists())
 
     def test_execution_key_before_start_is_rejected(self) -> None:
-        source = _tarball_source()
         assembled = assemble_stage1_bundle(
             self.root / "bundle",
             runtime_lock_path=RUNTIME_LOCK,
-            tarball_source=source,
         )
         worktree = self.root / "worktrees" / "docs"
         worktree.mkdir(parents=True)
