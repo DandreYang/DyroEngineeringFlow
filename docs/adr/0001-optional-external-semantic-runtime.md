@@ -1,6 +1,6 @@
 # ADR-0001：可选外部语义运行时（first-party）
 
-- 状态：已接受（2026-07-29 修订：自研语义流运行时，不再依赖第三方工作流包）
+- 状态：已接受（2026-07-29 修订：本仓库语义流运行时，不再依赖外部工作流包）
 - 日期：2026-07-29
 - 决策者：DyroEngineeringFlow 维护者
 - 关联文档：[外部语义运行时 PoC](../external-semantic-runtime-poc.md)
@@ -26,7 +26,7 @@ DyroEngineeringFlow 是跨仓库工程交付控制面。它负责开发线、任
 5. 成功结果以 schema 化 result envelope 为准；Agent 自述不能代替 Dyro gates。
 6. evidence / review / signoff / merge / push 仍仅由 Dyro 控制面与独立主体完成；实验 Supervisor 不得越权。
 
-## 自研运行时相对常见第三方 Agent 工作流库的差异
+## 本仓库运行时相对常见外部 Agent 工作流库的差异
 
 | 维度 | `@dyro/semantic-flow` |
 | --- | --- |
@@ -47,4 +47,4 @@ DyroEngineeringFlow 是跨仓库工程交付控制面。它负责开发线、任
 - 用外部语义运行时替换 Dyro TaskGraph。
 - 将外部语义运行时加入 Dyro Core 依赖。
 - 把 Agent 输出当作 gate 通过条件。
-- 复制任何第三方工作流库源码作为「自研」。
+- 复制任何外部工作流库源码并宣称是本仓库实现。
