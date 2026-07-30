@@ -31,6 +31,24 @@ class CliTests(unittest.TestCase):
         root_index = routed[1].index("--root")
         self.assertEqual(routed[1][root_index + 1], "/workspace")
 
+    def test_top_level_root_routes_to_runtime_production_gate(self) -> None:
+        routed = _route_experiment_surface(
+            [
+                "--root",
+                "/workspace",
+                "runtime",
+                "production-gate",
+                "--release-manifest",
+                "/evidence/release.json",
+            ]
+        )
+
+        self.assertIsNotNone(routed)
+        self.assertEqual(routed[0], "runtime")
+        self.assertIn("--root", routed[1])
+        root_index = routed[1].index("--root")
+        self.assertEqual(routed[1][root_index + 1], "/workspace")
+
     def test_init_creates_workspace_contract(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
             root = Path(tmp) / "workspace"

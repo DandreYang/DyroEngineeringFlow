@@ -36,6 +36,7 @@ from .provenance import (
     render_review_binding,
     review_binding,
 )
+from .signing import TRUST_PURPOSES
 from .tasks import (
     STATUSES,
     answer_task,
@@ -1154,7 +1155,7 @@ def build_parser() -> argparse.ArgumentParser:
     key_trust.add_argument("id")
     key_trust.add_argument(
         "--purpose",
-        choices=("execution", "review", "signoff", "audit-export", "audit-receipt", "audit-recovery"),
+        choices=TRUST_PURPOSES,
         required=True,
     )
     key_trust.add_argument("--public-key", required=True)
@@ -1165,7 +1166,7 @@ def build_parser() -> argparse.ArgumentParser:
     key_revoke.add_argument("id")
     key_revoke.add_argument(
         "--purpose",
-        choices=("execution", "review", "signoff", "audit-export", "audit-receipt", "audit-recovery"),
+        choices=TRUST_PURPOSES,
         required=True,
     )
     key_revoke.add_argument("--reason", required=True)
@@ -1173,7 +1174,7 @@ def build_parser() -> argparse.ArgumentParser:
     key_list = key_sub.add_parser("list", help="列出指定用途的 trusted key IDs")
     key_list.add_argument(
         "--purpose",
-        choices=("execution", "review", "signoff", "audit-export", "audit-receipt", "audit-recovery"),
+        choices=TRUST_PURPOSES,
         required=True,
     )
     key_list.add_argument("--show-status", action="store_true", help="同时显示 pending、expired 与 revoked key")
@@ -1447,7 +1448,14 @@ def _route_experiment_surface(raw: list[str]) -> tuple[str, list[str]] | None:
             forwarded.insert(0, "--dry-run")
     if surface == "runtime":
         runtime_command = forwarded[0] if forwarded else ""
-        if global_args.root and runtime_command == "handoff":
+        if (
+            global_args.root
+            and runtime_command in {"handoff", "production-gate"}
+            and not any(
+                token == "--root" or token.startswith("--root=")
+                for token in forwarded
+            )
+        ):
             forwarded.extend(["--root", global_args.root])
         if global_args.dry_run:
             forwarded.insert(0, "--dry-run")

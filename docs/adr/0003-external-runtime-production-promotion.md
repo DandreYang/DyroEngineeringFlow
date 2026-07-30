@@ -102,12 +102,32 @@ Profile、runner workspace 与 Stage5 pack 之外。Handoff 在 dry-run 与真�
 
 不得用可编辑的 `pass: true` 配置、fixture 或本机结果伪造这些证据。
 
+### 6. 真实环境证据以发布绑定的独立签名进入门禁
+
+门禁不再永久硬编码环境阻断状态，也不接受调用方传入自定义 checklist。真实
+环境完成验收后，唯一可清除 `PROD-01/02/09` 的路径是：
+
+1. `production-release` 签名的发布清单，固定 Dyro 版本、源码 commit、镜像、
+   wheel/sdist/SBOM/provenance、provider 二进制与运维计划内容哈希；
+2. `production-security`、`production-provider`、`production-quota` 分别签署
+   对应检查，并绑定同一份已签名清单哈希和 environment ID；
+3. 发布与三个验收角色使用四把不同的 trusted Ed25519 公钥；
+4. 证明有界、限期、包含持久证据 URI 与内容 SHA-256，且当前密钥未撤销；
+5. 所有 `pass` 强断言都满足，开放高危与严重发现均为 0。
+
+门禁只验证并汇总，不创建、修改或签署上述证据，也不触发部署。缺少证明时保持
+原始阻断；签名的 `fail` 仍是阻断；无效或过期证明以验证错误失败关闭。即使全部
+验证得到 `READY`，结果也包含 `release_approval_required=true`，最终发布批准
+仍由独立发布控制面作出。
+
 ## 后果
 
 - `PROD-03`（Stage5→Core execution evidence handoff）可由代码和端到端测试
   判定为通过。
 - `PROD-01`、`PROD-02`、`PROD-09` 仍阻断生产；因此当前结论仍是
   `NOT_READY`。
+- 三项真实环境验收完成后已有可审计、可机器验证的晋级路径；默认无外部证据时
+  行为不变，仍为 `NOT_READY`/退出码 3。
 - 外部 runtime 对 Core 的依赖方向仅存在于可信 handoff adapter；
   Core 不依赖 Bun、TypeScript runtime 或 Stage5 Supervisor。
 - 生产 operator 执行面必须由部署适配层固定 Stage5 配置；在真实 provider
@@ -120,3 +140,5 @@ Profile、runner workspace 与 Stage5 pack 之外。Handoff 在 dry-run 与真�
 - pack artifact 与 handoff workspace 内容不一致时继续构建 Core bundle。
 - Runtime 自动执行 import、review、signoff、merge 或 push。
 - 通过用户自填状态清除生产环境阻断项。
+- 用同一公钥跨发布、安全、provider 或配额角色完成自我批准。
+- 验收证明不绑定精确发布清单、环境或有效期。

@@ -21,6 +21,8 @@ class RuntimeCliTests(unittest.TestCase):
         self.assertFalse(payload.get("production_ready"))
         self.assertEqual(payload.get("exit_code"), 3)
         self.assertEqual(payload.get("next_command"), "dyro runtime plan")
+        self.assertTrue(payload.get("release_approval_required"))
+        self.assertFalse(payload["production_acceptance"]["provided"])
 
     def test_production_gate_human_output_is_actionable(self) -> None:
         buf = StringIO()
@@ -43,6 +45,9 @@ class RuntimeCliTests(unittest.TestCase):
         self.assertEqual(payload.get("next_command"), "dyro runtime doctor")
         self.assertTrue(payload["capabilities"]["stage5_supervisor_api"])
         self.assertFalse(payload["capabilities"]["operator_run_cli"])
+        self.assertTrue(
+            payload["capabilities"]["signed_production_acceptance"]
+        )
 
     def test_status_human_output_explains_safety_boundary(self) -> None:
         buf = StringIO()

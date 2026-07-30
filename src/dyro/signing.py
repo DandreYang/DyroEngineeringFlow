@@ -29,6 +29,10 @@ TRUST_PURPOSES = (
     "audit-export",
     "audit-receipt",
     "audit-recovery",
+    "production-release",
+    "production-security",
+    "production-provider",
+    "production-quota",
 )
 KEY_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 KEY_METADATA_SUFFIX = ".metadata.json"
@@ -367,6 +371,34 @@ def signature_key_id(record: dict[str, object]) -> str | None:
     if not isinstance(signature, dict) or not isinstance(signature.get("key_id"), str):
         return None
     return validate_key_id(str(signature["key_id"]))
+
+
+def trusted_key_fingerprint(
+    root: Path,
+    purpose: str,
+    key_id: str,
+) -> str:
+    """Return the normalized SHA-256 fingerprint for one trusted public key."""
+    purpose = validate_purpose(purpose)
+    key_id = validate_key_id(key_id)
+    directory = trusted_keys_directory(root.resolve(), purpose)
+    _validate_trust_directory(directory)
+    public_key_path = directory / f"{key_id}.pem"
+    public_key = _load_public_key_bytes(
+        _read_regular_file(public_key_path, "信任公钥"),
+        public_key_path,
+    )
+    normalized = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    fingerprint = hashlib.sha256(normalized).hexdigest()
+    metadata_path = _metadata_path(directory, key_id)
+    if metadata_path.exists() or metadata_path.is_symlink():
+        metadata = _read_json_file(metadata_path, "密钥元数据")
+        if metadata.get("fingerprint_sha256") != fingerprint:
+            raise ValidationError(f"信任公钥与元数据指纹不匹配：{key_id}")
+    return fingerprint
 
 
 def generate_keypair(key_id: str, *, private_key: Path, public_key: Path) -> None:

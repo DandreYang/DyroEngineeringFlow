@@ -56,6 +56,73 @@ dyro runtime plan
 计划只读，展示已完成、受阻、待执行和需本机检查的阶段。环境阻断项不能通过
 修改本地 JSON 清除。
 
+## 签名生产验收闭环
+
+真实环境整改完成后，发布负责人先在受保护的 Dyro trust root 中登记四个用途
+隔离的公钥：
+
+```bash
+dyro --root /control/dyro-profile key trust release-2026 \
+  --purpose production-release \
+  --public-key /trust/release-2026.public.pem
+dyro --root /control/dyro-profile key trust security-2026 \
+  --purpose production-security \
+  --public-key /trust/security-2026.public.pem
+dyro --root /control/dyro-profile key trust provider-2026 \
+  --purpose production-provider \
+  --public-key /trust/provider-2026.public.pem
+dyro --root /control/dyro-profile key trust quota-2026 \
+  --purpose production-quota \
+  --public-key /trust/quota-2026.public.pem
+```
+
+四个信任用途必须由不同公钥承担。私钥留在各职责主体的签名系统中；门禁只读取
+工作区 trust store 中的公钥。信任目录的权限、密钥审批和 Witness 同步属于部署
+控制面责任，不能交给 Sandbox 或 provider。
+
+发布流水线按
+[`production-deployment-manifest.schema.json`](../../experiments/external_workflow_runner/schemas/production-deployment-manifest.schema.json)
+生成发布清单。清单固定：
+
+- Dyro 版本、完整源码 commit 与批准的 Bun 镜像 digest；
+- wheel、sdist、SBOM 与 provenance SHA-256；
+- 每个真实 provider 二进制 SHA-256；
+- deployment、canary、rollback、observability 和 runbook 内容 SHA-256；
+- release ID、environment ID 与创建时间。
+
+发布角色使用 `production-release` 签名清单。随后三个独立职责流水线按
+[`production-attestation.schema.json`](../../experiments/external_workflow_runner/schemas/production-attestation.schema.json)
+分别签署：
+
+| 检查 | 签名用途 | 必须断言 |
+| --- | --- | --- |
+| `PROD-01` | `production-security` | 多宿主逃逸、租户边界、编排器、内核、存储、网络策略均已验证，开放高危/严重发现为 0 |
+| `PROD-02` | `production-provider` | provider 钉扎、Broker-only 凭据、轮换、撤销、恢复均已验证，至少一次真实 canary，开放高危/严重发现为 0 |
+| `PROD-09` | `production-quota` | 所有可写挂载已声明并强制字节/inode/文件数上限，耗尽与并发租户测试通过，开放高危/严重发现为 0 |
+
+每份证明必须绑定**已签名发布清单的规范化 SHA-256**与相同 environment ID，
+包含 1–32 个无凭据、无 query/fragment 的持久证据 URI 及内容哈希，并在 31 天
+内失效。`pass` 中任何关键断言为假、计数不足或存在高危/严重发现都会被拒绝，
+而不是降级为警告。签名采用现有 `dyro.signing.sign_record` 的用途域隔离契约；外部
+签名系统必须生成相同的 RFC 8785 JCS 消息。
+
+操作员使用同一条只读门禁命令完成验证：
+
+```bash
+dyro --root /control/dyro-profile runtime production-gate \
+  --release-manifest /release/dyro-production-manifest.json \
+  --security-attestation /evidence/prod-01.json \
+  --provider-attestation /evidence/prod-02.json \
+  --quota-attestation /evidence/prod-09.json \
+  --human
+```
+
+缺少任一证明时只关闭已验证的对应项，其余项继续 `NOT_READY`/退出码 3。
+文档篡改、签名用途错误、密钥撤销、过期、跨发布/环境漂移、参数角色错配或同一
+公钥跨角色复用都返回验证错误/退出码 2。只有三份 `pass` 证明同时有效时才返回
+`READY`/退出码 0；该结果仍明确要求独立发布批准，不会触发部署、导入、review、
+signoff、merge 或 push。
+
 ## 受控执行证据旅程
 
 ### 1. Core 领取并安全导出 claim
@@ -166,6 +233,7 @@ Runtime 不执行上述命令，也不能把 bundle 构建成功解释为任务�
 | --- | --- | --- |
 | 本机三域隔离与双重清理 | 已验证 | Stage0–5 Docker 回归 |
 | 生产门禁退出语义与 operator UX | 已实现 | runtime CLI/doctor tests |
+| 发布绑定的四方签名生产验收 | 已实现 | production acceptance 契约、CLI 与对抗测试 |
 | Stage5 claim 受 Core claim 约束 | 已实现 | claim authority/renewal tests |
 | Stage5 pack → 签名 Core bundle → independent review | 已实现 | `test_runtime_core_handoff_integration` |
 | 多宿主逃逸与租户边界 | 待真实环境 | `PROD-01` |
@@ -179,5 +247,7 @@ Runtime 不执行上述命令，也不能把 bundle 构建成功解释为任务�
 1. `production-gate` 没有 open blocker 且退出码为 0；
 2. wheel 与 sdist 安装后的命令和 runtime bundle 均通过验证；
 3. 真实发布环境完成安全、凭据、配额和容量证据；
-4. 独立 reviewer 确认 runtime 权限仍不包含交付控制动作；
-5. canary、回滚、告警、on-call 与审计保留方案均完成演练。
+4. 发布清单与 `PROD-01/02/09` 证明通过当前时间、用途隔离、不同公钥、版本、
+   环境和内容哈希绑定校验；
+5. 独立 reviewer 确认 runtime 权限仍不包含交付控制动作；
+6. canary、回滚、告警、on-call 与审计保留方案均完成演练。

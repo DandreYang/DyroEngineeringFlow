@@ -272,14 +272,24 @@ flowchart TB
 
 **非 Core。** 目录：`experiments/external_workflow_runner/`。当前生命周期为
 **Production Candidate（生产候选）**；在多主机、真实供应商执行集群和可写挂载配额
-完成生产环境验收前，生产状态仍为 `NOT_READY`。
+完成生产环境验收前，生产状态仍为 `NOT_READY`。门禁不会接受可编辑的
+`pass: true`：真实环境完成验收后，必须提供绑定同一版本、环境、镜像和制品的
+发布清单，以及安全、供应商、配额三个用途隔离的 Ed25519 签名证明；四个角色还
+必须使用不同公钥。
 
 ```bash
 dyro runtime status
 dyro runtime doctor
 dyro runtime plan
 dyro runtime production-gate  # NOT_READY 时退出码为 3
+dyro runtime production-gate --help  # 查看签名生产验收输入
 ```
+
+完整验收命令使用
+`--release-manifest`、`--security-attestation`、`--provider-attestation`
+和 `--quota-attestation`。证据契约与信任配置见
+[生产就绪设计](docs/designs/external-runtime-production-readiness.md)；门禁即使
+返回 `READY`，也只代表自动检查通过，仍需独立发布批准。
 
 ### 语义运行时时序（可选实验）
 

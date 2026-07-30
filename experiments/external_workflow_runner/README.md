@@ -48,6 +48,15 @@ The Docker runtime identity is fixed in
 runtime validation additionally checks the expected branch set and
 status-dependent invariants that JSON Schema alone cannot express.
 
+Production environment acceptance uses
+[`schemas/production-deployment-manifest.schema.json`](schemas/production-deployment-manifest.schema.json)
+and
+[`schemas/production-attestation.schema.json`](schemas/production-attestation.schema.json).
+The gate requires a release signature plus purpose-separated security,
+provider, and quota signatures from four distinct trusted public keys. Missing
+evidence leaves the corresponding blocker open; signed evidence never grants
+runtime delivery authority.
+
 ## Verification
 
 The integration tests require the pinned image:
@@ -77,6 +86,22 @@ The shipped runtime still does not:
 - import, review, sign off, merge, or push Dyro evidence;
 - prove a production deployment or multi-host isolation boundary;
 - enforce storage quotas at every production writable mount.
+
+Those statements describe the current repository/environment evidence. Once
+the real environment supplies the four release-bound signatures, operators can
+verify them without editing code:
+
+```sh
+dyro runtime production-gate \
+  --root /control/dyro-profile \
+  --release-manifest /release/manifest.json \
+  --security-attestation /evidence/prod-01.json \
+  --provider-attestation /evidence/prod-02.json \
+  --quota-attestation /evidence/prod-09.json
+```
+
+`READY` still requires independent release approval and does not deploy,
+import, review, sign off, merge, or push.
 
 After Sandbox and Broker cleanup is independently verified, the trusted
 runner-side handoff may use an execution key to build a signed Core-compatible

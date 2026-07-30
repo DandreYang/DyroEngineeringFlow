@@ -67,6 +67,7 @@ def _status_report() -> dict[str, object]:
             "runtime_doctor": True,
             "production_plan": True,
             "core_evidence_handoff": True,
+            "signed_production_acceptance": True,
         },
         "authority_boundary": {
             "runtime_forbidden": [
@@ -123,9 +124,24 @@ def _print_gate_human(report: Mapping[str, object]) -> None:
     ready = report.get("production_ready") is True
     blockers = report.get("blockers")
     blocker_list = blockers if isinstance(blockers, list) else []
+    acceptance = report.get("production_acceptance")
+    acceptance_record = (
+        acceptance if isinstance(acceptance, Mapping) else {}
+    )
+    if acceptance_record.get("provided") is True:
+        print(
+            "验收对象："
+            f"{acceptance_record.get('release_id', '?')} / "
+            f"{acceptance_record.get('environment_id', '?')}"
+        )
+        print(
+            "发布清单："
+            f"{acceptance_record.get('release_manifest_sha256', '?')}"
+        )
     if ready:
         print("Dyro 外部语义运行时生产门禁：通过")
         print("结论：READY")
+        print("注意：门禁通过不等于已批准发布，仍需独立发布审批。")
         return
     print("Dyro 外部语义运行时生产门禁：未通过")
     print(f"结论：NOT_READY（{len(blocker_list)} 个阻断项）")
@@ -146,7 +162,20 @@ def _print_gate_human(report: Mapping[str, object]) -> None:
 def cmd_production_gate(args: argparse.Namespace) -> int:
     from .stage5.production_gate import evaluate_production_readiness
 
-    report = evaluate_production_readiness()
+    attestation_paths = {
+        check_id: path
+        for check_id, path in (
+            ("PROD-01", args.security_attestation),
+            ("PROD-02", args.provider_attestation),
+            ("PROD-09", args.quota_attestation),
+        )
+        if path is not None
+    }
+    report = evaluate_production_readiness(
+        root=args.root,
+        release_manifest=args.release_manifest,
+        attestations=attestation_paths,
+    )
     if _output_mode(args) == "human":
         _print_gate_human(report)
     else:
@@ -448,6 +477,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_gate = sub.add_parser(
         "production-gate",
         help="执行生产门禁；NOT_READY 时返回退出码 3",
+    )
+    p_gate.add_argument(
+        "--root",
+        type=Path,
+        help="包含用途隔离 trust store 的 Dyro 工作区根目录",
+    )
+    p_gate.add_argument(
+        "--release-manifest",
+        type=Path,
+        help="production-release 签名且绑定当前版本/镜像/制品的发布清单",
+    )
+    p_gate.add_argument(
+        "--security-attestation",
+        type=Path,
+        help="production-security 签名的 PROD-01 验收证明",
+    )
+    p_gate.add_argument(
+        "--provider-attestation",
+        type=Path,
+        help="production-provider 签名的 PROD-02 验收证明",
+    )
+    p_gate.add_argument(
+        "--quota-attestation",
+        type=Path,
+        help="production-quota 签名的 PROD-09 验收证明",
     )
     _add_output_options(p_gate)
     p_gate.set_defaults(func=cmd_production_gate)

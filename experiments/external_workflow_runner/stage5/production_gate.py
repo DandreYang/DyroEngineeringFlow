@@ -7,8 +7,17 @@ operator checklist so CI/tests can assert the gate stays fail-closed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Mapping, Sequence
+
+from dyro.errors import ValidationError
+
+from .production_acceptance import (
+    ATTESTATION_PURPOSES,
+    VerifiedProductionAcceptance,
+    verify_production_acceptance,
+)
 
 
 @dataclass(frozen=True)
@@ -147,11 +156,44 @@ def production_not_ready_checklist() -> tuple[ChecklistItem, ...]:
 
 
 def evaluate_production_readiness(
-    checklist: Sequence[ChecklistItem] | None = None,
+    *,
+    root: Path | None = None,
+    release_manifest: Path | None = None,
+    attestations: Mapping[str, Path] | Sequence[Path] = (),
 ) -> dict[str, object]:
-    items = list(
-        production_not_ready_checklist() if checklist is None else checklist
-    )
+    items = list(production_not_ready_checklist())
+    acceptance: VerifiedProductionAcceptance | None = None
+    if attestations and release_manifest is None:
+        raise ValidationError(
+            "提供生产验收证明时必须同时提供 --release-manifest"
+        )
+    if release_manifest is not None:
+        if root is None:
+            raise ValidationError(
+                "验证生产发布清单时必须提供 Dyro trust root"
+            )
+        acceptance = verify_production_acceptance(
+            root=root,
+            release_manifest_path=release_manifest,
+            attestation_paths=attestations,
+        )
+        replacements: dict[str, ChecklistItem] = {}
+        for check_id, attestation in acceptance.attestations.items():
+            replacements[check_id] = replace(
+                next(item for item in items if item.id == check_id),
+                status=attestation.verdict,
+                evidence=(
+                    f"已验证绑定发布 {acceptance.release_id} 的 "
+                    f"{ATTESTATION_PURPOSES[check_id]} 签名验收；"
+                    f"签名者 {attestation.signer_key_id}，"
+                    f"不可变证据 {attestation.evidence_count} 项"
+                ),
+                verification=(
+                    f"发布清单 {acceptance.release_manifest_sha256} 与 "
+                    f"{check_id} 验收签名均已验证"
+                ),
+            )
+        items = [replacements.get(item.id, item) for item in items]
     blockers = [item for item in items if item.blocks_production]
     open_blockers = [
         item
@@ -166,6 +208,28 @@ def evaluate_production_readiness(
         "verdict": "READY" if production_ready else "NOT_READY",
         "exit_code": 0 if production_ready else 3,
         "blocker_count": len(open_blockers),
+        "release_approval_required": True,
+        "production_acceptance": (
+            acceptance.to_mapping()
+            if acceptance is not None
+            else {
+                "provided": False,
+                "release_manifest_verified": False,
+                "missing_checks": list(ATTESTATION_PURPOSES),
+                "required_signing_purposes": {
+                    "release": "production-release",
+                    **dict(ATTESTATION_PURPOSES),
+                },
+                "schemas": {
+                    "release_manifest": (
+                        "schemas/production-deployment-manifest.schema.json"
+                    ),
+                    "attestation": (
+                        "schemas/production-attestation.schema.json"
+                    ),
+                },
+            }
+        ),
         "blockers": [
             {
                 "id": item.id,
@@ -263,10 +327,11 @@ def production_readiness_plan() -> dict[str, object]:
                 "state": "blocked",
                 "title": "验证真实生产环境",
                 "covers": ["PROD-01", "PROD-02", "PROD-09"],
-                "command": "dyro runtime production-gate",
+                "command": "dyro runtime production-gate --help",
                 "acceptance": (
                     "发布环境通过独立多宿主安全评审、真实 provider 舰队 canary、"
-                    "凭据生命周期证明与可写挂载配额故障测试。"
+                    "凭据生命周期证明与可写挂载配额故障测试；四个用途隔离的"
+                    "签名绑定同一发布清单。"
                 ),
             },
             {

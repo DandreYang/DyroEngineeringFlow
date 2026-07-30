@@ -35,3 +35,24 @@ Use the executable gate rather than reading this snapshot:
 dyro runtime production-gate
 # NOT_READY => exit 3
 ```
+
+## How real evidence can close the blockers
+
+This snapshot remains `NOT_READY`; it is not a permanent hard-coded dead end.
+After the real release environment completes the three reviews, the gate can
+consume:
+
+1. a `production-release` signed deployment manifest;
+2. a `production-security` signed `PROD-01` attestation;
+3. a `production-provider` signed `PROD-02` attestation;
+4. a `production-quota` signed `PROD-09` attestation.
+
+All records bind the same release manifest and environment. The four roles
+must use distinct trusted public keys. Attestations expire within 31 days and
+bind durable evidence URIs plus SHA-256 values. The executable contract rejects
+tampering, weak pass assertions, revoked keys, role mismatch, expiry, and
+cross-release drift. See
+[`docs/designs/external-runtime-production-readiness.md`](../../../docs/designs/external-runtime-production-readiness.md).
+
+The gate only reports readiness. A `READY` result still requires independent
+release approval and never performs deployment or Dyro Core delivery actions.

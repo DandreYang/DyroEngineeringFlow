@@ -2,6 +2,12 @@
 
 ## 0.5.1 - Unreleased
 
+- Add a fail-closed production acceptance path: one release-bound manifest and
+  three expiring, purpose-separated environment attestations must verify under
+  four distinct trusted Ed25519 public keys before `PROD-01/02/09` can clear.
+- Ship strict deployment-manifest and production-attestation schemas; reject
+  tampering, weak pass assertions, role mismatch, key reuse, expiry, and
+  cross-release/environment drift while retaining independent release approval.
 - Add operator-friendly `dyro runtime status/doctor/plan`, make a closed production gate return exit code 3, and preserve JSON output for automation.
 - Bind Stage5 leases to exported Dyro Core claim authority; verify sealed-pack identity and live workspace artifacts before building a signed Core execution bundle.
 - Add an end-to-end Stage5 pack → Core import → independent review test while keeping import/review/signoff/merge/push outside runtime authority.

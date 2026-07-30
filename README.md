@@ -272,14 +272,26 @@ flowchart TB
 
 Not Core. Tree: `experiments/external_workflow_runner/`. Lifecycle:
 **Production Candidate**; production status remains `NOT_READY` while the
-multi-host, real-provider fleet, and writable-mount quota blockers remain.
+multi-host, real-provider fleet, and writable-mount quota blockers remain. The
+gate does not accept editable `pass: true` state. Once the real environment is
+validated, a release manifest plus security, provider, and quota attestations
+must bind the same version, environment, image, and artifacts with four
+purpose-separated Ed25519 signatures backed by distinct public keys.
 
 ```bash
 dyro runtime status
 dyro runtime doctor
 dyro runtime plan
 dyro runtime production-gate  # NOT_READY exits 3
+dyro runtime production-gate --help  # signed acceptance inputs
 ```
+
+A complete acceptance invocation uses `--release-manifest`,
+`--security-attestation`, `--provider-attestation`, and
+`--quota-attestation`. See the
+[production-readiness design](docs/designs/external-runtime-production-readiness.md)
+for the evidence and trust contract. A `READY` gate result still requires
+independent release approval.
 
 ### Semantic runtime sequence (optional experiment)
 

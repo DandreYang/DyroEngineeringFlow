@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 
@@ -78,6 +79,36 @@ def main() -> None:
     missing = [name for name, path in resources.items() if not path.is_dir()]
     if missing:
         raise SystemExit(f"installed runtime resources missing: {missing}")
+    schema_paths = {
+        "result-envelope": package_root / "schemas/result-envelope.schema.json",
+        "production-deployment-manifest": (
+            package_root
+            / "schemas/production-deployment-manifest.schema.json"
+        ),
+        "production-attestation": (
+            package_root / "schemas/production-attestation.schema.json"
+        ),
+    }
+    missing_schemas = [
+        name for name, path in schema_paths.items() if not path.is_file()
+    ]
+    if missing_schemas:
+        raise SystemExit(
+            f"installed runtime schemas missing: {missing_schemas}"
+        )
+    for name, path in schema_paths.items():
+        try:
+            schema = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SystemExit(
+                f"installed runtime schema is unreadable: {name}"
+            ) from exc
+        if (
+            not isinstance(schema, dict)
+            or schema.get("$schema")
+            != "https://json-schema.org/draft/2020-12/schema"
+        ):
+            raise SystemExit(f"installed runtime schema is invalid: {name}")
     with tempfile.TemporaryDirectory() as tmp:
         temporary_root = Path(tmp)
         runtime_lock_path = package_root / "runtime-lock.json"
