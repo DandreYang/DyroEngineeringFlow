@@ -857,6 +857,7 @@ class ContextAndResultContractTests(unittest.TestCase):
 
 class ProcessAndLifecycleTests(unittest.TestCase):
     def test_non_posix_supervision_fails_closed(self) -> None:
+        home = Path("/unused")
         with (
             patch.object(supervisor_module.os, "name", "nt"),
             self.assertRaisesRegex(
@@ -864,7 +865,7 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 "requires a POSIX host",
             ),
         ):
-            DispatchSupervisor(home=Path("/unused"))
+            DispatchSupervisor(home=home)
 
     def test_non_posix_backend_probe_does_not_spawn_cli(self) -> None:
         with (
