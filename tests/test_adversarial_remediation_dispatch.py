@@ -916,6 +916,10 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
+                return_value="/usr/local/bin/codex",
+            ),
+            patch(
                 "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
                 return_value=completed,
             ) as bounded,
@@ -966,6 +970,10 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                     "ANTHROPIC_API_KEY": "claude-only",
                 },
                 clear=False,
+            ),
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
+                return_value="/usr/local/bin/claude",
             ),
             patch(
                 "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
