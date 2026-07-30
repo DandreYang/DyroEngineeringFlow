@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from experiments.external_workflow_runner.artifacts import ArtifactPolicy
 from experiments.external_workflow_runner.errors import Stage0ValidationError
@@ -13,6 +14,9 @@ from experiments.external_workflow_runner.stage1.canonical import CanonicalInput
 from experiments.external_workflow_runner.stage1.claim import ClaimRecord, ClaimStore
 from experiments.external_workflow_runner.stage3.bundle import assemble_stage3_bundle
 from experiments.external_workflow_runner.stage3.claim_matrix import ClaimDeadlineMatrix
+from experiments.external_workflow_runner.stage3.docker_broker import (
+    Stage3DockerBrokerStack,
+)
 from experiments.external_workflow_runner.stage3.supervisor import (
     EXECUTION_KEY_ENV,
     PROVIDER_TOKEN,
@@ -100,16 +104,37 @@ class Stage3EndToEndTests(unittest.TestCase):
             safety_ms=1500,
         )
         now = time.time()
-        # Force mid-run renewal without expiring under suite load.
-        ClaimStore(claim_path).write(
+        claim_store = ClaimStore(claim_path)
+        # Force renewal while broker startup is still in progress.
+        claim_store.write(
             ClaimRecord(
                 task_id="task-stage3",
                 runner_id="stage3-runner",
                 generation=1,
                 execution_key_id="exec-key-stage3",
-                # Half-life ~1s into the run so renewal loop fires during phase1 hold.
+                # Half-life ~1s ahead, well before the broker may become ready.
                 issued_at=now - 4.0,
                 expires_at=now + 6.0,
+            )
+        )
+        real_broker_start = Stage3DockerBrokerStack.start
+        generation_before_broker: list[int] = []
+
+        def start_after_renewal(**kwargs: object) -> Stage3DockerBrokerStack:
+            deadline = time.monotonic() + 2.0
+            while (
+                claim_store.read().generation == 1
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
+            generation_before_broker.append(claim_store.read().generation)
+            return real_broker_start(**kwargs)
+
+        self.enterContext(
+            patch.object(
+                Stage3DockerBrokerStack,
+                "start",
+                side_effect=start_after_renewal,
             )
         )
         result = Stage3Supervisor(
@@ -144,6 +169,12 @@ class Stage3EndToEndTests(unittest.TestCase):
             )
         ).execute()
 
+        self.assertEqual(len(generation_before_broker), 1)
+        self.assertGreaterEqual(
+            generation_before_broker[0],
+            2,
+            "claim renewal must start before broker readiness",
+        )
         self.assertEqual(result.supervised.envelope["status"], "DONE")
         self.assertTrue(result.cleanup_verified)
         self.assertEqual(result.provider_mode, "argv-cli")

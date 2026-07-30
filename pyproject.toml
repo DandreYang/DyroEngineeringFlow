@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dyro"
-version = "0.5.0"
+version = "0.5.1"
 description = "DyroEngineeringFlow: local-first automation and delivery control for multi-repository teams"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -63,6 +63,13 @@ packages = [
   "runtime-lock.json",
   "schemas/*.json",
   "fixtures/*",
+  "ts_runtime/*",
+  "ts_runtime/src/*",
+  "stage1/bundle_src/*",
+  "stage2/bundle_src/*",
+  "stage3/bundle_src/*",
+  "stage4/bundle_src/*",
+  "stage5/bundle_src/*",
 ]
 
 [tool.unittest]

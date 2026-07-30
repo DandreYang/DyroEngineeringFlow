@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.1 - Unreleased
+
+- Restore the TypeScript semantic runtime and Stage1–5 bundle sources in both wheel and sdist; release CI now installs and assembles Stage1/Stage5 from each artifact outside the checkout.
+- Make external claim renewal compare-and-swap exact owner generations, reject unsafe claim files, and aggregate Supervisor shutdown checks.
+- Prove Docker container and network cleanup fail-closed, including partial startup and readiness failures.
+- Bind evidence files to the validated result envelope, seal manifest/ZIP consistency, reject unsafe or oversized pack members, and avoid partial packs.
+- Run local dispatch edits in detached Git worktrees with hash-bound patches; make default dispatch truly asynchronous.
+- Add atomic run claims and owner-token leases, bounded process-tree execution, sealed context reads, strict JSON results, safe GC, authenticated backend routing, and real parallel panels.
+- Reject real CLI adapters in `strict` mode unless they can prove OS-level isolation; Codex/Claude permission profiles are no longer described as physical isolation.
+- Route top-level `--root` / `--dry-run` safely into experiment surfaces and align ADR/design documentation with shipped behavior.
+
 ## 0.5.0 - 2026-07-30
 
 - Ship first-party `experiments.*` modules in the `dyro` wheel (local agent dispatch L0–L4, external workflow runner Stage0–5).

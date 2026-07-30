@@ -271,7 +271,7 @@ flowchart TB
   Host -->|"explicit dyro commands"| Dyro
 ```
 
-See `docs/agent-orchestration-discipline.md`. Experiment under `experiments/local_agent_dispatch/` (not in the installed package).
+See `docs/agent-orchestration-discipline.md`. The optional harness under `experiments/local_agent_dispatch/` ships with the installed package but never replaces Core gates or merge.
 
 ---
 

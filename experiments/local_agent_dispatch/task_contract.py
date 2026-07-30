@@ -90,9 +90,11 @@ def parse_task_contract(payload: Mapping[str, Any]) -> TaskContract:
         raise DispatchValidationError("files must be a non-empty minimal set")
     if any(type(item) is not str or not item.strip() for item in files):
         raise DispatchValidationError("files entries must be non-empty strings")
-    if any(item.strip() == "**/*" for item in files):
+    if len(files) > 50:
+        raise DispatchValidationError("files contains too many glob entries")
+    if any(item.strip().lstrip("!") in {"*", "**", "**/*", "*/**", "**/**"} for item in files):
         raise DispatchValidationError(
-            "files must not use unrestricted **/*; provide a minimal sufficient set"
+            "files must not use an unrestricted glob; provide a minimal sufficient set"
         )
 
     raw_task = payload.get("task")

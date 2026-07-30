@@ -19,7 +19,7 @@
 | --- | --- |
 | 零知识任务契约 | 被调方看不到宿主对话；上下文必须自包含 |
 | 注入前机密守卫 | 路径 + 内容特征双检，fail-closed 剔除 |
-| 严格影子目录 | 物理上仅见白名单文件（可选，敏感仓默认开） |
+| 严格影子目录 | 仅向通过严格隔离能力门禁的 adapter 提供白名单快照；普通 CLI 不因改变 `cwd` 自动升级为物理隔离 |
 | 结果 locator 核验 | 文件存在、行号不越界 → `verified`；不删条目 |
 | 进程身份租约 | `pid + 启动时刻` 防 PID 复用误回收 |
 | 双层并发槽 | 每后端 + 全局；init grace + 心跳 |
@@ -87,7 +87,7 @@ DetachedWorker
 | `constraints` | 含只读/禁止网络/禁止碰密钥路径 |
 | `output_contract` | 与 `ResultEnvelope` schema 对齐 |
 | `files` | 最小充分集；禁止默认 `**/*` |
-| `strict` | true 时启用影子目录（见 §7） |
+| `strict` | true 时启用影子目录并要求 adapter 严格隔离能力（见 §8） |
 | `mode` | `read-only` \| `edit` |
 
 校验失败（空 objective、files 零匹配、strict+edit 冲突等）→ **派发前** fail-closed。
@@ -173,12 +173,12 @@ DetachedWorker
 
 `strict: true` 且 `mode: read-only`：
 
-1. 展开 files glob → 守卫 → 物化到 `~/.dyro/local-agent-dispatch/shadow/<run_id>/`  
+1. 展开 files glob → 以 no-follow 文件描述符完成路径、大小、内容守卫 → 物化到 `~/.dyro/local-agent-dispatch/shadow/<run_id>/`
 2. 保持相对路径结构  
 3. worker cwd = 影子根  
-4. 被调进程 **物理上** 看不到白名单外文件  
+4. adapter 还必须声明并实现 strict isolation；否则 Supervisor 在派发前拒绝
 
-说明：后端 CLI 自带的「plan/read-only 权限档」仅是行为约束；**严格模式是硬隔离补强**。  
+说明：后端 CLI 自带的「plan/read-only/禁用工具」权限档与 shadow `cwd` 都不是 OS 隔离证明。当前外部 Codex / Claude adapter 均标记为不支持 strict；`auto + strict` 只能选择离线 `echo`，真实隔离任务应走 ADR-0001 Docker 链。
 `edit` 模式使用 git worktree（§10），不与 strict 影子混用。
 
 ## 9. 异步生命周期与并发
@@ -194,18 +194,27 @@ accepted → running → completed|failed|timeout
 | 派发 | 校验通过后立刻返回 `run_id`；worker detached |
 | 收取 | `result(run_id, wait=bool, timeout=…)`；可多 id 等待 |
 | 槽位 | `mkdir` 原子锁；scope=`backend_id` 与 `global` 双层 |
-| 租约 | `pid` + `process_started_at`；存活用身份匹配，不只看 TTL |
+| 租约 | `pid` + `process_started_at` + 随机 owner token；续租/释放必须匹配所有权 |
 | init grace | 槽位新建后短窗口内禁止判死 |
 | 僵死回收 | rename 抢占 + 删除；失败则下轮重试 |
 | GC | 超龄 run、影子目录、不活跃 thread 可回收 |
 
+worker 记录会持久化 `pid + process_started_at + owner token`。短命的派发 CLI
+退出后，新 Supervisor、`result --wait` 与 GC 都会重建监控：只有操作系统证明该
+进程已消失、成为 zombie 或 PID 代际不符时，才以 token-CAS 将遗留 `running`
+转为 `failed`。`ps` 不可用但 PID 仍存活时保持 fail-safe，不误杀运行中的任务。
+
 相对「仅 TTL 锁」：增加 **进程启动时刻** 防 PID 复用；相对「无 grace」：避免 init 竞态误杀。
+
+当前 `run` / `panel` / worker 的进程树监管限定 POSIX（Linux/macOS）；Windows
+允许导入与只读 discovery，但执行会 fail-closed，直到提供并验证 Windows 原生
+process-tree 与 pipe 后端。
 
 ## 10. Edit 模式：worktree + patch
 
-1. 创建隔离 git worktree（含未提交变更同步策略：以当前 index/worktree 快照为准，设计实现时显式记录）  
+1. 从当前 Git `HEAD` 创建 detached 隔离 worktree；源工作区未提交变更不会隐式复制
 2. 后端仅在该 worktree 写  
-3. 产出 `git diff` → `patch_ref` 落盘  
+3. 产出有界 `git diff --binary` → 带 SHA-256 的 `patch_ref` 落盘
 4. **默认不** 写回主工作区、不 commit、不 push  
 
 主 agent / 人择优 apply。

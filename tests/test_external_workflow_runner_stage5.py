@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -98,6 +99,7 @@ class EvidenceDryRunUnitTests(unittest.TestCase):
             root = Path(tmp)
             artifact = root / "report.md"
             artifact.write_text("# Stage 5 report\n", encoding="utf-8")
+            artifact_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
             pack = pack_run_evidence(
                 pack_root=root / "pack",
                 workflow_run_id="run-dry-1",
@@ -111,8 +113,18 @@ class EvidenceDryRunUnitTests(unittest.TestCase):
                     "expires_at": 2.0,
                 },
                 canonical_input_sha256="a" * 64,
-                envelope={"status": "DONE", "workflow_run_id": "run-dry-1"},
-                artifact_paths=(("report.md", artifact),),
+                envelope={
+                    "status": "DONE",
+                    "workflow_run_id": "run-dry-1",
+                    "artifacts": [
+                        {
+                            "repository": "repo",
+                            "path": "report.md",
+                            "sha256": artifact_sha,
+                        }
+                    ],
+                },
+                artifact_paths=(("repo", "report.md", artifact),),
                 provider_pin={"source": "host", "content_sha256": "b" * 64},
                 claim_matrix={"total_ms": 1},
                 cleanup=CleanupProof(
@@ -144,7 +156,7 @@ class EvidenceDryRunUnitTests(unittest.TestCase):
                     claim={"schema_version": 1, "task_id": "t"},
                     canonical_input_sha256="c" * 64,
                     envelope={"status": "DONE"},
-                    artifact_paths=(("report.md", artifact),),
+                    artifact_paths=(("repo", "report.md", artifact),),
                     provider_pin={},
                     claim_matrix={},
                     cleanup=CleanupProof(

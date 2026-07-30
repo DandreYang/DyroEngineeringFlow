@@ -8,7 +8,13 @@ from pathlib import Path
 import secrets
 import subprocess
 import time
+from typing import NoReturn
 
+from ..docker_cleanup import (
+    CLEANUP_LABEL,
+    PARTIAL_START_SETTLE_SECONDS,
+    remove_and_verify,
+)
 from ..errors import Stage0ValidationError
 from ..sandbox import BUN_IMAGE, BUN_USER, _docker_environment
 
@@ -30,6 +36,49 @@ def _run_docker(
         raise Stage0ValidationError(f"docker command timed out: {argv[:4]}") from exc
 
 
+def _fail_start_with_cleanup(
+    message: str,
+    *,
+    network_name: str,
+    netns_name: str,
+    broker_name: str,
+    cleanup_token: str,
+) -> NoReturn:
+    try:
+        remove_and_verify(
+            run_docker=_run_docker,
+            container_names=(broker_name, netns_name),
+            network_name=network_name,
+            owner_token=cleanup_token,
+            settle_seconds=PARTIAL_START_SETTLE_SECONDS,
+        )
+    except Exception as cleanup_error:
+        raise Stage0ValidationError(
+            f"{message}; partial-start cleanup could not be proven: {cleanup_error}"
+        ) from cleanup_error
+    raise Stage0ValidationError(message)
+
+
+def _run_start_step(
+    argv: list[str],
+    *,
+    network_name: str,
+    netns_name: str,
+    broker_name: str,
+    cleanup_token: str,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return _run_docker(argv)
+    except Exception as start_error:
+        _fail_start_with_cleanup(
+            f"Docker start step failed: {start_error}",
+            network_name=network_name,
+            netns_name=netns_name,
+            broker_name=broker_name,
+            cleanup_token=cleanup_token,
+        )
+
+
 @dataclass
 class DockerBrokerStack:
     network_name: str
@@ -38,6 +87,7 @@ class DockerBrokerStack:
     port: int
     telemetry_host_path: Path
     bundle_root: Path
+    cleanup_token: str
 
     @classmethod
     def start(
@@ -52,6 +102,7 @@ class DockerBrokerStack:
         network_name = f"dyro-s1-net-{token}"
         netns_name = f"dyro-s1-ns-{token}"
         broker_name = f"dyro-s1-broker-{token}"
+        cleanup_token = secrets.token_hex(16)
         telemetry_host_path = Path(telemetry_host_path)
         telemetry_host_path.parent.mkdir(parents=True, exist_ok=True)
         if telemetry_host_path.exists():
@@ -60,16 +111,32 @@ class DockerBrokerStack:
         # Container uid 1000 must be able to append telemetry.
         os.chmod(telemetry_host_path, 0o666)
 
-        create_net = _run_docker(
-            ["docker", "network", "create", "--internal", network_name]
+        create_net = _run_start_step(
+            [
+                "docker",
+                "network",
+                "create",
+                "--label",
+                f"{CLEANUP_LABEL}={cleanup_token}",
+                "--internal",
+                network_name,
+            ],
+            network_name=network_name,
+            netns_name=netns_name,
+            broker_name=broker_name,
+            cleanup_token=cleanup_token,
         )
         if create_net.returncode != 0:
-            raise Stage0ValidationError(
-                f"failed to create internal network: {create_net.stderr.strip()}"
+            _fail_start_with_cleanup(
+                f"failed to create internal network: {create_net.stderr.strip()}",
+                network_name=network_name,
+                netns_name=netns_name,
+                broker_name=broker_name,
+                cleanup_token=cleanup_token,
             )
 
         # Network namespace holder with no workflow code.
-        create_ns = _run_docker(
+        create_ns = _run_start_step(
             [
                 "docker",
                 "run",
@@ -77,6 +144,8 @@ class DockerBrokerStack:
                 "--rm",
                 "--name",
                 netns_name,
+                "--label",
+                f"{CLEANUP_LABEL}={cleanup_token}",
                 "--network",
                 network_name,
                 "--user",
@@ -89,15 +158,23 @@ class DockerBrokerStack:
                 BUN_IMAGE,
                 "sleep",
                 "600",
-            ]
+            ],
+            network_name=network_name,
+            netns_name=netns_name,
+            broker_name=broker_name,
+            cleanup_token=cleanup_token,
         )
         if create_ns.returncode != 0:
-            _run_docker(["docker", "network", "rm", network_name], timeout=15)
-            raise Stage0ValidationError(
-                f"failed to create broker network namespace: {create_ns.stderr.strip()}"
+            _fail_start_with_cleanup(
+                "failed to create broker network namespace: "
+                f"{create_ns.stderr.strip()}",
+                network_name=network_name,
+                netns_name=netns_name,
+                broker_name=broker_name,
+                cleanup_token=cleanup_token,
             )
 
-        start_broker = _run_docker(
+        start_broker = _run_start_step(
             [
                 "docker",
                 "run",
@@ -105,6 +182,8 @@ class DockerBrokerStack:
                 "--rm",
                 "--name",
                 broker_name,
+                "--label",
+                f"{CLEANUP_LABEL}={cleanup_token}",
                 "--network",
                 f"container:{netns_name}",
                 "--user",
@@ -139,13 +218,19 @@ class DockerBrokerStack:
                 BUN_IMAGE,
                 "bun",
                 "/opt/workflow/broker_server.ts",
-            ]
+            ],
+            network_name=network_name,
+            netns_name=netns_name,
+            broker_name=broker_name,
+            cleanup_token=cleanup_token,
         )
         if start_broker.returncode != 0:
-            _run_docker(["docker", "rm", "--force", netns_name], timeout=15)
-            _run_docker(["docker", "network", "rm", network_name], timeout=15)
-            raise Stage0ValidationError(
-                f"failed to start broker container: {start_broker.stderr.strip()}"
+            _fail_start_with_cleanup(
+                f"failed to start broker container: {start_broker.stderr.strip()}",
+                network_name=network_name,
+                netns_name=netns_name,
+                broker_name=broker_name,
+                cleanup_token=cleanup_token,
             )
 
         stack = cls(
@@ -155,9 +240,20 @@ class DockerBrokerStack:
             port=port,
             telemetry_host_path=telemetry_host_path,
             bundle_root=Path(bundle_root),
+            cleanup_token=cleanup_token,
         )
-        stack._wait_until_ready()
-        return stack
+        try:
+            stack._wait_until_ready()
+            return stack
+        except Exception as readiness_error:
+            try:
+                stack.stop()
+            except Exception as cleanup_error:
+                raise Stage0ValidationError(
+                    "broker readiness failed and cleanup could not be attempted: "
+                    f"{readiness_error}; cleanup: {cleanup_error}"
+                ) from cleanup_error
+            raise
 
     def _wait_until_ready(self, *, timeout_seconds: float = 15.0) -> None:
         deadline = time.monotonic() + timeout_seconds
@@ -190,6 +286,9 @@ class DockerBrokerStack:
         return ["--network", f"container:{self.netns_name}"]
 
     def stop(self) -> None:
-        for name in (self.broker_name, self.netns_name):
-            _run_docker(["docker", "rm", "--force", name], timeout=15)
-        _run_docker(["docker", "network", "rm", self.network_name], timeout=15)
+        remove_and_verify(
+            run_docker=_run_docker,
+            container_names=(self.broker_name, self.netns_name),
+            network_name=self.network_name,
+            owner_token=self.cleanup_token,
+        )

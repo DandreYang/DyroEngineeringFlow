@@ -40,29 +40,40 @@ class ClaimRenewalLoop:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                raise Stage0ValidationError(
+                    "claim renewal loop did not stop before the deadline"
+                )
             self._thread = None
         if self._error is not None:
             raise Stage0ValidationError(self._error)
 
+    def renew_once(self, *, now: float | None = None) -> bool:
+        """Atomically renew the exact claim generation currently owned by this lease."""
+        current = time.time() if now is None else now
+        if self.lease.is_expired(now=current):
+            raise Stage0ValidationError("claim expired during Stage 2 workflow")
+        if not self.lease.should_renew(now=current):
+            return False
+        previous = self.lease.record
+        if previous.runner_id != self.runner_id:
+            raise Stage0ValidationError("claim runner_id mismatch before renewal")
+        renewed = self.lease.build_renewal(
+            extend_seconds=self.extend_seconds,
+            now=current,
+        )
+        self.store.compare_and_swap(
+            expected=previous,
+            replacement=renewed,
+        )
+        self.lease.commit_renewal(renewed)
+        self.renewals_observed += 1
+        return True
+
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                now = time.time()
-                if self.lease.is_expired(now=now):
-                    self._error = "claim expired during Stage 2 workflow"
-                    return
-                if self.lease.should_renew(now=now):
-                    renewed = self.lease.renew(
-                        extend_seconds=self.extend_seconds,
-                        now=now,
-                    )
-                    self.store.write(renewed)
-                    self.store.assert_matches(
-                        runner_id=self.runner_id,
-                        generation=renewed.generation,
-                        now=now,
-                    )
-                    self.renewals_observed += 1
+                self.renew_once()
             except Exception as exc:  # noqa: BLE001 - surface on stop()
                 self._error = f"claim renewal failed: {exc}"
                 return

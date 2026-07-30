@@ -12,8 +12,12 @@ from .base import AdapterResult
 class EchoAdapter:
     id = "echo"
     command = "echo"
+    strict_isolation = True
 
     def available(self) -> bool:
+        return True
+
+    def authenticated(self) -> bool:
         return True
 
     def run(
