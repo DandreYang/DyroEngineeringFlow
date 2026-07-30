@@ -66,6 +66,7 @@ _MANIFEST_KEYS = frozenset(
         "signature",
     }
 )
+_UNSIGNED_MANIFEST_KEYS = _MANIFEST_KEYS - {"signature"}
 _ARTIFACT_KEYS = frozenset(
     {
         "wheel_sha256",
@@ -98,6 +99,7 @@ _ATTESTATION_KEYS = frozenset(
         "signature",
     }
 )
+_UNSIGNED_ATTESTATION_KEYS = _ATTESTATION_KEYS - {"signature"}
 _SIGNATURE_KEYS = frozenset(
     {"schema_version", "algorithm", "purpose", "key_id", "value"}
 )
@@ -187,6 +189,17 @@ _COUNT_ASSERTIONS = MappingProxyType(
 )
 
 
+def production_schema_paths() -> dict[str, Path]:
+    """Return absolute paths to the schemas shipped with this installation."""
+    schema_root = Path(__file__).resolve().parent.parent / "schemas"
+    return {
+        "release_manifest": (
+            schema_root / "production-deployment-manifest.schema.json"
+        ),
+        "attestation": schema_root / "production-attestation.schema.json",
+    }
+
+
 @dataclass(frozen=True)
 class VerifiedProductionAttestation:
     check_id: str
@@ -258,10 +271,8 @@ class VerifiedProductionAcceptance:
                 **dict(ATTESTATION_PURPOSES),
             },
             "schemas": {
-                "release_manifest": (
-                    "schemas/production-deployment-manifest.schema.json"
-                ),
-                "attestation": ("schemas/production-attestation.schema.json"),
+                name: str(path)
+                for name, path in production_schema_paths().items()
             },
         }
 
@@ -281,7 +292,12 @@ def _reject_duplicate_keys(
     return result
 
 
-def _read_bounded_json(path: Path, label: str) -> dict[str, object]:
+def read_production_json(path: Path, label: str) -> dict[str, object]:
+    """Read one bounded, stable production-contract JSON object.
+
+    The reader rejects links, special files, duplicate keys, non-finite
+    numbers, oversized documents, and files replaced while being read.
+    """
     path = path.expanduser()
     try:
         metadata = path.lstat()
@@ -293,7 +309,7 @@ def _read_bounded_json(path: Path, label: str) -> dict[str, object]:
         raise ValidationError(f"{label}必须是普通文件且不能是符号链接：{path}")
     if metadata.st_size > _MAX_DOCUMENT_BYTES:
         raise ValidationError(f"{label}超过 {_MAX_DOCUMENT_BYTES} 字节上限：{path}")
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
@@ -329,6 +345,18 @@ def _read_bounded_json(path: Path, label: str) -> dict[str, object]:
             raise ValidationError(f"{label}读取期间发生变化：{path}")
     finally:
         os.close(descriptor)
+    try:
+        final_metadata = path.lstat()
+    except OSError as exc:
+        raise ValidationError(f"{label}读取后路径发生变化：{path}") from exc
+    if (
+        not stat.S_ISREG(final_metadata.st_mode)
+        or before.st_dev != final_metadata.st_dev
+        or before.st_ino != final_metadata.st_ino
+        or before.st_size != final_metadata.st_size
+        or before.st_mtime_ns != final_metadata.st_mtime_ns
+    ):
+        raise ValidationError(f"{label}读取期间发生变化：{path}")
     try:
         value = json.loads(
             data,
@@ -425,12 +453,25 @@ def _validate_hash_mapping(
     return result
 
 
+def _normalize_checked_at(value: datetime | None) -> datetime:
+    if value is None:
+        return datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        raise ValidationError("生产验收 checked_at 必须包含时区")
+    return value.astimezone(timezone.utc)
+
+
 def _validate_release_manifest(
     manifest: dict[str, object],
     *,
     now: datetime,
+    signature_required: bool = True,
 ) -> None:
-    _require_exact_keys(manifest, _MANIFEST_KEYS, "发布清单")
+    _require_exact_keys(
+        manifest,
+        _MANIFEST_KEYS if signature_required else _UNSIGNED_MANIFEST_KEYS,
+        "发布清单",
+    )
     if (
         type(manifest.get("schema_version")) is not int
         or manifest.get("schema_version") != 1
@@ -477,10 +518,24 @@ def _validate_release_manifest(
     created_at = _parse_timestamp(manifest.get("created_at"), "发布清单.created_at")
     if created_at > now + _CLOCK_SKEW:
         raise ValidationError("发布清单.created_at 位于未来")
-    _validate_signature_shape(
+    if signature_required:
+        _validate_signature_shape(
+            manifest,
+            purpose=RELEASE_PURPOSE,
+            label="发布清单",
+        )
+
+
+def validate_unsigned_release_manifest(
+    manifest: dict[str, object],
+    *,
+    checked_at: datetime | None = None,
+) -> None:
+    """Validate an unsigned manifest before it leaves for external signing."""
+    _validate_release_manifest(
         manifest,
-        purpose=RELEASE_PURPOSE,
-        label="发布清单",
+        now=_normalize_checked_at(checked_at),
+        signature_required=False,
     )
 
 
@@ -556,15 +611,19 @@ def _validate_assertions(
             raise ValidationError(f"{check_id} pass 验收要求 {minimum_field}>=1")
 
 
-def _verify_attestation(
+def _validate_attestation(
     attestation: dict[str, object],
     *,
-    root: Path,
-    manifest: Mapping[str, object],
+    environment_id: str,
     manifest_sha256: str,
     now: datetime,
-) -> VerifiedProductionAttestation:
-    _require_exact_keys(attestation, _ATTESTATION_KEYS, "生产验收证明")
+    signature_required: bool,
+) -> tuple[str, str, datetime, datetime, int]:
+    _require_exact_keys(
+        attestation,
+        _ATTESTATION_KEYS if signature_required else _UNSIGNED_ATTESTATION_KEYS,
+        "生产验收证明",
+    )
     if (
         type(attestation.get("schema_version")) is not int
         or attestation.get("schema_version") != 1
@@ -580,7 +639,7 @@ def _verify_attestation(
         raise ValidationError(f"生产验收证明.check_id 不受支持：{check_id}")
     if attestation.get("release_manifest_sha256") != manifest_sha256:
         raise ValidationError(f"{check_id} 未绑定当前发布清单")
-    if attestation.get("environment_id") != manifest["environment_id"]:
+    if attestation.get("environment_id") != environment_id:
         raise ValidationError(f"{check_id} environment_id 与发布清单不一致")
     verdict = _require_string(
         attestation.get("verdict"),
@@ -617,12 +676,49 @@ def _verify_attestation(
         check_id=check_id,
         verdict=verdict,
     )
-    purpose = ATTESTATION_PURPOSES[check_id]
-    _validate_signature_shape(
+    if signature_required:
+        _validate_signature_shape(
+            attestation,
+            purpose=ATTESTATION_PURPOSES[check_id],
+            label=check_id,
+        )
+    return check_id, verdict, issued_at, expires_at, len(evidence)
+
+
+def validate_unsigned_production_attestation(
+    attestation: dict[str, object],
+    *,
+    release: VerifiedProductionAcceptance,
+    checked_at: datetime | None = None,
+) -> str:
+    """Validate an unsigned environment attestation against a signed release."""
+    check_id, _, _, _, _ = _validate_attestation(
         attestation,
-        purpose=purpose,
-        label=check_id,
+        environment_id=release.environment_id,
+        manifest_sha256=release.release_manifest_sha256,
+        now=_normalize_checked_at(checked_at),
+        signature_required=False,
     )
+    return ATTESTATION_PURPOSES[check_id]
+
+
+def _verify_attestation(
+    attestation: dict[str, object],
+    *,
+    root: Path,
+    release: VerifiedProductionAcceptance,
+    now: datetime,
+) -> VerifiedProductionAttestation:
+    check_id, verdict, issued_at, expires_at, evidence_count = (
+        _validate_attestation(
+            attestation,
+            environment_id=release.environment_id,
+            manifest_sha256=release.release_manifest_sha256,
+            now=now,
+            signature_required=True,
+        )
+    )
+    purpose = ATTESTATION_PURPOSES[check_id]
     verify_record(
         attestation,
         purpose=purpose,
@@ -640,7 +736,7 @@ def _verify_attestation(
         signer_fingerprint=trusted_key_fingerprint(root, purpose, key_id),
         issued_at=issued_at.isoformat(),
         expires_at=expires_at.isoformat(),
-        evidence_count=len(evidence),
+        evidence_count=evidence_count,
     )
 
 
@@ -649,6 +745,7 @@ def verify_production_acceptance(
     root: Path,
     release_manifest_path: Path,
     attestation_paths: Mapping[str, Path] | Sequence[Path],
+    checked_at: datetime | None = None,
 ) -> VerifiedProductionAcceptance:
     """Verify one deployment manifest and zero or more role attestations."""
     if len(attestation_paths) > len(ATTESTATION_PURPOSES):
@@ -665,8 +762,8 @@ def verify_production_acceptance(
     root = root.expanduser().resolve()
     if not root.is_dir():
         raise ValidationError(f"生产验收 trust root 不存在：{root}")
-    checked_at = datetime.now(timezone.utc)
-    manifest = _read_bounded_json(release_manifest_path, "生产发布清单")
+    checked_at = _normalize_checked_at(checked_at)
+    manifest = read_production_json(release_manifest_path, "生产发布清单")
     _validate_release_manifest(manifest, now=checked_at)
     verify_record(
         manifest,
@@ -685,18 +782,27 @@ def verify_production_acceptance(
     )
     manifest_sha256 = hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
 
+    release = VerifiedProductionAcceptance(
+        release_id=str(manifest["release_id"]),
+        environment_id=str(manifest["environment_id"]),
+        source_commit=str(manifest["source_commit"]),
+        release_manifest_sha256=manifest_sha256,
+        release_signer_key_id=release_key_id,
+        release_signer_fingerprint=release_fingerprint,
+        attestations=MappingProxyType({}),
+        signer_fingerprints=MappingProxyType(
+            {RELEASE_PURPOSE: release_fingerprint}
+        ),
+    )
     attestations: dict[str, VerifiedProductionAttestation] = {}
-    fingerprints: dict[str, str] = {
-        RELEASE_PURPOSE: release_fingerprint,
-    }
+    fingerprints: dict[str, str] = {RELEASE_PURPOSE: release_fingerprint}
     seen_fingerprints = {release_fingerprint}
     for expected_check_id, path in attestation_entries:
-        attestation = _read_bounded_json(path, "生产验收证明")
+        attestation = read_production_json(path, "生产验收证明")
         verified = _verify_attestation(
             attestation,
             root=root,
-            manifest=manifest,
-            manifest_sha256=manifest_sha256,
+            release=release,
             now=checked_at,
         )
         if expected_check_id is not None and verified.check_id != expected_check_id:

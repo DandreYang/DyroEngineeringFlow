@@ -8,6 +8,8 @@ Stage 5 closes the **local** experiment path:
 4. **Production gate** — return exit code 3 while environment blockers remain
 5. **Signed acceptance** — verify one release manifest and three independently
    signed, expiring environment attestations without granting deployment authority
+6. **Operator/HSM handoff** — hash real inputs, prepare unsigned records,
+   export exact signing bytes, and verify externally produced signatures
 
 The handoff only builds a bundle. It never imports evidence or performs
 review/signoff/merge/push. See
@@ -21,6 +23,11 @@ dyro runtime doctor
 dyro runtime plan
 dyro runtime claim prepare --help
 dyro runtime handoff --help
+dyro runtime production-acceptance schemas --human
+dyro runtime production-acceptance release-prepare --help
+dyro runtime production-acceptance attestation-prepare --help
+dyro runtime production-acceptance signing-payload --help
+dyro runtime production-acceptance signature-attach --help
 dyro runtime production-gate  # exit 3 while NOT_READY
 dyro runtime production-gate --help  # signed acceptance inputs
 ```
@@ -36,6 +43,12 @@ under `../schemas/` and the
 The current repository still has no real-environment evidence, so the
 zero-input gate remains `NOT_READY`.
 
+The operator commands are create-only and honor top-level `--dry-run`. They
+never accept a production private key, synthesize pass assertions, grant
+release approval, or deploy. See the
+[production acceptance operator runbook](../../../docs/production-acceptance-operator-runbook.md)
+for the complete release → HSM → attestation → gate sequence.
+
 ## Verification
 
 ```sh
@@ -43,6 +56,7 @@ docker pull oven/bun:1.3.11-slim
 python3 -m unittest tests.test_external_workflow_runner_stage5
 python3 -m unittest tests.test_runtime_core_handoff_integration
 python3 -m unittest tests.test_production_acceptance
+python3 -m unittest tests.test_production_operator
 python3 -m unittest
 ```
 

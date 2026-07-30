@@ -5,7 +5,7 @@ external TypeScript workflow runtime. Python modules ship with the `dyro`
 wheel:
 
 - `import experiments.external_workflow_runner…`
-- `dyro runtime status|doctor|plan|claim|handoff|production-gate`
+- `dyro runtime status|doctor|plan|claim|handoff|production-acceptance|production-gate`
 - `python -m experiments.external_workflow_runner production-gate`
 
 It does not change Dyro Core delivery authority. The runtime is a Production
@@ -56,6 +56,14 @@ The gate requires a release signature plus purpose-separated security,
 provider, and quota signatures from four distinct trusted public keys. Missing
 evidence leaves the corresponding blocker open; signed evidence never grants
 runtime delivery authority.
+
+`dyro runtime production-acceptance` closes the operator usability gap without
+moving authority into the runtime: it locates packaged schemas, hashes real
+release/evidence files, prepares create-only unsigned records, exports
+domain-separated RFC 8785 bytes for an external signer/HSM, and verifies the
+returned signature before create-only attachment. It has no production private
+key or deployment command. The complete procedure is in the
+[production acceptance operator runbook](../../docs/production-acceptance-operator-runbook.md).
 
 ## Verification
 

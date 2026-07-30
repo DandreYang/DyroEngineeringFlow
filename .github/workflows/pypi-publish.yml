@@ -75,6 +75,8 @@ jobs:
           set -e
           test "$runtime_gate_wheel_exit" -eq 3
           python -c "import json; r=json.load(open('/tmp/release-runtime-gate-wheel.json')); assert r.get('verdict')=='NOT_READY' and r.get('exit_code')==3, r"
+          /tmp/dyro-release-wheel/bin/dyro runtime production-acceptance schemas >/tmp/release-runtime-schemas-wheel.json
+          python -c "import json, pathlib; r=json.load(open('/tmp/release-runtime-schemas-wheel.json')); assert r.get('verdict')=='LOCATED' and all(pathlib.Path(v['path']).is_file() for v in r['schemas'].values()), r"
           python -m venv /tmp/dyro-release-sdist
           /tmp/dyro-release-sdist/bin/pip install "$GITHUB_WORKSPACE"/dist/dyro-*.tar.gz
           /tmp/dyro-release-sdist/bin/python "$GITHUB_WORKSPACE/tools/verify_installed_artifact.py"
@@ -87,6 +89,8 @@ jobs:
           set -e
           test "$runtime_gate_sdist_exit" -eq 3
           python -c "import json; r=json.load(open('/tmp/release-runtime-gate-sdist.json')); assert r.get('verdict')=='NOT_READY' and r.get('exit_code')==3, r"
+          /tmp/dyro-release-sdist/bin/dyro runtime production-acceptance schemas >/tmp/release-runtime-schemas-sdist.json
+          python -c "import json, pathlib; r=json.load(open('/tmp/release-runtime-schemas-sdist.json')); assert r.get('verdict')=='LOCATED' and all(pathlib.Path(v['path']).is_file() for v in r['schemas'].values()), r"
 
       - name: Validate distribution metadata
         run: python -m twine check --strict dist/*

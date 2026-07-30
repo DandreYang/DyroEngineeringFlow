@@ -252,8 +252,19 @@ def _canonical_record(record: dict[str, object]) -> bytes:
     return canonical_json_bytes(unsigned)
 
 
-def _signature_message(record: dict[str, object], purpose: str) -> bytes:
-    return f"dyro/{validate_purpose(purpose)}/v1\0".encode("ascii") + _canonical_record(record)
+def signature_message(record: dict[str, object], purpose: str) -> bytes:
+    """Return the domain-separated RFC 8785 bytes signed by Dyro.
+
+    This public helper lets HSM and remote signing adapters reproduce Dyro's
+    signing contract without receiving a private key or invoking a local
+    signing command.
+    """
+    if not isinstance(record, dict):
+        raise ValidationError("签名记录必须是 JSON 对象")
+    return (
+        f"dyro/{validate_purpose(purpose)}/v1\0".encode("ascii")
+        + _canonical_record(record)
+    )
 
 
 def _load_private_key(path: Path) -> Ed25519PrivateKey:
@@ -294,7 +305,7 @@ def sign_record(
     if "signature" in record:
         raise ValidationError("记录已经包含 signature，拒绝重复签名")
     key_id = validate_key_id(key_id)
-    signature = _load_private_key(private_key).sign(_signature_message(record, purpose))
+    signature = _load_private_key(private_key).sign(signature_message(record, purpose))
     signed = dict(record)
     signed["signature"] = {
         "schema_version": 1,
@@ -360,7 +371,7 @@ def verify_record(
     except (binascii.Error, ValueError) as exc:
         raise ValidationError("Ed25519 signature 不是有效 Base64") from exc
     try:
-        public_key.verify(signature_bytes, _signature_message(record, purpose))
+        public_key.verify(signature_bytes, signature_message(record, purpose))
     except InvalidSignature as exc:
         raise ValidationError("Ed25519 signature 验证失败") from exc
     return True

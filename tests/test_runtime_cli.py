@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import unittest
 from io import StringIO
 from unittest import mock
@@ -20,9 +21,15 @@ class RuntimeCliTests(unittest.TestCase):
         self.assertEqual(payload.get("verdict"), "NOT_READY")
         self.assertFalse(payload.get("production_ready"))
         self.assertEqual(payload.get("exit_code"), 3)
-        self.assertEqual(payload.get("next_command"), "dyro runtime plan")
+        self.assertEqual(
+            payload.get("next_command"),
+            "dyro runtime production-acceptance schemas --human",
+        )
+        self.assertIsInstance(payload.get("checked_at"), str)
         self.assertTrue(payload.get("release_approval_required"))
         self.assertFalse(payload["production_acceptance"]["provided"])
+        for schema_path in payload["production_acceptance"]["schemas"].values():
+            self.assertTrue(Path(schema_path).is_file())
 
     def test_production_gate_human_output_is_actionable(self) -> None:
         buf = StringIO()
@@ -32,7 +39,10 @@ class RuntimeCliTests(unittest.TestCase):
         output = buf.getvalue()
         self.assertIn("生产门禁：未通过", output)
         self.assertIn("PROD-01", output)
-        self.assertIn("下一步：dyro runtime plan", output)
+        self.assertIn(
+            "下一步：dyro runtime production-acceptance schemas --human",
+            output,
+        )
 
     def test_status_includes_entry_points(self) -> None:
         buf = StringIO()
@@ -47,6 +57,9 @@ class RuntimeCliTests(unittest.TestCase):
         self.assertFalse(payload["capabilities"]["operator_run_cli"])
         self.assertTrue(
             payload["capabilities"]["signed_production_acceptance"]
+        )
+        self.assertTrue(
+            payload["capabilities"]["production_acceptance_operator_kit"]
         )
 
     def test_status_human_output_explains_safety_boundary(self) -> None:

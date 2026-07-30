@@ -2,6 +2,14 @@
 
 ## 0.5.1 - Unreleased
 
+- Add a create-only production-acceptance operator kit that locates packaged
+  schemas, stably hashes real distributions/SBOM/provenance/providers/operations,
+  prepares explicit unsigned records, exports exact HSM signing bytes, and
+  verifies externally produced signatures without loading production private
+  keys or granting deployment authority.
+- Add auditable `checked_at`, non-looping next commands, installed-artifact
+  smoke coverage, an operator runbook, and adversarial overwrite/link/FIFO/
+  replacement/signature tests for the production acceptance journey.
 - Add a fail-closed production acceptance path: one release-bound manifest and
   three expiring, purpose-separated environment attestations must verify under
   four distinct trusted Ed25519 public keys before `PROD-01/02/09` can clear.

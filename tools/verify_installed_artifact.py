@@ -38,6 +38,10 @@ from experiments.external_workflow_runner.stage5.host_provider import (
 from experiments.external_workflow_runner.stage5.core_handoff import (
     build_core_evidence_handoff,
 )
+from experiments.external_workflow_runner.stage5.production_operator import (
+    describe_production_schemas,
+    prepare_release_manifest,
+)
 from experiments.external_workflow_runner.manifest import verify_bundle_manifest
 
 
@@ -65,7 +69,7 @@ def _verify_bundle(result: dict[str, object], *, expected_stage: int) -> None:
 def main() -> None:
     if not callable(collect_runtime_diagnostics) or not callable(
         build_core_evidence_handoff
-    ):
+    ) or not callable(prepare_release_manifest):
         raise SystemExit("installed runtime operator modules are unavailable")
     package_root = Path(runtime_package.__file__).resolve().parent
     resources = {
@@ -111,6 +115,65 @@ def main() -> None:
             raise SystemExit(f"installed runtime schema is invalid: {name}")
     with tempfile.TemporaryDirectory() as tmp:
         temporary_root = Path(tmp)
+        schema_contract = describe_production_schemas()
+        if (
+            schema_contract.get("verdict") != "LOCATED"
+            or schema_contract.get("written") is not False
+        ):
+            raise SystemExit("installed production schema contract is unavailable")
+        release_inputs = {
+            name: temporary_root / f"{name}.input"
+            for name in (
+                "wheel_sha256",
+                "sdist_sha256",
+                "sbom_sha256",
+                "provenance_sha256",
+                "deployment_sha256",
+                "canary_plan_sha256",
+                "rollback_plan_sha256",
+                "observability_plan_sha256",
+                "runbook_sha256",
+            )
+        }
+        for name, path in release_inputs.items():
+            path.write_bytes(name.encode("ascii"))
+        provider = temporary_root / "provider.bin"
+        provider.write_bytes(b"installed-provider")
+        dry_release = prepare_release_manifest(
+            release_id="installed-smoke",
+            environment_id="prod/smoke",
+            source_commit="1" * 40,
+            artifacts={
+                name: release_inputs[name]
+                for name in (
+                    "wheel_sha256",
+                    "sdist_sha256",
+                    "sbom_sha256",
+                    "provenance_sha256",
+                )
+            },
+            providers=(("smoke", provider),),
+            operations={
+                name: release_inputs[name]
+                for name in (
+                    "deployment_sha256",
+                    "canary_plan_sha256",
+                    "rollback_plan_sha256",
+                    "observability_plan_sha256",
+                    "runbook_sha256",
+                )
+            },
+            output=temporary_root / "release.unsigned.json",
+            dry_run=True,
+        )
+        if (
+            dry_release.get("verdict") != "DRY_RUN"
+            or dry_release.get("written") is not False
+            or (temporary_root / "release.unsigned.json").exists()
+        ):
+            raise SystemExit(
+                "installed production release preparation is unsafe"
+            )
         runtime_lock_path = package_root / "runtime-lock.json"
         assemblers = (
             (1, assemble_stage1_bundle),

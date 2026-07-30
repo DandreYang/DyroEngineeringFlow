@@ -1085,7 +1085,8 @@ def build_parser() -> argparse.ArgumentParser:
         "runtime",
         help=(
             "可选外部语义运行时诊断与生产门禁（当前 NOT_READY）。"
-            "用法：dyro runtime status|doctor|plan|claim|handoff|production-gate"
+            "用法：dyro runtime status|doctor|plan|claim|handoff|"
+            "production-acceptance|production-gate"
         ),
         add_help=False,
     )
@@ -1448,9 +1449,22 @@ def _route_experiment_surface(raw: list[str]) -> tuple[str, list[str]] | None:
             forwarded.insert(0, "--dry-run")
     if surface == "runtime":
         runtime_command = forwarded[0] if forwarded else ""
+        acceptance_command = (
+            forwarded[1]
+            if runtime_command == "production-acceptance"
+            and len(forwarded) > 1
+            else ""
+        )
         if (
             global_args.root
-            and runtime_command in {"handoff", "production-gate"}
+            and (
+                runtime_command in {"handoff", "production-gate"}
+                or (
+                    runtime_command == "production-acceptance"
+                    and acceptance_command
+                    in {"attestation-prepare", "signing-payload", "signature-attach"}
+                )
+            )
             and not any(
                 token == "--root" or token.startswith("--root=")
                 for token in forwarded
