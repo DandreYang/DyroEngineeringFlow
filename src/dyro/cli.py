@@ -1343,19 +1343,51 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _route_experiment_surface(raw: list[str]) -> tuple[str, list[str]] | None:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--root")
+    common.add_argument("--dry-run", action="store_true")
+    global_args, remaining = common.parse_known_args(raw)
+    if not remaining or remaining[0] not in {"dispatch", "runtime"}:
+        return None
+    surface = remaining[0]
+    forwarded = list(remaining[1:])
+    if surface == "dispatch":
+        dispatch_common = argparse.ArgumentParser(add_help=False)
+        dispatch_common.add_argument("--home")
+        dispatch_common.add_argument("--dry-run", action="store_true")
+        _, dispatch_remaining = dispatch_common.parse_known_args(forwarded)
+        dispatch_command = (
+            dispatch_remaining[0] if dispatch_remaining else ""
+        )
+        if (
+            global_args.root
+            and dispatch_command in {"run", "panel"}
+            and not any(
+                token == "--project" or token.startswith("--project=")
+                for token in forwarded
+            )
+        ):
+            forwarded.extend(["--project", global_args.root])
+        if global_args.dry_run:
+            forwarded.insert(0, "--dry-run")
+    return surface, forwarded
+
+
 def main(argv: list[str] | None = None) -> None:
     import sys
 
     # Optional experiment surfaces ship in the dyro wheel (not Core delivery).
     raw = list(sys.argv[1:] if argv is None else argv)
-    if raw and raw[0] == "dispatch":
+    experiment = _route_experiment_surface(raw)
+    if experiment is not None and experiment[0] == "dispatch":
         from experiments.local_agent_dispatch.cli import main as dispatch_main
 
-        raise SystemExit(dispatch_main(raw[1:]))
-    if raw and raw[0] == "runtime":
+        raise SystemExit(dispatch_main(experiment[1]))
+    if experiment is not None and experiment[0] == "runtime":
         from experiments.external_workflow_runner.cli import main as runtime_main
 
-        raise SystemExit(runtime_main(raw[1:]))
+        raise SystemExit(runtime_main(experiment[1]))
 
     parser = build_parser()
     args = parser.parse_args(argv)

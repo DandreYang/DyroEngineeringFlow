@@ -31,7 +31,7 @@
    - `import experiments.local_agent_dispatch`
    
    相对 Core 仍为**可选产品面**：不写入 TaskGraph 成功条件，不成为 gate 证据。
-3. 协议必须包含：五段式任务契约、文件白名单、注入前机密守卫、可选严格影子目录、异步 run 生命周期、结果契约（含 locator 核验）、进程身份租约、edit 模式仅 patch 交付。
+3. 协议必须包含：五段式任务契约、文件白名单、注入前机密守卫、可选严格影子目录、异步 run 生命周期、结果契约（含 locator 核验）、进程身份租约、edit 模式仅 patch 交付。`strict` 只允许声明并实现严格隔离能力的 adapter；当前外部 Codex / Claude CLI 均不满足该门槛，严格任务只可使用离线 `echo` 验证器，或改走 ADR-0001 Docker 隔离链。
 4. 默认结果为 **建议性**；核验字段标记可信度，不静默删除条目。
 5. **禁止** 从派发 Supervisor（及 `dyro dispatch` 路径）调用 signoff / merge / push / 生产 evidence import。
 6. 与 ADR-0001 的 Docker 语义运行时 **并列不合并**：派发 harness 不替代 Sandbox/Broker；语义运行时不替代多宿主 CLI 派发。
@@ -42,13 +42,17 @@
 - 用户 `pipx install dyro` 后即可使用派发 harness，无需单独 clone 实验树。
 - Core 依赖集仍保持轻量（派发不引入 Docker/模型 SaaS 硬依赖）。
 - 实现可分阶段：契约与守卫可单测；CLI 适配器可探测可用性。
+- 默认 `run` 启动 detached worker；`--wait` 才同步等待。运行状态与租约均通过带 owner token 的原子 claim/续租/释放保护。
+- detached worker 的 PID、启动代际与 owner token 持久化；新 Supervisor、result/wait 与 GC 可在原派发进程退出后安全终态化已死亡的 worker。
+- `run` / `panel` / worker 的进程树监管当前限定 POSIX（Linux/macOS）；Windows 仅支持导入与只读 discovery，执行 fail-closed。
+- `edit` 在 detached Git worktree 内执行并只返回 hash 密封的 patch；主工作区、commit 与 push 均不由派发链修改。
 - 生产语义运行时仍由 ADR-0001 / Stage5 `NOT_READY` 门禁约束；本 ADR 不降低该门槛。
 
 ## 否决项
 
 - 用多模型投票或 dispatch 结果 **替代** Dyro gates / review / signoff / merge。
 - 将派发 Supervisor 接到 Core 的 merge/push/signoff/生产 evidence import 路径。
-- 在非严格模式下假设「权限档 = 物理隔离」。
+- 把 CLI 的 plan/read-only/工具禁用权限档或 shadow `cwd` 宣称为 OS 级物理隔离。
 - 直接修改用户主工作区作为 edit 默认路径。
 - 把第三方协作品牌/SDK 作为 Core 或派发协议的硬依赖。
 

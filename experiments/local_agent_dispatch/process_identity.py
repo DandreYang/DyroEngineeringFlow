@@ -48,6 +48,64 @@ def current_identity() -> ProcessIdentity:
     return ProcessIdentity(pid=os.getpid(), started_at=started)
 
 
+def identity_for_pid(pid: int) -> ProcessIdentity:
+    if type(pid) is not int or pid <= 0:
+        raise ValueError("pid must be a positive integer")
+    started = process_started_at(pid) or f"unknown-{pid}-{time.time_ns()}"
+    return ProcessIdentity(pid=pid, started_at=started)
+
+
+def process_is_alive(pid: int) -> bool:
+    """Return false only when the operating system proves ``pid`` is absent."""
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def process_state(pid: int) -> str | None:
+    """Best-effort process state token; ``Z`` denotes an exited zombie."""
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    state = completed.stdout.strip()
+    return state or None
+
+
+def process_identity_is_dead(*, pid: int, started_at: str) -> bool:
+    """
+    Return true only with positive evidence that the generation ended.
+
+    False means alive *or unverifiable*; in particular, equality of the
+    second-resolution ``ps`` token is not proof of generation ownership.
+    """
+    if not process_is_alive(pid):
+        return True
+    state = process_state(pid)
+    if state is not None and state.startswith("Z"):
+        return True
+    if started_at.startswith("unknown-"):
+        return False
+    live_started_at = process_started_at(pid)
+    return live_started_at is not None and live_started_at != started_at
+
+
 def identity_matches(lease: Mapping[str, object], *, pid: int | None = None) -> bool:
     """True when lease pid is alive and started_at still matches."""
     lease_pid = lease.get("pid")

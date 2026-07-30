@@ -41,7 +41,7 @@ class ResultEnvelope:
             "verified_ratio": (
                 sum(1 for e in self.evidence if e.verified is True) / len(self.evidence)
                 if self.evidence
-                else 1.0
+                else 0.0
             ),
         }
 

@@ -7,11 +7,11 @@ from typing import Mapping, Sequence
 
 from .adapters.registry import probe_backends
 from .json_store import atomic_write_json, read_json
-from .paths import skills_dir
+from .paths import dispatch_home_path, skills_dir
 
 
 def load_routes(home: Path | None = None) -> list[dict[str, str]]:
-    path = skills_dir(home) / "routes.json"
+    path = dispatch_home_path(home) / "skills" / "routes.json"
     payload = read_json(path)
     if not payload:
         return []

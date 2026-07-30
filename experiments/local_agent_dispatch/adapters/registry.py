@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+
+from ..errors import DispatchValidationError
 from .base import BackendAdapter
 from .echo import EchoAdapter
 from .subprocess_cli import claude_adapter, codex_adapter
@@ -20,30 +23,58 @@ def list_adapters() -> list[str]:
     return sorted(_all().keys())
 
 
-def get_adapter(backend_id: str) -> BackendAdapter:
+def adapter_is_authenticated(adapter: BackendAdapter) -> bool:
+    """Apply one platform capability policy to selection and reporting."""
+    if os.name != "posix":
+        return adapter.id == "echo"
+    authenticated = getattr(adapter, "authenticated", None)
+    if callable(authenticated):
+        return bool(authenticated())
+    # Preserve the original adapter-test/extension compatibility contract:
+    # adapters predating the explicit auth probe use availability as the probe.
+    return adapter.available()
+
+
+def get_adapter(
+    backend_id: str,
+    *,
+    require_strict: bool = False,
+) -> BackendAdapter:
     adapters = _all()
     if backend_id == "auto":
         for preferred in ("codex", "claude", "echo"):
             adapter = adapters.get(preferred)
-            if adapter is not None and adapter.available():
+            if (
+                adapter is not None
+                and adapter.available()
+                and adapter_is_authenticated(adapter)
+                and (not require_strict or adapter.strict_isolation)
+            ):
                 return adapter
-        return EchoAdapter()
+        raise DispatchValidationError(
+            "no available authenticated backend satisfies the isolation policy"
+        )
     adapter = adapters.get(backend_id)
     if adapter is None:
-        from ..errors import DispatchValidationError
-
         raise DispatchValidationError(f"unknown backend: {backend_id}")
+    if require_strict and not adapter.strict_isolation:
+        raise DispatchValidationError(
+            f"backend does not provide strict isolation: {backend_id}"
+        )
     return adapter
 
 
 def probe_backends() -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for adapter_id, adapter in sorted(_all().items()):
+        available = adapter.available()
         rows.append(
             {
                 "id": adapter_id,
                 "command": adapter.command,
-                "available": adapter.available(),
+                "available": available,
+                "authenticated": adapter_is_authenticated(adapter),
+                "strict_isolation": adapter.strict_isolation,
             }
         )
     return rows

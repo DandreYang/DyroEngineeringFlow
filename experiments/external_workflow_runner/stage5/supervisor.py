@@ -11,10 +11,11 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import secrets
+import sys
 from typing import Mapping
 
 from ..artifacts import ArtifactPolicy
-from ..errors import Stage0ValidationError
+from ..errors import report_cleanup_failures, Stage0ValidationError
 from ..manifest import verify_bundle_manifest
 from ..sandbox import (
     BUN_IMAGE,
@@ -206,11 +207,14 @@ class Stage5Supervisor:
         )
         broker: Stage5DockerBrokerStack | None = None
         supervised: SupervisedResult | None = None
+        final_claim: ClaimRecord | None = None
         key_during = False
         sandbox_cleanup = False
         broker_cleanup = False
         broker_absent = False
         try:
+            # Keep authority live during Docker startup, not only after readiness.
+            renewal.start()
             broker = Stage5DockerBrokerStack.start(
                 bundle_root=self.config.bundle_root,
                 telemetry_host_path=telemetry_path,
@@ -220,7 +224,6 @@ class Stage5Supervisor:
                 provider_fake_token=PROVIDER_TOKEN,
                 host_provider=self._host_provider,
             )
-            renewal.start()
             sandbox = DockerSandboxConfig(
                 name=f"dyro-s5-{secrets.token_hex(4)}",
                 image=BUN_IMAGE,
@@ -263,20 +266,46 @@ class Stage5Supervisor:
             )
             sandbox_cleanup = supervised.process.cleanup_verified
         finally:
-            renewal.stop()
+            primary_error = sys.exception()
+            cleanup_errors: list[str] = []
+            try:
+                renewal.stop()
+            except Exception as exc:  # noqa: BLE001 - continue mandatory cleanup
+                cleanup_errors.append(f"claim renewal stop: {exc}")
             if broker is not None:
-                broker.stop()
-                broker_cleanup = broker.cleanup_verified
-                broker_absent = broker.containers_absent
-            final_claim = claim_store.assert_matches(runner_id=self.config.runner_id)
-            verify_bundle_manifest(
-                self.config.bundle_root,
-                self._bundle_manifest,
-                expected_identity=self._bundle_identity,
+                try:
+                    broker.stop()
+                    broker_cleanup = broker.cleanup_verified
+                    broker_absent = broker.containers_absent
+                except Exception as exc:  # noqa: BLE001 - aggregate after all cleanup
+                    cleanup_errors.append(f"broker stop: {exc}")
+            try:
+                final_claim = claim_store.assert_matches(
+                    runner_id=self.config.runner_id,
+                    generation=lease.record.generation,
+                    execution_key_id=lease.record.execution_key_id,
+                    task_id=lease.record.task_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - aggregate invariant failures
+                cleanup_errors.append(f"claim verification: {exc}")
+            try:
+                verify_bundle_manifest(
+                    self.config.bundle_root,
+                    self._bundle_manifest,
+                    expected_identity=self._bundle_identity,
+                )
+            except Exception as exc:  # noqa: BLE001 - aggregate invariant failures
+                cleanup_errors.append(f"bundle verification: {exc}")
+            report_cleanup_failures(
+                "Stage 5",
+                cleanup_errors,
+                primary_error=primary_error,
             )
 
         if supervised is None:
             raise Stage0ValidationError("Stage 5 run produced no supervised result")
+        if final_claim is None:
+            raise Stage0ValidationError("Stage 5 final claim was not verified")
         if not sandbox_cleanup:
             raise Stage0ValidationError("sandbox cleanup was not verified")
         if not broker_cleanup or not broker_absent:
@@ -328,7 +357,13 @@ class Stage5Supervisor:
                 claim=final_claim.to_mapping(),
                 canonical_input_sha256=digest,
                 envelope=dict(supervised.envelope),
-                artifact_paths=((canonical.artifact_path, report_path),),
+                artifact_paths=(
+                    (
+                        canonical.artifact_repository,
+                        canonical.artifact_path,
+                        report_path,
+                    ),
+                ),
                 provider_pin=self._host_provider.to_mapping(),
                 claim_matrix=matrix.to_mapping(),
                 cleanup=cleanup_proof,

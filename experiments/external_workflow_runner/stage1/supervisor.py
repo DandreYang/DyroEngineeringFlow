@@ -7,10 +7,11 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import secrets
+import sys
 from typing import Mapping
 
 from ..artifacts import ArtifactPolicy
-from ..errors import Stage0ValidationError
+from ..errors import report_cleanup_failures, Stage0ValidationError
 from ..manifest import verify_bundle_manifest
 from ..sandbox import (
     BUN_IMAGE,
@@ -105,8 +106,15 @@ class Stage1Supervisor:
         claim = claim_store.assert_matches(runner_id=self.config.runner_id)
         lease = ClaimLease(record=claim, renewals=[])
         if lease.should_renew():
-            renewed = lease.renew(extend_seconds=self.config.claim_extend_seconds)
-            claim_store.write(renewed)
+            previous = lease.record
+            renewed = lease.build_renewal(
+                extend_seconds=self.config.claim_extend_seconds
+            )
+            claim_store.compare_and_swap(
+                expected=previous,
+                replacement=renewed,
+            )
+            lease.commit_renewal(renewed)
             claim = claim_store.assert_matches(
                 runner_id=self.config.runner_id,
                 generation=renewed.generation,
@@ -195,16 +203,34 @@ class Stage1Supervisor:
             )
             cleanup_verified = supervised.process.cleanup_verified
         finally:
+            primary_error = sys.exception()
+            cleanup_errors: list[str] = []
             if broker is not None:
-                broker.stop()
-            claim_store.assert_matches(
-                runner_id=self.config.runner_id,
-                generation=claim.generation,
-            )
-            verify_bundle_manifest(
-                self.config.bundle_root,
-                self._bundle_manifest,
-                expected_identity=self._bundle_identity,
+                try:
+                    broker.stop()
+                except Exception as exc:  # noqa: BLE001 - aggregate after all cleanup
+                    cleanup_errors.append(f"broker stop: {exc}")
+            try:
+                claim_store.assert_matches(
+                    runner_id=self.config.runner_id,
+                    generation=claim.generation,
+                    execution_key_id=claim.execution_key_id,
+                    task_id=claim.task_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - aggregate invariant failures
+                cleanup_errors.append(f"claim verification: {exc}")
+            try:
+                verify_bundle_manifest(
+                    self.config.bundle_root,
+                    self._bundle_manifest,
+                    expected_identity=self._bundle_identity,
+                )
+            except Exception as exc:  # noqa: BLE001 - aggregate invariant failures
+                cleanup_errors.append(f"bundle verification: {exc}")
+            report_cleanup_failures(
+                "Stage 1",
+                cleanup_errors,
+                primary_error=primary_error,
             )
 
         if supervised is None:

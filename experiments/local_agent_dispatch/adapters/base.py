@@ -26,8 +26,11 @@ class AdapterResult:
 class BackendAdapter(Protocol):
     id: str
     command: str
+    strict_isolation: bool
 
     def available(self) -> bool: ...
+
+    def authenticated(self) -> bool: ...
 
     def run(
         self,

@@ -7,10 +7,11 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import secrets
+import sys
 from typing import Mapping
 
 from ..artifacts import ArtifactPolicy
-from ..errors import Stage0ValidationError
+from ..errors import report_cleanup_failures, Stage0ValidationError
 from ..manifest import verify_bundle_manifest
 from ..sandbox import (
     BUN_IMAGE,
@@ -147,9 +148,12 @@ class Stage2Supervisor:
         )
         broker: Stage2DockerBrokerStack | None = None
         supervised: SupervisedResult | None = None
+        final_claim: ClaimRecord | None = None
         key_during = False
         cleanup_verified = False
         try:
+            # Keep authority live during Docker startup, not only after readiness.
+            renewal.start()
             broker = Stage2DockerBrokerStack.start(
                 bundle_root=self.config.bundle_root,
                 telemetry_host_path=telemetry_path,
@@ -157,7 +161,6 @@ class Stage2Supervisor:
                 provider_mode=self.config.provider_mode,
                 max_concurrency=self.config.max_broker_concurrency,
             )
-            renewal.start()
             sandbox = DockerSandboxConfig(
                 name=f"dyro-stage2-{secrets.token_hex(4)}",
                 image=BUN_IMAGE,
@@ -199,18 +202,44 @@ class Stage2Supervisor:
             )
             cleanup_verified = supervised.process.cleanup_verified
         finally:
-            renewal.stop()
+            primary_error = sys.exception()
+            cleanup_errors: list[str] = []
+            try:
+                renewal.stop()
+            except Exception as exc:  # noqa: BLE001 - continue mandatory cleanup
+                cleanup_errors.append(f"claim renewal stop: {exc}")
             if broker is not None:
-                broker.stop()
-            final_claim = claim_store.assert_matches(runner_id=self.config.runner_id)
-            verify_bundle_manifest(
-                self.config.bundle_root,
-                self._bundle_manifest,
-                expected_identity=self._bundle_identity,
+                try:
+                    broker.stop()
+                except Exception as exc:  # noqa: BLE001 - aggregate after all cleanup
+                    cleanup_errors.append(f"broker stop: {exc}")
+            try:
+                final_claim = claim_store.assert_matches(
+                    runner_id=self.config.runner_id,
+                    generation=lease.record.generation,
+                    execution_key_id=lease.record.execution_key_id,
+                    task_id=lease.record.task_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - aggregate invariant failures
+                cleanup_errors.append(f"claim verification: {exc}")
+            try:
+                verify_bundle_manifest(
+                    self.config.bundle_root,
+                    self._bundle_manifest,
+                    expected_identity=self._bundle_identity,
+                )
+            except Exception as exc:  # noqa: BLE001 - aggregate invariant failures
+                cleanup_errors.append(f"bundle verification: {exc}")
+            report_cleanup_failures(
+                "Stage 2",
+                cleanup_errors,
+                primary_error=primary_error,
             )
 
         if supervised is None:
             raise Stage0ValidationError("Stage 2 run produced no supervised result")
+        if final_claim is None:
+            raise Stage0ValidationError("Stage 2 final claim was not verified")
         if not cleanup_verified:
             raise Stage0ValidationError("sandbox cleanup was not verified")
 

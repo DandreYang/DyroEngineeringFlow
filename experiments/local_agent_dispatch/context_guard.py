@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
+import stat
 from typing import Iterable, Mapping
 
 from .errors import DispatchValidationError
@@ -36,6 +37,7 @@ CONTENT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
+MAX_CONTEXT_FILE_BYTES = 512 * 1024
 
 
 @dataclass(frozen=True)
@@ -85,37 +87,260 @@ def check_content(content: str, *, file_label: str = "") -> GuardVerdict:
     return GuardVerdict(True)
 
 
-def guard_file(path: Path, root_dir: Path, *, read_content: bool = True) -> GuardVerdict:
+def _same_file_identity(
+    left: os.stat_result,
+    right: os.stat_result,
+) -> bool:
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def _read_stable_descriptor(
+    file_descriptor: int,
+    *,
+    raw_path: Path,
+    max_bytes: int,
+) -> tuple[bytearray, os.stat_result]:
+    before = os.fstat(file_descriptor)
+    if not stat.S_ISREG(before.st_mode):
+        raise DispatchValidationError(
+            f"context path is not a regular file: {raw_path}"
+        )
+    if before.st_size > max_bytes:
+        raise DispatchValidationError(
+            f"context file exceeds byte limit: {before.st_size} > {max_bytes}"
+        )
+    raw = bytearray()
+    while len(raw) <= max_bytes:
+        chunk = os.read(
+            file_descriptor,
+            min(64 * 1024, max_bytes + 1 - len(raw)),
+        )
+        if not chunk:
+            break
+        raw.extend(chunk)
+    if len(raw) > max_bytes:
+        raise DispatchValidationError(
+            f"context file exceeds byte limit while reading: {raw_path}"
+        )
+    after = os.fstat(file_descriptor)
+    if (
+        not _same_file_identity(before, after)
+        or before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+    ):
+        raise DispatchValidationError(
+            f"context file changed while being read: {raw_path}"
+        )
+    return raw, after
+
+
+def _snapshot_path_chain(
+    root: Path,
+    relative: Path,
+    *,
+    raw_path: Path,
+) -> tuple[list[tuple[Path, os.stat_result]], os.stat_result]:
+    """Snapshot a resolved, non-link path chain for no-dir_fd platforms."""
+    directories: list[tuple[Path, os.stat_result]] = []
+    current = root
+    for component in (".", *relative.parts[:-1]):
+        if component != ".":
+            current /= component
+        metadata = current.lstat()
+        is_junction = getattr(current, "is_junction", None)
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or (callable(is_junction) and is_junction())
+            or not stat.S_ISDIR(metadata.st_mode)
+        ):
+            raise DispatchValidationError(
+                f"context path cannot be opened safely: {raw_path}"
+            )
+        directories.append((current, metadata))
+
+    file_path = root / relative
+    file_metadata = file_path.lstat()
+    is_junction = getattr(file_path, "is_junction", None)
+    if (
+        stat.S_ISLNK(file_metadata.st_mode)
+        or (callable(is_junction) and is_junction())
+        or not stat.S_ISREG(file_metadata.st_mode)
+    ):
+        raise DispatchValidationError(
+            f"context path is not a regular file: {raw_path}"
+        )
+    return directories, file_metadata
+
+
+def read_guarded_file(
+    path: Path,
+    root_dir: Path,
+    *,
+    max_bytes: int = MAX_CONTEXT_FILE_BYTES,
+) -> tuple[str, str]:
+    """Read one regular UTF-8 file through the safest available path API."""
+    raw_path = Path(path)
+    if raw_path.is_symlink():
+        raise DispatchValidationError(f"context path is a symbolic link: {raw_path}")
+    try:
+        root = Path(root_dir).resolve(strict=True)
+        candidate = raw_path.resolve(strict=True)
+        relative = candidate.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise DispatchValidationError(
+            f"context path escapes workspace: {raw_path}"
+        ) from exc
+    if not relative.parts:
+        raise DispatchValidationError(
+            f"context path is not a regular file: {raw_path}"
+        )
+    verdict = check_path(candidate, root)
+    if not verdict.allowed:
+        raise DispatchValidationError(verdict.reason)
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise DispatchValidationError("context byte limit must be positive")
+
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    root_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptors: list[int] = []
+    try:
+        if os.open in getattr(os, "supports_dir_fd", ()):
+            current = os.open(root, root_flags)
+            descriptors.append(current)
+            for component in relative.parts[:-1]:
+                current = os.open(
+                    component,
+                    root_flags,
+                    dir_fd=current,
+                )
+                descriptors.append(current)
+            file_descriptor = os.open(
+                relative.parts[-1],
+                file_flags,
+                dir_fd=current,
+            )
+            descriptors.append(file_descriptor)
+            raw, _after = _read_stable_descriptor(
+                file_descriptor,
+                raw_path=raw_path,
+                max_bytes=max_bytes,
+            )
+        else:
+            before_directories, before_path = _snapshot_path_chain(
+                root,
+                relative,
+                raw_path=raw_path,
+            )
+            file_descriptor = os.open(candidate, file_flags)
+            descriptors.append(file_descriptor)
+            opened = os.fstat(file_descriptor)
+            if not _same_file_identity(before_path, opened):
+                raise DispatchValidationError(
+                    f"context file changed while being opened: {raw_path}"
+                )
+            raw, after = _read_stable_descriptor(
+                file_descriptor,
+                raw_path=raw_path,
+                max_bytes=max_bytes,
+            )
+            after_directories, after_path = _snapshot_path_chain(
+                root,
+                relative,
+                raw_path=raw_path,
+            )
+            if (
+                len(before_directories) != len(after_directories)
+                or any(
+                    before_item[0] != after_item[0]
+                    or not _same_file_identity(
+                        before_item[1],
+                        after_item[1],
+                    )
+                    for before_item, after_item in zip(
+                        before_directories,
+                        after_directories,
+                        strict=True,
+                    )
+                )
+                or not _same_file_identity(before_path, after_path)
+                or not _same_file_identity(after, after_path)
+                or after.st_size != after_path.st_size
+                or after.st_mtime_ns != after_path.st_mtime_ns
+            ):
+                raise DispatchValidationError(
+                    f"context path changed while being read: {raw_path}"
+                )
+    except (OSError, NotImplementedError) as exc:
+        raise DispatchValidationError(
+            f"context file cannot be opened safely: {raw_path}"
+        ) from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+    if b"\0" in raw:
+        raise DispatchValidationError(
+            f"binary file rejected for context injection: {raw_path}"
+        )
+    try:
+        text = bytes(raw).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DispatchValidationError(
+            f"non-utf8 file rejected for context injection: {raw_path}"
+        ) from exc
+    content_verdict = check_content(text, file_label=relative.as_posix())
+    if not content_verdict.allowed:
+        raise DispatchValidationError(content_verdict.reason)
+    return relative.as_posix(), text
+
+
+def guard_file(
+    path: Path,
+    root_dir: Path,
+    *,
+    read_content: bool = True,
+    max_bytes: int = MAX_CONTEXT_FILE_BYTES,
+) -> GuardVerdict:
     path = Path(path)
     path_verdict = check_path(path, root_dir)
     if not path_verdict.allowed:
         return path_verdict
     if not read_content:
         return path_verdict
-    if not path.is_file():
-        return GuardVerdict(False, f"not a regular file: {path}")
     try:
-        with path.open("rb") as handle:
-            raw = handle.read(512 * 1024)
-    except OSError as exc:
-        return GuardVerdict(False, f"unreadable: {path}: {exc}")
-    if b"\0" in raw:
-        return GuardVerdict(False, f"binary file rejected for context injection: {path}")
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return GuardVerdict(False, f"non-utf8 file rejected: {path}")
-    return check_content(text, file_label=str(path))
+        read_guarded_file(path, root_dir, max_bytes=max_bytes)
+    except DispatchValidationError as exc:
+        return GuardVerdict(False, str(exc))
+    return GuardVerdict(True)
 
 
 def assert_files_allowed(
-    paths: Iterable[Path], root_dir: Path, *, read_content: bool = True
+    paths: Iterable[Path],
+    root_dir: Path,
+    *,
+    read_content: bool = True,
+    max_bytes: int = MAX_CONTEXT_FILE_BYTES,
 ) -> list[dict[str, object]]:
     """Return per-file verdicts; raise if any file is denied."""
     reports: list[dict[str, object]] = []
     denied: list[str] = []
     for path in paths:
-        verdict = guard_file(path, root_dir, read_content=read_content)
+        verdict = guard_file(
+            path,
+            root_dir,
+            read_content=read_content,
+            max_bytes=max_bytes,
+        )
         entry = {"path": str(path), **verdict.to_mapping()}
         reports.append(entry)
         if not verdict.allowed:
@@ -157,12 +382,7 @@ def materialize_strict_shadow(
     elif file_paths is not None:
         root = Path(root_dir).resolve()
         for path in file_paths:
-            path = Path(path)
-            verdict = guard_file(path, root)
-            if not verdict.allowed:
-                raise DispatchValidationError(verdict.reason)
-            rel = path.resolve().relative_to(root).as_posix()
-            pairs.append((rel, path.read_text(encoding="utf-8")))
+            pairs.append(read_guarded_file(Path(path), root))
     else:
         raise DispatchValidationError("materialize_strict_shadow requires inputs")
 

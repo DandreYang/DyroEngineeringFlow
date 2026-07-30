@@ -2,22 +2,215 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import math
+import os
 from pathlib import Path
+import secrets
+import signal
+import subprocess
+import sys
+import threading
 import time
-from typing import Mapping
+from typing import Callable, Mapping
 
-from .adapters.registry import get_adapter
+from .adapters.registry import adapter_is_authenticated, get_adapter
 from .context_guard import materialize_strict_shadow
+from .edit_workspace import EditWorkspace
 from .errors import DispatchValidationError
-from .fileset import collect_guarded_files
-from .lease import SlotManager
-from .paths import patches_dir, shadow_dir
+from .fileset import collect_guarded_context
+from .lease import LeaseHeartbeat, SlotManager
+from .paths import dispatch_home, runs_dir, shadow_dir
+from .process_identity import current_identity
 from .result_envelope import build_result
 from .run_store import RunRecord, RunStore
 from .task_contract import parse_task_contract
 
 
 FORBIDDEN = frozenset({"merge", "push", "signoff", "import_evidence"})
+_ASYNC_WORKERS: set[subprocess.Popen[bytes]] = set()
+_ASYNC_WORKERS_LOCK = threading.Lock()
+ASYNC_STARTUP_TIMEOUT_SECONDS = 5.0
+_WORKER_COMMON_ENV = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "TMPDIR",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+    }
+)
+_WORKER_BACKEND_ENV = {
+    "codex": frozenset({"CODEX_HOME"}),
+    "claude": frozenset(
+        {
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CONFIG_DIR",
+            "XDG_CONFIG_HOME",
+        }
+    ),
+}
+
+
+def _require_posix_supervision() -> None:
+    if os.name != "posix":
+        raise DispatchValidationError(
+            "local dispatch run/panel/worker supervision requires a POSIX "
+            "host (Linux or macOS)"
+        )
+
+
+@dataclass(frozen=True)
+class _WorkerOutcome:
+    status: str
+    result: dict[str, object]
+    error: str = ""
+    shadow_path: str = ""
+
+
+def _validate_timeout(timeout_seconds: float) -> None:
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(float(timeout_seconds))
+        or timeout_seconds <= 0
+    ):
+        raise DispatchValidationError("timeout_seconds must be finite and positive")
+
+
+def _worker_environment(*, backend: str, home: Path) -> dict[str, str]:
+    allowed = _WORKER_COMMON_ENV | _WORKER_BACKEND_ENV.get(
+        backend,
+        frozenset(),
+    )
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name in allowed and value
+    }
+    environment["DYRO_LOCAL_AGENT_DISPATCH_HOME"] = str(home)
+    return environment
+
+
+def _reap_async_worker(
+    process: subprocess.Popen[bytes],
+    *,
+    store: RunStore,
+    run_id: str,
+    worker_token: str,
+) -> None:
+    try:
+        return_code = process.wait()
+        current = store.fail_if_reserved_worker(
+            run_id,
+            worker_token=worker_token,
+            error=(
+                "async worker exited before publishing a terminal result "
+                f"(exit_code={return_code})"
+            ),
+        )
+        if current.status == "running":
+            if not store.cleanup_backend_if_owned(
+                run_id,
+                worker_token=worker_token,
+            ):
+                return
+            store.fail_if_active_worker(
+                run_id,
+                worker_token=worker_token,
+                error=(
+                    "async worker exited before publishing a terminal result "
+                    f"(exit_code={return_code})"
+                ),
+            )
+    finally:
+        with _ASYNC_WORKERS_LOCK:
+            _ASYNC_WORKERS.discard(process)
+
+
+def _start_async_reaper(
+    process: subprocess.Popen[bytes],
+    *,
+    store: RunStore,
+    run_id: str,
+    worker_token: str,
+) -> None:
+    """Start the waiter only after the startup handshake is resolved."""
+    threading.Thread(
+        target=_reap_async_worker,
+        args=(process,),
+        kwargs={
+            "store": store,
+            "run_id": run_id,
+            "worker_token": worker_token,
+        },
+        daemon=True,
+    ).start()
+
+
+def _terminate_async_worker(process: subprocess.Popen[bytes]) -> None:
+    """Bound a detached worker that never completes its startup handshake."""
+    if process.returncode is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        process.wait(timeout=1.0)
+        return
+    except OSError as exc:
+        raise DispatchValidationError(
+            "async worker process group could not be signalled"
+        ) from exc
+    # Do not reap the group leader before escalation: while it is alive or a
+    # zombie its pid cannot be reused, so the dedicated pgid still identifies
+    # the worker generation and any surviving descendants.
+    time.sleep(1.0)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError as exc:
+        raise DispatchValidationError(
+            "async worker process group could not be killed"
+        ) from exc
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired as exc:
+        raise DispatchValidationError(
+            "async worker process group could not be terminated"
+        ) from exc
+
+
+def _failure_outcome(
+    *,
+    record: RunRecord,
+    error: str,
+    warning: str | None = None,
+) -> _WorkerOutcome:
+    warnings = [warning or error]
+    return _WorkerOutcome(
+        status="failed",
+        error=error,
+        result=build_result(
+            run_id=record.run_id,
+            status="error",
+            summary="",
+            cwd=Path(record.project_root),
+            evidence=[],
+            backend=record.backend,
+            error_code="worker_exception",
+            warnings=warnings,
+        ).to_mapping(),
+    )
 
 
 def refuse_production_actions(flags: Mapping[str, object] | None) -> None:
@@ -38,8 +231,10 @@ class DispatchSupervisor:
         max_per_backend: int = 2,
         max_global: int = 4,
     ) -> None:
+        _require_posix_supervision()
         self.home = home
         self.store = RunStore(home)
+        self.store.reconcile_orphaned_workers()
         self.slots = SlotManager(
             home, max_per_backend=max_per_backend, max_global=max_global
         )
@@ -58,12 +253,20 @@ class DispatchSupervisor:
         )
         contract = parse_task_contract(payload)
         # Fail-closed: expand + guard before accepting.
-        collect_guarded_files(contract.files, project_root)
-        adapter = get_adapter(contract.backend)
+        collect_guarded_context(contract.files, project_root)
+        adapter = get_adapter(contract.backend, require_strict=contract.strict)
         backend = adapter.id
         if not adapter.available() and backend != "echo":
             raise DispatchValidationError(
                 f"backend not available: {contract.backend} (resolved={backend})"
+            )
+        if not adapter_is_authenticated(adapter):
+            raise DispatchValidationError(
+                f"backend is not authenticated: {contract.backend} (resolved={backend})"
+            )
+        if contract.strict and not getattr(adapter, "strict_isolation", False):
+            raise DispatchValidationError(
+                f"backend does not provide strict isolation: {backend}"
             )
         return self.store.create(
             contract=contract,
@@ -78,47 +281,385 @@ class DispatchSupervisor:
         *,
         timeout_seconds: float = 120.0,
         sync: bool = True,
+        worker_token: str | None = None,
     ) -> RunRecord:
+        _validate_timeout(timeout_seconds)
         if not sync:
-            # Async: spawn is left to CLI; API still supports sync default.
-            raise DispatchValidationError(
-                "async execute is only available via CLI worker spawn; use sync=True"
-            )
+            if worker_token is not None:
+                raise DispatchValidationError(
+                    "worker_token is only supported for synchronous execution"
+                )
+            return self.spawn_worker(run_id, timeout_seconds=timeout_seconds)
         record = self.store.load(run_id)
-        if record.status not in {"accepted", "running"}:
+        if record.status != "accepted":
+            if record.status == "running":
+                raise DispatchValidationError(f"run is already claimed: {run_id}")
             return record
 
         leases = self.slots.acquire(record.backend)
         lease_paths = [str(lease.slot_dir) for lease in leases]
-        try:
-            self.store.update_status(
-                run_id, "running", lease_slots=lease_paths
-            )
-            return self._run_worker(run_id, timeout_seconds=timeout_seconds)
-        finally:
-            self.slots.release_all(leases)
+        worker_token = worker_token or secrets.token_hex(16)
 
-    def _run_worker(self, run_id: str, *, timeout_seconds: float) -> RunRecord:
+        def abort_on_lease_failure(_failure: Exception) -> None:
+            if not self.store.cleanup_backend_if_owned(
+                run_id,
+                worker_token=worker_token,
+            ):
+                raise DispatchValidationError(
+                    "backend cleanup could not be proven after lease "
+                    "heartbeat failure"
+                )
+
+        heartbeat = LeaseHeartbeat(
+            leases,
+            on_failure=abort_on_lease_failure,
+        )
+        heartbeat_started = False
+        claimed = False
+        outcome: _WorkerOutcome | None = None
+        operation_error: BaseException | None = None
+        try:
+            worker_identity = current_identity()
+            self.store.claim_for_execution(
+                run_id,
+                worker_token=worker_token,
+                lease_slots=lease_paths,
+                worker_pid=worker_identity.pid,
+                worker_started_at=worker_identity.started_at,
+            )
+            claimed = True
+            for lease in leases:
+                lease.bind_run(run_id)
+            heartbeat_started = True
+            heartbeat.start()
+            outcome = self._run_worker(
+                run_id,
+                timeout_seconds=timeout_seconds,
+                worker_token=worker_token,
+                lease_check=heartbeat.check,
+            )
+        except BaseException as exc:  # preserve cleanup on interrupts/exits
+            operation_error = exc
+
+        backend_cleanup_error: Exception | None = None
+        if claimed:
+            try:
+                if not self.store.cleanup_backend_if_owned(
+                    run_id,
+                    worker_token=worker_token,
+                ):
+                    backend_cleanup_error = DispatchValidationError(
+                        "backend process-group cleanup could not be proven"
+                    )
+            except Exception as exc:  # noqa: BLE001 - keep run nonterminal
+                backend_cleanup_error = exc
+
+        cleanup_errors: list[Exception] = []
+        if heartbeat_started:
+            try:
+                heartbeat.stop()
+            except Exception as exc:  # noqa: BLE001 - aggregate lifecycle failures
+                cleanup_errors.append(exc)
+        if backend_cleanup_error is None:
+            try:
+                self.slots.release_all(leases)
+            except Exception as exc:  # noqa: BLE001 - aggregate failures
+                cleanup_errors.append(exc)
+        cleanup_detail = "; ".join(str(exc) for exc in cleanup_errors)
+        preserved_outcome_error = False
+
+        if not claimed:
+            if operation_error is not None:
+                raise operation_error
+            if cleanup_errors:
+                raise DispatchValidationError(
+                    f"unclaimed worker cleanup failed: {cleanup_detail}"
+                )
+            raise DispatchValidationError("worker exited without claiming run")
+
+        if backend_cleanup_error is not None:
+            if operation_error is not None:
+                raise DispatchValidationError(
+                    "worker failed and backend cleanup could not be proven: "
+                    f"{backend_cleanup_error}"
+                ) from operation_error
+            raise backend_cleanup_error
+
+        if operation_error is not None:
+            error = f"worker failed after claim: {operation_error}"
+            warning = error
+            if cleanup_errors:
+                warning += (
+                    "; lifecycle cleanup also failed: "
+                    + cleanup_detail
+                )
+            outcome = _failure_outcome(
+                record=record,
+                error=error,
+                warning=warning,
+            )
+        elif cleanup_errors:
+            if outcome is not None and outcome.status in {"failed", "timeout"}:
+                preserved_outcome_error = True
+                result = dict(outcome.result)
+                warnings = list(result.get("warnings") or [])
+                warnings.append(
+                    "worker lifecycle cleanup also failed: "
+                    + cleanup_detail
+                )
+                result["warnings"] = warnings
+                outcome = _WorkerOutcome(
+                    status=outcome.status,
+                    result=result,
+                    error=outcome.error,
+                    shadow_path=outcome.shadow_path,
+                )
+            else:
+                error = (
+                    f"worker lifecycle cleanup failed: {cleanup_detail}"
+                )
+                outcome = _failure_outcome(
+                    record=record,
+                    error=error,
+                )
+
+        if outcome is None:
+            raise DispatchValidationError("worker produced no terminal outcome")
+
+        try:
+            final_record = self.store.update_status(
+                run_id,
+                outcome.status,
+                result=outcome.result,
+                error=outcome.error,
+                shadow_path=outcome.shadow_path,
+                expected_worker_token=worker_token,
+            )
+        except Exception as state_exc:
+            if operation_error is not None:
+                raise DispatchValidationError(
+                    "worker failed and running state could not be "
+                    f"terminalized: {state_exc}"
+                ) from operation_error
+            if cleanup_errors:
+                raise DispatchValidationError(
+                    "worker lifecycle cleanup failed and run state could "
+                    f"not be terminalized: {state_exc}"
+                ) from cleanup_errors[0]
+            raise
+
+        if operation_error is not None:
+            raise operation_error
+        if cleanup_errors:
+            if preserved_outcome_error and outcome.error:
+                raise DispatchValidationError(
+                    f"worker {outcome.status}: {outcome.error}; "
+                    f"lifecycle cleanup also failed: {cleanup_detail}"
+                ) from cleanup_errors[0]
+            raise cleanup_errors[0]
+        return final_record
+
+    def _fail_async_supervision(
+        self,
+        *,
+        process: subprocess.Popen[bytes] | None,
+        run_id: str,
+        worker_token: str,
+        error: Exception,
+    ) -> RunRecord:
+        """Fail a spawn only after its worker and backend are proven stopped."""
+        cleanup_errors: list[Exception] = []
+        if process is not None:
+            try:
+                _terminate_async_worker(process)
+            except Exception as cleanup_exc:  # noqa: BLE001
+                cleanup_errors.append(cleanup_exc)
+            finally:
+                with _ASYNC_WORKERS_LOCK:
+                    _ASYNC_WORKERS.discard(process)
+        current = self.store.load(run_id)
+        if current.status == "running":
+            try:
+                if not self.store.cleanup_backend_if_owned(
+                    run_id,
+                    worker_token=worker_token,
+                ):
+                    cleanup_errors.append(
+                        DispatchValidationError(
+                            "backend cleanup could not be proven"
+                        )
+                    )
+            except Exception as cleanup_exc:  # noqa: BLE001
+                cleanup_errors.append(cleanup_exc)
+        if cleanup_errors:
+            detail = "; ".join(str(item) for item in cleanup_errors)
+            raise DispatchValidationError(
+                "worker spawn supervision failed and cleanup could not "
+                f"be proven: {detail}"
+            ) from error
+        return self.store.fail_if_active_worker(
+            run_id,
+            worker_token=worker_token,
+            error=f"worker spawn failed: {error}",
+        )
+
+    def spawn_worker(
+        self,
+        run_id: str,
+        *,
+        timeout_seconds: float = 120.0,
+    ) -> RunRecord:
+        _validate_timeout(timeout_seconds)
+        record = self.store.load(run_id)
+        if record.status != "accepted":
+            raise DispatchValidationError(
+                f"run is not available for async spawn: {run_id} status={record.status}"
+            )
+        home = dispatch_home(self.home)
+        log_path = runs_dir(home) / f"{run_id}.worker.log"
+        environment = _worker_environment(backend=record.backend, home=home)
+        worker_token = secrets.token_hex(16)
+        record = self.store.reserve_async_worker(
+            run_id,
+            worker_token=worker_token,
+        )
+        package_root = Path(__file__).resolve().parents[2]
+        bootstrap = (
+            "import runpy,sys;"
+            f"sys.path.insert(0,{str(package_root)!r});"
+            "runpy.run_module("
+            "'experiments.local_agent_dispatch',run_name='__main__')"
+        )
+        process: subprocess.Popen[bytes] | None = None
+        try:
+            log_descriptor = os.open(
+                log_path,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_APPEND
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            try:
+                os.fchmod(log_descriptor, 0o600)
+            except Exception:
+                os.close(log_descriptor)
+                raise
+            with os.fdopen(log_descriptor, "ab") as log:
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-c",
+                        bootstrap,
+                        "--home",
+                        str(home),
+                        "worker",
+                        run_id,
+                        "--worker-token",
+                        worker_token,
+                        "--timeout",
+                        str(timeout_seconds),
+                    ],
+                    cwd=home,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    close_fds=True,
+                    env=environment,
+                )
+            with _ASYNC_WORKERS_LOCK:
+                _ASYNC_WORKERS.add(process)
+        except Exception as exc:  # noqa: BLE001 - never orphan a live worker
+            return self._fail_async_supervision(
+                process=process,
+                run_id=run_id,
+                worker_token=worker_token,
+                error=exc,
+            )
+        assert process is not None
+        startup_deadline = time.monotonic() + ASYNC_STARTUP_TIMEOUT_SECONDS
+        while time.monotonic() < startup_deadline:
+            current = self.store.load(run_id)
+            if current.status != "accepted":
+                try:
+                    _start_async_reaper(
+                        process,
+                        store=self.store,
+                        run_id=run_id,
+                        worker_token=worker_token,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    return self._fail_async_supervision(
+                        process=process,
+                        run_id=run_id,
+                        worker_token=worker_token,
+                        error=exc,
+                    )
+                return current
+            if process.poll() is not None:
+                _reap_async_worker(
+                    process,
+                    store=self.store,
+                    run_id=run_id,
+                    worker_token=worker_token,
+                )
+                return self.store.load(run_id)
+            time.sleep(0.02)
+        current = self.store.fail_if_reserved_worker(
+            run_id,
+            worker_token=worker_token,
+            error="async worker did not claim run before startup deadline",
+        )
+        if current.status != "failed":
+            try:
+                _start_async_reaper(
+                    process,
+                    store=self.store,
+                    run_id=run_id,
+                    worker_token=worker_token,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return self._fail_async_supervision(
+                    process=process,
+                    run_id=run_id,
+                    worker_token=worker_token,
+                    error=exc,
+                )
+            return current
+        _terminate_async_worker(process)
+        with _ASYNC_WORKERS_LOCK:
+            _ASYNC_WORKERS.discard(process)
+        return current
+
+    def _run_worker(
+        self,
+        run_id: str,
+        *,
+        timeout_seconds: float,
+        worker_token: str,
+        lease_check: Callable[[], None],
+    ) -> _WorkerOutcome:
         record = self.store.load(run_id)
         contract = parse_task_contract(record.contract)
         project_root = Path(record.project_root)
         started = time.time()
+        cleanup_warning = ""
 
         try:
-            files = collect_guarded_files(contract.files, project_root)
-            context: dict[str, str] = {}
-            for path in files:
-                rel = path.resolve().relative_to(project_root.resolve()).as_posix()
-                context[rel] = path.read_text(encoding="utf-8")
+            lease_check()
+            context = collect_guarded_context(contract.files, project_root)
+            lease_check()
 
             work_cwd = project_root
             shadow_path = ""
+            edit_workspace: EditWorkspace | None = None
             if contract.strict:
                 shadow_root = shadow_dir(self.home) / run_id
                 if shadow_root.exists():
-                    import shutil
-
-                    shutil.rmtree(shadow_root)
+                    raise DispatchValidationError("strict shadow already exists for run")
                 materialize_strict_shadow(
                     shadow_root=shadow_root,
                     root_dir=project_root,
@@ -128,37 +669,110 @@ class DispatchSupervisor:
                 shadow_path = str(shadow_root)
 
             if contract.mode == "edit":
-                # Isolation: only allow patch path under dispatch home, never auto-apply.
-                patch_dir = patches_dir(self.home) / run_id
-                patch_dir.mkdir(parents=True, exist_ok=True)
+                edit_workspace = EditWorkspace.create(
+                    project_root=project_root,
+                    home=self.home,
+                    run_id=run_id,
+                )
+                work_cwd = edit_workspace.worktree_root
+            lease_check()
 
-            adapter = get_adapter(record.backend)
-            adapter_result = adapter.run(
-                contract=contract,
-                cwd=work_cwd,
-                context_files=context,
-                timeout_seconds=timeout_seconds,
-            )
+            envelope_mapping: dict[str, object]
+            try:
+                adapter = get_adapter(
+                    record.backend,
+                    require_strict=contract.strict,
+                )
+                if contract.strict and not getattr(
+                    adapter,
+                    "strict_isolation",
+                    False,
+                ):
+                    raise DispatchValidationError(
+                        f"backend does not provide strict isolation: {record.backend}"
+                    )
+                configure_tracking = getattr(
+                    adapter,
+                    "configure_process_tracking",
+                    None,
+                )
+                if callable(configure_tracking):
+                    def bind_backend_process(
+                        pid: int,
+                        pgid: int,
+                        started_at: str,
+                    ) -> None:
+                        lease_check()
+                        self.store.bind_backend_process(
+                            run_id,
+                            worker_token=worker_token,
+                            backend_pid=pid,
+                            backend_pgid=pgid,
+                            backend_started_at=started_at,
+                        )
+                        lease_check()
 
-            # Locator verification uses project_root for non-strict; shadow for strict.
-            verify_cwd = work_cwd if contract.strict else project_root
-            envelope = build_result(
-                run_id=run_id,
-                status=adapter_result.status if adapter_result.status != "ok" else "ok",
-                summary=adapter_result.summary,
-                cwd=verify_cwd,
-                evidence=adapter_result.evidence,
-                confidence=adapter_result.confidence,
-                patch_ref=adapter_result.patch_ref,
-                takeover=adapter_result.takeover,
-                usage={
-                    **adapter_result.usage,
-                    "duration_ms": int((time.time() - started) * 1000),
-                },
-                warnings=adapter_result.warnings,
-                backend=record.backend,
-                error_code=adapter_result.error_code,
-            )
+                    configure_tracking(
+                        observer=bind_backend_process,
+                        lifetime_lock_path=(
+                            runs_dir(self.home)
+                            / f"{run_id}.backend.lifetime"
+                        ),
+                    )
+                lease_check()
+                adapter_result = adapter.run(
+                    contract=contract,
+                    cwd=work_cwd,
+                    context_files=context,
+                    timeout_seconds=timeout_seconds,
+                )
+                lease_check()
+                patch_ref = (
+                    edit_workspace.seal_patch()
+                    if edit_workspace is not None
+                    else None
+                )
+
+                # Verify edit evidence before removing its isolated worktree.
+                verify_cwd = (
+                    work_cwd
+                    if contract.strict or edit_workspace is not None
+                    else project_root
+                )
+                envelope = build_result(
+                    run_id=run_id,
+                    status=(
+                        adapter_result.status
+                        if adapter_result.status != "ok"
+                        else "ok"
+                    ),
+                    summary=adapter_result.summary,
+                    cwd=verify_cwd,
+                    evidence=adapter_result.evidence,
+                    confidence=adapter_result.confidence,
+                    patch_ref=patch_ref,
+                    takeover=adapter_result.takeover,
+                    usage={
+                        **adapter_result.usage,
+                        "duration_ms": int((time.time() - started) * 1000),
+                    },
+                    warnings=adapter_result.warnings,
+                    backend=record.backend,
+                    error_code=adapter_result.error_code,
+                )
+            finally:
+                if edit_workspace is not None:
+                    try:
+                        edit_workspace.cleanup()
+                    except Exception as exc:  # noqa: BLE001 - preserve result
+                        cleanup_warning = (
+                            f"edit workspace cleanup could not be completed: {exc}"
+                        )
+            envelope_mapping = envelope.to_mapping()
+            if cleanup_warning:
+                warnings = list(envelope_mapping.get("warnings", []))
+                warnings.append(cleanup_warning)
+                envelope_mapping["warnings"] = warnings
             if adapter_result.status == "timeout":
                 status = "timeout"
             elif adapter_result.status == "ok":
@@ -166,17 +780,18 @@ class DispatchSupervisor:
             else:
                 status = "failed"
 
-            return self.store.update_status(
-                run_id,
+            return _WorkerOutcome(
                 status,
-                result=envelope.to_mapping(),
+                result=envelope_mapping,
                 error=adapter_result.error_code,
                 shadow_path=shadow_path,
             )
         except Exception as exc:  # noqa: BLE001 - persist failure onto run
-            return self.store.update_status(
-                run_id,
-                "failed",
+            warnings = [str(exc)]
+            if cleanup_warning:
+                warnings.append(cleanup_warning)
+            return _WorkerOutcome(
+                status="failed",
                 error=str(exc),
                 result=build_result(
                     run_id=run_id,
@@ -186,11 +801,12 @@ class DispatchSupervisor:
                     evidence=[],
                     backend=record.backend,
                     error_code="worker_exception",
-                    warnings=[str(exc)],
+                    warnings=warnings,
                 ).to_mapping(),
             )
 
     def result(self, run_id: str) -> RunRecord:
+        self.store.reconcile_orphaned_workers(run_ids={run_id})
         return self.store.load(run_id)
 
     def wait(
@@ -200,9 +816,24 @@ class DispatchSupervisor:
         timeout_seconds: float = 300.0,
         poll_seconds: float = 0.2,
     ) -> list[RunRecord]:
+        _validate_timeout(timeout_seconds)
+        if (
+            isinstance(poll_seconds, bool)
+            or not isinstance(poll_seconds, (int, float))
+            or not math.isfinite(float(poll_seconds))
+            or poll_seconds <= 0
+        ):
+            raise DispatchValidationError(
+                "poll_seconds must be finite and positive"
+            )
         deadline = time.time() + timeout_seconds
         terminal = {"completed", "failed", "timeout", "cancelled"}
+        next_reconcile = 0.0
         while time.time() < deadline:
+            now = time.monotonic()
+            if now >= next_reconcile:
+                self.store.reconcile_orphaned_workers(run_ids=set(run_ids))
+                next_reconcile = now + 1.0
             records = [self.store.load(rid) for rid in run_ids]
             if all(r.status in terminal for r in records):
                 return records
