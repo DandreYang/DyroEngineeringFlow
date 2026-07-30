@@ -2,15 +2,35 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from dyro.cli import main
+from dyro.cli import _route_experiment_surface, main
 from dyro.changesets import get_changeset
 from dyro.config import load
+from dyro.tasks import load_task, status, task_template
 from dyro.workspace import create_line, get_line
 
 from .support import WorkspaceCase
 
 
 class CliTests(unittest.TestCase):
+    def test_top_level_root_and_dry_run_route_to_runtime_handoff(self) -> None:
+        routed = _route_experiment_surface(
+            [
+                "--root",
+                "/workspace",
+                "--dry-run",
+                "runtime",
+                "handoff",
+                "--task",
+                "TASK-1",
+            ]
+        )
+        self.assertIsNotNone(routed)
+        self.assertEqual(routed[0], "runtime")
+        self.assertEqual(routed[1][0], "--dry-run")
+        self.assertIn("--root", routed[1])
+        root_index = routed[1].index("--root")
+        self.assertEqual(routed[1][root_index + 1], "/workspace")
+
     def test_init_creates_workspace_contract(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
             root = Path(tmp) / "workspace"
@@ -132,6 +152,68 @@ class ProfileCommandsTests(WorkspaceCase):
         main(["--root", str(self.root), "agent", "add", "isolated", "--preset", "noop"])
         self.assertIn("isolated", load(self.root).adapters)
         main(["--root", str(self.root), "agent", "test", "isolated"])
+
+
+class ExternalClaimCommandsTests(WorkspaceCase):
+    def test_claim_output_preflight_preserves_task_and_existing_file(
+        self,
+    ) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                "require_clean_merge = true",
+                'require_clean_merge = true\nexecution_mode = "external"',
+            ),
+            encoding="utf-8",
+        )
+        config = load(self.root)
+        create_line(
+            config,
+            line_id="alpha",
+            branch="feat/alpha",
+            base="main",
+        )
+        task_id = "TASK-CLAIM-OUTPUT"
+        task_path = config.task_specs_dir / task_id
+        task_path.mkdir(parents=True)
+        task_path.joinpath("task.toml").write_text(
+            task_template(
+                task_id,
+                "claim output preflight",
+                "alpha",
+                "api",
+                "services/api",
+            ).replace('agent = "codex"', 'agent = "noop"'),
+            encoding="utf-8",
+        )
+        task_path.joinpath("handoff.md").write_text(
+            "# handoff\n",
+            encoding="utf-8",
+        )
+        output = self.root / "runner-inbox" / "claim.json"
+        output.parent.mkdir(parents=True)
+        output.write_text("user-owned\n", encoding="utf-8")
+
+        with self.assertRaises(SystemExit) as raised:
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "task",
+                    "claim",
+                    task_id,
+                    "--by",
+                    "runner-1",
+                    "--output",
+                    str(output),
+                ]
+            )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(output.read_text(encoding="utf-8"), "user-owned\n")
+        task = load_task(load(self.root), task_id)
+        self.assertEqual(status(load(self.root), task), "backlog")
+        self.assertFalse(task_path.joinpath("claim.json").exists())
 
 
 class DaemonSelectionTests(WorkspaceCase):

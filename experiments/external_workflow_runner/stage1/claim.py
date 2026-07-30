@@ -25,9 +25,12 @@ class ClaimRecord:
     execution_key_id: str
     issued_at: float
     expires_at: float
+    control_claim_id: str = ""
+    control_generation: int = 0
+    authority_expires_at: float | None = None
 
     def to_mapping(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": 1,
             "task_id": self.task_id,
             "runner_id": self.runner_id,
@@ -36,6 +39,15 @@ class ClaimRecord:
             "issued_at": self.issued_at,
             "expires_at": self.expires_at,
         }
+        if self.control_claim_id:
+            payload.update(
+                {
+                    "control_claim_id": self.control_claim_id,
+                    "control_generation": self.control_generation,
+                    "authority_expires_at": self.authority_expires_at,
+                }
+            )
+        return payload
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> ClaimRecord:
@@ -62,6 +74,31 @@ class ClaimRecord:
             or expires_at <= issued_at
         ):
             raise Stage0ValidationError("claim timestamps are invalid")
+        control_claim_id = payload.get("control_claim_id", "")
+        control_generation = payload.get("control_generation", 0)
+        authority_expires_at = payload.get("authority_expires_at")
+        has_control_binding = bool(control_claim_id)
+        if has_control_binding:
+            if (
+                not isinstance(control_claim_id, str)
+                or len(control_claim_id) > 128
+                or type(control_generation) is not int
+                or control_generation < 1
+                or type(authority_expires_at) not in (int, float)
+                or not math.isfinite(float(authority_expires_at))
+                or float(authority_expires_at) <= float(issued_at)
+                or float(expires_at) > float(authority_expires_at)
+            ):
+                raise Stage0ValidationError(
+                    "control-plane claim binding is invalid"
+                )
+        elif (
+            control_generation not in (0, None)
+            or authority_expires_at is not None
+        ):
+            raise Stage0ValidationError(
+                "control-plane claim binding is incomplete"
+            )
         return cls(
             task_id=str(payload["task_id"]),
             runner_id=str(payload["runner_id"]),
@@ -69,6 +106,15 @@ class ClaimRecord:
             execution_key_id=str(payload["execution_key_id"]),
             issued_at=float(issued_at),
             expires_at=float(expires_at),
+            control_claim_id=str(control_claim_id),
+            control_generation=(
+                int(control_generation) if has_control_binding else 0
+            ),
+            authority_expires_at=(
+                float(authority_expires_at)
+                if has_control_binding
+                else None
+            ),
         )
 
 
@@ -113,13 +159,26 @@ class ClaimLease:
             raise Stage0ValidationError("claim renewal time is invalid")
         if self.is_expired(now=current):
             raise Stage0ValidationError("refusing to renew an expired claim")
+        renewed_expiry = current + float(extend_seconds)
+        if self.record.authority_expires_at is not None:
+            renewed_expiry = min(
+                renewed_expiry,
+                self.record.authority_expires_at,
+            )
+            if renewed_expiry <= current:
+                raise Stage0ValidationError(
+                    "refusing to renew beyond control-plane claim authority"
+                )
         return ClaimRecord(
             task_id=self.record.task_id,
             runner_id=self.record.runner_id,
             generation=self.record.generation + 1,
             execution_key_id=self.record.execution_key_id,
             issued_at=current,
-            expires_at=current + float(extend_seconds),
+            expires_at=renewed_expiry,
+            control_claim_id=self.record.control_claim_id,
+            control_generation=self.record.control_generation,
+            authority_expires_at=self.record.authority_expires_at,
         )
 
     def commit_renewal(self, renewed: ClaimRecord) -> None:
@@ -129,6 +188,9 @@ class ClaimLease:
             or renewed.runner_id != previous.runner_id
             or renewed.execution_key_id != previous.execution_key_id
             or renewed.generation != previous.generation + 1
+            or renewed.control_claim_id != previous.control_claim_id
+            or renewed.control_generation != previous.control_generation
+            or renewed.authority_expires_at != previous.authority_expires_at
         ):
             raise Stage0ValidationError("claim renewal does not extend the current owner")
         self.renewals.append(

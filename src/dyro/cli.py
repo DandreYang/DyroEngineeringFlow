@@ -546,15 +546,82 @@ def cmd_task_run(args: argparse.Namespace) -> None:
 def cmd_task_claim(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
-    result = claim_task(
-        config,
-        task,
-        runner=args.by,
-        key_id=args.key_id,
-        lease_seconds=args.lease_seconds,
-        dry_run=args.dry_run,
+    requested_output = (
+        Path(args.output).expanduser() if args.output else None
     )
+    if requested_output is not None and (
+        requested_output.exists() or requested_output.is_symlink()
+    ):
+        raise DyroError(
+            f"拒绝覆盖已有 claim 导出文件：{requested_output}"
+        )
+    output = (
+        requested_output.parent.resolve() / requested_output.name
+        if requested_output is not None
+        else None
+    )
+    descriptor: int | None = None
+    if output is not None and not args.dry_run:
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise DyroError(
+                f"无法创建 claim 导出目录：{output.parent}"
+            ) from exc
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        initial_mode = 0o600 if os.name == "nt" else 0o000
+        try:
+            descriptor = os.open(output, flags, initial_mode)
+        except FileExistsError as exc:
+            raise DyroError(
+                f"拒绝覆盖已有 claim 导出文件：{output}"
+            ) from exc
+        except OSError as exc:
+            raise DyroError(f"无法创建 claim 导出文件：{output}") from exc
+    try:
+        result = claim_task(
+            config,
+            task,
+            runner=args.by,
+            key_id=args.key_id,
+            lease_seconds=args.lease_seconds,
+            dry_run=args.dry_run,
+        )
+        if descriptor is not None:
+            source = task.directory / "claim.json"
+            content = source.read_bytes()
+            if len(content) > 64 * 1024:
+                raise DyroError("claim 文件超过安全导出大小限制")
+            view = memoryview(content)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("claim 导出未取得进展")
+                view = view[written:]
+            os.fsync(descriptor)
+            if os.name != "nt":
+                # Keep the reserved final path unreadable until the complete
+                # claim has reached stable storage.
+                os.fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+    except Exception:
+        if descriptor is not None:
+            os.close(descriptor)
+            descriptor = None
+            assert output is not None
+            output.unlink(missing_ok=True)
+        raise
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     print(f"{task.id} -> {result}")
+    if output is not None:
+        if args.dry_run:
+            print(f"{task.id} claim -> dry-run: {output}")
+            return
+        print(f"{task.id} claim -> exported: {output}")
 
 
 def cmd_task_claim_renew(args: argparse.Namespace) -> None:
@@ -1015,7 +1082,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser(
         "runtime",
-        help="可选外部语义运行时状态（Stage5 生产 NOT_READY）。用法：dyro runtime status|production-gate",
+        help=(
+            "可选外部语义运行时诊断与生产门禁（当前 NOT_READY）。"
+            "用法：dyro runtime status|doctor|plan|claim|handoff|production-gate"
+        ),
         add_help=False,
     )
 
@@ -1251,6 +1321,10 @@ def build_parser() -> argparse.ArgumentParser:
     task_claim.add_argument("--by", required=True, help="执行器实例或受信任身份")
     task_claim.add_argument("--key-id", help="与 claim 绑定的 trusted execution key ID")
     task_claim.add_argument("--lease-seconds", type=int, default=3600, help="claim 租约秒数；默认 3600")
+    task_claim.add_argument(
+        "--output",
+        help="把新 claim 以 0600 权限导出到 runner 交接路径；拒绝覆盖",
+    )
     task_claim.set_defaults(func=cmd_task_claim)
     task_claim_renew = task_sub.add_parser("claim-renew", help="由当前 runner 续租未过期 claim")
     task_claim_renew.add_argument("id")
@@ -1369,6 +1443,12 @@ def _route_experiment_surface(raw: list[str]) -> tuple[str, list[str]] | None:
             )
         ):
             forwarded.extend(["--project", global_args.root])
+        if global_args.dry_run:
+            forwarded.insert(0, "--dry-run")
+    if surface == "runtime":
+        runtime_command = forwarded[0] if forwarded else ""
+        if global_args.root and runtime_command == "handoff":
+            forwarded.extend(["--root", global_args.root])
         if global_args.dry_run:
             forwarded.insert(0, "--dry-run")
     return surface, forwarded

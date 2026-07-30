@@ -264,11 +264,22 @@ flowchart TB
   Sup -->|start · pin| Bro
   Sand -->|loopback IPC| Bro
   HostP -.->|RO bind| Bro
-  Sup -->|after dual cleanup| Pack["local evidence pack / dry-run"]
-  Pack -.->|forbidden| Merge["merge / push / Core import"]
+  Sup -->|after dual cleanup| Pack["sealed Stage5 evidence pack"]
+  Pack -->|claim + artifact + gate binding| Handoff["signed Core execution bundle"]
+  Handoff -->|explicit operator transfer| Core["Dyro Core import + independent review"]
+  Pack -.->|forbidden| Merge["review / signoff / merge / push"]
 ```
 
-Не Core. `experiments/external_workflow_runner/`. Stage5 `NOT_READY`.
+Не Core. Путь: `experiments/external_workflow_runner/`. Статус —
+**Production Candidate**; production остаётся `NOT_READY` до проверки multi-host,
+реального provider fleet и квот для writable mounts.
+
+```bash
+dyro runtime status
+dyro runtime doctor
+dyro runtime plan
+dyro runtime production-gate  # NOT_READY exits 3
+```
 
 ### Последовательность semantic runtime (опциональный эксперимент)
 
@@ -287,6 +298,8 @@ sequenceDiagram
   S->>W: cleanup verify
   S->>B: stop · containers absent
   S->>S: pack only if dual cleanup OK
+  S->>S: bind current Core claim + pack hash
+  S-->>S: build signed Core bundle · never import
 ```
 
 ## Быстрый старт
@@ -384,7 +397,8 @@ dyro hotfix create incident-123 --base v2026.09.7 --repos api,web --yes
 Если исполнение и утверждение выполняет отдельная доверенная система, задайте `policy.execution_mode = "external"` и `policy.require_external_signoff = true`. Локальный Dyro разрешит только планирование; review, привязанный к receipt и точным task HEAD, должен быть явно подписан до `done`:
 
 ```bash
-dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026
+dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026 \
+  --output /secure-transfer/API-101.core-claim.json
 # Долгая работа должна продлевать bounded claim до истечения.
 dyro task claim-renew API-101 --by isolated-runner-1 --lease-seconds 3600
 # В изолированном runner: выполнить заявленные gates и упаковать receipt, логи и точные HEAD.
@@ -418,7 +432,8 @@ dyro config set policy.require_signed_signoff true
 
 dyro key generate runner-2026 --private-key /secure/runner.pem --public-key /secure/runner.pub.pem
 dyro key trust runner-2026 --purpose execution --public-key /secure/runner.pub.pem   --not-after 2027-01-01T00:00:00+00:00
-dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026
+dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026 \
+  --output /secure-transfer/API-101.core-claim.json
 dyro task evidence build API-101 --workspace /runner/workspace --receipt /runner/out/receipt.md   --output /runner/out/API-101.zip --claim /runner/in/claim.json   --signing-key /secure/runner.pem --key-id runner-2026
 
 dyro key generate reviewer-2026 --private-key /secure/reviewer.pem --public-key /secure/reviewer.pub.pem
@@ -473,11 +488,11 @@ dyro --dry-run task run API-101
 | `config get/set` / `agent list/add/test` / `open` | Безопасно управлять политикой и адаптерами, проверить executable или открыть агента на нужной линии. |
 | `task create/list/board/status/next/graph/explain/attempts/binding` | Манифесты и состояние, граф, scheduling, provenance и точная привязка review. |
 | `task run/answer/gates/review/signoff` | Запуск задач, ответы, gates, независимый review и external sign-off при необходимости. |
-| `task claim` / `task evidence build/execution/review` | Одноразовый claim, portable execution evidence build/import и import review, привязанного к receipt. |
+| `task claim --output` / `task evidence build/execution/review` | Одноразовый claim с create-only файлом передачи, portable execution evidence build/import и import review, привязанного к receipt. |
 | `task merge` | Слить reviewed task branch в линию-владельца. |
 | `task loop/daemon/stats/decisions` | Контролируемые batch, scheduling, ledger и decision gates. |
 | `dispatch` | Опциональный локальный multi-agent dispatch (L0–L4); только рекомендательный — не замена gates/merge. |
-| `runtime` | Статус опционального external semantic runtime (production Stage5 **NOT_READY**). |
+| `runtime status/doctor/plan/claim/handoff/production-gate` | Диагностика Production Candidate, привязка Stage5 leases к Core claims, сборка без импорта подписанных Core bundles и fail-closed при **NOT_READY**. |
 
 Подробности: [architecture and Profile](docs/architecture.md), [diagrams](docs/diagrams.en.md), [migration](docs/migrating-existing-control-planes.md), [PyPI publishing](docs/publishing.md) (maintainers).
 
@@ -487,4 +502,4 @@ dyro --dry-run task run API-101
 
 ## Текущие границы
 
-DyroEngineeringFlow даёт полный локальный workflow-контур и policy-контроль для более строгих команд в режиме только планирования на локальной машине. Он не создаёт удалённые репозитории, не несёт SaaS credentials и не provision'ит внешний runner; он даёт portable evidence-package contract. Опциональные модули в `experiments/` (external workflow runner Stage0–5, local agent dispatch L0–L4) **входят в wheel `dyro`** и доступны после установки (`dyro dispatch …`, `import experiments…`). Они остаются **опциональными относительно Core**: не заменяют gates, review, signoff и merge; semantic runtime в production по-прежнему Stage5 `NOT_READY` — см. ADR в `docs/adr/`. Локальные multi-repo merge preflight'ятся и восстанавливаются как одна операция; удалённые Git-серверы не дают атомарный multi-repo push, поэтому частичный сбой push записывается для recovery. Автоматический merge требует разрешения и в task manifest, и в локальной policy. [MIT License](LICENSE) и [`dyro` на PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow даёт полный локальный workflow-контур и policy-контроль для более строгих команд в режиме только планирования на локальной машине. Он не создаёт удалённые репозитории, не несёт SaaS credentials и не provision'ит внешний runner; он даёт portable evidence-package contract. Опциональные модули в `experiments/` (external workflow runner Stage0–5, local agent dispatch L0–L4) **входят в wheel `dyro`** и доступны после установки (`dyro dispatch …`, `dyro runtime …`, `import experiments…`). Они остаются **опциональными относительно Core** и не заменяют gates, review, signoff и merge. Semantic runtime теперь Production Candidate с передачей подписанного Core bundle; production остаётся `NOT_READY`, пока `PROD-01`, `PROD-02` и `PROD-09` не подтверждены в реальной release-среде. Локальные multi-repo merge preflight'ятся и восстанавливаются как одна операция; удалённые Git-серверы не дают атомарный multi-repo push, поэтому частичный сбой push записывается для recovery. Автоматический merge требует разрешения и в task manifest, и в локальной policy. [MIT License](LICENSE) и [`dyro` на PyPI](https://pypi.org/project/dyro/).

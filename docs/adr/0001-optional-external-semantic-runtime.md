@@ -34,13 +34,15 @@ DyroEngineeringFlow 是跨仓库工程交付控制面。它负责开发线、任
 | 默认 Agent | **无**；必须注入 Broker 后端 |
 | 凭证 | 运行时不读取 `process.env` 中的密钥 |
 | 身份 | 对 `ts_runtime/` 树做 content-hash 锁定 |
-| 产品边界 | experiment 模块随 `dyro` wheel 分发；不替代 Core 交付控制，生产 `NOT_READY` |
+| 产品边界 | Production Candidate 模块随 `dyro` wheel 分发；不替代 Core 交付控制，生产仍 `NOT_READY` |
 
 ## 后果
 
 - 实验能力相对 Dyro Core 状态机保持可选，不改变 Core 的 claim / gate / merge 语义；但目录已作为已分发产品面进入 wheel 与官方测试，不能从源码树直接删除而仍期望完整构建通过。
 - 运行时演进由本仓库维护，无第三方 workflow 包升级耦合。
 - 若未来评估其他第三方库，必须作为**新的供应链候选**重新做威胁建模；不得与 first-party 实现混名。
+- 生产晋级的 claim、handoff、门禁退出码和真实环境证据契约由
+  [ADR-0003](0003-external-runtime-production-promotion.md) 约束。
 
 ## 否决项
 

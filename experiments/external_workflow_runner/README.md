@@ -5,11 +5,11 @@ external TypeScript workflow runtime. Python modules ship with the `dyro`
 wheel:
 
 - `import experiments.external_workflow_runner…`
-- `dyro runtime status` / `dyro runtime production-gate`
+- `dyro runtime status|doctor|plan|claim|handoff|production-gate`
 - `python -m experiments.external_workflow_runner production-gate`
 
-It does not change Dyro Core delivery control and remains production
-`NOT_READY` (Stage5).
+It does not change Dyro Core delivery authority. The runtime is a Production
+Candidate but remains `NOT_READY` until the environment blockers clear.
 
 - Stage 0 isolation primitives: [`STAGE0_REPORT.md`](STAGE0_REPORT.md)
 - Stage 1 frozen runtime + Broker IPC: [`stage1/STAGE1_REPORT.md`](stage1/STAGE1_REPORT.md)
@@ -69,16 +69,16 @@ The tests run malicious TypeScript at module top level and verify that:
   for a label-owned container that appears after Docker CLI termination;
 - Agent-process timeout removes its full process group.
 
-## Explicit gaps
+## Production-candidate boundary
 
-Stage 1 still does not:
+The shipped runtime still does not:
 
-- call a real provider or mount provider credentials;
-- build, sign, import, review, or sign off Dyro evidence;
+- prove real provider credentials and fleet recovery;
+- import, review, sign off, merge, or push Dyro evidence;
 - prove a production deployment or multi-host isolation boundary;
-- make external event files part of Dyro-managed immutable evidence.
+- enforce storage quotas at every production writable mount.
 
-These gaps are deliberate. A signing key must not be introduced until the
-Sandbox and Broker are gone and cleanup has been independently verified.
-Passing Stage 1 means the frozen runtime install, fixed bundle, isolated
-fake-provider Broker path, and execution-key gate are feasible locally.
+After Sandbox and Broker cleanup is independently verified, the trusted
+runner-side handoff may use an execution key to build a signed Core-compatible
+bundle. It still cannot import that bundle. See
+[`docs/designs/external-runtime-production-readiness.md`](../../docs/designs/external-runtime-production-readiness.md).

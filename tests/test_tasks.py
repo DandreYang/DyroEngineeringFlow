@@ -306,6 +306,20 @@ class TaskTests(WorkspaceCase):
         self.assertTrue(result.gates_passed)
         self.assertTrue(bundle.is_file())
 
+        escaped_bundle = self.root / "escaped-execution.zip"
+        symlink_bundle = self.root / "symlink-execution.zip"
+        symlink_bundle.symlink_to(escaped_bundle)
+        with self.assertRaisesRegex(DyroError, "拒绝覆盖"):
+            build_execution_bundle(
+                config,
+                task,
+                workspace=workspace,
+                receipt=receipt,
+                output=symlink_bundle,
+            )
+        self.assertTrue(symlink_bundle.is_symlink())
+        self.assertFalse(escaped_bundle.exists())
+
         self.assertEqual(claim_task(config, task, runner="isolated-runner-1"), "assigned")
         with unpack_execution_bundle(bundle) as evidence:
             self.assertEqual(

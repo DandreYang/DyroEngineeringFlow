@@ -1,4 +1,4 @@
-# Production Not-ready checklist
+# Production Not-ready checklist（2026-07-30）
 
 This document is the operator-facing form of `production_gate.py`.
 **Production must remain blocked** while any blocker below is open.
@@ -7,7 +7,7 @@ This document is the operator-facing form of `production_gate.py`.
 | --- | --- | --- | --- |
 | PROD-01 | Multi-host / production container escape review | out_of_scope (local Docker only) | Yes |
 | PROD-02 | Real Codex/Claude fleet binaries + credential mounts | partial (host pin path; fixture in CI) | Yes |
-| PROD-03 | Dyro Core evidence import + review binding | fail (dry-run only) | Yes |
+| PROD-03 | Stage5-to-Core execution evidence handoff | pass (signed bundle + independent review binding E2E) | No (cleared) |
 | PROD-04 | No third-party workflow package/brand | pass | No |
 | PROD-05 | Sandbox never holds tokens/execution keys | pass | No |
 | PROD-06 | Fail-closed critical branches | pass | No |
@@ -25,4 +25,13 @@ This document is the operator-facing form of `production_gate.py`.
 
 ## Verdict
 
-**NOT_READY for production.** Local optional experiment may continue under Stage0–5 controls.
+**NOT_READY for production.** Open blockers are `PROD-01`, `PROD-02`, and
+`PROD-09`. The optional runtime is a **Production Candidate**, not an authorized
+production deployment.
+
+Use the executable gate rather than reading this snapshot:
+
+```sh
+dyro runtime production-gate
+# NOT_READY => exit 3
+```

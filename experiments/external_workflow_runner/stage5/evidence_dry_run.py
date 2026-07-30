@@ -23,6 +23,7 @@ from typing import Mapping
 import zipfile
 
 from ..errors import Stage0ValidationError
+from ..stage1.claim import ClaimRecord
 from ..stage4.evidence_pack import envelope_artifact_hashes
 from ..stage4.evidence_pack import PACK_KIND, PACK_SCHEMA_VERSION
 
@@ -420,12 +421,43 @@ def dry_run_validate_pack(
     seal = _load_json(seal_path)
     envelope = _load_json(envelope_path)
     claim = _load_json(claim_path)
+    verified_claim = ClaimRecord.from_mapping(claim)
 
     if (
         manifest.get("schema_version") != PACK_SCHEMA_VERSION
         or manifest.get("kind") != PACK_KIND
     ):
         raise Stage0ValidationError("evidence pack kind/schema is unsupported")
+    if (
+        seal.get("schema_version") != 1
+        or seal.get("kind") != "stage4-evidence-seal"
+    ):
+        raise Stage0ValidationError("evidence seal kind/schema is unsupported")
+    workflow_run_id = manifest.get("workflow_run_id")
+    if (
+        not isinstance(workflow_run_id, str)
+        or not workflow_run_id
+        or len(workflow_run_id) > 256
+        or envelope.get("workflow_run_id") != workflow_run_id
+        or seal.get("workflow_run_id") != workflow_run_id
+    ):
+        raise Stage0ValidationError(
+            "workflow_run_id is not bound across manifest, envelope, and seal"
+        )
+    canonical_input_sha256 = manifest.get(
+        "canonical_input_sha256"
+    )
+    if (
+        not isinstance(canonical_input_sha256, str)
+        or len(canonical_input_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in canonical_input_sha256
+        )
+    ):
+        raise Stage0ValidationError(
+            "canonical_input_sha256 is invalid"
+        )
     if envelope.get("status") != "DONE":
         raise Stage0ValidationError("dry-run refused: envelope status is not DONE")
     if not hmac.compare_digest(
@@ -449,8 +481,30 @@ def dry_run_validate_pack(
         )
 
     non_goals = manifest.get("non_goals")
-    if not isinstance(non_goals, list) or "no_merge" not in non_goals:
-        raise Stage0ValidationError("evidence pack must declare no_merge non-goal")
+    required_non_goals = {
+        "no_signoff",
+        "no_merge",
+        "no_push",
+        "no_dyro_core_import",
+    }
+    if (
+        not isinstance(non_goals, list)
+        or any(not isinstance(item, str) for item in non_goals)
+        or not required_non_goals.issubset(set(non_goals))
+    ):
+        raise Stage0ValidationError(
+            "evidence pack must declare every production-action non-goal"
+        )
+    actions_forbidden = seal.get("actions_forbidden")
+    if (
+        not isinstance(actions_forbidden, list)
+        or len(actions_forbidden) != 3
+        or any(not isinstance(item, str) for item in actions_forbidden)
+        or set(actions_forbidden) != {"signoff", "merge", "push"}
+    ):
+        raise Stage0ValidationError(
+            "evidence seal must forbid signoff, merge, and push"
+        )
 
     with _snapshot_zip(zip_path) as (zip_snapshot, zip_sha):
         if seal.get("pack_sha256") != zip_sha:
@@ -580,11 +634,24 @@ def dry_run_validate_pack(
         "kind": "experiment-evidence-candidate",
         "workflow_run_id": manifest.get("workflow_run_id"),
         "canonical_input_sha256": manifest.get("canonical_input_sha256"),
-        "claim_generation": claim.get("generation"),
-        "task_id": claim.get("task_id"),
-        "runner_id": claim.get("runner_id"),
+        "claim_generation": verified_claim.generation,
+        "task_id": verified_claim.task_id,
+        "runner_id": verified_claim.runner_id,
+        "execution_key_id": verified_claim.execution_key_id,
+        "control_claim_id": verified_claim.control_claim_id,
+        "control_generation": verified_claim.control_generation,
+        "authority_expires_at": verified_claim.authority_expires_at,
         "envelope_status": envelope.get("status"),
         "artifact_count": len(artifacts),
+        "artifacts": [
+            {
+                "repository": item["repository"],
+                "path": item["name"],
+                "sha256": item["sha256"],
+                "bytes": item["bytes"],
+            }
+            for item in artifacts
+        ],
         "provider_mode": manifest.get("provider_mode"),
         "pack_sha256": zip_sha,
         "production_import": False,

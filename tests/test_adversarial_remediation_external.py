@@ -865,7 +865,15 @@ class EvidenceBindingTests(unittest.TestCase):
         return pack_run_evidence(
             pack_root=root / "pack",
             workflow_run_id="run-1",
-            claim={"task_id": "TASK-1"},
+            claim={
+                "schema_version": 1,
+                "task_id": "TASK-1",
+                "runner_id": "runner-1",
+                "generation": 1,
+                "execution_key_id": "runner-key-1",
+                "issued_at": 1.0,
+                "expires_at": 4_102_444_800.0,
+            },
             canonical_input_sha256="a" * 64,
             envelope={
                 "schema_version": 1,

@@ -6,6 +6,9 @@ from pathlib import Path
 import tempfile
 
 import experiments.external_workflow_runner as runtime_package
+from experiments.external_workflow_runner.doctor import (
+    collect_runtime_diagnostics,
+)
 from experiments.external_workflow_runner.stage1.bundle import (
     BUNDLE_SRC as STAGE1_BUNDLE_SRC,
     assemble_stage1_bundle,
@@ -30,6 +33,9 @@ from experiments.external_workflow_runner.stage5.bundle import (
 from experiments.external_workflow_runner.stage5.host_provider import (
     pin_host_provider,
     write_host_fixture_cli,
+)
+from experiments.external_workflow_runner.stage5.core_handoff import (
+    build_core_evidence_handoff,
 )
 from experiments.external_workflow_runner.manifest import verify_bundle_manifest
 
@@ -56,6 +62,10 @@ def _verify_bundle(result: dict[str, object], *, expected_stage: int) -> None:
 
 
 def main() -> None:
+    if not callable(collect_runtime_diagnostics) or not callable(
+        build_core_evidence_handoff
+    ):
+        raise SystemExit("installed runtime operator modules are unavailable")
     package_root = Path(runtime_package.__file__).resolve().parent
     resources = {
         "runtime": RUNTIME_SOURCE,

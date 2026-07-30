@@ -248,7 +248,13 @@ class DockerSandboxRunner:
     def __init__(self, config: DockerSandboxConfig) -> None:
         self.config = config
 
-    def _container_owner(self) -> str | None:
+    def _container_identity(
+        self,
+        reference: str | None = None,
+        *,
+        exact_name: bool = True,
+    ) -> tuple[str, str] | None:
+        target = reference or self.config.name
         try:
             inspection = subprocess.run(
                 [
@@ -256,8 +262,11 @@ class DockerSandboxRunner:
                     "container",
                     "inspect",
                     "--format",
-                    f'{{{{ index .Config.Labels "{_CLEANUP_LABEL}" }}}}',
-                    self.config.name,
+                    (
+                        f'{{{{.Id}}}}|{{{{ index .Config.Labels '
+                        f'"{_CLEANUP_LABEL}" }}}}'
+                    ),
+                    target,
                 ],
                 check=False,
                 stdout=subprocess.PIPE,
@@ -267,7 +276,20 @@ class DockerSandboxRunner:
                 env=_docker_environment(),
             )
             if inspection.returncode == 0:
-                return inspection.stdout.strip()
+                resource_id, separator, owner = (
+                    inspection.stdout.strip().partition("|")
+                )
+                if not separator or not resource_id or not owner:
+                    raise Stage0ValidationError(
+                        "Workflow sandbox exists but its identity or owner "
+                        f"cannot be read: {target}"
+                    )
+                return resource_id, owner
+            filter_value = (
+                f"name=^/{target}$"
+                if exact_name
+                else f"id={target}"
+            )
             listing = subprocess.run(
                 [
                     "docker",
@@ -275,9 +297,9 @@ class DockerSandboxRunner:
                     "ls",
                     "--all",
                     "--filter",
-                    f"name=^/{self.config.name}$",
+                    filter_value,
                     "--format",
-                    "{{.Names}}",
+                    "{{.ID}}",
                 ],
                 check=False,
                 stdout=subprocess.PIPE,
@@ -288,17 +310,21 @@ class DockerSandboxRunner:
             )
         except subprocess.TimeoutExpired as exc:
             raise Stage0ValidationError(
-                f"Workflow sandbox ownership check timed out: {self.config.name}"
+                f"Workflow sandbox ownership check timed out: {target}"
             ) from exc
         if listing.returncode != 0:
             raise Stage0ValidationError(
-                f"Workflow sandbox ownership could not be inspected: {self.config.name}"
+                f"Workflow sandbox ownership could not be inspected: {target}"
             )
-        if self.config.name in listing.stdout.splitlines():
+        if listing.stdout.strip():
             raise Stage0ValidationError(
-                f"Workflow sandbox exists but its owner cannot be read: {self.config.name}"
+                f"Workflow sandbox exists but its owner cannot be read: {target}"
             )
         return None
+
+    def _container_owner(self) -> str | None:
+        identity = self._container_identity()
+        return identity[1] if identity is not None else None
 
     def _assert_name_available(self) -> None:
         if self._container_owner() is not None:
@@ -307,36 +333,92 @@ class DockerSandboxRunner:
             )
 
     def _force_remove(self, *, settle_seconds: float = 0.5) -> None:
+        if (
+            isinstance(settle_seconds, bool)
+            or not isinstance(settle_seconds, (int, float))
+            or not math.isfinite(settle_seconds)
+            or settle_seconds <= 0
+        ):
+            raise Stage0ValidationError(
+                "cleanup settle_seconds must be positive"
+            )
         deadline = time.monotonic() + settle_seconds
-        owner = self._container_owner()
-        while owner is None:
+        observed_ids: set[str] = set()
+        last_removal_error = ""
+        while True:
+            identity = self._container_identity()
+            if identity is not None:
+                resource_id, owner = identity
+                if owner != self.config.cleanup_token:
+                    raise Stage0ValidationError(
+                        "refusing to remove a container owned by another run: "
+                        f"{self.config.name}"
+                    )
+                observed_ids.add(resource_id)
+
+            remaining_ids: list[str] = []
+            for resource_id in observed_ids:
+                exact = self._container_identity(
+                    resource_id,
+                    exact_name=False,
+                )
+                if exact is None:
+                    continue
+                observed_id, owner = exact
+                if observed_id != resource_id:
+                    raise Stage0ValidationError(
+                        "Workflow sandbox container identity changed during cleanup"
+                    )
+                if owner != self.config.cleanup_token:
+                    raise Stage0ValidationError(
+                        "refusing to remove a container owned by another run: "
+                        f"{self.config.name}"
+                    )
+                remaining_ids.append(resource_id)
+
+            for resource_id in remaining_ids:
+                try:
+                    removal = subprocess.run(
+                        ["docker", "rm", "--force", resource_id],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=5,
+                        env=_docker_environment(),
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise Stage0ValidationError(
+                        "Workflow sandbox cleanup command timed out: "
+                        f"{self.config.name}"
+                    ) from exc
+                if removal.returncode != 0:
+                    last_removal_error = removal.stderr.strip()[-500:]
+
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return
+                final_identity = self._container_identity()
+                final_ids = [
+                    resource_id
+                    for resource_id in observed_ids
+                    if self._container_identity(
+                        resource_id,
+                        exact_name=False,
+                    )
+                    is not None
+                ]
+                if final_identity is None and not final_ids:
+                    return
+                detail = (
+                    f": {last_removal_error}"
+                    if last_removal_error
+                    else ""
+                )
+                raise Stage0ValidationError(
+                    "Workflow sandbox cleanup could not be verified: "
+                    f"{self.config.name}{detail}"
+                )
             time.sleep(min(0.05, remaining))
-            owner = self._container_owner()
-        if owner != self.config.cleanup_token:
-            raise Stage0ValidationError(
-                f"refusing to remove a container owned by another run: {self.config.name}"
-            )
-        try:
-            removal = subprocess.run(
-                ["docker", "rm", "--force", self.config.name],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=5,
-                env=_docker_environment(),
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise Stage0ValidationError(
-                f"Workflow sandbox cleanup command timed out: {self.config.name}"
-            ) from exc
-        if removal.returncode != 0 or self._container_owner() is not None:
-            raise Stage0ValidationError(
-                f"Workflow sandbox cleanup could not be verified: {self.config.name}"
-            )
 
     def run(
         self,
