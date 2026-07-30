@@ -125,6 +125,8 @@ class RuntimeCoreHandoffIntegrationTests(WorkspaceCase):
             str(repository),
             cwd=self.root,
         )
+        shell("git", "config", "user.name", "Test User", cwd=repository)
+        shell("git", "config", "user.email", "test@example.com", cwd=repository)
         shell(
             "git",
             "checkout",
