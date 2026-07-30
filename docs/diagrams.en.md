@@ -313,11 +313,14 @@ flowchart TB
   Sup -->|start · pin| Bro
   Sand -->|loopback IPC| Bro
   HostP -.->|RO bind| Bro
-  Sup -->|after dual cleanup| Pack["local evidence pack / dry-run"]
-  Pack -.->|forbidden| Merge["merge / push / Core import"]
+  Sup -->|after dual cleanup| Pack["sealed Stage5 evidence pack"]
+  Pack -->|claim + artifact + gate binding| Handoff["signed Core execution bundle"]
+  Handoff -->|explicit operator transfer| Core["Dyro Core import + independent review"]
+  Pack -.->|forbidden| Merge["review / signoff / merge / push"]
 ```
 
-Not Core. Tree: `experiments/external_workflow_runner/`. Production status: Stage5 `NOT_READY`.
+Not Core. Tree: `experiments/external_workflow_runner/`. This is a Production
+Candidate; production remains `NOT_READY` with `PROD-01/02/09` open.
 
 ---
 
@@ -338,9 +341,12 @@ sequenceDiagram
   S->>W: cleanup verify
   S->>B: stop · containers absent
   S->>S: pack only if dual cleanup OK
+  S->>S: bind current Core claim + pack hash
+  S-->>S: build signed Core bundle · never import
 ```
 
-Supervisor dual-cleanup before any local pack.
+Supervisor dual-cleans before any pack. The trusted handoff only builds a
+bundle; Core still exclusively owns import, review, signoff, merge, and push.
 
 ---
 

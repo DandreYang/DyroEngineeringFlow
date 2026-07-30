@@ -123,7 +123,12 @@ def _gate_artifacts(config: Config, task: Task, workspace: Path, output_dir: Pat
 
 
 def _write_bundle(source: Path, output: Path) -> None:
-    output.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise DyroError(
+            f"无法创建证据包输出目录：{output.parent}"
+        ) from exc
     temporary = ""
     try:
         with tempfile.NamedTemporaryFile(prefix=f".{output.name}.", suffix=".zip", dir=output.parent, delete=False) as handle:
@@ -137,7 +142,34 @@ def _write_bundle(source: Path, output: Path) -> None:
                 os.fsync(handle.fileno())
             except OSError:
                 pass
-        os.replace(temporary, output)
+        try:
+            os.link(temporary, output, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise DyroError(f"拒绝覆盖已有证据包：{output}") from exc
+        except OSError as exc:
+            raise DyroError(
+                "无法原子发布证据包；输出目录必须支持同文件系统硬链接："
+                f"{output.parent}"
+            ) from exc
+        try:
+            directory_flags = os.O_RDONLY | getattr(
+                os,
+                "O_DIRECTORY",
+                0,
+            )
+            directory_descriptor = os.open(output.parent, directory_flags)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        except OSError:
+            # The file itself is already durable. Some platforms/filesystems
+            # do not support directory fsync.
+            pass
+    except DyroError:
+        raise
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise DyroError(f"构建证据包失败：{output}") from exc
     finally:
         if temporary:
             Path(temporary).unlink(missing_ok=True)
@@ -161,8 +193,11 @@ def build_execution_bundle(
     workspace = workspace.expanduser().resolve()
     if not workspace.is_dir():
         raise DyroError(f"外部执行工作区不存在：{workspace}")
-    output = output.expanduser().resolve()
-    if output.exists():
+    requested_output = output.expanduser()
+    if requested_output.exists() or requested_output.is_symlink():
+        raise DyroError(f"拒绝覆盖已有证据包：{requested_output}")
+    output = requested_output.parent.resolve() / requested_output.name
+    if output.exists() or output.is_symlink():
         raise DyroError(f"拒绝覆盖已有证据包：{output}")
     if (signing_key is None) != (key_id is None):
         raise ValidationError("--signing-key 与 --key-id 必须同时提供")

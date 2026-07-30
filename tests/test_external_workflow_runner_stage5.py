@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -15,6 +16,7 @@ from experiments.external_workflow_runner.stage1.claim import ClaimRecord, Claim
 from experiments.external_workflow_runner.stage3.claim_matrix import ClaimDeadlineMatrix
 from experiments.external_workflow_runner.stage4.evidence_pack import (
     CleanupProof,
+    EvidencePackResult,
     pack_run_evidence,
 )
 from experiments.external_workflow_runner.stage5.bundle import assemble_stage5_bundle
@@ -62,6 +64,54 @@ def _docker_image_available() -> bool:
     )
 
 
+def _build_unit_pack(
+    root: Path,
+    *,
+    workflow_run_id: str,
+) -> EvidencePackResult:
+    artifact = root / "report.md"
+    artifact.write_text("# Stage 5 report\n", encoding="utf-8")
+    artifact_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    return pack_run_evidence(
+        pack_root=root / "pack",
+        workflow_run_id=workflow_run_id,
+        claim={
+            "schema_version": 1,
+            "task_id": "t",
+            "runner_id": "r",
+            "generation": 2,
+            "execution_key_id": "k",
+            "issued_at": 1.0,
+            "expires_at": 2.0,
+        },
+        canonical_input_sha256="a" * 64,
+        envelope={
+            "status": "DONE",
+            "workflow_run_id": workflow_run_id,
+            "artifacts": [
+                {
+                    "repository": "repo",
+                    "path": "report.md",
+                    "sha256": artifact_sha,
+                }
+            ],
+        },
+        artifact_paths=(("repo", "report.md", artifact),),
+        provider_pin={"source": "host", "content_sha256": "b" * 64},
+        claim_matrix={"total_ms": 1},
+        cleanup=CleanupProof(
+            sandbox_cleanup_verified=True,
+            broker_cleanup_verified=True,
+            broker_containers_absent=True,
+            raw_marker_leaked=False,
+            provider_token_leaked=False,
+        ),
+        mid_run_renewals=1,
+        provider_mode="argv-cli",
+        telemetry_text='{"raw_destroyed":true}\n',
+    )
+
+
 class HostProviderUnitTests(unittest.TestCase):
     def test_pin_and_allowlist(self) -> None:
         with tempfile.TemporaryDirectory(dir=_DOCKER_TEMP_DIR, prefix=".s5u-") as tmp:
@@ -97,52 +147,66 @@ class EvidenceDryRunUnitTests(unittest.TestCase):
     def test_dry_run_on_valid_pack(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            artifact = root / "report.md"
-            artifact.write_text("# Stage 5 report\n", encoding="utf-8")
-            artifact_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
-            pack = pack_run_evidence(
-                pack_root=root / "pack",
+            pack = _build_unit_pack(
+                root,
                 workflow_run_id="run-dry-1",
-                claim={
-                    "schema_version": 1,
-                    "task_id": "t",
-                    "runner_id": "r",
-                    "generation": 2,
-                    "execution_key_id": "k",
-                    "issued_at": 1.0,
-                    "expires_at": 2.0,
-                },
-                canonical_input_sha256="a" * 64,
-                envelope={
-                    "status": "DONE",
-                    "workflow_run_id": "run-dry-1",
-                    "artifacts": [
-                        {
-                            "repository": "repo",
-                            "path": "report.md",
-                            "sha256": artifact_sha,
-                        }
-                    ],
-                },
-                artifact_paths=(("repo", "report.md", artifact),),
-                provider_pin={"source": "host", "content_sha256": "b" * 64},
-                claim_matrix={"total_ms": 1},
-                cleanup=CleanupProof(
-                    sandbox_cleanup_verified=True,
-                    broker_cleanup_verified=True,
-                    broker_containers_absent=True,
-                    raw_marker_leaked=False,
-                    provider_token_leaked=False,
-                ),
-                mid_run_renewals=1,
-                provider_mode="argv-cli",
-                telemetry_text='{"raw_destroyed":true}\n',
             )
             dry = dry_run_validate_pack(pack.pack_dir)
             self.assertTrue(dry.pack_sha256_verified)
             self.assertEqual(dry.report["verdict"], "ACCEPT_FOR_HUMAN_REVIEW_ONLY")
             self.assertFalse(dry.candidate_record["production_import"])
             self.assertTrue(dry.report_path.is_file())
+
+    def test_dry_run_rejects_unknown_seal_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pack = _build_unit_pack(
+                root,
+                workflow_run_id="run-seal-kind",
+            )
+            seal_path = pack.pack_dir / "seal.json"
+            seal = json.loads(seal_path.read_text(encoding="utf-8"))
+            seal["kind"] = "untrusted-seal"
+            seal_path.write_text(json.dumps(seal), encoding="utf-8")
+            with self.assertRaisesRegex(
+                Stage0ValidationError,
+                "seal kind",
+            ):
+                dry_run_validate_pack(pack.pack_dir)
+
+    def test_dry_run_rejects_incomplete_forbidden_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pack = _build_unit_pack(
+                root,
+                workflow_run_id="run-seal-actions",
+            )
+            seal_path = pack.pack_dir / "seal.json"
+            seal = json.loads(seal_path.read_text(encoding="utf-8"))
+            seal["actions_forbidden"] = ["signoff", "merge"]
+            seal_path.write_text(json.dumps(seal), encoding="utf-8")
+            with self.assertRaisesRegex(
+                Stage0ValidationError,
+                "must forbid",
+            ):
+                dry_run_validate_pack(pack.pack_dir)
+
+    def test_dry_run_rejects_cross_file_workflow_id_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pack = _build_unit_pack(
+                root,
+                workflow_run_id="run-bound",
+            )
+            seal_path = pack.pack_dir / "seal.json"
+            seal = json.loads(seal_path.read_text(encoding="utf-8"))
+            seal["workflow_run_id"] = "run-substituted"
+            seal_path.write_text(json.dumps(seal), encoding="utf-8")
+            with self.assertRaisesRegex(
+                Stage0ValidationError,
+                "not bound",
+            ):
+                dry_run_validate_pack(pack.pack_dir)
 
     def test_dry_run_refuses_without_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -177,6 +241,14 @@ class ProductionGateTests(unittest.TestCase):
         self.assertFalse(report["production_ready"])
         self.assertEqual(report["verdict"], "NOT_READY")
         self.assertGreaterEqual(report["blocker_count"], 1)
+        checklist = {
+            item["id"]: item for item in report["checklist"]
+        }
+        self.assertEqual(checklist["PROD-03"]["status"], "pass")
+        self.assertNotIn(
+            "PROD-03",
+            {item["id"] for item in report["blockers"]},
+        )
         assert_not_production_ready(report)
 
 

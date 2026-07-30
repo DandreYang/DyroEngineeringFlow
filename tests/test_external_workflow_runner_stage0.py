@@ -640,11 +640,32 @@ class SandboxConfigurationTests(unittest.TestCase):
                 stderr="",
             )
 
+            observations = iter(
+                [
+                    None,
+                    ("container-id", config.cleanup_token),
+                ]
+            )
+            id_observations = iter(
+                [
+                    ("container-id", config.cleanup_token),
+                ]
+            )
+
+            def identity(
+                reference: str | None = None,
+                *,
+                exact_name: bool = True,
+            ):
+                if reference is not None and not exact_name:
+                    return next(id_observations, None)
+                return next(observations, None)
+
             with (
                 mock.patch.object(
                     runner,
-                    "_container_owner",
-                    side_effect=[None, config.cleanup_token, None],
+                    "_container_identity",
+                    side_effect=identity,
                 ),
                 mock.patch(
                     "experiments.external_workflow_runner.sandbox.subprocess.run",
@@ -656,8 +677,35 @@ class SandboxConfigurationTests(unittest.TestCase):
             run.assert_called_once()
             self.assertEqual(
                 run.call_args.args[0],
-                ["docker", "rm", "--force", config.name],
+                ["docker", "rm", "--force", "container-id"],
             )
+
+    def test_cleanup_rejects_invalid_settle_window(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ewr-stage0-config-") as temporary:
+            root = Path(temporary)
+            runner = DockerSandboxRunner(
+                DockerSandboxConfig(
+                    name="dyro-stage0-invalid-settle",
+                    image=BUN_IMAGE,
+                    bundle_root=root,
+                    run_root=root,
+                    worktrees={"docs": root},
+                    environment={},
+                )
+            )
+            for invalid in (
+                True,
+                0,
+                -1,
+                float("nan"),
+                float("inf"),
+            ):
+                with self.subTest(settle_seconds=invalid):
+                    with self.assertRaisesRegex(
+                        Stage0ValidationError,
+                        "settle_seconds must be positive",
+                    ):
+                        runner._force_remove(settle_seconds=invalid)
 
 
 def _docker_image_available() -> bool:

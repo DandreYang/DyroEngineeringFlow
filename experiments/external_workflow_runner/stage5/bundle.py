@@ -68,6 +68,7 @@ def assemble_stage5_bundle(
             "allows_push": False,
             "allows_signoff": False,
             "dry_run_validator": True,
+            "allows_signed_core_bundle_build_after_cleanup": True,
             "allows_core_import": False,
         },
         "production_ready": False,

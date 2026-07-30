@@ -264,11 +264,22 @@ flowchart TB
   Sup -->|start · pin| Bro
   Sand -->|loopback IPC| Bro
   HostP -.->|RO bind| Bro
-  Sup -->|after dual cleanup| Pack["local evidence pack / dry-run"]
-  Pack -.->|forbidden| Merge["merge / push / Core import"]
+  Sup -->|after dual cleanup| Pack["sealed Stage5 evidence pack"]
+  Pack -->|claim + artifact + gate binding| Handoff["signed Core execution bundle"]
+  Handoff -->|explicit operator transfer| Core["Dyro Core import + independent review"]
+  Pack -.->|forbidden| Merge["review / signoff / merge / push"]
 ```
 
-Pas Core. `experiments/external_workflow_runner/`. Stage5 `NOT_READY`.
+Pas Core. Chemin : `experiments/external_workflow_runner/`. État :
+**Production Candidate** ; la production reste `NOT_READY` jusqu'à validation
+multi-hôte, flotte avec fournisseur réel et quotas des montages inscriptibles.
+
+```bash
+dyro runtime status
+dyro runtime doctor
+dyro runtime plan
+dyro runtime production-gate  # NOT_READY exits 3
+```
 
 ### Séquence runtime sémantique (expérience optionnelle)
 
@@ -287,6 +298,8 @@ sequenceDiagram
   S->>W: cleanup verify
   S->>B: stop · containers absent
   S->>S: pack only if dual cleanup OK
+  S->>S: bind current Core claim + pack hash
+  S-->>S: build signed Core bundle · never import
 ```
 
 ## Démarrage rapide
@@ -384,7 +397,8 @@ dyro hotfix create incident-123 --base v2026.09.7 --repos api,web --yes
 Si l'exécution et l'approbation sont gérées par un système de confiance séparé, définissez `policy.execution_mode = "external"` et `policy.require_external_signoff = true`. Dyro local n'autorise alors que la planification ; une revue liée au reçu et aux HEAD exacts doit être signée explicitement avant `done` :
 
 ```bash
-dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026
+dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026 \
+  --output /secure-transfer/API-101.core-claim.json
 # Un travail long doit renouveler son claim borné avant expiration.
 dyro task claim-renew API-101 --by isolated-runner-1 --lease-seconds 3600
 # Dans le runner isolé : exécutez les gates déclarées et empaquetez reçu, logs et HEAD exacts.
@@ -418,7 +432,8 @@ dyro config set policy.require_signed_signoff true
 
 dyro key generate runner-2026 --private-key /secure/runner.pem --public-key /secure/runner.pub.pem
 dyro key trust runner-2026 --purpose execution --public-key /secure/runner.pub.pem   --not-after 2027-01-01T00:00:00+00:00
-dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026
+dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026 \
+  --output /secure-transfer/API-101.core-claim.json
 dyro task evidence build API-101 --workspace /runner/workspace --receipt /runner/out/receipt.md   --output /runner/out/API-101.zip --claim /runner/in/claim.json   --signing-key /secure/runner.pem --key-id runner-2026
 
 dyro key generate reviewer-2026 --private-key /secure/reviewer.pem --public-key /secure/reviewer.pub.pem
@@ -473,11 +488,11 @@ dyro --dry-run task run API-101
 | `config get/set` / `agent list/add/test` / `open` | Gérer politique et adaptateurs, valider un exécutable ou ouvrir un agent sur la bonne ligne. |
 | `task create/list/board/status/next/graph/explain/attempts/binding` | Manifestes et état, graphe, planification, provenance et liaison de revue exacte. |
 | `task run/answer/gates/review/signoff` | Exécuter, répondre, gates, revue indépendante et sign-off externe si requis. |
-| `task claim` / `task evidence build/execution/review` | Claim unique, build/import de preuve portable et import de revue liée au reçu. |
+| `task claim --output` / `task evidence build/execution/review` | Claim unique avec fichier de transfert créé exclusivement, build/import de preuve portable et import de revue liée au reçu. |
 | `task merge` | Fusionner la branche de tâche revue dans sa ligne propriétaire. |
 | `task loop/daemon/stats/decisions` | Lots contrôlés, ordonnancement, ledger et portes de décision. |
 | `dispatch` | Dispatch multi-agents local optionnel (L0–L4) ; consultatif — ne remplace pas gates/merge. |
-| `runtime` | Statut du runtime sémantique externe optionnel (production Stage5 **NOT_READY**). |
+| `runtime status/doctor/plan/claim/handoff/production-gate` | Diagnostiquer le Production Candidate, lier les leases Stage5 aux claims Core, construire sans importer les bundles Core signés et échouer fermé en **NOT_READY**. |
 
 Détail : [architecture et Profile](docs/architecture.md), [diagrammes](docs/diagrams.en.md), [migration](docs/migrating-existing-control-planes.md), [publication PyPI](docs/publishing.md) (mainteneurs).
 
@@ -487,4 +502,4 @@ Ce README est maintenu en anglais, chinois simplifié, coréen, espagnol, franç
 
 ## Limites actuelles
 
-DyroEngineeringFlow fournit une boucle de workflow locale complète et des contrôles de politique pour les équipes plus strictes en mode planification seule. Il ne crée pas de dépôts distants, n'embarque pas d'identifiants SaaS et ne provisionne pas de runner externe ; il fournit un contrat de paquet de preuve portable. Les modules optionnels sous `experiments/` (workflow runner Stage0–5, local agent dispatch L0–L4) **sont livrés dans la roue `dyro`** et utilisables après install (`dyro dispatch …`, `import experiments…`). Ils restent **optionnels par rapport au Core** : ils ne remplacent ni gates, ni review, ni signoff, ni merge ; le runtime sémantique reste Stage5 `NOT_READY` en production—voir les ADR dans `docs/adr/`. Les merges multi-dépôts locaux sont prévolés et récupérés comme une opération ; les serveurs Git distants n'offrent pas de push atomique multi-dépôts, donc un push partiel est journalisé pour récupération. Le merge automatique exige l'autorisation du manifeste de tâche et de la politique locale. [MIT License](LICENSE) et [`dyro` sur PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow fournit une boucle de workflow locale complète et des contrôles de politique pour les équipes plus strictes en mode planification seule. Il ne crée pas de dépôts distants, n'embarque pas d'identifiants SaaS et ne provisionne pas de runner externe ; il fournit un contrat de paquet de preuve portable. Les modules optionnels sous `experiments/` (workflow runner Stage0–5, local agent dispatch L0–L4) **sont livrés dans la roue `dyro`** et utilisables après install (`dyro dispatch …`, `dyro runtime …`, `import experiments…`). Ils restent **optionnels par rapport au Core** et ne remplacent ni gates, ni review, ni signoff, ni merge. Le runtime sémantique est désormais un Production Candidate avec transfert de bundle Core signé ; la production reste `NOT_READY` tant que `PROD-01`, `PROD-02` et `PROD-09` ne sont pas prouvés dans l'environnement réel de release. Les merges multi-dépôts locaux sont prévolés et récupérés comme une opération ; les serveurs Git distants n'offrent pas de push atomique multi-dépôts, donc un push partiel est journalisé pour récupération. Le merge automatique exige l'autorisation du manifeste de tâche et de la politique locale. [MIT License](LICENSE) et [`dyro` sur PyPI](https://pypi.org/project/dyro/).

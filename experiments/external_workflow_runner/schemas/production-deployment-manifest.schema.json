@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dyro.example/schemas/external-workflow-runner/production-deployment-manifest-v1.json",
+  "title": "Dyro Production Deployment Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "release_id",
+    "environment_id",
+    "dyro_version",
+    "source_commit",
+    "runtime_image",
+    "artifacts",
+    "providers",
+    "operations",
+    "created_at",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "kind": {
+      "const": "dyro-production-deployment-manifest"
+    },
+    "release_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "environment_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "dyro_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "runtime_image": {
+      "const": "oven/bun@sha256:478281fdd196871c7e51ba6a820b7803a8ae97042ec86cdbc2e1c6b6626442d9"
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wheel_sha256",
+        "sdist_sha256",
+        "sbom_sha256",
+        "provenance_sha256"
+      ],
+      "properties": {
+        "wheel_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sdist_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sbom_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "provenance_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "providers": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 16,
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/sha256"
+      }
+    },
+    "operations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deployment_sha256",
+        "canary_plan_sha256",
+        "rollback_plan_sha256",
+        "observability_plan_sha256",
+        "runbook_sha256"
+      ],
+      "properties": {
+        "deployment_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "canary_plan_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "rollback_plan_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "observability_plan_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "runbook_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 64
+    },
+    "signature": {
+      "$ref": "#/$defs/signature"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "algorithm",
+        "purpose",
+        "key_id",
+        "value"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "algorithm": {
+          "const": "ed25519"
+        },
+        "purpose": {
+          "const": "production-release"
+        },
+        "key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

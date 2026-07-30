@@ -313,11 +313,14 @@ flowchart TB
   Sup -->|启动 · pin| Bro
   Sand -->|loopback IPC| Bro
   HostP -.->|RO bind| Bro
-  Sup -->|双重清理后| Pack["本地 evidence pack / dry-run"]
-  Pack -.->|禁止| Merge["merge / push / Core import"]
+  Sup -->|双重清理后| Pack["密封 Stage5 evidence pack"]
+  Pack -->|绑定 claim · artifact · gate| Handoff["已签名 Core execution bundle"]
+  Handoff -->|操作员显式传递| Core["Dyro Core 导入 + 独立复核"]
+  Pack -.->|禁止| Merge["复核 / signoff / merge / push"]
 ```
 
-**非 Core。** `experiments/external_workflow_runner/`。生产见 Stage5 `NOT_READY`。
+**非 Core。** `experiments/external_workflow_runner/`。当前为 Production
+Candidate；生产仍为 `NOT_READY`，开放阻断项为 `PROD-01/02/09`。
 
 ---
 
@@ -338,9 +341,12 @@ sequenceDiagram
   S->>W: cleanup 校验
   S->>B: stop · 容器已消失
   S->>S: 仅双重清理 OK 才 pack
+  S->>S: 绑定当前 Core claim + pack hash
+  S-->>S: 构建已签名 Core bundle · 绝不导入
 ```
 
-Supervisor 双重清理后才允许本地 pack。
+Supervisor 双重清理后才允许 pack；可信 handoff 只构建 bundle，Core 仍独占
+import、review、signoff、merge 与 push。
 
 ---
 

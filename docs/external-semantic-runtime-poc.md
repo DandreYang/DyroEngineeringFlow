@@ -72,7 +72,12 @@ vendor/dyro-semantic-flow/
 - [`experiments/external_workflow_runner/stage5/POC_EVALUATION.md`](../experiments/external_workflow_runner/stage5/POC_EVALUATION.md)
 - [`experiments/external_workflow_runner/stage5/PRODUCTION_NOT_READY.md`](../experiments/external_workflow_runner/stage5/PRODUCTION_NOT_READY.md)
 
-**本地隔离：已证明。生产：NOT_READY。**
+**本地隔离：已证明。Stage5→Core 签名证据交接：已实现。生产：
+NOT_READY（仍缺真实环境证据）。**
+
+2026-07-30 的 Production Candidate 晋级契约见
+[ADR-0003](adr/0003-external-runtime-production-promotion.md) 与
+[生产就绪设计](designs/external-runtime-production-readiness.md)。
 
 ## 停止条件
 

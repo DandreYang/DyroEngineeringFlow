@@ -148,7 +148,8 @@ dyro hotfix create incident-123 --base v2026.09.7 --repos api,web --yes
 {t['external']}
 
 ```bash
-dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026
+dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026 \
+  --output /secure-transfer/API-101.core-claim.json
 # {t['comment_claim_renew']}
 dyro task claim-renew API-101 --by isolated-runner-1 --lease-seconds 3600
 # {t['comment_runner_build']}
@@ -183,7 +184,8 @@ dyro config set policy.require_signed_signoff true
 dyro key generate runner-2026 --private-key /secure/runner.pem --public-key /secure/runner.pub.pem
 dyro key trust runner-2026 --purpose execution --public-key /secure/runner.pub.pem \
   --not-after 2027-01-01T00:00:00+00:00
-dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026
+dyro task claim API-101 --by isolated-runner-1 --key-id runner-2026 \
+  --output /secure-transfer/API-101.core-claim.json
 dyro task evidence build API-101 --workspace /runner/workspace --receipt /runner/out/receipt.md \
   --output /runner/out/API-101.zip --claim /runner/in/claim.json \
   --signing-key /secure/runner.pem --key-id runner-2026
@@ -251,7 +253,7 @@ dyro --dry-run task run API-101
 | `config get/set` / `agent list/add/test` / `open` | {t['cmd_cfg']} |
 | `task create/list/board/status/next/graph/explain/attempts/binding` | {t['cmd_task']} |
 | `task run/answer/gates/review/signoff` | {t['cmd_run']} |
-| `task claim` / `task evidence build/execution/review` | {t['cmd_claim']} |
+| `task claim --output` / `task evidence build/execution/review` | {t['cmd_claim']} |
 | `task merge` | {t['cmd_merge']} |
 | `task loop/daemon/stats/decisions` | {t['cmd_loop']} |
 
