@@ -354,7 +354,7 @@ printf '{}\n' | .venv/bin/python -m experiments.local_agent_dispatch \
 
 ## 1. 最终结论
 
-源码层的 P0/P1 已完成修复并由独立代码复审复核；本轮没有重新引入 Docker 或外部 TypeScript semantic runtime。候选版本为 `0.5.2`，但**整体仍为发布 No-Go**：公开的 `dyro 0.5.1` 当前仍未 yank，且修复 PR 的 GitHub CI 尚未运行完成。2026-07-31 已实际启用 `main` 和 PyPI Environment 的远端治理；剩余发布处置必须在 PyPI 项目控制台完成，不能由本地代码替代。
+源码层的 P0/P1 已完成修复并由独立代码复审复核；本轮没有重新引入 Docker 或外部 TypeScript semantic runtime。候选版本为 `0.5.2`，但**整体仍为发布 No-Go**：公开的 `dyro 0.5.1` 当前仍未 yank，且 PR 仍需独立批准。PR #14 在 `b68580a` 已完成 8 项必需 CI（Linux Python 3.11–3.14、Windows、Intel macOS、wheel/sdist 与 TypeScript）；macOS runner 已从不再列为标准 runner 的 `macos-13` 迁移至受支持的 `macos-15-intel`，保持 Intel 覆盖。2026-07-31 已实际启用 `main` 和 PyPI Environment 的远端治理；剩余发布处置必须在 PyPI 项目控制台完成，不能由本地代码替代。
 
 已关闭的源码问题包括：任务/Provider 输出/异常的机密检测和脱敏；真实 Provider 的显式非物理隔离确认与只读上下文投影；`auto`/Panel 不再回退 echo；发现但未审计的 CLI 不可调度；公共状态命令不能跨越质量门；merge 重验 review/signoff；外部 QUESTION 续跑的同 run 单调 provenance；严格超时校验；tag 来源、锁文件和分发构建门禁。
 
@@ -362,10 +362,10 @@ printf '{}\n' | .venv/bin/python -m experiments.local_agent_dispatch \
 
 | 模块 | 结论 | 依据 |
 | --- | --- | --- |
-| Core | Conditional Go | 公开状态旁路已封堵；merge 会重验当前 review/signoff 与 task HEAD；全量单测通过。仍须在 PR CI 上完成目标平台验证。 |
+| Core | Conditional Go | 公开状态旁路已封堵；merge 会重验当前 review/signoff 与 task HEAD；全量单测和 PR 目标平台 CI 已通过。 |
 | Local dispatch | Conditional Go | 已 fail-closed、Provider 投影/显式确认/模拟标签均落地；尚未实际执行 Codex/Claude，Windows 仍只承诺 import/discovery fail-closed。 |
-| 供应链与发布 | No-Go | 发布工作流与远端治理已收紧；但 0.5.1 仍显示 `yanked=false`，且修复 PR 尚未完成完整 CI。 |
-| 整体 | No-Go | 先 yank 0.5.1 并让 PR CI 通过，才可把 0.5.2 标为可发布。 |
+| 供应链与发布 | No-Go | 发布工作流与远端治理已收紧，8 项 PR CI 已通过；但 0.5.1 仍显示 `yanked=false`，且合并与 PyPI 发布均需要独立审批。 |
+| 整体 | No-Go | 先 yank 0.5.1、取得独立 PR 批准并合并，再可把 0.5.2 标为可发布。 |
 
 ## 3. P0 Required Fixes
 
@@ -385,7 +385,7 @@ printf '{}\n' | .venv/bin/python -m experiments.local_agent_dispatch \
 
 ## 5. Requires Human Verification
 
-1. 合并 PR 后让 GitHub CI 完整通过：Linux Python matrix、Windows dispatch import/fail-closed、macOS clean install smoke。
+1. PR #14 的 8 项 GitHub CI 已通过；在无新提交的前提下，取得独立审批后再合并，保护规则会强制复核最新推送与所有必需 check。
 2. 在受控 macOS/Linux 主机分别执行一次真实 Codex 与 Claude 的只读最小任务；确认 `CODEX_HOME`/`CLAUDE_CONFIG_DIR` 等显式授权配置下的登录与 JSON 协议，并核对未列文件不在投影目录。不得以 echo 替代。
 3. 维持 GitHub 远端治理：`main` 已要求 PR review/CI 且禁止直接 push/force push；PyPI Environment 已要求非发起人审批、禁止 self-review/admin bypass，并限制到受保护分支。
 4. 完成 `0.5.1` PyPI yank 和事故记录；确认项目页的 yanked 标记后，再创建 `v0.5.2` Release。
