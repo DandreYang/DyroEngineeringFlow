@@ -75,6 +75,30 @@ jobs:
           /tmp/dyro-wheel-venv/bin/pip install /tmp/dyro-dist/dyro-*.whl
           /tmp/dyro-wheel-venv/bin/python -c "import experiments.local_agent_dispatch"
           DYRO_LOCAL_AGENT_DISPATCH_HOME="$smoke_root/wheel-dispatch-home" /tmp/dyro-wheel-venv/bin/dyro dispatch doctor >/tmp/dispatch-doctor.json
+
+  windows-dispatch-import:
+    name: Windows dispatch import / fail-closed smoke
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Install project
+        run: python -m pip install .
+
+      - name: Verify import and fail-closed execution
+        run: |
+          python -m experiments.local_agent_dispatch --dry-run doctor
+          python tools/verify_windows_dispatch_import.py
+
   typescript-interop:
     name: TypeScript protocol interoperability
     runs-on: ubuntu-latest
