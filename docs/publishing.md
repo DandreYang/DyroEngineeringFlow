@@ -44,6 +44,11 @@ PyPI Trusted Publishing 将 GitHub Actions 的 OIDC 身份绑定到这个仓库�
    dyro --version
    ```
 
+6. 将 `CHANGELOG.md` 中与 tag 对应的标题从 `Unreleased` 改为实际发布日期，
+   并确保 Git tag、GitHub Release、PyPI 版本和 changelog 都指向同一版本。不要
+   用下一版的发布来掩盖上一版的状态；若旧版本被 yank 或不再可下载，应保留其
+   tag/Release，并在 changelog 或事故记录中写明状态与升级目标。
+
 PyPI 不允许覆盖同一个版本号。发布失败后，如需修改分发文件或 metadata，必须递增版本号并重新创建 Release。
 
 若 GitHub 的 `release` 事件没有自动生成工作流运行，可在 Actions 页面选择 **Publish to PyPI** → **Run workflow**，输入既有 tag（例如 `vX.Y.Z`）。手动入口会 checkout 该 tag，并严格校验 tag 必须等于 `pyproject.toml` 的版本且位于受信 `main` 历史上；它不会构建后续 `main` 提交。

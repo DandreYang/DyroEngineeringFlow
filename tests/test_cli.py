@@ -1,10 +1,11 @@
 from pathlib import Path
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+from unittest.mock import patch
 
-from dyro.cli import _route_experiment_surface, main
+from dyro.cli import _route_experiment_surface, _setup_provider_preset, main
 from dyro.changesets import get_changeset
 from dyro.config import load
 from dyro.tasks import load_task, status, task_template
@@ -97,12 +98,179 @@ class CliTests(unittest.TestCase):
             self.assertEqual(get_line(config, "dev").branch, "feat/dev")
             self.assertTrue((root / "versions/dev/api").is_dir())
 
+    def test_setup_accepts_dry_run_after_the_command_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            root = Path(tmp) / "workspace"
+            repository = root / "repositories/api"
+            repository.mkdir(parents=True)
+            from .support import shell
+
+            shell("git", "init", "-b", "main", cwd=repository)
+
+            main(["setup", str(root), "--name", "demo", "--no-line", "--dry-run"])
+
+            self.assertFalse((root / "dyro.toml").exists())
+
+    def test_setup_rejects_conflicting_interaction_modes(self) -> None:
+        stderr = StringIO()
+        with (
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(["setup", "--interactive", "--non-interactive"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("not allowed with argument", stderr.getvalue())
+
+    def test_setup_reports_detected_but_unintegrated_providers_without_registering_them(self) -> None:
+        discovered = {"claude", "cursor-agent", "grok", "opencode", "hermes", "kimi"}
+        output = StringIO()
+        with (
+            patch("dyro.cli.shutil.which", side_effect=lambda command: f"/fake/{command}" if command in discovered else None),
+            redirect_stdout(output),
+        ):
+            self.assertIsNone(_setup_provider_preset())
+
+        rendered = output.getvalue()
+        for command in discovered:
+            self.assertIn(command, rendered)
+        self.assertIn("不会写入配置", rendered)
+
+    def test_interactive_setup_can_be_cancelled_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            root = Path(tmp) / "workspace"
+            repository = root / "repositories/api"
+            repository.mkdir(parents=True)
+            from .support import shell
+
+            shell("git", "init", "-b", "main", cwd=repository)
+            answers = iter(["", "", "", "n"])
+            with (
+                patch("dyro.cli._setup_provider_preset", return_value=None),
+                patch("builtins.input", side_effect=lambda _: next(answers)),
+            ):
+                main(["setup", str(root), "--interactive"])
+
+            self.assertFalse((root / "dyro.toml").exists())
+            self.assertFalse((root / ".dyro").exists())
+
+    def test_interactive_setup_applies_confirmed_plan(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            root = Path(tmp) / "workspace"
+            repository = root / "repositories/api"
+            repository.mkdir(parents=True)
+            from .support import shell
+
+            shell("git", "init", "-b", "main", cwd=repository)
+            shell("git", "config", "user.name", "Test User", cwd=repository)
+            shell("git", "config", "user.email", "test@example.com", cwd=repository)
+            repository.joinpath("README.md").write_text("anchor\n", encoding="utf-8")
+            shell("git", "add", "README.md", cwd=repository)
+            shell("git", "commit", "-m", "chore: initial", cwd=repository)
+            answers = iter(["", "", "", "y"])
+            with (
+                patch("dyro.cli._setup_provider_preset", return_value=None),
+                patch("builtins.input", side_effect=lambda _: next(answers)),
+            ):
+                main(["setup", str(root), "--interactive"])
+
+            config = load(root)
+            self.assertNotIn("codex", config.adapters)
+            self.assertEqual(get_line(config, "dev").branch, "feat/dev")
+
+    def test_interactive_setup_never_writes_into_a_git_repository_root(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            repository = Path(tmp) / "api"
+            repository.mkdir()
+            from .support import shell
+
+            shell("git", "init", "-b", "main", cwd=repository)
+            answers = iter([])
+            output = StringIO()
+            with (
+                patch("builtins.input", side_effect=lambda _: next(answers)),
+                redirect_stdout(output),
+            ):
+                main(["setup", str(repository), "--interactive"])
+
+            self.assertFalse((repository / "dyro.toml").exists())
+            self.assertIn("没有 origin", output.getvalue())
+
+    def test_interactive_setup_clones_a_sibling_workspace_for_a_git_root(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            parent = Path(tmp)
+            remote = parent / "api-origin.git"
+            repository = parent / "api"
+            sibling = parent / "api-dyro"
+            from .support import shell
+
+            shell("git", "init", "--bare", str(remote), cwd=parent)
+            repository.mkdir()
+            shell("git", "init", "-b", "main", cwd=repository)
+            shell("git", "config", "user.name", "Test User", cwd=repository)
+            shell("git", "config", "user.email", "test@example.com", cwd=repository)
+            repository.joinpath("README.md").write_text("anchor\n", encoding="utf-8")
+            shell("git", "add", "README.md", cwd=repository)
+            shell("git", "commit", "-m", "chore: initial", cwd=repository)
+            shell("git", "remote", "add", "origin", str(remote), cwd=repository)
+            shell("git", "push", "-u", "origin", "main", cwd=repository)
+            answers = iter(["", "", "", "", "y"])
+            with (
+                patch("dyro.cli._setup_provider_preset", return_value=None),
+                patch("builtins.input", side_effect=lambda _: next(answers)),
+            ):
+                main(["setup", str(repository), "--interactive"])
+
+            self.assertFalse((repository / "dyro.toml").exists())
+            self.assertTrue((sibling / "dyro.toml").is_file())
+            config = load(sibling)
+            self.assertEqual(len(config.repositories), 1)
+            self.assertTrue((sibling / "versions/dev").is_dir())
+
+    def test_interactive_setup_uses_the_source_branch_as_the_suggested_base(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            parent = Path(tmp)
+            remote = parent / "api-origin.git"
+            repository = parent / "api"
+            sibling = parent / "api-dyro"
+            from .support import shell
+
+            shell("git", "init", "--bare", str(remote), cwd=parent)
+            repository.mkdir()
+            shell("git", "init", "-b", "trunk", cwd=repository)
+            shell("git", "config", "user.name", "Test User", cwd=repository)
+            shell("git", "config", "user.email", "test@example.com", cwd=repository)
+            repository.joinpath("README.md").write_text("anchor\n", encoding="utf-8")
+            shell("git", "add", "README.md", cwd=repository)
+            shell("git", "commit", "-m", "chore: initial", cwd=repository)
+            shell("git", "remote", "add", "origin", str(remote), cwd=repository)
+            shell("git", "push", "-u", "origin", "trunk", cwd=repository)
+            shell("git", "symbolic-ref", "HEAD", "refs/heads/trunk", cwd=remote)
+            answers = iter(["", "", "", "", "y"])
+            with (
+                patch("dyro.cli._setup_provider_preset", return_value=None),
+                patch("builtins.input", side_effect=lambda _: next(answers)),
+            ):
+                main(["setup", str(repository), "--interactive"])
+
+            config = load(sibling)
+            self.assertEqual(config.policy.default_base, "trunk")
+            self.assertEqual(get_line(config, "dev").base, "trunk")
+
 
 class StartTests(WorkspaceCase):
     def test_start_dry_run_uses_selected_line_and_adapter(self) -> None:
         config = load(self.root)
         create_line(config, line_id="alpha", branch="feat/alpha", base="main")
         main(["--root", str(self.root), "--dry-run", "start", "--line", "alpha", "--agent", "noop"])
+
+    def test_next_without_a_profile_explains_how_to_begin(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            output = StringIO()
+            with redirect_stdout(output):
+                main(["--root", str(Path(tmp) / "empty"), "next"])
+
+            self.assertIn("dyro setup", output.getvalue())
 
 
 class LineCommandsTests(WorkspaceCase):

@@ -69,14 +69,30 @@ class TaskTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
+        task_path.joinpath("receipt.md").write_text("result: QUESTION\n", encoding="utf-8")
         task = load_task(config, "TASK-1")
-        self.assertEqual(run_task(config, task), "review")
+        self.assertEqual(run_task(config, task), "waiting_answer")
+        task_repository = self.root / "worktrees/alpha/TASK-1/services/api"
+        task_repository.joinpath("README.md").write_text("task change\n", encoding="utf-8")
+        shell("git", "add", "README.md", cwd=task_repository)
+        shell("git", "commit", "-m", "feat: task change", cwd=task_repository)
+        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
+        self.assertEqual(answer_task(config, task, "continue"), "review")
         self.assertEqual(status(config, task), "review")
         self._write_bound_review(task_path)
         self.assertEqual(review_task(config, task), "done")
         self.assertEqual(status(config, task), "done")
         merge_task(config, task)
+        line_repository = self.root / "versions/alpha/services/api"
+        first_merge_head = subprocess_output("git", "rev-parse", "HEAD", cwd=line_repository)
+        self.assertNotEqual(first_merge_head, subprocess_output("git", "rev-parse", "HEAD", cwd=task_repository))
+
+        # A CI retry or a second explicit request must not create another merge.
+        merge_task(config, task)
+        self.assertEqual(
+            subprocess_output("git", "rev-parse", "HEAD", cwd=line_repository),
+            first_merge_head,
+        )
 
     def test_public_status_cannot_bypass_review_or_merge(self) -> None:
         config = load(self.root)

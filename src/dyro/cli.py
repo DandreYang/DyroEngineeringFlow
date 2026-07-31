@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
+import sys
 import time
 
 from . import __version__
@@ -14,12 +16,19 @@ from .config import CONFIG_NAME, Config, expand_argv, load, validate_id
 from .evidence import build_execution_bundle, unpack_execution_bundle
 from .errors import DyroError, ValidationError
 from .onboarding import (
+    SetupPlan,
     append_repository,
     ask_for_workspace,
     bootstrap,
+    current_branch,
     discover_repositories,
+    is_git_repository,
+    origin_url,
+    repository_from_remote,
     render_config,
+    render_setup_plan,
     repository_input_from_path,
+    sibling_workspace_for,
 )
 from .profile import append_adapter, command_adapter, config_value, preset_adapter, set_config_value, test_adapter
 from .state import atomic_write_text, exclusive_lock
@@ -87,13 +96,6 @@ require_external_signoff = false
 require_signed_execution = false
 require_signed_review = false
 require_signed_signoff = false
-
-# Commands are argv arrays, not shell strings.  DyroEngineeringFlow expands only
-# {{workspace}}, {{root}}, {{task}}, {{line}} and {{prompt}}.
-[adapters.codex]
-launch = ["codex", "-C", "{{workspace}}"]
-read = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "{{prompt}}"]
-write = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "{{prompt}}"]
 
 # Add each repository anchor once.  A release line or task receives linked
 # worktrees under the configured layout paths.
@@ -189,7 +191,171 @@ def _ensure_state_directories(root: Path) -> None:
         (root / relative).mkdir(parents=True, exist_ok=True)
 
 
-def cmd_setup(args: argparse.Namespace) -> None:
+def _ask_value(prompt: str, *, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    value = input(f"{prompt}{suffix}：").strip()
+    return value or default
+
+
+def _ask_yes_no(prompt: str, *, default: bool = False) -> bool:
+    rendered_default = "Y/n" if default else "y/N"
+    value = input(f"{prompt} [{rendered_default}]：").strip().lower()
+    if not value:
+        return default
+    if value in {"y", "yes", "是"}:
+        return True
+    if value in {"n", "no", "否"}:
+        return False
+    raise DyroError("请选择 y 或 n")
+
+
+def _setup_provider_preset() -> str | None:
+    """Offer only a Provider that Core can configure and execute safely today."""
+
+    discovered = [
+        command
+        for command in ("codex", "claude", "cursor-agent", "grok", "opencode", "hermes", "kimi")
+        if shutil.which(command)
+    ]
+    if not discovered:
+        print("未发现本机 Agent；可稍后运行 dyro agent add <id> --command '…'。")
+        return None
+    if "codex" in discovered:
+        if _ask_yes_no("检测到 Codex。将它加入 Dyro Profile 吗", default=True):
+            return "codex"
+    unsupported = [command for command in discovered if command != "codex"]
+    if unsupported:
+        print(
+            "已发现 "
+            + "、".join(unsupported)
+            + "；它们尚无 Core 的受审计适配器，因此不会写入配置。"
+        )
+    return None
+
+
+def _render_interactive_setup_plan(plan: SetupPlan) -> None:
+    print("\n设置计划（尚未修改任何文件）：")
+    for item in render_setup_plan(plan):
+        print("  - " + item)
+    if plan.needs_bootstrap:
+        print("  - 将仅 clone 缺失且已明确提供 remote 的仓库")
+    print("  - 不会移动、覆盖或清理现有 Git 仓库")
+
+
+def _apply_setup_plan(plan: SetupPlan, *, dry_run: bool) -> None:
+    if dry_run:
+        print("DRY RUN: 上述计划不会写入文件、执行 clone 或创建 Git worktree")
+        return
+    config_file = plan.root / CONFIG_NAME
+    if config_file.exists():
+        raise DyroError(f"配置已存在：{config_file}")
+    plan.root.mkdir(parents=True, exist_ok=True)
+    adapter_presets = (plan.provider_preset,) if plan.provider_preset else ()
+    atomic_write_text(
+        config_file,
+        render_config(
+            plan.name,
+            list(plan.repositories),
+            plan.default_base,
+            adapter_presets=adapter_presets,
+        ),
+    )
+    config = load(plan.root)
+    _ensure_state_directories(config.root)
+    if plan.needs_bootstrap:
+        for message in bootstrap(config):
+            print(message)
+    if plan.line_id:
+        line = create_line(
+            config,
+            line_id=plan.line_id,
+            branch=plan.branch or f"feat/{plan.line_id}",
+            base=plan.default_base,
+            kind="line",
+        )
+        print(f"已创建开发线 {line.id}（{line.branch}）")
+    findings = doctor(config)
+    for finding in findings:
+        print(finding)
+    if any(finding.startswith("FAIL") for finding in findings):
+        raise DyroError("设置已保存，但 doctor 发现问题；请修复后运行 dyro next")
+    print("\n设置完成。下一步：dyro next")
+
+
+def _interactive_setup(args: argparse.Namespace) -> None:
+    root = Path(args.path).expanduser().resolve()
+    config_file = root / CONFIG_NAME
+    suggested_base = args.base or "main"
+    print("Dyro 首次设置。先检查环境，确认前不会修改文件。")
+    if config_file.exists():
+        config = load(root)
+        print(f"已发现 Profile：{config_file}（{len(config.repositories)} 个仓库）")
+        for finding in doctor(config):
+            print(finding)
+        print("下一步：dyro next")
+        return
+
+    repositories = discover_repositories(root) if root.exists() and not is_git_repository(root) else []
+    if is_git_repository(root):
+        remote = origin_url(root)
+        if not remote:
+            print("当前目录是 Git 仓库，但没有 origin。Dyro 不会把控制状态写进该仓库。")
+            print("请先为它配置 origin，或在包含多个仓库的独立目录中运行 dyro setup。")
+            return
+        source_branch = current_branch(root)
+        if source_branch and not args.base:
+            suggested_base = source_branch
+        suggested_root = sibling_workspace_for(root)
+        raw_root = _ask_value("为这个项目创建独立 Dyro 工作区", default=str(suggested_root))
+        root = Path(raw_root).expanduser().resolve()
+        if root.exists() and any(root.iterdir()):
+            raise DyroError(f"建议工作区必须为空或不存在：{root}")
+        repository = repository_from_remote(remote)
+        repositories = [repository]
+        print("将从当前仓库的 origin clone 新 anchor；当前仓库保持不变。")
+    elif not repositories:
+        remote = _ask_value("未发现本地 Git 仓库。输入一个 Git remote（留空退出）")
+        if not remote:
+            print("已取消；没有修改任何文件。")
+            return
+        repositories = [repository_from_remote(remote)]
+
+    name = _ask_value("工作区名称", default=args.name or _default_workspace_name(root))
+    validate_id(name, "workspace 名称")
+    base = _ask_value("默认基线分支", default=suggested_base)
+    line_id = _ask_value("首条开发线 ID（留空则仅创建 Profile）", default="dev")
+    if line_id:
+        validate_id(line_id, "开发线 ID")
+    provider = _setup_provider_preset()
+    plan = SetupPlan(
+        root=root,
+        name=name,
+        repositories=tuple(repositories),
+        default_base=base,
+        line_id=line_id or None,
+        branch=f"feat/{line_id}" if line_id else None,
+        provider_preset=provider,
+    )
+    _render_interactive_setup_plan(plan)
+    if args.dry_run:
+        _apply_setup_plan(plan, dry_run=True)
+        return
+    if not args.yes and not _ask_yes_no("应用此设置计划", default=False):
+        print("已取消；没有修改任何文件。")
+        return
+    _apply_setup_plan(plan, dry_run=False)
+
+
+def _setup_quick(args: argparse.Namespace) -> None:
+    root = Path(args.path).expanduser().resolve()
+    config = load(root)
+    print(f"检查现有 Profile：{config.root}")
+    for finding in doctor(config):
+        print(finding)
+    print("下一步：dyro next")
+
+
+def _non_interactive_setup(args: argparse.Namespace) -> None:
     """Create a usable Profile and, optionally, its first safe development line."""
     root = Path(args.path).expanduser().resolve()
     config_file = root / CONFIG_NAME
@@ -238,7 +404,35 @@ def cmd_setup(args: argparse.Namespace) -> None:
     if any(finding.startswith("FAIL") for finding in findings):
         raise DyroError("setup 已完成基础配置，但 doctor 仍发现结构错误")
     if created:
-        print("下一步：dyro start --line " + args.line if not args.no_line else "下一步：dyro line create <id> --yes")
+        print("下一步：dyro next")
+
+
+def _uses_interactive_setup(args: argparse.Namespace) -> bool:
+    if args.interactive:
+        return True
+    if args.non_interactive or args.quick:
+        return False
+    has_explicit_plan = any(
+        (
+            args.name,
+            args.base,
+            args.branch,
+            args.no_line,
+            args.yes,
+            args.line != "dev",
+        )
+    )
+    return sys.stdin.isatty() and not has_explicit_plan
+
+
+def cmd_setup(args: argparse.Namespace) -> None:
+    if args.quick:
+        _setup_quick(args)
+        return
+    if _uses_interactive_setup(args):
+        _interactive_setup(args)
+        return
+    _non_interactive_setup(args)
 
 
 def cmd_repo_list(args: argparse.Namespace) -> None:
@@ -379,11 +573,45 @@ def cmd_start(args: argparse.Namespace) -> None:
     if failures:
         print("\n".join(failures))
         raise DyroError("工作区尚未就绪；先修复 doctor 失败项，或运行 dyro bootstrap --yes")
+    if not config.adapters:
+        raise DyroError("尚未配置可启动的 Agent；先运行 dyro next 查看安全的下一步")
     line_id = args.line or _choose("开发线", [line.id for line in list_lines(config)])
     line = get_line(config, line_id, args.kind)
     agent = args.agent or _choose("Agent", sorted(config.adapters))
     open_args = argparse.Namespace(root=str(config.root), line=line.id, kind=line.kind, agent=agent, prompt=args.prompt or "", dry_run=args.dry_run)
     cmd_open(open_args)
+
+
+def cmd_next(args: argparse.Namespace) -> None:
+    """Give newcomers one safe, concrete next step without making changes."""
+
+    try:
+        config = _config(args)
+    except ValidationError:
+        print("尚未发现 Dyro 工作区。下一步：dyro setup")
+        return
+    findings = doctor(config)
+    failures = [finding for finding in findings if finding.startswith("FAIL")]
+    if failures:
+        print("工作区还不能开始任务：")
+        for finding in failures:
+            print("  " + finding)
+        print("下一步：dyro doctor；若仓库缺失且已配置 remote，则运行 dyro bootstrap --yes")
+        return
+    lines = list_lines(config)
+    if not lines:
+        print("Profile 已就绪，但还没有开发线。下一步：dyro line create dev --yes")
+        return
+    if not config.adapters:
+        if shutil.which("codex"):
+            print("工作区已就绪，检测到 Codex 尚未加入 Profile。下一步：dyro agent add codex --preset codex")
+        else:
+            print("工作区已就绪，但尚未配置可启动的 Agent。下一步：dyro agent add <id> --command '…'")
+        return
+    if len(lines) == 1 and len(config.adapters) == 1:
+        print(f"工作区已就绪。下一步：dyro start --line {lines[0].id} --agent {next(iter(config.adapters))}")
+        return
+    print("工作区已就绪。下一步：dyro start")
 
 
 def cmd_line_list(args: argparse.Namespace) -> None:
@@ -1090,7 +1318,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_mode.add_argument("--discover", action="store_true", help="自动发现当前目录下的 Git 仓库并登记 origin")
     init.set_defaults(func=cmd_init)
 
-    setup = sub.add_parser("setup", help="新人一键创建 Profile、目录与首条开发线")
+    setup = sub.add_parser("setup", help="首次引导：预览并安全创建 Profile、仓库与首条开发线")
     setup.add_argument("path", nargs="?", default=".")
     setup.add_argument("--name", help="新 Profile 的工作区名称；默认由目录名推断")
     setup.add_argument("--base", help="首条开发线与新 Profile 的默认基线；默认 main")
@@ -1098,6 +1326,17 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--branch", help="首条开发线分支；默认 feat/<line>")
     setup.add_argument("--no-line", action="store_true", help="仅建立 Profile，不创建 Git worktree 开发线")
     setup.add_argument("--yes", action="store_true", help="确认创建首条 Git worktree 开发线")
+    setup_mode = setup.add_mutually_exclusive_group()
+    setup_mode.add_argument("--interactive", action="store_true", help="强制运行交互式首次设置")
+    setup_mode.add_argument("--non-interactive", action="store_true", help="禁用交互提示；适合脚本与 CI")
+    setup.add_argument("--quick", action="store_true", help="只检查现有 Profile 并给出下一步")
+    setup.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="仅预览设置计划；也兼容全局 --dry-run 放在命令前",
+    )
     setup.set_defaults(func=cmd_setup)
 
     sub.add_parser("doctor", help="验证动态工作区结构").set_defaults(func=cmd_doctor)
@@ -1236,6 +1475,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--agent")
     start.add_argument("--prompt", default="")
     start.set_defaults(func=cmd_start)
+    sub.add_parser("next", help="根据当前状态给出新手的唯一安全下一步").set_defaults(func=cmd_next)
 
     line = sub.add_parser("line", help="功能开发线")
     line_sub = line.add_subparsers(dest="line_command", required=True)

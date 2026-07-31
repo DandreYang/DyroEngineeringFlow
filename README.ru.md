@@ -269,18 +269,37 @@ dyro --version
 python3 -m pip install --user --upgrade dyro
 ```
 
-Разместите репозитории в workspace и используйте путь для новичков: обнаружение, безопасные каталоги состояния и первая линия разработки одной командой:
+Для разработки самого Dyro используйте зафиксированную toolchain репозитория и настоящий вход тестов; приведённые ниже примеры project gates не являются тестами Dyro.
 
 ```bash
-mkdir my-workspace && cd my-workspace
-# Сначала клонируйте или перенесите Git-репозитории в этот каталог.
-dyro setup . --name my-workspace --line dev --yes
+uv sync --locked --all-extras --dev
+uv run python -m unittest discover -s tests -t . -v
+uv run ruff check src tests experiments
 ```
 
-`setup` сканирует локальные Git-репозитории, записывает относительные пути, выводит mounts линии и читает `origin` при наличии — без правки TOML. `--yes` нужен только потому, что первая линия создаёт Git worktree. `--no-line` — только Profile. Если репозиториев ещё нет — wizard:
+При первом запуске перейдите в каталог с репозиториями или в существующий Git-проект и выполните:
 
 ```bash
-dyro init . --wizard --name my-workspace
+dyro setup
+```
+
+Мастер показывает план до записи. Из корня Git-проекта он предлагает соседний Dyro workspace и клонирует из `origin`, не записывая control state в исходный проект. Он обнаруживает обычные команды Agent, но регистрирует только адаптеры с проверенным Core argv-контрактом. `n` или выход ничего не создают. Затем выполните:
+
+```bash
+dyro next
+```
+
+В скриптах и CI используйте явные параметры:
+
+```bash
+dyro setup . --name my-workspace --line dev --yes --non-interactive
+```
+
+Безопасный предпросмотр поддерживает обе формы:
+
+```bash
+dyro --dry-run setup . --name my-workspace --no-line
+dyro setup . --name my-workspace --no-line --dry-run
 ```
 
 Добавить репозиторий позже без открытия `dyro.toml`:
@@ -307,7 +326,7 @@ dyro bootstrap --yes
 dyro doctor
 ```
 
-Для нового участника обычная точка входа — одна команда. Она проверяет workspace, затем выбирает линию и локального агента:
+После настройки `dyro next` рекомендует следующий безопасный шаг. Когда готовы выбрать линию и настроенный Agent:
 
 ```bash
 dyro start

@@ -269,18 +269,41 @@ dyro --version
 python3 -m pip install --user --upgrade dyro
 ```
 
-将仓库放入工作区后，使用新人入口一条命令完成仓库发现、状态目录初始化和首条开发线创建：
+若要开发 Dyro 本身，请使用仓库锁定的工具链和实际测试入口（不要把下文的“受控项目门禁”示例当成 Dyro 的测试命令）：
 
 ```bash
-mkdir my-workspace && cd my-workspace
-# 先将 Git 仓库 clone 或移动到这个目录下。
-dyro setup . --name my-workspace --line dev --yes
+uv sync --locked --all-extras --dev
+uv run python -m unittest discover -s tests -t . -v
+uv run ruff check src tests experiments
 ```
 
-`setup` 会扫描当前目录下的 Git 仓库，自动登记工作区相对路径、推断开发线内挂载位置，并在可用时读取 `origin`，无需手改 TOML。`--yes` 仅用于确认首条开发线会创建 Git worktree；若只想先建立 Profile，可改用 `--no-line`。尚未 clone 仓库时可使用引导式兜底：
+项目提交的 Ruff 基线刻意只选择 `E4`、`E7`、`E9` 和 `F`。临时使用 `--select E,W,F` 属于更宽泛的风格审计，并不是 CI 配置的检查契约。
+
+首次使用只需进入包含仓库的目录，或直接进入一个现有 Git 项目后运行：
 
 ```bash
-dyro init . --wizard --name my-workspace
+dyro setup
+```
+
+首次引导会先展示计划，确认前不写入任何文件。它会扫描当前目录下的 Git 仓库、推断工作区相对路径与开发线挂载位置；若你在一个 Git 项目根目录运行，它会建议在同级创建独立 Dyro 工作区并从 `origin` clone，绝不移动、覆盖或把 Dyro 控制状态写入原项目。空目录时可直接输入一个 Git remote。
+
+引导会在最终确认前说明是否将创建 Profile、clone 缺失仓库、创建首条 `dev` 开发线或登记已检测到的受支持 Agent。它会探测常见的本机 Agent 命令，但只登记 Core 已审计 argv 契约的 adapter；发现但尚未集成的命令保持不动。输入 `n` 或直接退出不会留下半成品配置。完成后运行：
+
+```bash
+dyro next
+```
+
+它会给出当前唯一安全的下一步，例如创建开发线、配置 Agent，或启动已就绪的开发线。若你在脚本或 CI 中使用，保留显式参数和确认：
+
+```bash
+dyro setup . --name my-workspace --line dev --yes --non-interactive
+```
+
+安全预览既支持全局参数，也支持更符合直觉的命令后参数：
+
+```bash
+dyro --dry-run setup . --name my-workspace --no-line
+dyro setup . --name my-workspace --no-line --dry-run
 ```
 
 后续新增仓库也无需打开 `dyro.toml`：
@@ -307,7 +330,7 @@ dyro bootstrap --yes
 dyro doctor
 ```
 
-新人日常入口只需一条命令：检查工作区后，选择开发线和本机 Agent。
+配置完成后，`dyro next` 会给出推荐操作；需要选择开发线并启动已配置的本机 Agent 时使用：
 
 ```bash
 dyro start

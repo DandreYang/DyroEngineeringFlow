@@ -50,6 +50,8 @@ jobs:
           uv sync --locked --all-extras --dev
 
       - name: Run tests
+        env:
+          DYRO_RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: uv run python -m unittest discover -s tests -t . -v
 
       - name: Check release version

@@ -269,18 +269,44 @@ To upgrade later, run `pipx upgrade dyro`. If your team manages Python packages 
 python3 -m pip install --user --upgrade dyro
 ```
 
-Place your repositories in a workspace, then use the newcomer path to discover them, create the safe state directories, and create the first development line in one command:
+To develop Dyro itself, use the repository's locked toolchain and its actual
+test entry point (not the per-repository gate examples below):
 
 ```bash
-mkdir my-workspace && cd my-workspace
-# Clone or move your Git repositories under this directory first.
-dyro setup . --name my-workspace --line dev --yes
+uv sync --locked --all-extras --dev
+uv run python -m unittest discover -s tests -t . -v
+uv run ruff check src tests experiments
 ```
 
-`setup` scans local Git repositories, records their workspace-relative paths, derives their development-line mounts, and reads `origin` when available—no TOML editing. `--yes` is required only because the first line creates Git worktrees. Use `--no-line` when you want the Profile first and will create a line later. If the workspace has no repositories yet, use the guided fallback:
+The checked-in Ruff baseline deliberately selects `E4`, `E7`, `E9`, and `F`.
+Running a broader one-off selector such as `--select E,W,F` is an optional
+style audit, not the project's configured CI contract.
+
+For a first run, enter either a directory that contains repositories or an existing Git project, then run:
 
 ```bash
-dyro init . --wizard --name my-workspace
+dyro setup
+```
+
+The first-run guide previews its plan before it writes anything. It scans repositories beneath the current directory and derives safe workspace-relative paths and development-line mounts. When invoked from a Git repository root, it offers to create a separate sibling Dyro workspace and clone from `origin`; it never moves, overwrites, or writes Dyro control state into the original project. In an empty directory it can accept an explicit Git remote.
+
+Before the final confirmation, the guide shows whether it will create a Profile, clone missing repositories, create the first `dev` line, or register a detected supported Agent. It probes common local Agent commands, but registers only an adapter whose Core argv contract is audited; detected-but-unintegrated commands remain untouched. Entering `n` or leaving the guide creates nothing. Afterwards, run:
+
+```bash
+dyro next
+```
+
+This prints the one safe next action for the current state: create a line, configure an Agent, or start a ready line. Scripts and CI retain explicit flags and confirmation:
+
+```bash
+dyro setup . --name my-workspace --line dev --yes --non-interactive
+```
+
+Safe previews work both before and after the command, so the intuitive form is valid:
+
+```bash
+dyro --dry-run setup . --name my-workspace --no-line
+dyro setup . --name my-workspace --no-line --dry-run
 ```
 
 Add a repository later without opening `dyro.toml`:
@@ -307,7 +333,7 @@ dyro bootstrap --yes
 dyro doctor
 ```
 
-For a new teammate, the normal entry point is one command. It checks the workspace, then selects a development line and local agent:
+After setup, `dyro next` recommends the next action. Use this command when you are ready to select a development line and launch a configured local agent:
 
 ```bash
 dyro start

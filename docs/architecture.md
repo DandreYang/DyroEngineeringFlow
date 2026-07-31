@@ -58,6 +58,8 @@ require_signed_signoff = false
 path = "repositories/services/api"
 mount = "services/api"
 remote = "git@example.com:group/api.git" # 可选；仅供 bootstrap clone 缺失 anchor
+# 示例：这是受控项目自己的 gate；按该项目的工具链替换，
+# 并非 Dyro 源码仓库的测试命令。
 verify = [["python3", "-m", "pytest", "-q"]]
 
 [adapters.codex]
@@ -68,7 +70,7 @@ write = ["codex", "exec", "--sandbox", "workspace-write", "{prompt}"]
 
 可用占位符仅为 `{workspace}`、`{root}`、`{task}`、`{line}`、`{prompt}`。命令必须写为 argv 数组；Profile 若通过 `sh -c` 等方式绕过这一约束，安全责任由 Profile 维护者承担。
 
-日常 Profile 维护不必直接编辑此文件：`dyro setup` 可发现本地仓库并创建首条开发线，`dyro config get/set` 只允许修改经过校验的常用策略，`dyro agent add/test` 可登记预设或 argv adapter 并检查其可执行文件。
+日常 Profile 维护不必直接编辑此文件：交互式 `dyro setup` 会先预览本地仓库发现、缺失 anchor clone 与首条开发线计划，确认后才应用；`dyro next` 会给出当前唯一安全下一步。`dyro config get/set` 只允许修改经过校验的常用策略，`dyro agent add/test` 可登记预设或 argv adapter 并检查其可执行文件。
 
 `read` adapter 需要写出 `review.md`，因此部分 Agent 不能使用完全只读的进程沙箱。Core 会在复核前后重新核对每个任务仓库的 clean 状态与固定 HEAD；任何源码变动都会使复核失败，不能进入 `done`。
 

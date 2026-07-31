@@ -269,18 +269,37 @@ dyro --version
 python3 -m pip install --user --upgrade dyro
 ```
 
-저장소를 워크스페이스에 넣은 뒤, 새 구성원용 한 명령으로 검색, 상태 디렉터리 생성, 첫 개발 라인 생성을 수행합니다.
+Dyro 자체를 개발할 때는 저장소의 잠긴 도구 체인과 실제 테스트 진입점을 사용합니다. 아래의 프로젝트 gate 예시를 Dyro 테스트 명령으로 사용하지 마세요.
 
 ```bash
-mkdir my-workspace && cd my-workspace
-# 먼저 Git 저장소를 이 디렉터리 아래에 clone하거나 옮깁니다.
-dyro setup . --name my-workspace --line dev --yes
+uv sync --locked --all-extras --dev
+uv run python -m unittest discover -s tests -t . -v
+uv run ruff check src tests experiments
 ```
 
-`setup`은 로컬 Git 저장소를 검색해 워크스페이스 상대 경로와 개발 라인 내 위치를 자동 등록하고, 가능하면 `origin`도 읽습니다. TOML을 직접 편집할 필요가 없습니다. `--yes`는 Git worktree를 만드는 첫 개발 라인에만 필요합니다. Profile만 먼저 만들려면 `--no-line`을 사용하세요. 아직 저장소가 없다면 대화형 대안을 사용하세요.
+첫 실행에서는 저장소가 있는 디렉터리나 기존 Git 프로젝트에서 다음을 실행하세요.
 
 ```bash
-dyro init . --wizard --name my-workspace
+dyro setup
+```
+
+안내는 파일을 쓰기 전에 계획을 보여 줍니다. 현재 Git 프로젝트 루트에서 실행하면 같은 수준의 별도 Dyro workspace를 제안하고 `origin`에서 clone하므로 원 프로젝트에 제어 상태를 쓰지 않습니다. 일반적인 로컬 Agent 명령도 탐지하지만, Core argv 계약이 감사된 adapter만 등록합니다. `n`을 입력하거나 종료하면 아무것도 생성되지 않습니다. 완료 후에는 다음을 실행하세요.
+
+```bash
+dyro next
+```
+
+스크립트와 CI에서는 명시적 옵션을 사용합니다.
+
+```bash
+dyro setup . --name my-workspace --line dev --yes --non-interactive
+```
+
+안전한 미리보기는 다음 두 형태를 모두 지원합니다.
+
+```bash
+dyro --dry-run setup . --name my-workspace --no-line
+dyro setup . --name my-workspace --no-line --dry-run
 ```
 
 나중에 저장소를 추가할 때도 `dyro.toml`을 열 필요가 없습니다.
@@ -307,7 +326,7 @@ dyro bootstrap --yes
 dyro doctor
 ```
 
-새 팀원의 일반 진입점은 한 명령입니다. 워크스페이스를 확인한 뒤 개발 라인과 로컬 agent를 선택합니다.
+설정 후 `dyro next`가 다음 안전한 작업을 안내합니다. 개발 라인과 구성된 Agent를 선택해 시작할 준비가 되면 다음을 실행하세요.
 
 ```bash
 dyro start

@@ -269,18 +269,37 @@ Para atualizar, execute `pipx upgrade dyro`. Se a equipe gerencia pacotes Python
 python3 -m pip install --user --upgrade dyro
 ```
 
-Coloque os repositórios em um workspace e use o caminho de onboarding para descobri-los, criar diretórios de estado seguros e a primeira linha de desenvolvimento em um comando:
+Para desenvolver o próprio Dyro, use a cadeia de ferramentas bloqueada do repositório e sua entrada de testes real; os exemplos de gates de projeto abaixo não são testes do Dyro.
 
 ```bash
-mkdir my-workspace && cd my-workspace
-# Clone ou mova primeiro seus repositórios Git sob este diretório.
-dyro setup . --name my-workspace --line dev --yes
+uv sync --locked --all-extras --dev
+uv run python -m unittest discover -s tests -t . -v
+uv run ruff check src tests experiments
 ```
 
-`setup` varre repositórios Git locais, registra caminhos relativos ao workspace, deriva montagens de linha e lê `origin` quando disponível—sem editar TOML. `--yes` só é necessário porque a primeira linha cria Git worktrees. Use `--no-line` se quiser só o Profile. Sem repositórios, use o assistente:
+No primeiro uso, entre em um diretório que contém repositórios ou em um projeto Git existente e execute:
 
 ```bash
-dyro init . --wizard --name my-workspace
+dyro setup
+```
+
+O guia mostra o plano antes de escrever. Na raiz de um projeto Git, propõe um workspace Dyro irmão e clona de `origin`, sem escrever estado de controle no projeto original. Ele detecta comandos de Agent comuns, mas registra apenas adaptadores cujo contrato argv do Core foi auditado. `n` ou sair não cria nada. Depois execute:
+
+```bash
+dyro next
+```
+
+Em scripts e CI, mantenha opções explícitas:
+
+```bash
+dyro setup . --name my-workspace --line dev --yes --non-interactive
+```
+
+As prévias seguras aceitam ambas as formas:
+
+```bash
+dyro --dry-run setup . --name my-workspace --no-line
+dyro setup . --name my-workspace --no-line --dry-run
 ```
 
 Adicione um repositório depois sem abrir `dyro.toml`:
@@ -307,7 +326,7 @@ dyro bootstrap --yes
 dyro doctor
 ```
 
-Para um novo colega, o ponto de entrada normal é um comando. Ele verifica o workspace e escolhe linha e agente local:
+Após a configuração, `dyro next` recomenda a próxima ação segura. Quando estiver pronto para escolher uma linha e um Agent configurado:
 
 ```bash
 dyro start

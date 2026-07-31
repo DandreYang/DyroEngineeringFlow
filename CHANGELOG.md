@@ -1,6 +1,16 @@
 # Changelog
 
-## 0.5.2 - Unreleased
+## 0.5.3 - Unreleased
+
+- Add a preview-first interactive `dyro setup` path, a read-only `dyro next`
+  guide, and an explicit non-interactive mode for scripts and CI.
+- Keep control state out of a Git project root by proposing a sibling
+  workspace, preserve the source branch as the suggested base, and never
+  register a detected Provider without an audited Core adapter contract.
+- Synchronize newcomer guidance across all README translations, make Dyro's
+  own test command discoverable, and prevent released-version changelog drift.
+
+## 0.5.2 - 2026-08-01
 
 - Close dispatch secret boundaries for task text and Provider results; real
   Providers now require explicit acknowledgement and read-only runs use a
@@ -14,7 +24,11 @@
 - Verify trusted release-tag ancestry, lock the release build environment, and
   document the incident/yank response path before the next publication.
 
-## 0.5.1 - 2026-07-31
+## 0.5.1 - 2026-07-31 (superseded)
+
+> The Git tag and GitHub Release remain the historical record. The 0.5.1
+> distribution is no longer available from PyPI; install or upgrade to 0.5.2
+> or later.
 
 - Remove the Docker-backed external semantic runtime from the default package,
   CLI, release validation, and CI; preserve its source, tests, and design

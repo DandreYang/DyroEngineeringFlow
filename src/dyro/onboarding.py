@@ -21,6 +21,23 @@ class RepositoryInput:
     remote: str = ""
 
 
+@dataclass(frozen=True)
+class SetupPlan:
+    """A previewable first-run plan.  Rendering it must never mutate a workspace."""
+
+    root: Path
+    name: str
+    repositories: tuple[RepositoryInput, ...]
+    default_base: str
+    line_id: str | None
+    branch: str | None
+    provider_preset: str | None = None
+
+    @property
+    def needs_bootstrap(self) -> bool:
+        return any(not (self.root / repository.path).exists() for repository in self.repositories)
+
+
 _DISCOVERY_SKIP_DIRS = frozenset({
     ".dyro",
     ".git",
@@ -89,6 +106,51 @@ def _origin_url(repository: Path) -> str:
 
 def _is_git_repository(path: Path) -> bool:
     return run(("git", "-C", str(path), "rev-parse", "--git-dir"), timeout=10).code == 0
+
+
+def is_git_repository(path: Path) -> bool:
+    """Return whether *path* is a Git worktree without exposing Git internals to the CLI."""
+
+    return _is_git_repository(path)
+
+
+def origin_url(repository: Path) -> str:
+    """Return a repository's origin URL when one is configured."""
+
+    return _origin_url(repository)
+
+
+def current_branch(repository: Path) -> str:
+    """Return the checked-out branch name, or an empty string for detached HEAD."""
+
+    result = run(("git", "-C", str(repository), "branch", "--show-current"), timeout=10)
+    return result.stdout.strip() if result.code == 0 else ""
+
+
+def repository_from_remote(remote: str, *, path: str | None = None) -> RepositoryInput:
+    """Create a conservative repository proposal for an explicitly supplied remote."""
+
+    candidate = remote.strip()
+    if not candidate or "\n" in candidate or "\r" in candidate:
+        raise ValidationError("Git remote 必须是单行非空地址")
+    tail = candidate.rstrip("/").rsplit("/", 1)[-1]
+    if ":" in tail:
+        tail = tail.rsplit(":", 1)[-1]
+    name = tail[:-4] if tail.endswith(".git") else tail
+    repository_id = _repository_id(name)
+    relative_path = _relative_path(path or f"repositories/{repository_id}", "repository path")
+    return RepositoryInput(
+        id=repository_id,
+        path=relative_path,
+        mount=repository_id,
+        remote=candidate,
+    )
+
+
+def sibling_workspace_for(repository: Path) -> Path:
+    """Suggest, but never create, a workspace beside a repository root."""
+
+    return repository.parent / f"{repository.name}-dyro"
 
 
 def discover_repositories(root: Path) -> list[RepositoryInput]:
@@ -175,7 +237,13 @@ def _quote(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def render_config(name: str, repositories: list[RepositoryInput], default_base: str = "main") -> str:
+def render_config(
+    name: str,
+    repositories: list[RepositoryInput],
+    default_base: str = "main",
+    *,
+    adapter_presets: tuple[str, ...] = (),
+) -> str:
     if not repositories:
         raise ValidationError("向导至少需要一个仓库")
     validate_id(name, "workspace 名称")
@@ -201,12 +269,19 @@ def render_config(name: str, repositories: list[RepositoryInput], default_base: 
         "require_signed_review = false",
         "require_signed_signoff = false",
         'execution_mode = "local"',
-        "",
-        "[adapters.codex]",
-        'launch = ["codex", "-C", "{workspace}"]',
-        'read = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "{prompt}"]',
-        'write = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "{prompt}"]',
     ]
+    for preset in adapter_presets:
+        if preset != "codex":
+            raise ValidationError(f"首次设置不支持的 Agent preset：{preset}")
+        chunks.extend(
+            (
+                "",
+                "[adapters.codex]",
+                'launch = ["codex", "-C", "{workspace}"]',
+                'read = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "{prompt}"]',
+                'write = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "{prompt}"]',
+            )
+        )
     for repo in repositories:
         validate_id(repo.id, "repository id")
         chunks.extend(("", f"[repositories.{_toml_table_key(repo.id)}]", f"path = {_quote(repo.path)}", f"mount = {_quote(repo.mount)}"))
@@ -214,6 +289,28 @@ def render_config(name: str, repositories: list[RepositoryInput], default_base: 
             chunks.append(f"remote = {_quote(repo.remote)}")
         chunks.append("verify = []")
     return "\n".join(chunks) + "\n"
+
+
+def render_setup_plan(plan: SetupPlan) -> tuple[str, ...]:
+    """Render a human-readable plan without leaking implementation-only details."""
+
+    lines = [
+        f"工作区：{plan.root}",
+        f"Profile：{plan.name}",
+        f"默认基线：{plan.default_base}",
+    ]
+    for repository in plan.repositories:
+        state = "clone" if not (plan.root / repository.path).exists() else "register"
+        lines.append(f"仓库：{repository.id} → {repository.path}（{state}）")
+    if plan.line_id:
+        lines.append(f"开发线：{plan.line_id}（{plan.branch}）")
+    else:
+        lines.append("开发线：暂不创建")
+    if plan.provider_preset:
+        lines.append(f"Agent：{plan.provider_preset}")
+    else:
+        lines.append("Agent：暂不配置")
+    return tuple(lines)
 
 
 def ask_for_workspace(name_default: str, ask: Callable[[str], str] = input) -> tuple[str, list[RepositoryInput], str]:

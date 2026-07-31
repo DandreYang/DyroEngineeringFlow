@@ -1,6 +1,16 @@
 from dyro.config import load
 from dyro.errors import ValidationError
-from dyro.onboarding import RepositoryInput, ask_for_workspace, bootstrap, discover_repositories, render_config, repository_input_from_path
+from dyro.onboarding import (
+    RepositoryInput,
+    SetupPlan,
+    ask_for_workspace,
+    bootstrap,
+    discover_repositories,
+    render_config,
+    render_setup_plan,
+    repository_from_remote,
+    repository_input_from_path,
+)
 
 from .support import WorkspaceCase
 
@@ -54,3 +64,23 @@ class OnboardingTests(WorkspaceCase):
         )
 
         self.assertIn("web.app", load(self.root).repositories)
+
+    def test_render_config_requires_an_explicit_provider_choice(self) -> None:
+        content = render_config("workspace", [RepositoryInput("api", "repositories/api", "api")])
+
+        self.assertNotIn("[adapters.codex]", content)
+
+    def test_remote_repository_and_setup_plan_are_safe_to_preview(self) -> None:
+        repository = repository_from_remote("git@github.com:acme/payments.git")
+        plan = SetupPlan(
+            root=self.root,
+            name="workspace",
+            repositories=(repository,),
+            default_base="main",
+            line_id="dev",
+            branch="feat/dev",
+        )
+
+        self.assertEqual((repository.id, repository.path), ("payments", "repositories/payments"))
+        self.assertTrue(plan.needs_bootstrap)
+        self.assertIn("开发线：dev（feat/dev）", render_setup_plan(plan))
