@@ -1081,16 +1081,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="可选本地多 Agent 派发（L0–L4；不替代 gates/merge）。用法：dyro dispatch <subcommand> …",
         add_help=False,
     )
-    sub.add_parser(
-        "runtime",
-        help=(
-            "可选外部语义运行时诊断与生产门禁（当前 NOT_READY）。"
-            "用法：dyro runtime status|doctor|plan|claim|handoff|"
-            "production-acceptance|production-gate"
-        ),
-        add_help=False,
-    )
-
     init = sub.add_parser("init", help="初始化工作区配置")
     init.add_argument("path", nargs="?", default=".")
     init.add_argument("--name", default="my-workspace")
@@ -1424,7 +1414,7 @@ def _route_experiment_surface(raw: list[str]) -> tuple[str, list[str]] | None:
     common.add_argument("--root")
     common.add_argument("--dry-run", action="store_true")
     global_args, remaining = common.parse_known_args(raw)
-    if not remaining or remaining[0] not in {"dispatch", "runtime"}:
+    if not remaining or remaining[0] != "dispatch":
         return None
     surface = remaining[0]
     forwarded = list(remaining[1:])
@@ -1447,50 +1437,19 @@ def _route_experiment_surface(raw: list[str]) -> tuple[str, list[str]] | None:
             forwarded.extend(["--project", global_args.root])
         if global_args.dry_run:
             forwarded.insert(0, "--dry-run")
-    if surface == "runtime":
-        runtime_command = forwarded[0] if forwarded else ""
-        acceptance_command = (
-            forwarded[1]
-            if runtime_command == "production-acceptance"
-            and len(forwarded) > 1
-            else ""
-        )
-        if (
-            global_args.root
-            and (
-                runtime_command in {"handoff", "production-gate"}
-                or (
-                    runtime_command == "production-acceptance"
-                    and acceptance_command
-                    in {"attestation-prepare", "signing-payload", "signature-attach"}
-                )
-            )
-            and not any(
-                token == "--root" or token.startswith("--root=")
-                for token in forwarded
-            )
-        ):
-            forwarded.extend(["--root", global_args.root])
-        if global_args.dry_run:
-            forwarded.insert(0, "--dry-run")
     return surface, forwarded
 
 
 def main(argv: list[str] | None = None) -> None:
     import sys
 
-    # Optional experiment surfaces ship in the dyro wheel (not Core delivery).
+    # The optional local dispatch surface ships in the dyro wheel.
     raw = list(sys.argv[1:] if argv is None else argv)
     experiment = _route_experiment_surface(raw)
     if experiment is not None and experiment[0] == "dispatch":
         from experiments.local_agent_dispatch.cli import main as dispatch_main
 
         raise SystemExit(dispatch_main(experiment[1]))
-    if experiment is not None and experiment[0] == "runtime":
-        from experiments.external_workflow_runner.cli import main as runtime_main
-
-        raise SystemExit(runtime_main(experiment[1]))
-
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

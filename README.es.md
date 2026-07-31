@@ -251,57 +251,6 @@ sequenceDiagram
   Note over H: Delivery still uses dyro task merge
 ```
 
-### Runtime semántico externo (experimento opcional)
-
-```mermaid
-flowchart TB
-  Sup["Trusted Supervisor"]
-  Sand["Workflow Sandbox<br/>pinned TS bundle · no vendor token"]
-  Bro["Agent Broker<br/>argv provider · raw only on tmpfs"]
-  HostP["Optional host provider<br/>Broker-mounted only"]
-
-  Sup -->|start · verify bundle/claim| Sand
-  Sup -->|start · pin| Bro
-  Sand -->|loopback IPC| Bro
-  HostP -.->|RO bind| Bro
-  Sup -->|after dual cleanup| Pack["sealed Stage5 evidence pack"]
-  Pack -->|claim + artifact + gate binding| Handoff["signed Core execution bundle"]
-  Handoff -->|explicit operator transfer| Core["Dyro Core import + independent review"]
-  Pack -.->|forbidden| Merge["review / signoff / merge / push"]
-```
-
-No es Core. Ruta: `experiments/external_workflow_runner/`. El estado es
-**Production Candidate**; producción sigue `NOT_READY` hasta demostrar operación
-multi-host, la flota con proveedor real y las cuotas de montajes escribibles.
-
-```bash
-dyro runtime status
-dyro runtime doctor
-dyro runtime plan
-dyro runtime production-gate  # NOT_READY exits 3
-```
-
-### Secuencia del runtime semántico (experimento opcional)
-
-```mermaid
-sequenceDiagram
-  participant S as Supervisor
-  participant B as Broker container
-  participant W as Sandbox container
-
-  S->>B: start internal net + pin
-  S->>W: start shared netns · no token
-  W->>B: agent.call JSON-line
-  B->>B: spawn provider · destroy raw
-  B-->>W: sanitized result
-  W-->>S: result-envelope + artifacts
-  S->>W: cleanup verify
-  S->>B: stop · containers absent
-  S->>S: pack only if dual cleanup OK
-  S->>S: bind current Core claim + pack hash
-  S-->>S: build signed Core bundle · never import
-```
-
 ## Inicio rápido
 
 Para el uso diario del CLI, instala `dyro` desde PyPI en un entorno `pipx` aislado (Python 3.11 o posterior):
@@ -492,7 +441,6 @@ dyro --dry-run task run API-101
 | `task merge` | Fusionar la rama de tarea revisada en su línea propietaria. |
 | `task loop/daemon/stats/decisions` | Lotes controlados, programación, ledger y puertas de decisión. |
 | `dispatch` | Despacho multi-agente local opcional (L0–L4); solo consultivo — no sustituye gates/merge. |
-| `runtime status/doctor/plan/claim/handoff/production-gate` | Diagnostica el Production Candidate, vincula leases Stage5 a claims Core, construye sin importar bundles Core firmados y falla de forma cerrada en **NOT_READY**. |
 
 Detalle: [arquitectura y Profile](docs/architecture.md), [diagramas](docs/diagrams.en.md), [migración](docs/migrating-existing-control-planes.md), [publicación PyPI](docs/publishing.md) (maintainers).
 
@@ -502,4 +450,4 @@ Este README se mantiene en inglés, chino simplificado, coreano, español, franc
 
 ## Límites actuales
 
-DyroEngineeringFlow ofrece un bucle de workflow local completo y controles de política para equipos que deben quedarse en modo solo planificación en local. No crea repositorios remotos, no transporta credenciales SaaS ni aprovisiona un runner externo; sí aporta un contrato de paquete de evidencia portable. Los módulos opcionales bajo `experiments/` (workflow runner Stage0–5, local agent dispatch L0–L4) **se incluyen en el wheel de `dyro`** y están disponibles tras instalar (`dyro dispatch …`, `dyro runtime …`, `import experiments…`). Siguen siendo **opcionales frente a Core** y no sustituyen gates, review, signoff ni merge. El runtime semántico es ahora un Production Candidate con entrega de bundle Core firmado; producción sigue `NOT_READY` hasta demostrar `PROD-01`, `PROD-02` y `PROD-09` en el entorno real de release. Los merges multi-repo locales se preflightan y recuperan como una operación; los servidores Git remotos no ofrecen push atómico multi-repo, por lo que un push parcial se registra para recuperación. El merge automático requiere permiso en el manifiesto de tarea y en la política local. [MIT License](LICENSE) y [`dyro` en PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow ofrece un flujo local completo y controles de política para equipos en modo de planificación. No crea repositorios remotos, no transporta credenciales SaaS ni aprovisiona runners externos; conserva un contrato portable de paquetes de evidencia para ejecución externa. El despacho local opcional de agentes se distribuye como `experiments.local_agent_dispatch` y se usa con `dyro dispatch …`; es solo consultivo y nunca sustituye gates, review, signoff ni merge. Los merges locales multi-repo se prevalidan y recuperan como una operación; los servidores Git remotos no ofrecen push atómico multi-repo, por lo que se registra un fallo parcial. El merge automático requiere permiso en el manifiesto de tarea y la política local. [MIT License](LICENSE) y [`dyro` en PyPI](https://pypi.org/project/dyro/).

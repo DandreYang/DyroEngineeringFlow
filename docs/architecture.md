@@ -152,38 +152,6 @@ dyro task evidence review TASK-42 --file /review/out/review.md
 dyro task signoff TASK-42 --by release-manager  # 仅 require_external_signoff = true 时
 ```
 
-可选 Stage5 语义运行时使用同一条 Core 证据链，不获得新的控制权限：
-
-```bash
-# Runner 将 Core claim 缩减为不可越过 Core 到期时间的 Stage5 claim
-dyro runtime claim prepare \
-  --core-claim /runner/inbox/TASK-42.core-claim.json \
-  --output /runner/state/TASK-42.stage5-claim.json
-
-# 固定 Stage5 workflow 完成并完成 Sandbox/Broker 双重清理后，
-# 验证 pack 与 live workspace artifact，再构建签名 Core bundle
-dyro runtime handoff \
-  --root /runner/dyro-profile \
-  --task TASK-42 \
-  --pack /runner/state/TASK-42/stage5-pack \
-  --workspace /runner/workspaces/TASK-42 \
-  --core-claim /runner/inbox/TASK-42.core-claim.json \
-  --output /runner/out/TASK-42.core-evidence.zip \
-  --signing-key /secure/runner.pem \
-  --key-id runner-2026
-
-# 只有控制面显式导入；runtime 不执行此命令
-dyro task evidence execution TASK-42 \
-  --bundle /control/inbox/TASK-42.core-evidence.zip
-```
-
-Handoff 生成的 receipt 绑定 Stage5 pack SHA-256、workflow run、canonical
-input 与 Core claim ID/generation；Core provenance 再绑定 receipt、gates 与干净
-逐仓 HEAD。Stage5 内部 lease generation 可续租，但不得越过
-`authority_expires_at`。完整晋级契约与用户旅程见
-[`外部 runtime 生产就绪设计`](designs/external-runtime-production-readiness.md)
-及 [ADR-0003](adr/0003-external-runtime-production-promotion.md)。
-
 领取记录与状态转换由任务锁保护。claim 默认是一小时的有限租约，可用 `task claim-renew` 续租或 `task claim-release` 主动释放；未过期 claim 只能由原 runner 操作，过期后允许新 runner 原子接管并递增 generation。只有有效 claim 才占用 external 冲突组，旧版没有过期字段的 claim 为保持兼容仍视为永久有效。`task evidence build` 不执行 shell 字符串，只按任务中声明的 argv gates 运行，并且会在打包前重新验证隔离工作区的任务分支、clean 状态和逐仓 HEAD。它生成的 ZIP 只允许 `receipt.md`、`gates.json`、`task-heads.json`、`provenance.json` 与 `gates/*.log`，导入端拒绝绝对路径、路径穿越、符号链接、重复文件与超大包。执行证据中的 `gates.json` 使用以下通用格式；每个声明的任务 gate 都必须存在、退出码为 0、日志位于 JSON 同目录内，并且日志哈希必须匹配：
 
 ```json
@@ -251,7 +219,7 @@ Dyro 的交付拓扑与之**实质相近**：TaskGraph（`depends_on` / conflict
 但产品身份仍是 **本地优先的多仓交付控制面（delivery control plane）**，不是 agent 编排框架，也不是 Knowledge Graph / GraphRAG 检索栈：
 
 - 交付真相在 Core：gates 与 receipt/HEAD 绑定的 review（及可选 signoff），不是 agent 自报或多模型投票。
-- `dyro dispatch` 输出仅为**建议**；`dyro runtime` 已进入 Production Candidate，但生产门禁仍为 **NOT_READY**。
+- `dyro dispatch` 输出仅为**建议**，不能替代确定性 gate 或独立复核。
 - 业务规则留在 Profile；Core 不绑定某家模型或协作品牌。
 
 因此文档主叙事继续用 TaskGraph / gates / evidence；Graph Engineering 仅作概念对照，不作产品更名。
@@ -259,7 +227,5 @@ Dyro 的交付拓扑与之**实质相近**：TaskGraph（`depends_on` / conflict
 ## 扩展路线
 
 未来的 adapter、通知、签名规则、发布平台与审批系统应使用 Python entry point 或独立 Profile 扩展包接入；不要把某个组织的策略加入 core 默认行为。
-
-任务内部的语义工作流运行时也遵守这一边界。可选外部语义运行时（first-party `@dyro/semantic-flow`，实验目录承载）必须由 Workflow Sandbox、Agent Broker 与可信 Supervisor / Packager 隔离，不能替代 TaskGraph、gates、证据或交付控制；已接受的架构边界见 [`ADR-0001`](adr/0001-optional-external-semantic-runtime.md)，试点范围与退出条件见 [`外部语义运行时 PoC`](external-semantic-runtime-poc.md)。
 
 开发者侧的可选本地多 Agent 派发（五段式任务契约、注入前机密守卫、locator 核验、隔离 patch）与上述控制面分层并列，随 `dyro` 安装包分发（`dyro dispatch` / `import experiments.local_agent_dispatch`），但**不**替代 gates/合并；见 [`ADR-0002`](adr/0002-optional-local-agent-dispatch.md)、[`多智能体编排纪律`](agent-orchestration-discipline.md) 与 [`可选本地 Agent 派发设计`](designs/optional-local-agent-dispatch.md)。

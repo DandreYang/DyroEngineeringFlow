@@ -2405,19 +2405,6 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                         self.assertFalse(state_home.exists())
             execute.assert_not_called()
 
-    def test_top_level_dry_run_routes_to_read_only_runtime_status(self) -> None:
-        output = io.StringIO()
-        with (
-            redirect_stdout(output),
-            self.assertRaises(SystemExit) as raised,
-        ):
-            dyro_main(["--dry-run", "runtime", "status"])
-        self.assertEqual(raised.exception.code, 0)
-        report = json.loads(output.getvalue())
-        self.assertFalse(report["production"]["production_ready"])
-        self.assertEqual(report["production"]["verdict"], "NOT_READY")
-
-
 class GarbageCollectionSafetyTests(unittest.TestCase):
     def test_tampered_shadow_path_cannot_delete_outside_shadow_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,6 +1,8 @@
 from pathlib import Path
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 
 from dyro.cli import _route_experiment_surface, main
 from dyro.changesets import get_changeset
@@ -12,7 +14,7 @@ from .support import WorkspaceCase
 
 
 class CliTests(unittest.TestCase):
-    def test_top_level_root_and_dry_run_route_to_runtime_handoff(self) -> None:
+    def test_runtime_is_not_an_experiment_surface(self) -> None:
         routed = _route_experiment_surface(
             [
                 "--root",
@@ -24,53 +26,17 @@ class CliTests(unittest.TestCase):
                 "TASK-1",
             ]
         )
-        self.assertIsNotNone(routed)
-        self.assertEqual(routed[0], "runtime")
-        self.assertEqual(routed[1][0], "--dry-run")
-        self.assertIn("--root", routed[1])
-        root_index = routed[1].index("--root")
-        self.assertEqual(routed[1][root_index + 1], "/workspace")
+        self.assertIsNone(routed)
 
-    def test_top_level_root_routes_to_runtime_production_gate(self) -> None:
-        routed = _route_experiment_surface(
-            [
-                "--root",
-                "/workspace",
-                "runtime",
-                "production-gate",
-                "--release-manifest",
-                "/evidence/release.json",
-            ]
-        )
-
-        self.assertIsNotNone(routed)
-        self.assertEqual(routed[0], "runtime")
-        self.assertIn("--root", routed[1])
-        root_index = routed[1].index("--root")
-        self.assertEqual(routed[1][root_index + 1], "/workspace")
-
-    def test_top_level_root_routes_to_production_attestation_preparation(
-        self,
-    ) -> None:
-        routed = _route_experiment_surface(
-            [
-                "--root",
-                "/workspace",
-                "--dry-run",
-                "runtime",
-                "production-acceptance",
-                "attestation-prepare",
-                "--release-manifest",
-                "/evidence/release.json",
-            ]
-        )
-
-        self.assertIsNotNone(routed)
-        self.assertEqual(routed[0], "runtime")
-        self.assertEqual(routed[1][0], "--dry-run")
-        self.assertIn("--root", routed[1])
-        root_index = routed[1].index("--root")
-        self.assertEqual(routed[1][root_index + 1], "/workspace")
+    def test_runtime_command_is_rejected(self) -> None:
+        stderr = StringIO()
+        with (
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(["runtime", "status"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("invalid choice", stderr.getvalue())
 
     def test_init_creates_workspace_contract(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:

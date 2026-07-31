@@ -26,7 +26,7 @@
 | 异步默认 | 派发立即返回 `run_id`；禁止无理由同步空等 |
 | 回收纪律 | 禁止把完整事件流灌回宿主上下文 |
 | 动态宿主 skill | 只渲染本机可用后端与用户路由偏好 |
-| 与 Dyro 边界 | 永不 merge/push/signoff；与 ADR-0001 实验并列 |
+| 与 Dyro 边界 | 永不 merge/push/signoff；不替代 Core 交付控制 |
 
 ## 2. 非目标
 
@@ -132,7 +132,7 @@ DetachedWorker
 
 - 核验在 worker 侧自动执行，宿主默认可见  
 - dry-run / 报告可统计 `verified_ratio`  
-- 与 ADR-0001 evidence pack 的 hash 密封可组合（pack 内再封一层）
+- 与 Core evidence pack 的 hash 密封可组合（pack 内再封一层）
 
 ## 6. 对抗评审记录协议
 
@@ -178,7 +178,7 @@ DetachedWorker
 3. worker cwd = 影子根  
 4. adapter 还必须声明并实现 strict isolation；否则 Supervisor 在派发前拒绝
 
-说明：后端 CLI 自带的「plan/read-only/禁用工具」权限档与 shadow `cwd` 都不是 OS 隔离证明。当前外部 Codex / Claude adapter 均标记为不支持 strict；`auto + strict` 只能选择离线 `echo`，真实隔离任务应走 ADR-0001 Docker 链。
+说明：后端 CLI 自带的「plan/read-only/禁用工具」权限档与 shadow `cwd` 都不是 OS 隔离证明。当前外部 Codex / Claude adapter 均标记为不支持 strict；`auto + strict` 只能选择离线 `echo`，其余严格任务会在派发前明确拒绝。
 `edit` 模式使用 git worktree（§10），不与 strict 影子混用。
 
 ## 9. 异步生命周期与并发
@@ -238,16 +238,13 @@ process-tree 与 pipe 后端。
 
 禁止静态 skill 列出用户没有的后端。
 
-## 13. 与 ADR-0001 外部语义运行时的组合
+## 13. 使用边界
 
 | 场景 | 用哪条路径 |
 | --- | --- |
-| 任务内固定 TS 语义流 + Docker 隔离 | ADR-0001 Stage0–5 |
 | 开发者要第二意见 / 大调研 / patch 竞赛 | ADR-0002 本设计 |
 | 高风险设计评审 | 本设计 panel + 对抗评审板 |
-| 生产 evidence / merge | 仅 Dyro 控制面；两侧 harness 皆不可越权 |
-
-Stage5 dry-run 的 pack 核验与本设计的 locator 核验可共享库思想，但 **状态目录与生命周期分离**。
+| 生产 evidence / merge | 仅 Dyro 控制面；派发 harness 不可越权 |
 
 ## 14. 分阶段实现
 
@@ -257,7 +254,6 @@ Stage5 dry-run 的 pack 核验与本设计的 locator 核验可共享库思想�
 | **L1** | `RunStore` + 双层槽位租约 + strict 影子接入 | 单测绿 |
 | **L2** | `echo`/`codex`/`claude` 适配器 + CLI `run`/`result` | 单测（echo）+ 本机可选真 CLI |
 | **L3** | `panel`、skill 渲染、routes、`gc` | 单测绿 |
-| **L4** | `stage5-bridge` dry-run（不替代 Core import） | 模块导入 + `dyro dispatch` |
 
 ## 15. 测试矩阵（L0）
 
@@ -273,4 +269,4 @@ Stage5 dry-run 的 pack 核验与本设计的 locator 核验可共享库思想�
 - 恶意后端 CLI 完全不可信环境下的机密安全  
 - 可替代生产 evidence 链  
 
-生产门槛仍以 Stage5 `PRODUCTION_NOT_READY` 与 ADR-0001 为准。
+派发结果始终是建议性产物，不能构成生产放行依据。

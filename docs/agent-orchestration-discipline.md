@@ -9,7 +9,6 @@
 - [ADR-0002：可选本地 Agent 派发与结果密封](adr/0002-optional-local-agent-dispatch.md)
 - [可选本地 Agent 派发设计](designs/optional-local-agent-dispatch.md)
 - [实现：`experiments/local_agent_dispatch/`](../experiments/local_agent_dispatch/README.md)（L0–L4 CLI）
-- [ADR-0001：可选外部语义运行时](adr/0001-optional-external-semantic-runtime.md)
 
 ## 1. 分层：Harness / 记录 / 控制面
 
@@ -104,18 +103,7 @@ docs/reviews/YYYY-MM-DD-<topic>-adversarial-board.md
 5. 中文 Conventional Commit（除非仓规另定）  
 6. 仅在明确要求时 push，并用 `ls-remote`/fetch 核远端  
 
-## 7. 与外部语义运行时的边界
-
-| 本地 Agent 派发（ADR-0002） | 外部语义运行时（ADR-0001 / Stage0–5） |
-| --- | --- |
-| 开发者侧、订阅 CLI、可选 | 任务内固定 TS bundle、Docker 隔离 |
-| 结论建议性 | envelope fail-closed |
-| 随 `dyro` 安装、相对 Core 可选 | 可 `import` / `dyro dispatch`；仍不替代 gates/merge |
-| 可 patch 交付，不 merge | dual cleanup 后才可 pack/dry-run |
-
-两者都 **禁止** 把 Agent 自述升级为 gate。
-
-## 8. 开跑前检查表
+## 7. 开跑前检查表
 
 1. 是否已有 skill/纪律覆盖？不要重建 harness  
 2. 任务是否拆成维度与验收标准？  
