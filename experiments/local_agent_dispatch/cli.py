@@ -17,7 +17,6 @@ from .panel import run_panel
 from .paths import dispatch_home, dispatch_home_path
 from .run_store import RunRecord, RunStore
 from .skill_render import render_skill_markdown, save_route, write_skill
-from .stage5_bridge import dry_run_stage5_pack
 from .supervisor import DispatchSupervisor
 
 
@@ -230,12 +229,6 @@ def cmd_route(args: argparse.Namespace) -> int:
     raise DispatchValidationError(f"unknown route command: {args.route_cmd}")
 
 
-def cmd_bridge(args: argparse.Namespace) -> int:
-    report = dry_run_stage5_pack(Path(args.pack_dir))
-    _print_json(report)
-    return 0
-
-
 def cmd_doctor(args: argparse.Namespace) -> int:
     requested_home = Path(args.home) if args.home else None
     home = (
@@ -363,13 +356,6 @@ def build_parser() -> argparse.ArgumentParser:
     add.set_defaults(func=cmd_route)
     lst = route_sub.add_parser("list")
     lst.set_defaults(func=cmd_route)
-
-    p = sub.add_parser(
-        "stage5-bridge",
-        help="Dry-run validate an external-workflow evidence pack (L4)",
-    )
-    p.add_argument("pack_dir")
-    p.set_defaults(func=cmd_bridge)
 
     p = sub.add_parser("worker", help=argparse.SUPPRESS)
     p.add_argument("run_id")

@@ -65,28 +65,14 @@ jobs:
           cd "$smoke_root"
           python -m venv /tmp/dyro-release-wheel
           /tmp/dyro-release-wheel/bin/pip install "$GITHUB_WORKSPACE"/dist/dyro-*.whl
-          /tmp/dyro-release-wheel/bin/python "$GITHUB_WORKSPACE/tools/verify_installed_artifact.py"
-          /tmp/dyro-release-wheel/bin/python -c "import experiments.local_agent_dispatch, experiments.external_workflow_runner"
+          /tmp/dyro-release-wheel/bin/python -c "import experiments.local_agent_dispatch"
           DYRO_LOCAL_AGENT_DISPATCH_HOME="$smoke_root/wheel-dispatch-home" /tmp/dyro-release-wheel/bin/dyro dispatch doctor >/tmp/release-dispatch-doctor-wheel.json
           python -c "import json; json.load(open('/tmp/release-dispatch-doctor-wheel.json'))"
-          set +e
-          DYRO_LOCAL_AGENT_DISPATCH_HOME="$smoke_root/wheel-dispatch-home" /tmp/dyro-release-wheel/bin/dyro runtime production-gate >/tmp/release-runtime-gate-wheel.json
-          runtime_gate_wheel_exit=$?
-          set -e
-          test "$runtime_gate_wheel_exit" -eq 3
-          python -c "import json; r=json.load(open('/tmp/release-runtime-gate-wheel.json')); assert r.get('verdict')=='NOT_READY' and r.get('exit_code')==3, r"
           python -m venv /tmp/dyro-release-sdist
           /tmp/dyro-release-sdist/bin/pip install "$GITHUB_WORKSPACE"/dist/dyro-*.tar.gz
-          /tmp/dyro-release-sdist/bin/python "$GITHUB_WORKSPACE/tools/verify_installed_artifact.py"
-          /tmp/dyro-release-sdist/bin/python -c "import experiments.local_agent_dispatch, experiments.external_workflow_runner"
+          /tmp/dyro-release-sdist/bin/python -c "import experiments.local_agent_dispatch"
           DYRO_LOCAL_AGENT_DISPATCH_HOME="$smoke_root/sdist-dispatch-home" /tmp/dyro-release-sdist/bin/dyro dispatch doctor >/tmp/release-dispatch-doctor-sdist.json
           python -c "import json; json.load(open('/tmp/release-dispatch-doctor-sdist.json'))"
-          set +e
-          DYRO_LOCAL_AGENT_DISPATCH_HOME="$smoke_root/sdist-dispatch-home" /tmp/dyro-release-sdist/bin/dyro runtime production-gate >/tmp/release-runtime-gate-sdist.json
-          runtime_gate_sdist_exit=$?
-          set -e
-          test "$runtime_gate_sdist_exit" -eq 3
-          python -c "import json; r=json.load(open('/tmp/release-runtime-gate-sdist.json')); assert r.get('verdict')=='NOT_READY' and r.get('exit_code')==3, r"
 
       - name: Validate distribution metadata
         run: python -m twine check --strict dist/*

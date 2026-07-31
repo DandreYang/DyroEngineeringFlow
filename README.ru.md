@@ -251,57 +251,6 @@ sequenceDiagram
   Note over H: Delivery still uses dyro task merge
 ```
 
-### Внешний semantic runtime (опциональный эксперимент)
-
-```mermaid
-flowchart TB
-  Sup["Trusted Supervisor"]
-  Sand["Workflow Sandbox<br/>pinned TS bundle · no vendor token"]
-  Bro["Agent Broker<br/>argv provider · raw only on tmpfs"]
-  HostP["Optional host provider<br/>Broker-mounted only"]
-
-  Sup -->|start · verify bundle/claim| Sand
-  Sup -->|start · pin| Bro
-  Sand -->|loopback IPC| Bro
-  HostP -.->|RO bind| Bro
-  Sup -->|after dual cleanup| Pack["sealed Stage5 evidence pack"]
-  Pack -->|claim + artifact + gate binding| Handoff["signed Core execution bundle"]
-  Handoff -->|explicit operator transfer| Core["Dyro Core import + independent review"]
-  Pack -.->|forbidden| Merge["review / signoff / merge / push"]
-```
-
-Не Core. Путь: `experiments/external_workflow_runner/`. Статус —
-**Production Candidate**; production остаётся `NOT_READY` до проверки multi-host,
-реального provider fleet и квот для writable mounts.
-
-```bash
-dyro runtime status
-dyro runtime doctor
-dyro runtime plan
-dyro runtime production-gate  # NOT_READY exits 3
-```
-
-### Последовательность semantic runtime (опциональный эксперимент)
-
-```mermaid
-sequenceDiagram
-  participant S as Supervisor
-  participant B as Broker container
-  participant W as Sandbox container
-
-  S->>B: start internal net + pin
-  S->>W: start shared netns · no token
-  W->>B: agent.call JSON-line
-  B->>B: spawn provider · destroy raw
-  B-->>W: sanitized result
-  W-->>S: result-envelope + artifacts
-  S->>W: cleanup verify
-  S->>B: stop · containers absent
-  S->>S: pack only if dual cleanup OK
-  S->>S: bind current Core claim + pack hash
-  S-->>S: build signed Core bundle · never import
-```
-
 ## Быстрый старт
 
 Для повседневного CLI установите `dyro` из PyPI в изолированное окружение `pipx` (Python 3.11+):
@@ -492,7 +441,6 @@ dyro --dry-run task run API-101
 | `task merge` | Слить reviewed task branch в линию-владельца. |
 | `task loop/daemon/stats/decisions` | Контролируемые batch, scheduling, ledger и decision gates. |
 | `dispatch` | Опциональный локальный multi-agent dispatch (L0–L4); только рекомендательный — не замена gates/merge. |
-| `runtime status/doctor/plan/claim/handoff/production-gate` | Диагностика Production Candidate, привязка Stage5 leases к Core claims, сборка без импорта подписанных Core bundles и fail-closed при **NOT_READY**. |
 
 Подробности: [architecture and Profile](docs/architecture.md), [diagrams](docs/diagrams.en.md), [migration](docs/migrating-existing-control-planes.md), [PyPI publishing](docs/publishing.md) (maintainers).
 
@@ -502,4 +450,4 @@ dyro --dry-run task run API-101
 
 ## Текущие границы
 
-DyroEngineeringFlow даёт полный локальный workflow-контур и policy-контроль для более строгих команд в режиме только планирования на локальной машине. Он не создаёт удалённые репозитории, не несёт SaaS credentials и не provision'ит внешний runner; он даёт portable evidence-package contract. Опциональные модули в `experiments/` (external workflow runner Stage0–5, local agent dispatch L0–L4) **входят в wheel `dyro`** и доступны после установки (`dyro dispatch …`, `dyro runtime …`, `import experiments…`). Они остаются **опциональными относительно Core** и не заменяют gates, review, signoff и merge. Semantic runtime теперь Production Candidate с передачей подписанного Core bundle; production остаётся `NOT_READY`, пока `PROD-01`, `PROD-02` и `PROD-09` не подтверждены в реальной release-среде. Локальные multi-repo merge preflight'ятся и восстанавливаются как одна операция; удалённые Git-серверы не дают атомарный multi-repo push, поэтому частичный сбой push записывается для recovery. Автоматический merge требует разрешения и в task manifest, и в локальной policy. [MIT License](LICENSE) и [`dyro` на PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow предоставляет полный локальный workflow и policy-контроль для команд в режиме планирования. Он не создаёт удалённые репозитории, не передаёт SaaS credentials и не provision'ит внешние runner'ы; при этом сохраняет переносимый контракт пакета evidence для внешнего выполнения. Опциональный локальный Agent dispatch поставляется как `experiments.local_agent_dispatch` и запускается через `dyro dispatch …`; он носит рекомендательный характер и не заменяет gates, review, signoff или merge. Локальные multi-repo merge предварительно проверяются и восстанавливаются как одна операция; удалённые Git-серверы не дают атомарный multi-repo push, поэтому частичный сбой записывается. Автоматический merge требует разрешения и в task manifest, и в локальной policy. [MIT License](LICENSE) и [`dyro` на PyPI](https://pypi.org/project/dyro/).

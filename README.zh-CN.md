@@ -251,67 +251,6 @@ sequenceDiagram
   Note over H: 合入交付仍走 dyro task merge
 ```
 
-### 外部语义运行时（可选实验）
-
-```mermaid
-flowchart TB
-  Sup["可信 Supervisor"]
-  Sand["Workflow Sandbox<br/>固定 TS bundle · 无供应商 token"]
-  Bro["Agent Broker<br/>argv provider · raw 仅 tmpfs"]
-  HostP["可选 host provider<br/>仅挂 Broker"]
-
-  Sup -->|启动 · 校验 bundle/claim| Sand
-  Sup -->|启动 · pin| Bro
-  Sand -->|loopback IPC| Bro
-  HostP -.->|RO bind| Bro
-  Sup -->|双重清理后| Pack["密封 Stage5 evidence pack"]
-  Pack -->|绑定 claim · artifact · gate| Handoff["已签名 Core execution bundle"]
-  Handoff -->|操作员显式传递| Core["Dyro Core 导入 + 独立复核"]
-  Pack -.->|禁止| Merge["复核 / signoff / merge / push"]
-```
-
-**非 Core。** 目录：`experiments/external_workflow_runner/`。当前生命周期为
-**Production Candidate（生产候选）**；在多主机、真实供应商执行集群和可写挂载配额
-完成生产环境验收前，生产状态仍为 `NOT_READY`。门禁不会接受可编辑的
-`pass: true`：真实环境完成验收后，必须提供绑定同一版本、环境、镜像和制品的
-发布清单，以及安全、供应商、配额三个用途隔离的 Ed25519 签名证明；四个角色还
-必须使用不同公钥。
-
-```bash
-dyro runtime status
-dyro runtime doctor
-dyro runtime plan
-dyro runtime production-gate  # NOT_READY 时退出码为 3
-dyro runtime production-gate --help  # 查看签名生产验收输入
-```
-
-完整验收命令使用
-`--release-manifest`、`--security-attestation`、`--provider-attestation`
-和 `--quota-attestation`。证据契约与信任配置见
-[生产就绪设计](docs/designs/external-runtime-production-readiness.md)；门禁即使
-返回 `READY`，也只代表自动检查通过，仍需独立发布批准。
-
-### 语义运行时时序（可选实验）
-
-```mermaid
-sequenceDiagram
-  participant S as Supervisor
-  participant B as Broker 容器
-  participant W as Sandbox 容器
-
-  S->>B: 启动内网 + pin
-  S->>W: 共享 netns 启动 · 无 token
-  W->>B: agent.call JSON-line
-  B->>B: 拉起 provider · 销毁 raw
-  B-->>W: 净化后的 result
-  W-->>S: result-envelope + artifacts
-  S->>W: cleanup 校验
-  S->>B: stop · 容器已消失
-  S->>S: 仅双重清理 OK 才 pack
-  S->>S: 绑定当前 Core claim + pack hash
-  S-->>S: 构建已签名 Core bundle · 绝不导入
-```
-
 ## 快速开始
 
 日常使用 CLI 时，推荐通过隔离的 `pipx` 环境从 PyPI 安装 `dyro`（要求 Python 3.11+）：
@@ -502,9 +441,8 @@ dyro --dry-run task run API-101
 | `task merge` | 将已复核的任务分支合入所属开发线。 |
 | `task loop/daemon/stats/decisions` | 受控批处理、调度、台账报表和决策门禁。 |
 | `dispatch` | 可选本地多 Agent 派发（L0–L4）；仅建议，不替代 gates/merge。 |
-| `runtime status/doctor/plan/claim/handoff/production-gate` | 诊断 Production Candidate、将 Stage5 租约绑定到 Core claim、构建但绝不导入已签名 Core bundle，并在生产未就绪时关闭失败。 |
 
-实现细节见[架构与 Profile 契约](docs/architecture.md)、[外部运行时生产就绪设计](docs/designs/external-runtime-production-readiness.md)、[既有控制面迁移指南](docs/migrating-existing-control-planes.md)，以及维护者用的 [PyPI 发布说明](docs/publishing.md)。
+实现细节见[架构与 Profile 契约](docs/architecture.md)、[既有控制面迁移指南](docs/migrating-existing-control-planes.md)，以及维护者用的 [PyPI 发布说明](docs/publishing.md)。
 
 ## 语言与文档
 
@@ -512,8 +450,8 @@ README 提供英语、简体中文、韩语、西班牙语、法语、德语、�
 
 ## 当前边界
 
-DyroEngineeringFlow 已具备完整的本地工作流闭环，以及让高保障团队在本机保持“仅计划”模式的策略控制。它不创建远端仓库、不携带 SaaS 凭证，也不负责供给外部 runner；但内置可移植证据包的构建与校验契约。`experiments/` 下的可选能力（外部 workflow runner Stage0–5、本地 agent dispatch L0–L4）**随 `dyro` 安装包一并分发**（`dyro dispatch …`、`dyro runtime …`、`import experiments…`）。它们相对 Core 仍是**可选面**：不替代 gates / 复核 / signoff / merge。语义运行时现为具备已签名 Core bundle 移交闭环的 Production Candidate，但只有 `PROD-01`、`PROD-02`、`PROD-09` 在真实发布环境得到证明后才能转为生产就绪。本地多仓 merge 会统一预检并在失败时恢复；不同 Git 远端无法提供原子跨仓 push，因此部分推送失败会写入台账等待恢复。自动 merge 需要任务清单与本地策略双重许可。本项目采用 [MIT License](LICENSE)，并已发布为 [PyPI `dyro`](https://pypi.org/project/dyro/) 包。
+DyroEngineeringFlow 提供完整的本地工作流闭环，以及让高保障团队在本机保持“仅计划”模式的策略控制。它不创建远端仓库、不携带 SaaS 凭证，也不负责供给外部 runner；但保留可移植外部执行证据包的交接契约。可选的本地 Agent 派发以 `experiments.local_agent_dispatch` 随安装包分发，并通过 `dyro dispatch …` 使用；其结论仅供参考，绝不替代 gates、复核、signoff 或 merge。本地多仓 merge 会统一预检并在失败时恢复；不同 Git 远端无法提供原子跨仓 push，因此部分推送失败会写入台账等待恢复。自动 merge 需要任务清单与本地策略双重许可。本项目采用 [MIT License](LICENSE)，并已发布为 [PyPI `dyro`](https://pypi.org/project/dyro/) 包。
 
 ### 与 Graph Engineering 的关系（可选读）
 
-行业里有时把「多节点 + 路由/并行 + 校验」的工作拓扑称作 **Graph Engineering**（相对单 agent loop）。Dyro 的交付拓扑与之实质相近（TaskGraph、状态机、gates、复核、merge，以及可选的 dispatch / runtime 子图），但产品身份仍是 **交付控制面**，不是 agent 编排框架，也不是 Knowledge Graph / GraphRAG。dispatch 仅为建议；runtime 是 Production Candidate，生产仍为 **NOT_READY**。详见[架构文档](docs/architecture.md#与-graph-engineering-的关系可选读)。
+行业里有时把「多节点 + 路由/并行 + 校验」的工作拓扑称作 **Graph Engineering**（相对单 agent loop）。Dyro 的交付拓扑与之实质相近（TaskGraph、状态机、gates、复核、merge，以及可选的 dispatch 子图），但产品身份仍是 **交付控制面**，不是 agent 编排框架，也不是 Knowledge Graph / GraphRAG。dispatch 仅为建议。详见[架构文档](docs/architecture.md#与-graph-engineering-的关系可选读)。

@@ -2,26 +2,16 @@
 
 ## 0.5.1 - Unreleased
 
-- Add a fail-closed production acceptance path: one release-bound manifest and
-  three expiring, purpose-separated environment attestations must verify under
-  four distinct trusted Ed25519 public keys before `PROD-01/02/09` can clear.
-- Ship strict deployment-manifest and production-attestation schemas; reject
-  tampering, weak pass assertions, role mismatch, key reuse, expiry, and
-  cross-release/environment drift while retaining independent release approval.
-- Add operator-friendly `dyro runtime status/doctor/plan`, make a closed production gate return exit code 3, and preserve JSON output for automation.
-- Bind Stage5 leases to exported Dyro Core claim authority; verify sealed-pack identity and live workspace artifacts before building a signed Core execution bundle.
-- Add an end-to-end Stage5 pack → Core import → independent review test while keeping import/review/signoff/merge/push outside runtime authority.
-- Publish claim and evidence outputs without following dangling symlinks or overwriting concurrent files; distinguish dry-run, gate-blocked diagnostic bundles, and import-ready handoffs.
-- Verify Stage0 cleanup by ownership label plus exact container ID across a bounded Docker daemon settle window.
-- Update CI and release artifact smoke tests to require the intentional `NOT_READY` exit code 3 instead of treating a closed production gate as success.
-- Restore the TypeScript semantic runtime and Stage1–5 bundle sources in both wheel and sdist; release CI now installs and assembles Stage1/Stage5 from each artifact outside the checkout.
-- Make external claim renewal compare-and-swap exact owner generations, reject unsafe claim files, and aggregate Supervisor shutdown checks.
-- Prove Docker container and network cleanup fail-closed, including partial startup and readiness failures.
-- Bind evidence files to the validated result envelope, seal manifest/ZIP consistency, reject unsafe or oversized pack members, and avoid partial packs.
+- Remove the Docker-backed external semantic runtime from the default package,
+  CLI, release validation, and CI; preserve its source, tests, and design
+  history in the separate semantic-runtime archive.
+- Remove the dispatch `stage5-bridge` so local provider dispatch has no runtime
+  dependency on the removed Docker experiment.
 - Run local dispatch edits in detached Git worktrees with hash-bound patches; make default dispatch truly asynchronous.
 - Add atomic run claims and owner-token leases, bounded process-tree execution, sealed context reads, strict JSON results, safe GC, authenticated backend routing, and real parallel panels.
 - Reject real CLI adapters in `strict` mode unless they can prove OS-level isolation; Codex/Claude permission profiles are no longer described as physical isolation.
-- Route top-level `--root` / `--dry-run` safely into experiment surfaces and align ADR/design documentation with shipped behavior.
+- Route top-level `--root` / `--dry-run` safely into the dispatch surface and
+  align ADR/design documentation with shipped behavior.
 
 ## 0.5.0 - 2026-07-30
 

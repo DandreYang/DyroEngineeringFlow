@@ -251,69 +251,6 @@ sequenceDiagram
   Note over H: Delivery still uses dyro task merge
 ```
 
-### External semantic runtime (optional experiment)
-
-```mermaid
-flowchart TB
-  Sup["Trusted Supervisor"]
-  Sand["Workflow Sandbox<br/>pinned TS bundle · no vendor token"]
-  Bro["Agent Broker<br/>argv provider · raw only on tmpfs"]
-  HostP["Optional host provider<br/>Broker-mounted only"]
-
-  Sup -->|start · verify bundle/claim| Sand
-  Sup -->|start · pin| Bro
-  Sand -->|loopback IPC| Bro
-  HostP -.->|RO bind| Bro
-  Sup -->|after dual cleanup| Pack["sealed Stage5 evidence pack"]
-  Pack -->|claim + artifact + gate binding| Handoff["signed Core execution bundle"]
-  Handoff -->|explicit operator transfer| Core["Dyro Core import + independent review"]
-  Pack -.->|forbidden| Merge["review / signoff / merge / push"]
-```
-
-Not Core. Tree: `experiments/external_workflow_runner/`. Lifecycle:
-**Production Candidate**; production status remains `NOT_READY` while the
-multi-host, real-provider fleet, and writable-mount quota blockers remain. The
-gate does not accept editable `pass: true` state. Once the real environment is
-validated, a release manifest plus security, provider, and quota attestations
-must bind the same version, environment, image, and artifacts with four
-purpose-separated Ed25519 signatures backed by distinct public keys.
-
-```bash
-dyro runtime status
-dyro runtime doctor
-dyro runtime plan
-dyro runtime production-gate  # NOT_READY exits 3
-dyro runtime production-gate --help  # signed acceptance inputs
-```
-
-A complete acceptance invocation uses `--release-manifest`,
-`--security-attestation`, `--provider-attestation`, and
-`--quota-attestation`. See the
-[production-readiness design](docs/designs/external-runtime-production-readiness.md)
-for the evidence and trust contract. A `READY` gate result still requires
-independent release approval.
-
-### Semantic runtime sequence (optional experiment)
-
-```mermaid
-sequenceDiagram
-  participant S as Supervisor
-  participant B as Broker container
-  participant W as Sandbox container
-
-  S->>B: start internal net + pin
-  S->>W: start shared netns · no token
-  W->>B: agent.call JSON-line
-  B->>B: spawn provider · destroy raw
-  B-->>W: sanitized result
-  W-->>S: result-envelope + artifacts
-  S->>W: cleanup verify
-  S->>B: stop · containers absent
-  S->>S: pack only if dual cleanup OK
-  S->>S: bind current Core claim + pack hash
-  S-->>S: build signed Core bundle · never import
-```
-
 ## Quick start
 
 For daily CLI use, install `dyro` from PyPI in an isolated `pipx` environment (Python 3.11 or later):
@@ -520,10 +457,8 @@ dyro --dry-run task run API-101
 | `task merge` | Merge a reviewed task branch into its owning development line. |
 | `task loop/daemon/stats/decisions` | Run controlled batches, scheduling, ledger reporting, and decision gates. |
 | `dispatch` | Optional local multi-agent dispatch (L0–L4); advisory only — not a substitute for gates/merge. |
-| `runtime status/doctor/plan/claim/handoff/production-gate` | Diagnose the Production Candidate, bind Stage5 leases to Core claims, build (but never import) signed Core bundles, and fail closed while production is **NOT_READY**. |
 
 See the [architecture and Profile contract](docs/architecture.md),
-[external-runtime production readiness design](docs/designs/external-runtime-production-readiness.md),
 the [existing control-plane migration guide](docs/migrating-existing-control-planes.md),
 and the [PyPI publishing runbook](docs/publishing.md) (maintainers) for implementation detail.
 
@@ -533,8 +468,8 @@ This README is maintained in English, Simplified Chinese, Korean, Spanish, Frenc
 
 ## Current boundaries
 
-DyroEngineeringFlow provides a complete local workflow loop and policy controls for keeping stricter teams in planning-only local mode. It does not create remote repositories, ship SaaS credentials, or provision an external runner; it does provide a portable evidence-package contract for one. Optional modules under `experiments/` (external workflow runner Stage0–5, local agent dispatch L0–L4) **ship in the `dyro` wheel** and are usable after install (`dyro dispatch …`, `dyro runtime …`, `import experiments…`). They remain **optional relative to Core**: they do not replace gates, review, signoff, or merge. The semantic runtime is now a Production Candidate with a signed Core-bundle handoff, but production remains `NOT_READY` until `PROD-01`, `PROD-02`, and `PROD-09` are proven on the real release environment. Local multi-repository merges are preflighted and recovered as one operation; remote Git servers cannot provide atomic cross-repository push, so partial push failure is recorded for recovery. Automatic merge requires permission in both the task manifest and local policy. It is available under the [MIT License](LICENSE) and as [`dyro` on PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow provides a complete local workflow loop and policy controls for keeping stricter teams in planning-only local mode. It does not create remote repositories, ship SaaS credentials, or provision external runners; it does provide a portable evidence-package contract for external execution. The optional local dispatch harness ships as `experiments.local_agent_dispatch` and is available as `dyro dispatch …`; it is advisory and never replaces gates, review, signoff, or merge. Local multi-repository merges are preflighted and recovered as one operation; remote Git servers cannot provide atomic cross-repository push, so partial push failure is recorded for recovery. Automatic merge requires permission in both the task manifest and local policy. It is available under the [MIT License](LICENSE) and as [`dyro` on PyPI](https://pypi.org/project/dyro/).
 
 ### Graph Engineering (optional reading)
 
-Some discussions call multi-node agent/work topologies **Graph Engineering** (as opposed to a single-agent loop). Dyro’s delivery topology is close in substance—TaskGraph, state machine, gates, review, merge, plus optional `dispatch` / runtime subgraphs—but the product identity remains a **delivery control plane**, not an agent-orchestration framework or a knowledge-graph/RAG stack. Dispatch output is advisory; runtime production stays **NOT_READY**. See [architecture](docs/architecture.md#与-graph-engineering-的关系可选读).
+Some discussions call multi-node agent/work topologies **Graph Engineering** (as opposed to a single-agent loop). Dyro’s delivery topology is close in substance—TaskGraph, state machine, gates, review, merge, plus the optional `dispatch` subgraph—but the product identity remains a **delivery control plane**, not an agent-orchestration framework or a knowledge-graph/RAG stack. Dispatch output is advisory. See [architecture](docs/architecture.md#与-graph-engineering-的关系可选读).

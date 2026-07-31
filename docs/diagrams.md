@@ -28,8 +28,6 @@ python3 scripts/render_diagrams.py            # 英文图例
 | 07 | 7. 用例总览 |
 | 08a | 8a. 多智能体分层（实验） |
 | 08b | 8b. 多智能体时序 |
-| 09a | 9a. 外部语义运行时（实验） |
-| 09b | 9b. 语义运行时时序 |
 
 ---
 
@@ -300,55 +298,6 @@ Dispatch 结果仅为**建议**；交付仍走 Dyro gates / merge。
 
 ---
 
-## 9a. 外部语义运行时（实验）
-
-```mermaid
-flowchart TB
-  Sup["可信 Supervisor"]
-  Sand["Workflow Sandbox<br/>固定 TS bundle · 无供应商 token"]
-  Bro["Agent Broker<br/>argv provider · raw 仅 tmpfs"]
-  HostP["可选 host provider<br/>仅挂 Broker"]
-
-  Sup -->|启动 · 校验 bundle/claim| Sand
-  Sup -->|启动 · pin| Bro
-  Sand -->|loopback IPC| Bro
-  HostP -.->|RO bind| Bro
-  Sup -->|双重清理后| Pack["密封 Stage5 evidence pack"]
-  Pack -->|绑定 claim · artifact · gate| Handoff["已签名 Core execution bundle"]
-  Handoff -->|操作员显式传递| Core["Dyro Core 导入 + 独立复核"]
-  Pack -.->|禁止| Merge["复核 / signoff / merge / push"]
-```
-
-**非 Core。** `experiments/external_workflow_runner/`。当前为 Production
-Candidate；生产仍为 `NOT_READY`，开放阻断项为 `PROD-01/02/09`。
-
----
-
-## 9b. 语义运行时时序
-
-```mermaid
-sequenceDiagram
-  participant S as Supervisor
-  participant B as Broker 容器
-  participant W as Sandbox 容器
-
-  S->>B: 启动内网 + pin
-  S->>W: 共享 netns 启动 · 无 token
-  W->>B: agent.call JSON-line
-  B->>B: 拉起 provider · 销毁 raw
-  B-->>W: 净化后的 result
-  W-->>S: result-envelope + artifacts
-  S->>W: cleanup 校验
-  S->>B: stop · 容器已消失
-  S->>S: 仅双重清理 OK 才 pack
-  S->>S: 绑定当前 Core claim + pack hash
-  S-->>S: 构建已签名 Core bundle · 绝不导入
-```
-
-Supervisor 双重清理后才允许 pack；可信 handoff 只构建 bundle，Core 仍独占
-import、review、signoff、merge 与 push。
-
----
 
 ## 新人 15 分钟路径
 

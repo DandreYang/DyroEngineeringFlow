@@ -251,57 +251,6 @@ sequenceDiagram
   Note over H: Delivery still uses dyro task merge
 ```
 
-### 외부 시맨틱 런타임 (선택 실험)
-
-```mermaid
-flowchart TB
-  Sup["Trusted Supervisor"]
-  Sand["Workflow Sandbox<br/>pinned TS bundle · no vendor token"]
-  Bro["Agent Broker<br/>argv provider · raw only on tmpfs"]
-  HostP["Optional host provider<br/>Broker-mounted only"]
-
-  Sup -->|start · verify bundle/claim| Sand
-  Sup -->|start · pin| Bro
-  Sand -->|loopback IPC| Bro
-  HostP -.->|RO bind| Bro
-  Sup -->|after dual cleanup| Pack["sealed Stage5 evidence pack"]
-  Pack -->|claim + artifact + gate binding| Handoff["signed Core execution bundle"]
-  Handoff -->|explicit operator transfer| Core["Dyro Core import + independent review"]
-  Pack -.->|forbidden| Merge["review / signoff / merge / push"]
-```
-
-Core가 아닙니다. 경로: `experiments/external_workflow_runner/`. 현재
-**Production Candidate**이며, multi-host·실제 provider fleet·writable mount
-quota를 검증하기 전까지 production 상태는 `NOT_READY`입니다.
-
-```bash
-dyro runtime status
-dyro runtime doctor
-dyro runtime plan
-dyro runtime production-gate  # NOT_READY exits 3
-```
-
-### 시맨틱 런타임 시퀀스 (선택 실험)
-
-```mermaid
-sequenceDiagram
-  participant S as Supervisor
-  participant B as Broker container
-  participant W as Sandbox container
-
-  S->>B: start internal net + pin
-  S->>W: start shared netns · no token
-  W->>B: agent.call JSON-line
-  B->>B: spawn provider · destroy raw
-  B-->>W: sanitized result
-  W-->>S: result-envelope + artifacts
-  S->>W: cleanup verify
-  S->>B: stop · containers absent
-  S->>S: pack only if dual cleanup OK
-  S->>S: bind current Core claim + pack hash
-  S-->>S: build signed Core bundle · never import
-```
-
 ## 빠른 시작
 
 일상적인 CLI 사용에는 격리된 `pipx` 환경에서 PyPI의 `dyro`를 설치하세요. Python 3.11 이상이 필요합니다.
@@ -492,7 +441,6 @@ dyro --dry-run task run API-101
 | `task merge` | 검토된 작업 분기를 소유 개발 라인에 병합. |
 | `task loop/daemon/stats/decisions` | 통제된 배치, 스케줄링, 원장 보고, 의사결정 게이트. |
 | `dispatch` | 선택적 로컬 멀티 에이전트 파견(L0–L4); 권고만 — gates/merge 대체 아님. |
-| `runtime status/doctor/plan/claim/handoff/production-gate` | Production Candidate 진단, Stage5 lease와 Core claim 결합, 서명 Core bundle 빌드(가져오기는 금지), **NOT_READY** 시 fail-closed. |
 
 구현 세부사항: [architecture and Profile contract](docs/architecture.md), [diagram guide](docs/diagrams.en.md), [migration guide](docs/migrating-existing-control-planes.md), 유지자용 [PyPI publishing](docs/publishing.md).
 
@@ -502,4 +450,4 @@ dyro --dry-run task run API-101
 
 ## 현재 경계
 
-DyroEngineeringFlow는 완전한 로컬 워크플로 루프와, 더 엄격한 팀이 로컬에서 계획 전용 모드를 유지하도록 하는 정책 제어를 제공합니다. 원격 저장소를 만들거나 SaaS 자격 증명을 실어 보내거나 외부 runner를 프로비저닝하지 않으며, 이식 가능한 증거 패키지 계약은 제공합니다. `experiments/` 아래 선택 모듈(외부 workflow runner Stage0–5, local agent dispatch L0–L4)은 **`dyro` wheel에 포함**되어 설치 후 사용할 수 있습니다(`dyro dispatch …`, `dyro runtime …`, `import experiments…`). Core 대비 **선택 면**이며 gates/review/signoff/merge를 대체하지 않습니다. Semantic runtime은 이제 서명된 Core bundle 전달을 갖춘 Production Candidate이지만, 실제 release 환경에서 `PROD-01`, `PROD-02`, `PROD-09`를 입증하기 전까지 production은 `NOT_READY`입니다. 로컬 다중 저장소 merge는 하나의 작업으로 사전 점검·복구됩니다. 원격 Git 서버는 원자적 교차 저장소 push를 제공하지 않으므로 부분 push 실패는 복구를 위해 기록됩니다. 자동 merge는 작업 매니페스트와 로컬 정책 모두의 허가가 필요합니다. [MIT License](LICENSE) 및 [PyPI `dyro`](https://pypi.org/project/dyro/).
+DyroEngineeringFlow는 계획 모드 팀을 위한 완전한 로컬 워크플로와 정책 제어를 제공합니다. 원격 저장소를 만들거나 SaaS 자격 증명을 전달하거나 외부 runner를 프로비저닝하지 않으며, 외부 실행을 위한 이식 가능한 증거 패키지 계약은 유지합니다. 선택형 로컬 Agent dispatch는 `experiments.local_agent_dispatch`로 함께 배포되고 `dyro dispatch …`로 사용합니다. 이 결과는 참고용이며 gates, review, signoff, merge를 대체하지 않습니다. 로컬 다중 저장소 merge는 하나의 작업으로 사전 점검·복구되며, 원격 Git 서버는 원자적 다중 저장소 push를 제공하지 않아 부분 실패를 기록합니다. 자동 merge에는 task manifest와 로컬 policy의 권한이 모두 필요합니다. [MIT License](LICENSE) 및 [PyPI `dyro`](https://pypi.org/project/dyro/)에서 제공합니다.

@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 
 from experiments.local_agent_dispatch.errors import DispatchValidationError
-from experiments.local_agent_dispatch.stage5_bridge import dry_run_stage5_pack
 from experiments.local_agent_dispatch.supervisor import (
     FORBIDDEN,
     DispatchSupervisor,
@@ -46,13 +45,6 @@ class DispatchBoundaryTests(unittest.TestCase):
         with self.assertRaises(DispatchValidationError) as ctx:
             supervisor.accept(payload, project_root=ROOT)
         self.assertIn("merge", str(ctx.exception))
-
-    def test_stage5_bridge_rejects_production_flags(self) -> None:
-        with self.assertRaises(DispatchValidationError):
-            dry_run_stage5_pack(
-                ROOT,  # not a real pack; fail before or on flags
-                production_actions={"push": True},
-            )
 
     def test_dispatch_tree_does_not_import_dyro_merge_paths(self) -> None:
         """Static: dispatch sources must not call Core merge/signoff modules."""

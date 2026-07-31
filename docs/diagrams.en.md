@@ -28,8 +28,6 @@ Related: [`architecture.md`](architecture.md) · [`agent-orchestration-disciplin
 | 07 | 7. Use-case overview |
 | 08a | 8a. Multi-agent layers (experiment) |
 | 08b | 8b. Multi-agent sequence |
-| 09a | 9a. External semantic runtime (experiment) |
-| 09b | 9b. Semantic runtime sequence |
 
 ---
 
@@ -300,55 +298,6 @@ Dispatch output is advisory; delivery still uses Dyro gates/merge.
 
 ---
 
-## 9a. External semantic runtime (experiment)
-
-```mermaid
-flowchart TB
-  Sup["Trusted Supervisor"]
-  Sand["Workflow Sandbox<br/>pinned TS bundle · no vendor token"]
-  Bro["Agent Broker<br/>argv provider · raw only on tmpfs"]
-  HostP["Optional host provider<br/>Broker-mounted only"]
-
-  Sup -->|start · verify bundle/claim| Sand
-  Sup -->|start · pin| Bro
-  Sand -->|loopback IPC| Bro
-  HostP -.->|RO bind| Bro
-  Sup -->|after dual cleanup| Pack["sealed Stage5 evidence pack"]
-  Pack -->|claim + artifact + gate binding| Handoff["signed Core execution bundle"]
-  Handoff -->|explicit operator transfer| Core["Dyro Core import + independent review"]
-  Pack -.->|forbidden| Merge["review / signoff / merge / push"]
-```
-
-Not Core. Tree: `experiments/external_workflow_runner/`. This is a Production
-Candidate; production remains `NOT_READY` with `PROD-01/02/09` open.
-
----
-
-## 9b. Semantic runtime sequence
-
-```mermaid
-sequenceDiagram
-  participant S as Supervisor
-  participant B as Broker container
-  participant W as Sandbox container
-
-  S->>B: start internal net + pin
-  S->>W: start shared netns · no token
-  W->>B: agent.call JSON-line
-  B->>B: spawn provider · destroy raw
-  B-->>W: sanitized result
-  W-->>S: result-envelope + artifacts
-  S->>W: cleanup verify
-  S->>B: stop · containers absent
-  S->>S: pack only if dual cleanup OK
-  S->>S: bind current Core claim + pack hash
-  S-->>S: build signed Core bundle · never import
-```
-
-Supervisor dual-cleans before any pack. The trusted handoff only builds a
-bundle; Core still exclusively owns import, review, signoff, merge, and push.
-
----
 
 ## Newcomer 15-minute path
 
