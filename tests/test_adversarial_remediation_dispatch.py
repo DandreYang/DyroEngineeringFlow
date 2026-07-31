@@ -1938,6 +1938,7 @@ class ProcessAndLifecycleTests(unittest.TestCase):
             fake_codex.chmod(0o755)
             payload = _payload()
             payload["backend"] = "codex"
+            payload["allow_unconfined_provider"] = True
             task_file = root / "task.json"
             task_file.write_text(json.dumps(payload), encoding="utf-8")
             environment = dict(os.environ)
