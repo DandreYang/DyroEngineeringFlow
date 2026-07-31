@@ -3,6 +3,7 @@ __pycache__/
 .ewr-stage*/
 .pytest_cache/
 .serena/
+.omc/
 .venv/
 *.egg-info/
 *.pid
@@ -17,4 +18,3 @@ dist/
 # Optional local Mermaid→PNG exports (docs use GitHub Mermaid; do not commit)
 docs/images/diagrams/*.png
 docs/images/diagrams/zh/*.png
-
