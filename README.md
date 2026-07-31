@@ -282,6 +282,11 @@ purpose-separated Ed25519 signatures backed by distinct public keys.
 dyro runtime status
 dyro runtime doctor
 dyro runtime plan
+dyro runtime production-acceptance schemas --human
+dyro runtime production-acceptance release-prepare --help
+dyro runtime production-acceptance attestation-prepare --help
+dyro runtime production-acceptance signing-payload --help
+dyro runtime production-acceptance signature-attach --help
 dyro runtime production-gate  # NOT_READY exits 3
 dyro runtime production-gate --help  # signed acceptance inputs
 ```
@@ -290,8 +295,11 @@ A complete acceptance invocation uses `--release-manifest`,
 `--security-attestation`, `--provider-attestation`, and
 `--quota-attestation`. See the
 [production-readiness design](docs/designs/external-runtime-production-readiness.md)
-for the evidence and trust contract. A `READY` gate result still requires
-independent release approval.
+for the evidence and trust contract, and the
+[production acceptance operator runbook](docs/production-acceptance-operator-runbook.md)
+for the create-only real-file hashing and external HSM sequence. The runtime
+operator kit never accepts a production private key or deploys. A `READY` gate
+result still requires independent release approval.
 
 ### Semantic runtime sequence (optional experiment)
 
@@ -520,10 +528,11 @@ dyro --dry-run task run API-101
 | `task merge` | Merge a reviewed task branch into its owning development line. |
 | `task loop/daemon/stats/decisions` | Run controlled batches, scheduling, ledger reporting, and decision gates. |
 | `dispatch` | Optional local multi-agent dispatch (L0–L4); advisory only — not a substitute for gates/merge. |
-| `runtime status/doctor/plan/claim/handoff/production-gate` | Diagnose the Production Candidate, bind Stage5 leases to Core claims, build (but never import) signed Core bundles, and fail closed while production is **NOT_READY**. |
+| `runtime status/doctor/plan/claim/handoff/production-acceptance/production-gate` | Diagnose the Production Candidate, bind Stage5 leases to Core claims, prepare create-only external-HSM acceptance records, build (but never import) signed Core bundles, and fail closed while production is **NOT_READY**. |
 
 See the [architecture and Profile contract](docs/architecture.md),
 [external-runtime production readiness design](docs/designs/external-runtime-production-readiness.md),
+[production acceptance operator runbook](docs/production-acceptance-operator-runbook.md),
 the [existing control-plane migration guide](docs/migrating-existing-control-planes.md),
 and the [PyPI publishing runbook](docs/publishing.md) (maintainers) for implementation detail.
 

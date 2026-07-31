@@ -34,6 +34,9 @@ Use the executable gate rather than reading this snapshot:
 ```sh
 dyro runtime production-gate
 # NOT_READY => exit 3
+
+dyro runtime production-acceptance schemas --human
+# first actionable step for collecting signed production acceptance
 ```
 
 ## How real evidence can close the blockers
@@ -53,6 +56,8 @@ bind durable evidence URIs plus SHA-256 values. The executable contract rejects
 tampering, weak pass assertions, revoked keys, role mismatch, expiry, and
 cross-release drift. See
 [`docs/designs/external-runtime-production-readiness.md`](../../../docs/designs/external-runtime-production-readiness.md).
+The create-only file hashing and external HSM flow is documented in the
+[`production acceptance operator runbook`](../../../docs/production-acceptance-operator-runbook.md).
 
 The gate only reports readiness. A `READY` result still requires independent
 release approval and never performs deployment or Dyro Core delivery actions.

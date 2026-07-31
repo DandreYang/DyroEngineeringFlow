@@ -83,6 +83,8 @@ jobs:
           set -e
           test "$runtime_gate_exit" -eq 3
           python -c "import json; r=json.load(open('/tmp/runtime-gate.json')); assert r.get('verdict')=='NOT_READY' and r.get('exit_code')==3, r"
+          /tmp/dyro-wheel-venv/bin/dyro runtime production-acceptance schemas >/tmp/runtime-schemas.json
+          python -c "import json, pathlib; r=json.load(open('/tmp/runtime-schemas.json')); assert r.get('verdict')=='LOCATED' and all(pathlib.Path(v['path']).is_file() for v in r['schemas'].values()), r"
           python -m venv /tmp/dyro-sdist-venv
           /tmp/dyro-sdist-venv/bin/pip install /tmp/dyro-dist/dyro-*.tar.gz
           /tmp/dyro-sdist-venv/bin/python "$GITHUB_WORKSPACE/tools/verify_installed_artifact.py"
@@ -95,6 +97,8 @@ jobs:
           set -e
           test "$runtime_gate_sdist_exit" -eq 3
           python -c "import json; r=json.load(open('/tmp/runtime-gate-sdist.json')); assert r.get('verdict')=='NOT_READY' and r.get('exit_code')==3, r"
+          /tmp/dyro-sdist-venv/bin/dyro runtime production-acceptance schemas >/tmp/runtime-schemas-sdist.json
+          python -c "import json, pathlib; r=json.load(open('/tmp/runtime-schemas-sdist.json')); assert r.get('verdict')=='LOCATED' and all(pathlib.Path(v['path']).is_file() for v in r['schemas'].values()), r"
 
   windows-dispatch-import:
     name: Windows dispatch import / fail-closed smoke

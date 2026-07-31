@@ -23,6 +23,7 @@ from experiments.external_workflow_runner.cli import main as runtime_main
 from experiments.external_workflow_runner.stage5.production_acceptance import (
     ATTESTATION_PURPOSES,
     RELEASE_PURPOSE,
+    read_production_json,
     verify_production_acceptance,
 )
 from experiments.external_workflow_runner.stage5.production_gate import (
@@ -335,6 +336,33 @@ class ProductionAcceptanceTests(unittest.TestCase):
                 release_manifest_path=duplicate_manifest,
                 attestation_paths=(),
             )
+
+    def test_manifest_reader_rejects_path_replacement_after_snapshot(
+        self,
+    ) -> None:
+        victim = self.root / "replaceable-manifest.json"
+        victim.write_bytes(self.manifest_path.read_bytes())
+        original_read = os.read
+        replaced = False
+
+        def replace_after_read(descriptor: int, size: int) -> bytes:
+            nonlocal replaced
+            chunk = original_read(descriptor, size)
+            if chunk and not replaced:
+                replaced = True
+                victim.rename(self.root / "original-manifest.json")
+                victim.write_text("{}", encoding="utf-8")
+            return chunk
+
+        with (
+            mock.patch(
+                "experiments.external_workflow_runner.stage5."
+                "production_acceptance.os.read",
+                side_effect=replace_after_read,
+            ),
+            self.assertRaisesRegex(ValidationError, "读取期间发生变化"),
+        ):
+            read_production_json(victim, "生产发布清单")
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
     def test_manifest_reader_rejects_fifo_without_blocking(self) -> None:

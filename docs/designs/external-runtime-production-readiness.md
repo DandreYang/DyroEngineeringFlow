@@ -80,9 +80,24 @@ dyro --root /control/dyro-profile key trust quota-2026 \
 工作区 trust store 中的公钥。信任目录的权限、密钥审批和 Witness 同步属于部署
 控制面责任，不能交给 Sandbox 或 provider。
 
-发布流水线按
+操作员先从当前安装制品定位或 create-only 导出精确契约：
+
+```bash
+dyro runtime production-acceptance schemas --human
+dyro runtime production-acceptance schemas \
+  --output-dir /release/contracts/dyro-0.5.1
+```
+
+随后使用 `release-prepare` 对真实 wheel、sdist、SBOM、provenance、provider
+二进制以及 deployment/canary/rollback/observability/runbook 文件做稳定哈希，
+并创建未签名发布清单。工具拒绝空文件、符号链接、特殊文件、读取期替换和任何
+已有输出；顶层 `--dry-run` 只验证、不写入。完整可复制步骤见
+[`生产验收操作员手册`](../production-acceptance-operator-runbook.md)。
+
+未签名发布清单遵循
 [`production-deployment-manifest.schema.json`](../../experiments/external_workflow_runner/schemas/production-deployment-manifest.schema.json)
-生成发布清单。清单固定：
+的 signature 之外全部字段；附加已验证 signature 后才成为该 schema 的完整
+记录。清单固定：
 
 - Dyro 版本、完整源码 commit 与批准的 Bun 镜像 digest；
 - wheel、sdist、SBOM 与 provenance SHA-256；
@@ -100,11 +115,18 @@ dyro --root /control/dyro-profile key trust quota-2026 \
 | `PROD-02` | `production-provider` | provider 钉扎、Broker-only 凭据、轮换、撤销、恢复均已验证，至少一次真实 canary，开放高危/严重发现为 0 |
 | `PROD-09` | `production-quota` | 所有可写挂载已声明并强制字节/inode/文件数上限，耗尽与并发租户测试通过，开放高危/严重发现为 0 |
 
-每份证明必须绑定**已签名发布清单的规范化 SHA-256**与相同 environment ID，
+每份证明由 `attestation-prepare` 基于操作员显式 assertions 和真实 evidence
+文件准备。该命令不会生成模板、推断 `pass` 或自动把断言设为真。每份证明必须
+绑定**已签名发布清单的规范化 SHA-256**与相同 environment ID，
 包含 1–32 个无凭据、无 query/fragment 的持久证据 URI 及内容哈希，并在 31 天
 内失效。`pass` 中任何关键断言为假、计数不足或存在高危/严重发现都会被拒绝，
-而不是降级为警告。签名采用现有 `dyro.signing.sign_record` 的用途域隔离契约；外部
-签名系统必须生成相同的 RFC 8785 JCS 消息。
+而不是降级为警告。
+
+`signing-payload` 输出现有 Dyro 用途域隔离契约的精确 raw bytes、Base64 与
+SHA-256；外部 signer/HSM 直接以 Ed25519 签署 raw bytes。`signature-attach`
+只接受规范 Base64，使用 trust store 公钥验签成功后才 create-only 地生成完整
+记录。两个命令都不接受 private/signing key 参数。跨语言签名系统可使用公开的
+`dyro.signing.signature_message` 复现相同 RFC 8785 JCS 消息。
 
 操作员使用同一条只读门禁命令完成验证：
 
@@ -210,6 +232,11 @@ Runtime 不执行上述命令，也不能把 bundle 构建成功解释为任务�
 | `runtime status` | 0 | — | 否 |
 | `runtime doctor` | 0 | 3 | 否 |
 | `runtime plan` | 0 | — | 否 |
+| `runtime production-acceptance schemas` | 0 | — | 可选：仅创建新 schema 目录 |
+| `runtime production-acceptance release-prepare` | 0 | 2 | 仅创建新未签名清单 |
+| `runtime production-acceptance attestation-prepare` | 0 | 2 | 仅创建新未签名证明 |
+| `runtime production-acceptance signing-payload` | 0 | 2 | 可选：仅创建新 raw payload |
+| `runtime production-acceptance signature-attach` | 0 | 2 | 仅创建新已签名记录 |
 | `runtime production-gate` | 0 (`READY`) | 3 (`NOT_READY`) | 否 |
 | `runtime claim prepare` | 0 | 2 | 仅新输出文件 |
 | `runtime handoff` | 0 | 3（gate 失败）/ 2（验证错误） | 仅新 Core ZIP；不导入 |
@@ -234,6 +261,7 @@ Runtime 不执行上述命令，也不能把 bundle 构建成功解释为任务�
 | 本机三域隔离与双重清理 | 已验证 | Stage0–5 Docker 回归 |
 | 生产门禁退出语义与 operator UX | 已实现 | runtime CLI/doctor tests |
 | 发布绑定的四方签名生产验收 | 已实现 | production acceptance 契约、CLI 与对抗测试 |
+| create-only operator/HSM 交接 | 已实现 | 真实文件稳定哈希、raw payload、外部签名附加与安装制品 smoke |
 | Stage5 claim 受 Core claim 约束 | 已实现 | claim authority/renewal tests |
 | Stage5 pack → 签名 Core bundle → independent review | 已实现 | `test_runtime_core_handoff_integration` |
 | 多宿主逃逸与租户边界 | 待真实环境 | `PROD-01` |

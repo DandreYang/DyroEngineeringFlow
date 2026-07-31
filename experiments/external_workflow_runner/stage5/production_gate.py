@@ -8,6 +8,7 @@ operator checklist so CI/tests can assert the gate stays fail-closed.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -16,6 +17,7 @@ from dyro.errors import ValidationError
 from .production_acceptance import (
     ATTESTATION_PURPOSES,
     VerifiedProductionAcceptance,
+    production_schema_paths,
     verify_production_acceptance,
 )
 
@@ -161,6 +163,7 @@ def evaluate_production_readiness(
     release_manifest: Path | None = None,
     attestations: Mapping[str, Path] | Sequence[Path] = (),
 ) -> dict[str, object]:
+    checked_at = datetime.now(timezone.utc)
     items = list(production_not_ready_checklist())
     acceptance: VerifiedProductionAcceptance | None = None
     if attestations and release_manifest is None:
@@ -176,6 +179,7 @@ def evaluate_production_readiness(
             root=root,
             release_manifest_path=release_manifest,
             attestation_paths=attestations,
+            checked_at=checked_at,
         )
         replacements: dict[str, ChecklistItem] = {}
         for check_id, attestation in acceptance.attestations.items():
@@ -201,9 +205,21 @@ def evaluate_production_readiness(
         if item.status != "pass"
     ]
     production_ready = len(open_blockers) == 0
+    if acceptance is None:
+        next_command: str | None = (
+            "dyro runtime production-acceptance schemas --human"
+        )
+    elif acceptance.missing_checks:
+        next_command = (
+            "dyro runtime production-acceptance "
+            "attestation-prepare --help"
+        )
+    else:
+        next_command = None
     return {
         "schema_version": 1,
         "kind": "external-semantic-runtime-production-gate",
+        "checked_at": checked_at.isoformat(timespec="seconds"),
         "production_ready": production_ready,
         "verdict": "READY" if production_ready else "NOT_READY",
         "exit_code": 0 if production_ready else 3,
@@ -221,12 +237,8 @@ def evaluate_production_readiness(
                     **dict(ATTESTATION_PURPOSES),
                 },
                 "schemas": {
-                    "release_manifest": (
-                        "schemas/production-deployment-manifest.schema.json"
-                    ),
-                    "attestation": (
-                        "schemas/production-attestation.schema.json"
-                    ),
+                    name: str(path)
+                    for name, path in production_schema_paths().items()
                 },
             }
         ),
@@ -255,7 +267,12 @@ def evaluate_production_readiness(
             }
             for item in items
         ],
-        "next_command": "dyro runtime plan",
+        "next_command": next_command,
+        "next_action": (
+            "independent_release_approval"
+            if production_ready
+            else "collect_and_sign_missing_production_evidence"
+        ),
         "adr_stop_conditions": [
             "must_not_modify_dyro_scheduler_for_internal_phases",
             "must_isolate_credentials_and_execution_keys",
@@ -323,11 +340,38 @@ def production_readiness_plan() -> dict[str, object]:
                 ),
             },
             {
+                "id": "release-contract-preparation",
+                "state": "operator_check_required",
+                "title": "固定发布制品、provider 与运维计划",
+                "covers": [
+                    "wheel",
+                    "sdist",
+                    "sbom",
+                    "provenance",
+                    "provider-pins",
+                    "canary",
+                    "rollback",
+                    "observability",
+                    "runbook",
+                ],
+                "command": (
+                    "dyro runtime production-acceptance "
+                    "release-prepare --help"
+                ),
+                "acceptance": (
+                    "操作员工具对真实普通文件稳定哈希并创建未签名清单；"
+                    "production-release 私钥只留在外部 signer/HSM。"
+                ),
+            },
+            {
                 "id": "environment-acceptance",
                 "state": "blocked",
                 "title": "验证真实生产环境",
                 "covers": ["PROD-01", "PROD-02", "PROD-09"],
-                "command": "dyro runtime production-gate --help",
+                "command": (
+                    "dyro runtime production-acceptance "
+                    "attestation-prepare --help"
+                ),
                 "acceptance": (
                     "发布环境通过独立多宿主安全评审、真实 provider 舰队 canary、"
                     "凭据生命周期证明与可写挂载配额故障测试；四个用途隔离的"

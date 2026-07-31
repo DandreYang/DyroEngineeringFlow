@@ -42,6 +42,25 @@ PyPI Trusted Publishing 将 GitHub Actions 的 OIDC 身份绑定到这个仓库�
    dyro --version
    ```
 
+## 生产候选验收材料
+
+PyPI publish workflow 只负责测试、构建、安装制品 smoke、Environment 审批与
+Trusted Publishing 上传；它不会自动生成 `PROD-01/02/09` 的真实环境证据，
+也不会持有 production acceptance 私钥。
+
+若同一版本还要晋级外部语义运行时生产环境，发布流水线必须另外保存：
+
+- 本次 wheel 与 sdist；
+- 经审核的 SBOM 与 provenance；
+- 实际部署的 provider 二进制快照；
+- deployment、canary、rollback、observability 与 runbook 文件。
+
+操作员随后按
+[生产验收操作员手册](production-acceptance-operator-runbook.md)使用
+`dyro runtime production-acceptance release-prepare` 哈希上述真实文件，再由
+外部 signer/HSM 签署。当前 publish workflow 不会因为缺少这些环境材料而冒充
+runtime 生产就绪；最终仍以 `production-gate` 和独立 release approval 为准。
+
 PyPI 不允许覆盖同一个版本号。发布失败后，如需修改分发文件或 metadata，必须递增版本号并重新创建 Release。
 
 若 GitHub 的 `release` 事件没有自动生成工作流运行，可在 Actions 页面选择 **Publish to PyPI** → **Run workflow**，输入既有 tag（例如 `vX.Y.Z`）。手动入口会 checkout 该 tag，并严格校验 tag 必须等于 `pyproject.toml` 的版本；它不会构建后续 `main` 提交。

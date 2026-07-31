@@ -120,6 +120,18 @@ Profile、runner workspace 与 Stage5 pack 之外。Handoff 在 dry-run 与真�
 验证得到 `READY`，结果也包含 `release_approval_required=true`，最终发布批准
 仍由独立发布控制面作出。
 
+### 7. 操作员工具只准备验收材料，不获得签名或发布权限
+
+`dyro runtime production-acceptance` 提供 schema 定位/导出、真实文件稳定
+哈希、未签名记录准备、域隔离 RFC 8785 signing payload 和外部 signature
+附加。所有文件输出均为 create-only，支持只验证不写入的顶层 `--dry-run`。
+
+该命令组没有生产 private/signing key 参数。`signature-attach` 只能附加外部
+signer/HSM 返回的 Base64 Ed25519 signature，并在写入前用当前 trust store
+验签。`attestation-prepare` 要求职责主体提供完整 assertions、verdict 与真实
+evidence 文件，不提供自动 `pass` 模板。工具生成 `READY` 所需的可验证材料，
+但不会改变 `release_approval_required`，也不执行部署或 Core 交付动作。
+
 ## 后果
 
 - `PROD-03`（Stage5→Core execution evidence handoff）可由代码和端到端测试
@@ -132,6 +144,8 @@ Profile、runner workspace 与 Stage5 pack 之外。Handoff 在 dry-run 与真�
   Core 不依赖 Bun、TypeScript runtime 或 Stage5 Supervisor。
 - 生产 operator 执行面必须由部署适配层固定 Stage5 配置；在真实 provider
   与凭据契约完成前，不提供“任意 workflow”或自动生产运行命令。
+- wheel/sdist 安装验证必须确认 schema 可从安装包定位，且 release preparation
+  dry-run 不会创建输出。
 
 ## 否决项
 
@@ -142,3 +156,4 @@ Profile、runner workspace 与 Stage5 pack 之外。Handoff 在 dry-run 与真�
 - 通过用户自填状态清除生产环境阻断项。
 - 用同一公钥跨发布、安全、provider 或配额角色完成自我批准。
 - 验收证明不绑定精确发布清单、环境或有效期。
+- 在 runtime CLI 中增加生产私钥、本地生产签名或自动发布命令。
