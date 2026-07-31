@@ -108,7 +108,7 @@ jobs:
 
   macos-dispatch-install:
     name: macOS clean install smoke
-    runs-on: macos-13
+    runs-on: macos-15-intel
     timeout-minutes: 15
     steps:
       - name: Check out source
