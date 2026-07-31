@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
+import experiments.local_agent_dispatch.adapters.registry as registry_module
 from experiments.local_agent_dispatch.adapters.registry import get_adapter, probe_backends
 from experiments.local_agent_dispatch.cli import main as cli_main
 from experiments.local_agent_dispatch.errors import DispatchValidationError
 from experiments.local_agent_dispatch.gc import gc
 from experiments.local_agent_dispatch.lease import SlotManager
-from experiments.local_agent_dispatch.panel import run_panel
-from experiments.local_agent_dispatch.skill_render import render_skill_markdown, write_skill
+from experiments.local_agent_dispatch.panel import resolve_panel_members, run_panel
+from experiments.local_agent_dispatch.skill_render import render_skill_markdown, save_route, write_skill
 from experiments.local_agent_dispatch.supervisor import DispatchSupervisor
 from experiments.local_agent_dispatch.task_contract import parse_task_contract
 
@@ -34,6 +38,7 @@ def _task(backend: str = "echo", *, strict: bool = False) -> dict:
     return {
         "schema_version": 1,
         "backend": backend,
+        "allow_offline_simulation": backend == "echo",
         "mode": "read-only",
         "strict": strict,
         "files": ["src/*.py"],
@@ -73,6 +78,8 @@ class SupervisorEchoTests(unittest.TestCase):
             self.assertIsNotNone(done.result)
             assert done.result is not None
             self.assertIn("echo-adapter", str(done.result.get("summary")))
+            self.assertEqual(done.result.get("execution_kind"), "offline-simulation")
+            self.assertEqual(done.result.get("confidence"), "low")
             self.assertTrue(done.shadow_path)
             self.assertTrue(Path(done.shadow_path).is_dir())
             # host .env must not be required; secret file should fail accept
@@ -81,6 +88,14 @@ class SupervisorEchoTests(unittest.TestCase):
             bad["files"] = [".env", "src/*.py"]
             with self.assertRaises(DispatchValidationError):
                 sup.accept(bad, project_root=project)
+
+    def test_echo_requires_explicit_simulation_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sup = DispatchSupervisor(home=_home(tmp))
+            task = _task()
+            task["allow_offline_simulation"] = False
+            with self.assertRaisesRegex(DispatchValidationError, "allow_offline_simulation"):
+                sup.accept(task, project_root=_project(tmp))
 
 
 class PanelTests(unittest.TestCase):
@@ -98,6 +113,12 @@ class PanelTests(unittest.TestCase):
             self.assertEqual(board["members"], ["echo"])
             self.assertEqual(len(board["runs"]), 1)
             self.assertTrue(Path(str(board["board_path"])).is_file())
+
+    def test_default_panel_never_falls_back_to_offline_simulation(self) -> None:
+        echo = get_adapter("echo")
+        with patch.object(registry_module, "_all", return_value={"echo": echo}):
+            with self.assertRaisesRegex(DispatchValidationError, "no authenticated"):
+                resolve_panel_members(None)
 
 
 class SkillAndGcTests(unittest.TestCase):
@@ -154,15 +175,80 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(code, 0)
 
+    def test_dry_run_validates_contract_and_known_backend_without_state_or_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = _home(tmp)
+            project = _project(tmp)
+            task_path = Path(tmp) / "task.json"
+            task_path.write_text(json.dumps(_task(backend="codex")), encoding="utf-8")
+            output = io.StringIO()
+            errors = io.StringIO()
+            with (
+                patch(
+                    "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded"
+                ) as bounded,
+                redirect_stdout(output),
+                redirect_stderr(errors),
+            ):
+                code = cli_main(
+                    [
+                        "--home",
+                        str(home),
+                        "--dry-run",
+                        "run",
+                        "--project",
+                        str(project),
+                        "--file",
+                        str(task_path),
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertTrue(json.loads(output.getvalue())["valid"])
+            self.assertTrue(
+                json.loads(output.getvalue())["requires_allow_unconfined_provider"]
+            )
+            bounded.assert_not_called()
+            self.assertFalse(home.exists())
+
+            output = io.StringIO()
+            errors = io.StringIO()
+            with redirect_stdout(output), redirect_stderr(errors):
+                code = cli_main(
+                    [
+                        "--home",
+                        str(home),
+                        "--dry-run",
+                        "run",
+                        "--project",
+                        str(project),
+                        "--file",
+                        str(task_path),
+                        "--backend",
+                        "not-a-provider",
+                    ]
+                )
+            self.assertEqual(code, 2)
+            self.assertIn("unknown backend", errors.getvalue())
+            self.assertFalse(home.exists())
+
 
 class RegistryTests(unittest.TestCase):
     def test_auto_and_echo(self) -> None:
         echo = get_adapter("echo")
         self.assertTrue(echo.available())
-        auto = get_adapter("auto")
-        self.assertTrue(auto.id)
+        with patch.object(registry_module, "_all", return_value={"echo": echo}):
+            with self.assertRaisesRegex(DispatchValidationError, "no available authenticated"):
+                get_adapter("auto")
         rows = probe_backends()
         self.assertTrue(any(r["id"] == "echo" for r in rows))
+        self.assertTrue(any(r["id"] == "opencode" and not r["supported"] for r in rows))
+
+    def test_routes_reject_simulation_and_unknown_providers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = _home(tmp)
+            for backend in ("echo", "not-a-provider", "opencode"):
+                with self.subTest(backend=backend), self.assertRaises(DispatchValidationError):
+                    save_route("default", backend, home=home)
 
 
 class ContractRejectTests(unittest.TestCase):

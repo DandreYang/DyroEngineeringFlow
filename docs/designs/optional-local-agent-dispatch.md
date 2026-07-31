@@ -68,6 +68,8 @@ DetachedWorker
   "backend": "auto",
   "mode": "read-only",
   "strict": false,
+  "allow_unconfined_provider": false,
+  "allow_offline_simulation": false,
   "files": ["src/**/*.py", "!**/*_test.py"],
   "task": {
     "briefing": "项目是什么、构建/测试入口",
@@ -89,6 +91,8 @@ DetachedWorker
 | `files` | 最小充分集；禁止默认 `**/*` |
 | `strict` | true 时启用影子目录并要求 adapter 严格隔离能力（见 §8） |
 | `mode` | `read-only` \| `edit` |
+| `allow_unconfined_provider` | 真实 Provider 的非 strict 执行必须显式为 `true`；read-only 只投影白名单上下文，仍不构成 OS 隔离 |
+| `allow_offline_simulation` | 仅允许显式 `echo` 测试模拟；`auto` 永不回退到它 |
 
 校验失败（空 objective、files 零匹配、strict+edit 冲突等）→ **派发前** fail-closed。
 
@@ -101,6 +105,8 @@ DetachedWorker
   "status": "ok",
   "summary": "…",
   "confidence": "high|medium|low",
+  "execution_kind": "provider|offline-simulation",
+  "isolation": "strict|context-projection|best-effort-unconfined|not-applicable",
   "evidence": [
     {
       "file": "src/foo.py",
@@ -159,7 +165,8 @@ DetachedWorker
 
 ### 7.2 内容级
 
-- 私钥块、`sk-…`、`ghp_…`、AWS `AKIA…` 等特征 → 拒绝该文件  
+- 私钥块、`sk-…` / `sk-proj-…`、`ghp_…` / `github_pat_…`、AWS `AKIA…` 等特征 → 拒绝该文件或任务字段。
+- 五段式任务文本、读取到的上下文、Provider JSON 的 `summary` / evidence / warnings 都经过同一守卫；解析失败或命中机密时只保存脱敏错误，绝不保存原始 stdout/stderr。
 
 ### 7.3 相对仅「文件名黑名单」的增强
 
@@ -178,7 +185,7 @@ DetachedWorker
 3. worker cwd = 影子根  
 4. adapter 还必须声明并实现 strict isolation；否则 Supervisor 在派发前拒绝
 
-说明：后端 CLI 自带的「plan/read-only/禁用工具」权限档与 shadow `cwd` 都不是 OS 隔离证明。当前外部 Codex / Claude adapter 均标记为不支持 strict；`auto + strict` 只能选择离线 `echo`，其余严格任务会在派发前明确拒绝。
+说明：后端 CLI 自带的「plan/read-only/禁用工具」权限档与 shadow `cwd` 都不是 OS 隔离证明。当前外部 Codex / Claude adapter 均标记为不支持 strict；任何 `strict` 真实 Provider 任务都会在派发前明确拒绝。`echo` 只可作为显式、已确认的离线模拟，不能充当 `auto` 或 Panel 的兜底。
 `edit` 模式使用 git worktree（§10），不与 strict 影子混用。
 
 ## 9. 异步生命周期与并发
@@ -227,14 +234,15 @@ process-tree 与 pipe 后端。
 4. **禁止** 读取完整 event 日志灌入宿主上下文  
 5. 长任务超时：优先 followup/续聊，禁止无脑重复全量派发  
 
-## 12. 动态宿主 skill
+## 12. Provider 发现、选择与动态宿主 skill
 
 安装/刷新时：
 
-1. 探测本机后端命令与登录态  
-2. 读取用户路由偏好  
-3. 渲染 skill 正文：仅含可用后端、默认模型、路由表  
-4. 分发到各宿主 skills 目录  
+1. `dyro dispatch backends` 探测本机命令与登录态；当前受审计、可执行的集成为 `codex` 和 `claude`。
+2. `cursor-agent`、`opencode`、`grok`、`hermes`、`kimi` 会被展示为“已发现但未集成”，不得被自动或手动路由，直到各自拥有经过审计的非交互协议 adapter。
+3. 当只有一个已认证 Provider 时，`backend: auto` 可以选择它；当有多个时，用户必须使用 `dyro dispatch route add default <provider>` 选择默认路由；一个也没有时 fail-closed 并给出发现结果。
+4. `echo` 仅用于显式 `--backend echo --allow-offline-simulation` 的确定性测试，输出的 `execution_kind=offline-simulation`、低置信度和非生产警告不得被上游当作真实模型结论。
+5. 渲染 skill 正文只含已准备 Provider、发现但未集成的命令、路由表与上述限制，再分发到各宿主 skills 目录。
 
 禁止静态 skill 列出用户没有的后端。
 
@@ -268,5 +276,7 @@ process-tree 与 pipe 后端。
 - 容器逃逸免疫  
 - 恶意后端 CLI 完全不可信环境下的机密安全  
 - 可替代生产 evidence 链  
+
+真实 Provider 的 read-only 路径只得到经过守卫的白名单上下文投影；它不是物理隔离，调用者必须显式确认该风险。编辑路径是隔离 Git worktree，但同样不等同于对恶意 CLI 的 OS 沙箱。
 
 派发结果始终是建议性产物，不能构成生产放行依据。

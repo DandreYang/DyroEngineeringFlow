@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
+from .context_guard import assert_content_allowed
 from .errors import DispatchValidationError
 from .locator_verify import EvidenceItem, verify_evidence
 
@@ -23,6 +24,8 @@ class ResultEnvelope:
     warnings: list[str] = field(default_factory=list)
     backend: str = ""
     error_code: str = ""
+    execution_kind: str = "provider"
+    isolation: str = "not-applicable"
 
     def to_mapping(self) -> dict[str, object]:
         return {
@@ -38,6 +41,8 @@ class ResultEnvelope:
             "warnings": list(self.warnings),
             "backend": self.backend,
             "error_code": self.error_code,
+            "execution_kind": self.execution_kind,
+            "isolation": self.isolation,
             "verified_ratio": (
                 sum(1 for e in self.evidence if e.verified is True) / len(self.evidence)
                 if self.evidence
@@ -60,11 +65,35 @@ def build_result(
     warnings: Sequence[str] | None = None,
     backend: str = "",
     error_code: str = "",
+    execution_kind: str = "provider",
+    isolation: str = "not-applicable",
 ) -> ResultEnvelope:
     if status not in {"ok", "error", "timeout", "cancelled"}:
         raise DispatchValidationError(f"invalid result status: {status}")
     if confidence not in {"high", "medium", "low"}:
         raise DispatchValidationError(f"invalid confidence: {confidence}")
+    if execution_kind not in {"provider", "offline-simulation"}:
+        raise DispatchValidationError(f"invalid execution_kind: {execution_kind}")
+    if isolation not in {"strict", "context-projection", "best-effort-unconfined", "not-applicable"}:
+        raise DispatchValidationError(f"invalid isolation: {isolation}")
+    _assert_safe_result_text(summary, "result.summary")
+    _assert_safe_result_text(backend, "result.backend")
+    _assert_safe_result_text(error_code, "result.error_code")
+    if patch_ref is not None:
+        _assert_safe_result_text(patch_ref, "result.patch_ref")
+    if takeover is not None:
+        _assert_safe_result_text(takeover, "result.takeover")
+    for index, warning in enumerate(warnings or ()):
+        if type(warning) is not str:
+            raise DispatchValidationError("result.warnings entries must be strings")
+        _assert_safe_result_text(warning, f"result.warnings[{index}]")
+    for index, item in enumerate(evidence or ()):
+        if not isinstance(item, Mapping):
+            raise DispatchValidationError("result.evidence entries must be objects")
+        for name in ("file", "claim", "lines"):
+            value = item.get(name)
+            if isinstance(value, str):
+                _assert_safe_result_text(value, f"result.evidence[{index}].{name}")
     verified = verify_evidence(list(evidence or ()), cwd=cwd)
     return ResultEnvelope(
         schema_version=1,
@@ -79,7 +108,16 @@ def build_result(
         warnings=list(warnings or ()),
         backend=backend,
         error_code=error_code,
+        execution_kind=execution_kind,
+        isolation=isolation,
     )
+
+
+def _assert_safe_result_text(value: str, label: str) -> None:
+    if type(value) is not str:
+        raise DispatchValidationError(f"{label} must be a string")
+    if value:
+        assert_content_allowed(value, label=label)
 
 
 def result_from_mapping(payload: Mapping[str, Any], *, cwd) -> ResultEnvelope:
@@ -101,4 +139,6 @@ def result_from_mapping(payload: Mapping[str, Any], *, cwd) -> ResultEnvelope:
         warnings=[str(x) for x in (payload.get("warnings") or [])],
         backend=str(payload.get("backend") or ""),
         error_code=str(payload.get("error_code") or ""),
+        execution_kind=str(payload.get("execution_kind") or "provider"),
+        isolation=str(payload.get("isolation") or "not-applicable"),
     )

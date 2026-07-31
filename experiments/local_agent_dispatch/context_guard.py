@@ -32,8 +32,9 @@ CREDENTIAL_DIRS = frozenset({".ssh", ".aws", ".gnupg", ".kube"})
 
 CONTENT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"),
-    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bghp_[A-Za-z0-9]{36,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
@@ -85,6 +86,23 @@ def check_content(content: str, *, file_label: str = "") -> GuardVerdict:
                 f"secret-like content matched /{pattern.pattern[:40]}/ in {label}",
             )
     return GuardVerdict(True)
+
+
+def assert_content_allowed(content: str, *, label: str) -> None:
+    """Reject secret-like text without including the matched text in an error."""
+    verdict = check_content(content, file_label=label)
+    if not verdict.allowed:
+        raise DispatchValidationError(f"secret-like content is not allowed in {label}")
+
+
+def safe_error_text(error: object, *, fallback: str = "dispatch failure") -> str:
+    """Return bounded diagnostic text without persisting a detected credential."""
+    detail = str(error).strip()
+    if not detail:
+        return fallback
+    if not check_content(detail, file_label="error").allowed:
+        return "dispatch failure detail withheld because secret-like content was detected"
+    return detail[:2000]
 
 
 def _same_file_identity(

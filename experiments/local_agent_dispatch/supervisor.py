@@ -14,8 +14,12 @@ import threading
 import time
 from typing import Callable, Mapping
 
-from .adapters.registry import adapter_is_authenticated, get_adapter
-from .context_guard import materialize_strict_shadow
+from .adapters.registry import (
+    adapter_is_authenticated,
+    get_adapter,
+    list_real_provider_ids,
+)
+from .context_guard import materialize_strict_shadow, safe_error_text
 from .edit_workspace import EditWorkspace
 from .errors import DispatchValidationError
 from .fileset import collect_guarded_context
@@ -24,6 +28,7 @@ from .paths import dispatch_home, runs_dir, shadow_dir
 from .process_identity import current_identity
 from .result_envelope import build_result
 from .run_store import RunRecord, RunStore
+from .skill_render import selected_route
 from .task_contract import parse_task_contract
 
 
@@ -34,7 +39,6 @@ ASYNC_STARTUP_TIMEOUT_SECONDS = 5.0
 _WORKER_COMMON_ENV = frozenset(
     {
         "PATH",
-        "HOME",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",
@@ -196,10 +200,11 @@ def _failure_outcome(
     error: str,
     warning: str | None = None,
 ) -> _WorkerOutcome:
-    warnings = [warning or error]
+    safe_error = safe_error_text(error)
+    warnings = [safe_error_text(warning or error)]
     return _WorkerOutcome(
         status="failed",
-        error=error,
+        error=safe_error,
         result=build_result(
             run_id=record.run_id,
             status="error",
@@ -221,6 +226,75 @@ def refuse_production_actions(flags: Mapping[str, object] | None) -> None:
             raise DispatchValidationError(
                 f"local agent dispatch forbids production action: {key}"
             )
+
+
+def _configured_backend_id(backend: str, *, home: Path | None) -> str | None:
+    if backend != "auto":
+        return backend
+    return selected_route(home=home)
+
+
+def preflight_dispatch(
+    payload: Mapping[str, object],
+    *,
+    project_root: Path,
+    home: Path | None = None,
+) -> dict[str, object]:
+    """Validate a dispatch request without creating state or probing a CLI."""
+    refuse_production_actions(
+        payload.get("production_actions")
+        if isinstance(payload.get("production_actions"), dict)
+        else None
+    )
+    contract = parse_task_contract(payload)
+    context = collect_guarded_context(contract.files, project_root)
+    configured = _configured_backend_id(contract.backend, home=home)
+    resolved_backend: str | None = None
+    if configured is not None:
+        adapter = get_adapter(configured, require_strict=contract.strict)
+        resolved_backend = adapter.id
+    return {
+        "contract": contract,
+        "context_files": len(context),
+        "resolved_backend": resolved_backend,
+        "requires_provider_selection": contract.backend == "auto" and configured is None,
+        "requires_allow_unconfined_provider": bool(
+            resolved_backend in list_real_provider_ids()
+            and not contract.strict
+            and not contract.allow_unconfined_provider
+        ),
+        "requires_allow_offline_simulation": bool(
+            resolved_backend == "echo" and not contract.allow_offline_simulation
+        ),
+    }
+
+
+def _resolve_execution_backend(contract, *, home: Path | None):
+    configured = _configured_backend_id(contract.backend, home=home)
+    if configured is not None:
+        adapter = get_adapter(configured, require_strict=contract.strict)
+        if not adapter.available():
+            raise DispatchValidationError(f"backend not available: {configured}")
+        if not adapter_is_authenticated(adapter):
+            raise DispatchValidationError(f"backend is not authenticated: {configured}")
+        return adapter
+
+    candidates = []
+    for backend_id in list_real_provider_ids():
+        adapter = get_adapter(backend_id, require_strict=contract.strict)
+        if adapter.available() and adapter_is_authenticated(adapter):
+            candidates.append(adapter)
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise DispatchValidationError(
+            "no authenticated real provider found; install/login Codex or Claude, "
+            "then run `dyro dispatch route add default <backend>`"
+        )
+    raise DispatchValidationError(
+        "multiple real providers are ready; choose one with "
+        "`dyro dispatch route add default <backend>` or pass --backend"
+    )
 
 
 class DispatchSupervisor:
@@ -254,19 +328,24 @@ class DispatchSupervisor:
         contract = parse_task_contract(payload)
         # Fail-closed: expand + guard before accepting.
         collect_guarded_context(contract.files, project_root)
-        adapter = get_adapter(contract.backend, require_strict=contract.strict)
+        adapter = _resolve_execution_backend(contract, home=self.home)
         backend = adapter.id
-        if not adapter.available() and backend != "echo":
-            raise DispatchValidationError(
-                f"backend not available: {contract.backend} (resolved={backend})"
-            )
-        if not adapter_is_authenticated(adapter):
-            raise DispatchValidationError(
-                f"backend is not authenticated: {contract.backend} (resolved={backend})"
-            )
         if contract.strict and not getattr(adapter, "strict_isolation", False):
             raise DispatchValidationError(
                 f"backend does not provide strict isolation: {backend}"
+            )
+        if backend == "echo" and not contract.allow_offline_simulation:
+            raise DispatchValidationError(
+                "offline echo simulation requires allow_offline_simulation=true"
+            )
+        if (
+            backend in list_real_provider_ids()
+            and not contract.strict
+            and not contract.allow_unconfined_provider
+        ):
+            raise DispatchValidationError(
+                "real provider access requires allow_unconfined_provider=true; "
+                "files are projected for read-only work but this is not OS-level isolation"
             )
         return self.store.create(
             contract=contract,
@@ -365,7 +444,7 @@ class DispatchSupervisor:
                 self.slots.release_all(leases)
             except Exception as exc:  # noqa: BLE001 - aggregate failures
                 cleanup_errors.append(exc)
-        cleanup_detail = "; ".join(str(exc) for exc in cleanup_errors)
+        cleanup_detail = "; ".join(safe_error_text(exc) for exc in cleanup_errors)
         preserved_outcome_error = False
 
         if not claimed:
@@ -386,7 +465,7 @@ class DispatchSupervisor:
             raise backend_cleanup_error
 
         if operation_error is not None:
-            error = f"worker failed after claim: {operation_error}"
+            error = "worker failed after claim: " + safe_error_text(operation_error)
             warning = error
             if cleanup_errors:
                 warning += (
@@ -500,7 +579,7 @@ class DispatchSupervisor:
         return self.store.fail_if_active_worker(
             run_id,
             worker_token=worker_token,
-            error=f"worker spawn failed: {error}",
+            error="worker spawn failed: " + safe_error_text(error),
         )
 
     def spawn_worker(
@@ -656,10 +735,17 @@ class DispatchSupervisor:
             work_cwd = project_root
             shadow_path = ""
             edit_workspace: EditWorkspace | None = None
-            if contract.strict:
+            use_context_projection = (
+                contract.strict
+                or (
+                    contract.mode == "read-only"
+                    and record.backend in list_real_provider_ids()
+                )
+            )
+            if use_context_projection:
                 shadow_root = shadow_dir(self.home) / run_id
                 if shadow_root.exists():
-                    raise DispatchValidationError("strict shadow already exists for run")
+                    raise DispatchValidationError("context shadow already exists for run")
                 materialize_strict_shadow(
                     shadow_root=shadow_root,
                     root_dir=project_root,
@@ -736,9 +822,29 @@ class DispatchSupervisor:
                 # Verify edit evidence before removing its isolated worktree.
                 verify_cwd = (
                     work_cwd
-                    if contract.strict or edit_workspace is not None
+                    if use_context_projection or edit_workspace is not None
                     else project_root
                 )
+                isolation = (
+                    "strict"
+                    if contract.strict or record.backend == "echo"
+                    else (
+                        "context-projection"
+                        if use_context_projection
+                        else "best-effort-unconfined"
+                    )
+                )
+                warnings = list(adapter_result.warnings)
+                if isolation == "context-projection":
+                    warnings.append(
+                        "read-only provider ran in a guarded context projection; "
+                        "this is not a claim of OS-level strict isolation"
+                    )
+                elif isolation == "best-effort-unconfined":
+                    warnings.append(
+                        "unconfined provider access was explicitly acknowledged; "
+                        "files limits injected context, not all provider tool reads"
+                    )
                 envelope = build_result(
                     run_id=run_id,
                     status=(
@@ -756,9 +862,11 @@ class DispatchSupervisor:
                         **adapter_result.usage,
                         "duration_ms": int((time.time() - started) * 1000),
                     },
-                    warnings=adapter_result.warnings,
+                    warnings=warnings,
                     backend=record.backend,
                     error_code=adapter_result.error_code,
+                    execution_kind=adapter_result.execution_kind,
+                    isolation=isolation,
                 )
             finally:
                 if edit_workspace is not None:
@@ -766,7 +874,8 @@ class DispatchSupervisor:
                         edit_workspace.cleanup()
                     except Exception as exc:  # noqa: BLE001 - preserve result
                         cleanup_warning = (
-                            f"edit workspace cleanup could not be completed: {exc}"
+                            "edit workspace cleanup could not be completed: "
+                            + safe_error_text(exc)
                         )
             envelope_mapping = envelope.to_mapping()
             if cleanup_warning:
@@ -787,12 +896,13 @@ class DispatchSupervisor:
                 shadow_path=shadow_path,
             )
         except Exception as exc:  # noqa: BLE001 - persist failure onto run
-            warnings = [str(exc)]
+            safe_error = safe_error_text(exc)
+            warnings = [safe_error]
             if cleanup_warning:
                 warnings.append(cleanup_warning)
             return _WorkerOutcome(
                 status="failed",
-                error=str(exc),
+                error=safe_error,
                 result=build_result(
                     run_id=run_id,
                     status="error",

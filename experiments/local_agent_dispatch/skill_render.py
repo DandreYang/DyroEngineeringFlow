@@ -5,7 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from .adapters.registry import probe_backends
+from .adapters.registry import (
+    adapter_is_authenticated,
+    get_adapter,
+    list_real_provider_ids,
+    probe_backends,
+)
+from .errors import DispatchValidationError
 from .json_store import atomic_write_json, read_json
 from .paths import dispatch_home_path, skills_dir
 
@@ -27,7 +33,26 @@ def load_routes(home: Path | None = None) -> list[dict[str, str]]:
     return out
 
 
+def selected_route(*, home: Path | None = None, scene: str = "default") -> str | None:
+    return next(
+        (route["backend"] for route in load_routes(home) if route["scene"] == scene),
+        None,
+    )
+
+
 def save_route(scene: str, backend: str, *, home: Path | None = None) -> None:
+    scene = scene.strip()
+    backend = backend.strip()
+    if not scene:
+        raise DispatchValidationError("route scene must not be empty")
+    if backend not in list_real_provider_ids():
+        raise DispatchValidationError(
+            "route backend must be an integrated real provider; "
+            "offline simulation and discovery-only commands cannot be routed"
+        )
+    adapter = get_adapter(backend)
+    if not adapter.available() or not adapter_is_authenticated(adapter):
+        raise DispatchValidationError(f"route backend is not ready: {backend}")
     path = skills_dir(home) / "routes.json"
     routes = load_routes(home)
     routes = [r for r in routes if r["scene"] != scene]
@@ -41,8 +66,16 @@ def render_skill_markdown(
     routes: Sequence[Mapping[str, str]] | None = None,
 ) -> str:
     backends = probe_backends()
-    available = [b for b in backends if b["available"]]
-    unavailable = [b for b in backends if not b["available"]]
+    providers = [b for b in backends if b.get("execution_kind") == "provider"]
+    available = [
+        b
+        for b in providers
+        if b["available"] and b["authenticated"] and b.get("supported")
+    ]
+    unavailable = [b for b in providers if b not in available]
+    discovery_only = [
+        b for b in backends if b.get("execution_kind") == "unintegrated"
+    ]
     route_rows = list(routes) if routes is not None else load_routes(home)
 
     lines = [
@@ -66,14 +99,29 @@ def render_skill_markdown(
         for row in available:
             lines.append(f"- `{row['id']}` (command: `{row['command']}`)")
     else:
-        lines.append("- none probed; `echo` offline adapter still works for dry runs")
+        lines.append("- none ready; configure and authenticate an integrated Provider")
 
     if unavailable:
         lines.append("")
         lines.append("## Not available (do not route here)")
         lines.append("")
         for row in unavailable:
-            lines.append(f"- `{row['id']}` (`{row['command']}` not found)")
+            state = "not found" if not row["available"] else "not authenticated"
+            lines.append(f"- `{row['id']}` (`{row['command']}`: {state})")
+
+    if discovery_only:
+        lines.extend(
+            [
+                "",
+                "## Discovered but not integrated (do not dispatch)",
+                "",
+            ]
+        )
+        for row in discovery_only:
+            state = "found" if row["available"] else "not found"
+            lines.append(
+                f"- `{row['id']}` (`{row['command']}`: {state}; needs an audited adapter)"
+            )
 
     lines.extend(
         [
@@ -104,8 +152,9 @@ def render_skill_markdown(
             "",
             "1. Task JSON must be self-contained (five-part contract).",
             "2. Prefer minimal `files` globs; never `**/*`.",
-            "3. Dispatch first, continue other work, then collect results.",
-            "4. Bring back only summary/evidence; do not load full event logs.",
+            "3. `auto` never falls back to echo; add a ready route when several Providers exist.",
+            "4. `echo` is an explicit offline simulation only and needs `allow_offline_simulation=true`.",
+            "5. Bring back only summary/evidence; do not load full event logs.",
             "",
         ]
     )

@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import os
+import shutil
 
 from ..errors import DispatchValidationError
 from .base import BackendAdapter
 from .echo import EchoAdapter
 from .subprocess_cli import claude_adapter, codex_adapter
+
+
+REAL_PROVIDER_IDS = ("codex", "claude")
+DISCOVER_ONLY_PROVIDERS = {
+    "cursor-agent": "cursor-agent",
+    "opencode": "opencode",
+    "grok": "grok",
+    "hermes": "hermes",
+    "kimi": "kimi",
+}
 
 
 def _all() -> dict[str, BackendAdapter]:
@@ -21,6 +32,10 @@ def _all() -> dict[str, BackendAdapter]:
 
 def list_adapters() -> list[str]:
     return sorted(_all().keys())
+
+
+def list_real_provider_ids() -> tuple[str, ...]:
+    return REAL_PROVIDER_IDS
 
 
 def adapter_is_authenticated(adapter: BackendAdapter) -> bool:
@@ -42,7 +57,7 @@ def get_adapter(
 ) -> BackendAdapter:
     adapters = _all()
     if backend_id == "auto":
-        for preferred in ("codex", "claude", "echo"):
+        for preferred in REAL_PROVIDER_IDS:
             adapter = adapters.get(preferred)
             if (
                 adapter is not None
@@ -75,6 +90,23 @@ def probe_backends() -> list[dict[str, object]]:
                 "available": available,
                 "authenticated": adapter_is_authenticated(adapter),
                 "strict_isolation": adapter.strict_isolation,
+                "supported": adapter.id != "echo",
+                "execution_kind": (
+                    "offline-simulation" if adapter.id == "echo" else "provider"
+                ),
+            }
+        )
+    for provider_id, command in sorted(DISCOVER_ONLY_PROVIDERS.items()):
+        rows.append(
+            {
+                "id": provider_id,
+                "command": command,
+                "available": shutil.which(command) is not None,
+                "authenticated": False,
+                "strict_isolation": False,
+                "supported": False,
+                "execution_kind": "unintegrated",
+                "reason": "command discovery only; no audited non-interactive adapter",
             }
         )
     return rows

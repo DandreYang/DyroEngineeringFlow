@@ -30,18 +30,26 @@ def resolve_panel_members(requested: Sequence[str] | None) -> list[str]:
         if not members:
             raise DispatchValidationError("no panel members available")
         return members
-    # Default: available real backends, always allow echo as last resort
+    # Default panels must contain only ready, integrated Providers.  An
+    # explicitly requested echo member remains possible for deterministic test
+    # simulations, but must be separately acknowledged by the task contract.
     available = [
         row["id"]
         for row in probe_backends()
-        if row["available"] and row["authenticated"]
+        if (
+            row["available"]
+            and row["authenticated"]
+            and row.get("supported")
+            and row.get("execution_kind") == "provider"
+        )
     ]
-    preferred = [b for b in ("codex", "claude", "echo") if b in available]
+    preferred = [b for b in ("codex", "claude") if b in available]
     if not preferred:
-        preferred = ["echo"]
-    # panel wants diversity: at least echo if only one real
-    if len(preferred) == 1 and preferred[0] != "echo":
-        preferred.append("echo")
+        raise DispatchValidationError(
+            "no authenticated integrated provider is available; "
+            "configure a Provider route or explicitly request an acknowledged "
+            "offline simulation"
+        )
     return preferred[:3]
 
 

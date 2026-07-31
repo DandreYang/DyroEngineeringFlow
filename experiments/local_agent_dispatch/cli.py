@@ -12,12 +12,13 @@ from typing import Any
 
 from .adapters.registry import probe_backends
 from .errors import DispatchValidationError
+from .context_guard import safe_error_text
 from .gc import gc
 from .panel import run_panel
 from .paths import dispatch_home, dispatch_home_path
 from .run_store import RunRecord, RunStore
 from .skill_render import render_skill_markdown, save_route, write_skill
-from .supervisor import DispatchSupervisor
+from .supervisor import DispatchSupervisor, preflight_dispatch
 
 
 def _print_json(payload: Any) -> None:
@@ -68,13 +69,35 @@ def cmd_run(args: argparse.Namespace) -> int:
     payload = _load_payload(args)
     if args.backend:
         payload["backend"] = args.backend
+    if args.allow_unconfined_provider:
+        payload["allow_unconfined_provider"] = True
+    if args.allow_offline_simulation:
+        payload["allow_offline_simulation"] = True
     if args.dry_run:
+        home = Path(args.home) if args.home else None
+        preflight = preflight_dispatch(
+            payload,
+            project_root=Path(args.project).resolve(),
+            home=home,
+        )
         _print_json(
             {
                 "dry_run": True,
                 "action": "dispatch-run",
                 "project": str(Path(args.project).resolve()),
+                "valid": True,
                 "backend": payload.get("backend", "auto"),
+                "resolved_backend": preflight["resolved_backend"],
+                "context_files": preflight["context_files"],
+                "requires_provider_selection": preflight[
+                    "requires_provider_selection"
+                ],
+                "requires_allow_unconfined_provider": preflight[
+                    "requires_allow_unconfined_provider"
+                ],
+                "requires_allow_offline_simulation": preflight[
+                    "requires_allow_offline_simulation"
+                ],
                 "mode": payload.get("mode", "read-only"),
             }
         )
@@ -265,12 +288,12 @@ def cmd_worker(args: argparse.Namespace) -> int:
                 supervisor.store.fail_if_reserved_worker(
                     args.run_id,
                     worker_token=args.worker_token,
-                    error=f"worker failed before claim: {exc}",
+                    error="worker failed before claim: " + safe_error_text(exc),
                 )
             else:
                 supervisor.store.fail_if_accepted(
                     args.run_id,
-                    error=f"worker failed before claim: {exc}",
+                    error="worker failed before claim: " + safe_error_text(exc),
                 )
         except Exception as state_exc:
             raise DispatchValidationError(
@@ -311,6 +334,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stdin", action="store_true")
     p.add_argument("--file", default="")
     p.add_argument("--backend", default="")
+    p.add_argument(
+        "--allow-unconfined-provider",
+        action="store_true",
+        help="Acknowledge that a real provider is not proven OS-isolated",
+    )
+    p.add_argument(
+        "--allow-offline-simulation",
+        action="store_true",
+        help="Allow the explicit echo test simulator; it is never a real Provider result",
+    )
     p.add_argument("--wait", action="store_true", help="Execute synchronously")
     p.add_argument("--timeout", type=_positive_finite_float, default=120.0)
     p.set_defaults(func=cmd_run)

@@ -105,16 +105,16 @@ stateDiagram-v2
   assigned --> in_progress: run starts
   in_progress --> waiting_answer: human answer needed
   waiting_answer --> in_progress: task answer
-  in_progress --> review: gates pass · enter review
+  in_progress --> review: gates pass · private evidence flow
   in_progress --> failed: failure
   failed --> assigned: re-claim
-  review --> review_pending_signoff: require_external_signoff
-  review --> done: independent review PASS
-  review_pending_signoff --> done: task signoff
+  review --> review_pending_signoff: verified review · private flow
+  review --> done: independent review PASS · private flow
+  review_pending_signoff --> done: task signoff · private flow
   done --> [*]: task merge into line
 ```
 
-Illegal transitions are rejected; forced overrides need explicit `--force` (see architecture).
+Illegal transitions are rejected; `--force` cannot enter review, signoff-pending, or done quality states (see architecture).
 
 ---
 

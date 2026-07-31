@@ -195,7 +195,55 @@ def external_execution_plan(
     }
     if claim_binding is not None:
         plan["claim"] = dict(claim_binding)
+    task_directory = getattr(task, "directory", None)
+    if isinstance(task_directory, Path):
+        previous = latest_execution_attempt(task_directory)
+        answers = task_directory / "answers.md"
+        if previous is not None and answers.is_file():
+            parent_attempt_id = previous.get("attempt_id")
+            if not isinstance(parent_attempt_id, str) or not parent_attempt_id:
+                raise ValidationError("已有 external provenance 缺少 parent attempt")
+            plan["continuation"] = {
+                "parent_attempt_id": parent_attempt_id,
+                "answer_sha256": _sha256(answers.read_bytes()),
+            }
     return plan
+
+
+def _next_external_attempt_lineage(
+    task_directory: Path,
+) -> tuple[str, int, str | None]:
+    """Allocate a monotonic external attempt from durable Core provenance."""
+    previous = latest_execution_attempt(task_directory)
+    if previous is None:
+        return uuid.uuid4().hex, 1, None
+    run_id = previous.get("run_id")
+    attempt_id = previous.get("attempt_id")
+    attempt_number = previous.get("attempt_number")
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or not isinstance(attempt_id, str)
+        or not attempt_id
+        or type(attempt_number) is not int
+        or attempt_number < 1
+    ):
+        raise ValidationError("已有 external provenance lineage 无效")
+    return run_id, attempt_number + 1, attempt_id
+
+
+def _existing_external_attempt(
+    task_directory: Path,
+    attempt_id: str,
+) -> dict[str, object] | None:
+    return next(
+        (
+            item
+            for item in list_execution_attempts(task_directory)
+            if item.get("attempt_id") == attempt_id
+        ),
+        None,
+    )
 
 
 def build_external_attempt_record(
@@ -210,13 +258,15 @@ def build_external_attempt_record(
 ) -> dict[str, object]:
     now = _utc_now()
     plan_sha256 = _sha256(_canonical_json(plan).encode("utf-8"))
-    run_id = uuid.uuid4().hex
-    return {
+    run_id, attempt_number, parent_attempt_id = _next_external_attempt_lineage(
+        task_directory
+    )
+    record: dict[str, object] = {
         "schema_version": 1,
         "task_id": task_id,
         "run_id": run_id,
         "attempt_id": f"{task_id}-external-{uuid.uuid4().hex[:12]}",
-        "attempt_number": 1,
+        "attempt_number": attempt_number,
         "status": "completed",
         "started_at": now,
         "completed_at": now,
@@ -228,6 +278,9 @@ def build_external_attempt_record(
         "plan_sha256": plan_sha256,
         "plan": plan,
     }
+    if parent_attempt_id is not None:
+        record["parent_attempt_id"] = parent_attempt_id
+    return record
 
 
 def _validate_external_attempt_record(
@@ -290,6 +343,25 @@ def _validate_external_attempt_record(
     expected_plan_sha256 = _sha256(_canonical_json(plan).encode("utf-8"))
     if record.get("plan_sha256") != expected_plan_sha256:
         raise ValidationError("外部 provenance plan_sha256 不匹配")
+    existing = _existing_external_attempt(task_directory, attempt_id)
+    if existing is not None:
+        if _canonical_json(existing) != _canonical_json(record):
+            raise ValidationError(f"外部 provenance attempt 已存在但内容不同：{attempt_id}")
+        return dict(record)
+    previous = latest_execution_attempt(task_directory)
+    if previous is None:
+        if record.get("attempt_number") != 1:
+            raise ValidationError("首个 external attempt 必须使用 attempt_number=1")
+        if record.get("parent_attempt_id") is not None:
+            raise ValidationError("首个 external attempt 不得声明 parent_attempt_id")
+    else:
+        expected_run_id, expected_number, expected_parent = _next_external_attempt_lineage(
+            task_directory
+        )
+        if record.get("run_id") != expected_run_id or record.get("attempt_number") != expected_number:
+            raise ValidationError("外部 provenance attempt lineage 不连续或不属于当前 run")
+        if record.get("parent_attempt_id") != expected_parent:
+            raise ValidationError("外部 provenance parent_attempt_id 不匹配当前 attempt")
     return dict(record)
 
 

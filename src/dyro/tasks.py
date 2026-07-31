@@ -35,6 +35,7 @@ from .workspace import Line, get_line, line_repository_path, repository_path
 
 
 STATUSES = ("backlog", "assigned", "in_progress", "waiting_answer", "review", "review_pending_signoff", "done", "failed")
+QUALITY_GATE_STATUSES = frozenset({"review", "review_pending_signoff", "done"})
 TRANSITIONS = {
     "backlog": {"assigned"},
     "assigned": {"in_progress", "failed"},
@@ -52,6 +53,8 @@ TASK_HEADS_SHA_RE = re.compile(r"^task_heads_sha256:\s*([0-9a-f]{64})\s*$", re.I
 GIT_HEAD_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$", re.IGNORECASE)
 TASK_HEADS_FILE = "task-heads.json"
 MERGE_LOCK_TIMEOUT_SECONDS = 1800.0
+MAX_TASK_TIMEOUT_MINUTES = 24 * 60
+MAX_GATE_TIMEOUT_SECONDS = 24 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,12 @@ def _strings(raw: Any, label: str) -> tuple[str, ...]:
     return tuple(raw)
 
 
+def _positive_int(raw: Any, label: str, *, maximum: int) -> int:
+    if type(raw) is not int or raw < 1 or raw > maximum:
+        raise ValidationError(f"{label} 必须是 1 到 {maximum} 之间的整数")
+    return raw
+
+
 def _parse_task(path: Path) -> Task:
     try:
         raw = tomllib.loads((path / "task.toml").read_text(encoding="utf-8"))
@@ -145,7 +154,18 @@ def _parse_task(path: Path) -> Task:
             raise ValidationError(f"任务 {task_id} gate cwd 必须位于 task worktree 内")
         if any(gate.name == name for gate in gates):
             raise ValidationError(f"任务 {task_id} gate 名称不能重复：{name}")
-        gates.append(Gate(name, tuple(argv), cwd, int(entry.get("timeout_seconds", 1800))))
+        gates.append(
+            Gate(
+                name,
+                tuple(argv),
+                cwd,
+                _positive_int(
+                    entry.get("timeout_seconds", 1800),
+                    f"任务 {task_id} gate {name} timeout_seconds",
+                    maximum=MAX_GATE_TIMEOUT_SECONDS,
+                ),
+            )
+        )
     merge = raw.get("merge", {})
     if not isinstance(merge, dict):
         raise ValidationError(f"任务 {task_id} merge 必须是表")
@@ -160,8 +180,16 @@ def _parse_task(path: Path) -> Task:
         depends_on=_strings(raw.get("depends_on", []), "depends_on"),
         blocked_on=_strings(raw.get("blocked_on", []), "blocked_on"),
         conflict_group=str(raw.get("conflict_group", "")),
-        timeout_minutes=int(raw.get("timeout_minutes", 60)),
-        review_timeout_minutes=int(raw.get("review_timeout_minutes", 45)),
+        timeout_minutes=_positive_int(
+            raw.get("timeout_minutes", 60),
+            f"任务 {task_id} timeout_minutes",
+            maximum=MAX_TASK_TIMEOUT_MINUTES,
+        ),
+        review_timeout_minutes=_positive_int(
+            raw.get("review_timeout_minutes", 45),
+            f"任务 {task_id} review_timeout_minutes",
+            maximum=MAX_TASK_TIMEOUT_MINUTES,
+        ),
         gates=tuple(gates),
         merge_auto=strict_bool(merge.get("auto", False), "merge.auto"),
         merge_push=strict_bool(merge.get("push", False), "merge.push"),
@@ -420,9 +448,22 @@ def release_task_claim(
             return next_status
 
 
-def set_status(config: Config, task: Task, next_status: str, *, force: bool = False, dry_run: bool = False) -> None:
+def set_status(
+    config: Config,
+    task: Task,
+    next_status: str,
+    *,
+    force: bool = False,
+    dry_run: bool = False,
+    _allow_quality_gate: bool = False,
+) -> None:
     if next_status not in STATUSES:
         raise ValidationError(f"非法状态 {next_status}，可选：{', '.join(STATUSES)}")
+    if next_status in QUALITY_GATE_STATUSES and not _allow_quality_gate:
+        raise DyroError(
+            "质量门状态只能由执行证据、独立复核或签收流程写入；"
+            "task status 仅可用于非质量门状态恢复"
+        )
     with exclusive_lock(_state_lock_path(task)):
         current = status(config, task)
         if current == next_status:
@@ -434,6 +475,25 @@ def set_status(config: Config, task: Task, next_status: str, *, force: bool = Fa
         if not dry_run:
             atomic_write_text(task.directory / "status", next_status + "\n")
             ledger(config, task.id, "status", from_status=current, to_status=next_status)
+
+
+def _set_quality_gate_status(
+    config: Config,
+    task: Task,
+    next_status: str,
+    *,
+    dry_run: bool = False,
+) -> None:
+    """Private transition used only after the relevant evidence has been verified."""
+    if next_status not in QUALITY_GATE_STATUSES:
+        raise AssertionError(f"not a quality-gate status: {next_status}")
+    set_status(
+        config,
+        task,
+        next_status,
+        dry_run=dry_run,
+        _allow_quality_gate=True,
+    )
 
 
 def ledger(config: Config, task_id: str, phase: str, **fields: object) -> None:
@@ -696,7 +756,18 @@ def _complete_execution_attempt(
     try:
         result = execute()
     except Exception as exc:
-        finish_execution_attempt(attempt, error=exc)
+        try:
+            finish_execution_attempt(attempt, error=exc)
+        except Exception as finish_exc:  # keep the executor failure authoritative
+            exc.add_note(f"attempt finalization also failed: {finish_exc}")
+        try:
+            if (
+                current_execution_attempt_id(task.directory) == attempt.attempt_id
+                and status(config, task) == "in_progress"
+            ):
+                set_status(config, task, "failed")
+        except Exception as state_exc:  # preserve the executor failure for callers
+            exc.add_note(f"task failure transition also failed: {state_exc}")
         ledger(
             config,
             task.id,
@@ -941,6 +1012,8 @@ def _valid_external_signoff(config: Config, task: Task) -> bool:
         )
     except ValidationError:
         return False
+    if not _valid_review_acceptance(config, task):
+        return False
     verdict, reviewed_receipt_hash, reviewed_task_heads_hash = _review_decision(task)
     try:
         receipt_hash = _file_sha256(resolve_evidence_path(task.directory, "receipt.md"))
@@ -972,6 +1045,37 @@ def _valid_external_signoff(config: Config, task: Task) -> bool:
                 and signoff.get("plan_sha256") == expected_binding[1]
             )
         )
+    )
+
+
+def _valid_review_acceptance(config: Config, task: Task) -> bool:
+    """Return whether an accepted review still binds the current execution proof."""
+    verdict, reviewed_receipt_hash, reviewed_task_heads_hash = _review_decision(task)
+    try:
+        receipt_hash = _file_sha256(resolve_evidence_path(task.directory, "receipt.md"))
+        task_heads_hash = _file_sha256(
+            resolve_evidence_path(task.directory, TASK_HEADS_FILE)
+        )
+    except DyroError:
+        return False
+    review = task.directory / "review.md"
+    if not review.is_file():
+        return False
+    binding_matches, _, _ = validate_review_binding(
+        task.directory,
+        review.read_text(encoding="utf-8"),
+    )
+    if not binding_matches:
+        return False
+    if config.policy.execution_mode == "local":
+        try:
+            _assert_task_heads_current(config, task)
+        except (DyroError, ValidationError):
+            return False
+    return (
+        verdict == "PASS"
+        and reviewed_receipt_hash == receipt_hash
+        and reviewed_task_heads_hash == task_heads_hash
     )
 
 
@@ -1212,7 +1316,7 @@ def _run_task(config: Config, task: Task, *, dry_run: bool, reserved: bool = Fal
         set_status(config, task, "failed")
         raise
     ledger(config, task.id, "execution_heads", task_heads_sha256=task_heads_hash)
-    set_status(config, task, "review")
+    _set_quality_gate_status(config, task, "review")
     return "review"
 
 
@@ -1346,7 +1450,7 @@ def _import_execution_evidence(
     if result != "DONE":
         set_status(config, task, "failed")
         return "failed"
-    set_status(config, task, "review")
+    _set_quality_gate_status(config, task, "review")
     return "review"
 
 
@@ -1440,7 +1544,7 @@ def _answer_task(config: Config, task: Task, answer: str, *, dry_run: bool, rese
         set_status(config, task, "failed")
         raise
     ledger(config, task.id, "execution_heads", task_heads_sha256=task_heads_hash)
-    set_status(config, task, "review")
+    _set_quality_gate_status(config, task, "review")
     return "review"
 
 
@@ -1487,7 +1591,7 @@ def _apply_review_decision(config: Config, task: Task, *, dry_run: bool = False)
                 if not dry_run:
                     ledger(config, task.id, "auto_merge_failed", error=str(exc))
                 raise
-        set_status(config, task, next_status, dry_run=dry_run)
+        _set_quality_gate_status(config, task, next_status, dry_run=dry_run)
         if not dry_run:
             ledger(
                 config,
@@ -1659,7 +1763,7 @@ def _signoff_task(
     )
     if not dry_run:
         atomic_write_text(task.directory / "signoff.json", json.dumps(signoff, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-        set_status(config, task, "done")
+        _set_quality_gate_status(config, task, "done")
         ledger(
             config,
             task.id,
@@ -1810,6 +1914,12 @@ def merge_task(config: Config, task: Task, *, push: bool = False, dry_run: bool 
     _require_local_execution(config, "合并", dry_run=dry_run)
     if status(config, task) != "done":
         raise DyroError(f"仅 done 任务可合并：{task.id}")
+    if not _valid_review_acceptance(config, task):
+        raise DyroError(
+            "仅具有有效的独立复核、当前回执与任务 HEAD 绑定的 done 任务可合并"
+        )
+    if config.policy.require_external_signoff and not _valid_external_signoff(config, task):
+        raise DyroError("当前 Profile 要求有效的外部签收后才能合并")
     _merge_task_repositories(config, task, push=push, dry_run=dry_run)
 
 

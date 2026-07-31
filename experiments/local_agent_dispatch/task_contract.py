@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from .context_guard import assert_content_allowed
 from .errors import DispatchValidationError
 
 
@@ -41,6 +42,8 @@ class TaskContract:
     backend: str
     mode: str
     strict: bool
+    allow_unconfined_provider: bool
+    allow_offline_simulation: bool
     files: tuple[str, ...]
     task: TaskBody
 
@@ -50,6 +53,8 @@ class TaskContract:
             "backend": self.backend,
             "mode": self.mode,
             "strict": self.strict,
+            "allow_unconfined_provider": self.allow_unconfined_provider,
+            "allow_offline_simulation": self.allow_offline_simulation,
             "files": list(self.files),
             "task": self.task.to_mapping(),
         }
@@ -60,6 +65,7 @@ def _require_nonempty_str(value: object, field: str) -> str:
         raise DispatchValidationError(f"task field must be a non-empty string: {field}")
     if len(value) > 200_000:
         raise DispatchValidationError(f"task field too large: {field}")
+    assert_content_allowed(value, label=f"task.{field}")
     return value
 
 
@@ -82,6 +88,12 @@ def parse_task_contract(payload: Mapping[str, Any]) -> TaskContract:
         raise DispatchValidationError(
             "strict shadow isolation is only valid with mode=read-only"
         )
+    allow_unconfined_provider = payload.get("allow_unconfined_provider", False)
+    if type(allow_unconfined_provider) is not bool:
+        raise DispatchValidationError("allow_unconfined_provider must be a boolean")
+    allow_offline_simulation = payload.get("allow_offline_simulation", False)
+    if type(allow_offline_simulation) is not bool:
+        raise DispatchValidationError("allow_offline_simulation must be a boolean")
 
     files = payload.get("files")
     if not isinstance(files, Sequence) or isinstance(files, (str, bytes)):
@@ -110,6 +122,8 @@ def parse_task_contract(payload: Mapping[str, Any]) -> TaskContract:
         backend=backend.strip(),
         mode=mode,
         strict=strict,
+        allow_unconfined_provider=allow_unconfined_provider,
+        allow_offline_simulation=allow_offline_simulation,
         files=tuple(str(item).strip() for item in files),
         task=task,
     )

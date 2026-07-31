@@ -49,7 +49,8 @@ class EchoAdapter:
             status="ok",
             summary=summary,
             evidence=evidence,
-            confidence="high",
+            confidence="low",
             warnings=["echo adapter is offline/deterministic; not a real model"],
             usage={"duration_ms": 1, "files": len(file_list)},
+            execution_kind="offline-simulation",
         )

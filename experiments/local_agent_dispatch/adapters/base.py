@@ -21,6 +21,7 @@ class AdapterResult:
     warnings: list[str] = field(default_factory=list)
     error_code: str = ""
     raw_preview: str = ""
+    execution_kind: str = "provider"
 
 
 class BackendAdapter(Protocol):

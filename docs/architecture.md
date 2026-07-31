@@ -104,7 +104,7 @@ backlog → assigned → in_progress → review ──────────�
                          └→ review_pending_signoff ─────────────┘
 ```
 
-非法状态跳转会被拒绝；人工恢复必须显式使用 `--force`。
+非法状态跳转会被拒绝。`task status --force` 只能用于非质量门的受控恢复，不能把任务推进到 `review`、`review_pending_signoff` 或 `done`；这些状态只能由已验证执行证据、独立复核和（如要求）签收的私有流程写入。`task merge` 还会在合并前重新验证当前 task HEAD 所绑定的 PASS review 与签收，状态文本本身不构成放行证据。
 
 ## 显式任务图
 
@@ -209,12 +209,13 @@ Ed25519 信任根位于 `.dyro/trust/ed25519/execution/`、`.dyro/trust/ed25519/
 10. `--push` 同时受 `policy.allow_push = true` 和命令行显式请求限制；只有全部本地 merge 成功后才开始逐仓 push。Git 本身不提供跨远端原子 push，部分远端失败会写入台账并保留本地合并供人工恢复。
 11. Change Set 只记录干净开发线的精确提交组合；`changeset verify` 会拒绝 dirty、分支或 HEAD 漂移。具体发布平台、promotion 与 forward-port 由 Profile 扩展执行并回写其证据。
 12. 下游调度不仅要求依赖任务为 `done`，还要求依赖的逐仓 task HEAD 已进入所属开发线；状态完成不能代替代码集成。
+13. 外部执行的后续 attempt 必须继承同一 run、递增 attempt number，并绑定前一 attempt 与回答摘要；同一编号不可被不同证据重写。
 
 ## 与 Graph Engineering 的关系（可选读）
 
 行业里有时把「多节点 + 路由/并行 + 校验/停机」的 agent/工作流拓扑称作 **Graph Engineering**（相对单 agent 的 loop）。
 
-Dyro 的交付拓扑与之**实质相近**：TaskGraph（`depends_on` / conflict_group）、任务状态机、gates、独立复核、signoff、merge，以及可选的 `dyro dispatch` / 语义运行时子图，都是可设计、可版本化的工作图节点与边。`dyro task graph` 与文档中的 Mermaid 图是该拓扑的显式视图。
+Dyro 的交付拓扑与之**实质相近**：TaskGraph（`depends_on` / conflict_group）、任务状态机、gates、独立复核、signoff、merge，以及可选的 `dyro dispatch` 建议性子图，都是可设计、可版本化的工作图节点与边。`dyro task graph` 与文档中的 Mermaid 图是该拓扑的显式视图。
 
 但产品身份仍是 **本地优先的多仓交付控制面（delivery control plane）**，不是 agent 编排框架，也不是 Knowledge Graph / GraphRAG 检索栈：
 

@@ -59,6 +59,27 @@ class TaskContractTests(unittest.TestCase):
                     },
                 }
             )
+
+    def test_rejects_secret_like_text_in_every_task_field(self) -> None:
+        token = "sk-proj-" + ("a" * 48)
+        for field in ("briefing", "locations", "objective", "constraints", "output_contract"):
+            with self.subTest(field=field):
+                task = {
+                    "briefing": "a",
+                    "locations": "b",
+                    "objective": "c",
+                    "constraints": "d",
+                    "output_contract": "e",
+                }
+                task[field] = f"token={token}"
+                with self.assertRaisesRegex(DispatchValidationError, "secret-like"):
+                    parse_task_contract(
+                        {
+                            "schema_version": 1,
+                            "files": ["src/a.py"],
+                            "task": task,
+                        }
+                    )
         with self.assertRaises(DispatchValidationError):
             parse_task_contract(
                 {
@@ -92,6 +113,8 @@ class ContextGuardTests(unittest.TestCase):
             self.assertTrue(check_path(good, root).allowed)
             self.assertFalse(check_path(env, root).allowed)
             self.assertFalse(check_content(leak.read_text(encoding="utf-8")).allowed)
+            self.assertFalse(check_content("token=sk-proj-" + ("a" * 48)).allowed)
+            self.assertFalse(check_content("token=github_pat_" + ("a" * 82)).allowed)
             self.assertTrue(guard_file(good, root).allowed)
 
             assert_files_allowed([good], root)
@@ -143,6 +166,8 @@ class LocatorVerifyTests(unittest.TestCase):
 class ProcessIdentityTests(unittest.TestCase):
     def test_current_identity_matches_self(self) -> None:
         identity = current_identity()
+        if identity.started_at.startswith("unknown-"):
+            self.skipTest("stable process-generation identity is unavailable")
         self.assertTrue(
             identity_matches(
                 {"pid": identity.pid, "started_at": identity.started_at}

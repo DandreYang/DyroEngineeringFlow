@@ -1,6 +1,20 @@
 # Changelog
 
-## 0.5.1 - Unreleased
+## 0.5.2 - Unreleased
+
+- Close dispatch secret boundaries for task text and Provider results; real
+  Providers now require explicit acknowledgement and read-only runs use a
+  guarded context projection.
+- Make `echo` an explicit offline simulation, strengthen dry-run validation,
+  and expose discovery-only local Provider commands without treating them as
+  executable adapters.
+- Prevent public task-status changes from bypassing review, revalidate review
+  evidence at merge, recover failed attempts to retryable state, and keep
+  external QUESTION continuations on a monotonic provenance lineage.
+- Verify trusted release-tag ancestry, lock the release build environment, and
+  document the incident/yank response path before the next publication.
+
+## 0.5.1 - 2026-07-31
 
 - Remove the Docker-backed external semantic runtime from the default package,
   CLI, release validation, and CI; preserve its source, tests, and design

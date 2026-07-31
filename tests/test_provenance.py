@@ -185,6 +185,57 @@ class ProvenanceTest(unittest.TestCase):
                     dry_run=True,
                 )
 
+    def test_external_attempts_keep_one_run_and_increment_after_question(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task_directory = Path(temporary)
+            task_directory.joinpath("task.toml").write_text(
+                'schema_version = 1\nid = "A"\n', encoding="utf-8"
+            )
+            plan = {
+                "schema_version": 1,
+                "source": "external_evidence_bundle",
+                "task_id": "A",
+            }
+            question = build_external_attempt_record(
+                task_directory,
+                "A",
+                plan,
+                result="QUESTION",
+                receipt_sha256="a" * 64,
+            )
+            question_path = task_directory / "question-provenance.json"
+            question_path.write_text(json.dumps(question), encoding="utf-8")
+            import_external_execution_attempt(
+                task_directory,
+                "A",
+                provenance=question_path,
+                receipt_sha256="a" * 64,
+                result="QUESTION",
+                expected_plan=plan,
+            )
+
+            done = build_external_attempt_record(
+                task_directory,
+                "A",
+                plan,
+                result="DONE",
+                receipt_sha256="b" * 64,
+            )
+            self.assertEqual(done["run_id"], question["run_id"])
+            self.assertEqual(done["attempt_number"], 2)
+            self.assertEqual(done["parent_attempt_id"], question["attempt_id"])
+            done_path = task_directory / "done-provenance.json"
+            done_path.write_text(json.dumps(done), encoding="utf-8")
+            imported = import_external_execution_attempt(
+                task_directory,
+                "A",
+                provenance=done_path,
+                receipt_sha256="b" * 64,
+                result="DONE",
+                expected_plan=plan,
+            )
+            self.assertEqual(imported["attempt_id"], done["attempt_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

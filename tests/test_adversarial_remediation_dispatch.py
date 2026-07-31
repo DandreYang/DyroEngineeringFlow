@@ -114,6 +114,46 @@ class _WritingAdapter:
         )
 
 
+class _InspectingProviderAdapter:
+    id = "codex"
+    command = "codex"
+    strict_isolation = False
+
+    def __init__(self) -> None:
+        self.cwd: Path | None = None
+
+    def available(self) -> bool:
+        return True
+
+    def authenticated(self) -> bool:
+        return True
+
+    def run(self, *, contract, cwd, context_files, timeout_seconds):
+        del contract, context_files, timeout_seconds
+        self.cwd = Path(cwd)
+        return AdapterResult(
+            status="ok",
+            summary="inspected only projected context",
+            confidence="medium",
+        )
+
+
+class _SecretFailureProviderAdapter:
+    id = "codex"
+    command = "codex"
+    strict_isolation = False
+
+    def available(self) -> bool:
+        return True
+
+    def authenticated(self) -> bool:
+        return True
+
+    def run(self, *, contract, cwd, context_files, timeout_seconds):
+        del contract, cwd, context_files, timeout_seconds
+        raise RuntimeError("provider failure token=sk-proj-" + ("a" * 48))
+
+
 def _init_git_project(root: Path) -> None:
     (root / "app.py").write_text("changed = False\n", encoding="utf-8")
     for argv in (
@@ -156,6 +196,63 @@ class DispatchIsolationTests(unittest.TestCase):
                     "strict isolation",
                 ):
                     get_adapter(backend, require_strict=True)
+
+    def test_real_provider_requires_acknowledgement_and_uses_context_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            (project / "app.py").write_text("safe = True\n", encoding="utf-8")
+            (project / "unlisted.txt").write_text("do not expose\n", encoding="utf-8")
+            adapter = _InspectingProviderAdapter()
+            supervisor = DispatchSupervisor(home=root / "home")
+            payload = _payload()
+            payload["backend"] = "codex"
+
+            with patch(
+                "experiments.local_agent_dispatch.supervisor.get_adapter",
+                return_value=adapter,
+            ):
+                with self.assertRaisesRegex(DispatchValidationError, "allow_unconfined_provider"):
+                    supervisor.accept(payload, project_root=project)
+                payload["allow_unconfined_provider"] = True
+                record = supervisor.accept(payload, project_root=project)
+                finished = supervisor.execute(record.run_id)
+
+            self.assertEqual(finished.status, "completed")
+            self.assertIsNotNone(adapter.cwd)
+            assert adapter.cwd is not None
+            self.assertNotEqual(adapter.cwd.resolve(), project.resolve())
+            self.assertTrue((adapter.cwd / "app.py").is_file())
+            self.assertFalse((adapter.cwd / "unlisted.txt").exists())
+            self.assertEqual((finished.result or {}).get("isolation"), "context-projection")
+
+    def test_provider_exception_with_secret_is_redacted_before_run_persistence(self) -> None:
+        token = "sk-proj-" + ("a" * 48)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            (project / "app.py").write_text("safe = True\n", encoding="utf-8")
+            supervisor = DispatchSupervisor(home=root / "home")
+            payload = _payload()
+            payload["backend"] = "codex"
+            payload["allow_unconfined_provider"] = True
+            adapter = _SecretFailureProviderAdapter()
+
+            with patch(
+                "experiments.local_agent_dispatch.supervisor.get_adapter",
+                return_value=adapter,
+            ):
+                record = supervisor.accept(payload, project_root=project)
+                finished = supervisor.execute(record.run_id)
+
+            self.assertEqual(finished.status, "failed")
+            serialized = (root / "home" / "runs" / f"{record.run_id}.json").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn(token, serialized)
+            self.assertIn("detail withheld", serialized)
 
     def test_edit_mode_changes_only_isolated_worktree_and_returns_patch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -843,6 +940,32 @@ class ContextAndResultContractTests(unittest.TestCase):
         with self.assertRaisesRegex(DispatchValidationError, "JSON"):
             _parse_model_json("plain text is not the result contract")
 
+    def test_backend_result_rejects_secret_like_model_echo_without_leaking_it(self) -> None:
+        token = "github_pat_" + ("a" * 82)
+        with self.assertRaisesRegex(DispatchValidationError, "secret-like") as raised:
+            _parse_model_json(
+                json.dumps(
+                    {
+                        "summary": f"reflected token={token}",
+                        "confidence": "high",
+                        "evidence": [],
+                    }
+                )
+            )
+        self.assertNotIn(token, str(raised.exception))
+
+    def test_result_envelope_rejects_secret_like_warning_without_leaking_it(self) -> None:
+        token = "sk-proj-" + ("a" * 48)
+        with self.assertRaisesRegex(DispatchValidationError, "secret-like") as raised:
+            build_result(
+                run_id="run-1",
+                status="error",
+                summary="",
+                cwd=Path.cwd(),
+                warnings=[f"provider echoed {token}"],
+            )
+        self.assertNotIn(token, str(raised.exception))
+
     def test_empty_evidence_is_not_fully_verified(self) -> None:
         result = build_result(
             run_id="run-1",
@@ -878,10 +1001,13 @@ class ProcessAndLifecycleTests(unittest.TestCase):
             ) as bounded,
         ):
             rows = probe_backends()
-            selected = get_adapter("auto")
+            with self.assertRaisesRegex(
+                DispatchValidationError,
+                "no available authenticated",
+            ):
+                get_adapter("auto")
 
         bounded.assert_not_called()
-        self.assertEqual(selected.id, "echo")
         by_id = {str(row["id"]): row for row in rows}
         self.assertFalse(by_id["codex"]["authenticated"])
         self.assertFalse(by_id["claude"]["authenticated"])
@@ -913,6 +1039,7 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                     "AWS_SECRET_ACCESS_KEY": "must-not-pass",
                     "ANTHROPIC_API_KEY": "claude-only",
                     "CODEX_HOME": "/tmp/codex-home",
+                    "HOME": "/private/home-must-not-pass",
                 },
                 clear=False,
             ),
@@ -938,6 +1065,7 @@ class ProcessAndLifecycleTests(unittest.TestCase):
         self.assertIn("--ignore-rules", argv)
         self.assertNotIn("must-not-pass", bounded.call_args.kwargs["env"].values())
         self.assertNotIn("claude-only", bounded.call_args.kwargs["env"].values())
+        self.assertNotIn("/private/home-must-not-pass", bounded.call_args.kwargs["env"].values())
         self.assertEqual(
             bounded.call_args.kwargs["env"].get("CODEX_HOME"),
             "/tmp/codex-home",
@@ -1128,6 +1256,7 @@ class ProcessAndLifecycleTests(unittest.TestCase):
             (project / "app.py").write_text("safe = True\n", encoding="utf-8")
             payload = _payload()
             payload["backend"] = "echo"
+            payload["allow_offline_simulation"] = True
             task_file = root / "task.json"
             task_file.write_text(json.dumps(payload), encoding="utf-8")
             output = io.StringIO()
@@ -1189,6 +1318,7 @@ class ProcessAndLifecycleTests(unittest.TestCase):
             )
             payload = _payload()
             payload["backend"] = "echo"
+            payload["allow_offline_simulation"] = True
             task_file = root / "task.json"
             task_file.write_text(json.dumps(payload), encoding="utf-8")
             output = io.StringIO()

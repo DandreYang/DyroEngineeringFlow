@@ -78,6 +78,98 @@ class TaskTests(WorkspaceCase):
         self.assertEqual(status(config, task), "done")
         merge_task(config, task)
 
+    def test_public_status_cannot_bypass_review_or_merge(self) -> None:
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-REVIEW-GATE"
+        task_path.mkdir(parents=True)
+        task_path.joinpath("task.toml").write_text(
+            task_template("TASK-REVIEW-GATE", "review gate", "alpha", "api", "services/api").replace('agent = "codex"', 'agent = "noop"'),
+            encoding="utf-8",
+        )
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
+        task = load_task(config, "TASK-REVIEW-GATE")
+        self.assertEqual(run_task(config, task), "review")
+
+        with self.assertRaisesRegex(DyroError, "质量门"):
+            set_status(config, task, "done")
+        with self.assertRaisesRegex(DyroError, "仅 done"):
+            merge_task(config, task)
+        self.assertEqual(status(config, task), "review")
+
+    def test_merge_revalidates_accepted_review_binding(self) -> None:
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-MERGE-RECHECK"
+        task_path.mkdir(parents=True)
+        task_path.joinpath("task.toml").write_text(
+            task_template("TASK-MERGE-RECHECK", "merge recheck", "alpha", "api", "services/api").replace('agent = "codex"', 'agent = "noop"'),
+            encoding="utf-8",
+        )
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
+        task = load_task(config, "TASK-MERGE-RECHECK")
+        self.assertEqual(run_task(config, task), "review")
+        self._write_bound_review(task_path)
+        self.assertEqual(review_task(config, task), "done")
+        task_path.joinpath("review.md").write_text("verdict: PASS\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(DyroError, "有效的独立复核"):
+            merge_task(config, task)
+
+    def test_execution_exception_marks_current_task_failed_for_retry(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                'write = ["/usr/bin/true"]', 'write = ["definitely-missing-dyro-agent"]'
+            ),
+            encoding="utf-8",
+        )
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-RETRY"
+        task_path.mkdir(parents=True)
+        task_path.joinpath("task.toml").write_text(
+            task_template("TASK-RETRY", "retryable failure", "alpha", "api", "services/api").replace('agent = "codex"', 'agent = "noop"'),
+            encoding="utf-8",
+        )
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task = load_task(config, "TASK-RETRY")
+
+        with self.assertRaisesRegex(DyroError, "找不到可执行命令"):
+            run_task(config, task)
+        self.assertEqual(status(config, task), "failed")
+        attempt = next(task_path.joinpath("attempts").glob("*.json"))
+        self.assertEqual(json.loads(attempt.read_text(encoding="utf-8"))["status"], "failed")
+
+    def test_task_manifest_rejects_non_positive_or_non_integer_timeouts(self) -> None:
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        cases = {
+            "timeout_minutes = true": "timeout_minutes",
+            'review_timeout_minutes = "0"': "review_timeout_minutes",
+            "timeout_seconds = -1": "timeout_seconds",
+        }
+        for replacement, expected in cases.items():
+            with self.subTest(replacement=replacement):
+                task_id = f"TASK-TIMEOUT-{len(replacement)}"
+                task_path = config.task_specs_dir / task_id
+                task_path.mkdir(parents=True, exist_ok=True)
+                manifest = task_template(task_id, "timeout validation", "alpha", "api", "services/api")
+                field = replacement.split(" =", 1)[0]
+                if field == "timeout_seconds":
+                    manifest = manifest.replace("timeout_seconds = 120", replacement)
+                else:
+                    manifest = manifest.replace(f"{field} = 60" if field == "timeout_minutes" else "review_timeout_minutes = 45", replacement)
+                task_path.joinpath("task.toml").write_text(
+                    manifest.replace('agent = "codex"', 'agent = "noop"'),
+                    encoding="utf-8",
+                )
+                task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValidationError, expected):
+                    load_task(config, task_id)
+
     def test_external_signoff_is_required_after_receipt_bound_review(self) -> None:
         config_path = self.root / "dyro.toml"
         config_path.write_text(
@@ -102,7 +194,7 @@ class TaskTests(WorkspaceCase):
 
         self.assertEqual(review_task(config, task), "review_pending_signoff")
         self.assertEqual(status(config, task), "review_pending_signoff")
-        with self.assertRaisesRegex(DyroError, "要求外部签收"):
+        with self.assertRaisesRegex(DyroError, "质量门"):
             set_status(config, task, "done", force=True)
         self.assertEqual(signoff_task(config, task, approver="release-manager"), "done")
         self.assertEqual(status(config, task), "done")

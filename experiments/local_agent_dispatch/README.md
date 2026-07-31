@@ -24,8 +24,10 @@ dyro dispatch doctor
 dyro dispatch backends
 
 # 默认异步派发并立即返回 run_id；需要同步等待时显式加 --wait。
-dyro dispatch run --project . --file task.json --backend echo
-dyro dispatch run --project . --file task.json --wait --backend echo
+dyro dispatch run --project . --file task.json --backend codex --allow-unconfined-provider
+dyro dispatch run --project . --file task.json --wait --backend claude --allow-unconfined-provider
+# Echo is a deliberate test simulation, never an automatic fallback:
+dyro dispatch run --project . --file task.json --backend echo --allow-offline-simulation
 dyro dispatch result <run_id>
 dyro dispatch panel --project . --file task.json --members echo
 dyro dispatch skill-render --write
@@ -44,7 +46,14 @@ closed until a Windows process-tree backend is implemented.
 
 ## Task JSON shape
 
-See design §4 (five-part contract). Backend `echo` is always available for offline dry runs.
+See design §4 (five-part contract). `auto` considers only integrated, authenticated
+Providers; with several it requires `dyro dispatch route add default <backend>`, and
+with none it fails closed. `cursor-agent`, `opencode`, `grok`, `hermes`, and `kimi`
+may be discovered, but cannot run until an audited adapter exists. Backend `echo` is
+an explicit offline simulation: task JSON must set `allow_offline_simulation: true`
+and callers must not treat its low-confidence result as a Provider conclusion.
+Real non-strict Provider calls require `allow_unconfined_provider: true`; read-only
+calls receive a guarded context projection, which is not OS-level isolation.
 `strict: true` is fail-closed: the selected adapter must declare a verified strict-isolation capability. The shipped external Codex and Claude CLI adapters do not; use `echo` only for protocol validation, and reject strict work until an adapter can prove the required isolation.
 Edit runs execute in a detached Git worktree and return a hash-bound patch reference; they do not mutate, commit, or push the source worktree.
 

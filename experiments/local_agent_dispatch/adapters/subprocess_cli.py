@@ -9,6 +9,7 @@ import shutil
 from typing import Callable, Mapping, Sequence
 
 from ..bounded_process import BoundedCompletedProcess, run_bounded
+from ..context_guard import assert_content_allowed, safe_error_text
 from ..errors import DispatchValidationError
 from ..process_identity import identity_for_pid
 from ..task_contract import TaskContract
@@ -18,7 +19,6 @@ from .base import AdapterResult
 _COMMON_ENV_ALLOWLIST = frozenset(
     {
         "PATH",
-        "HOME",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",
@@ -122,6 +122,12 @@ def _parse_model_json(text: str) -> dict[str, object]:
         raise DispatchValidationError("backend JSON evidence is invalid")
     if any(not isinstance(item, dict) for item in evidence):
         raise DispatchValidationError("backend JSON evidence entries must be objects")
+    assert_content_allowed(summary, label="provider.summary")
+    for index, item in enumerate(evidence):
+        for name in ("file", "claim", "lines"):
+            value = item.get(name)
+            if isinstance(value, str):
+                assert_content_allowed(value, label=f"provider.evidence[{index}].{name}")
     return {
         "summary": summary.strip(),
         "confidence": confidence,
@@ -147,7 +153,6 @@ def _completed_to_result(
             summary="",
             error_code="output_limit",
             warnings=["backend output exceeded the byte limit and was terminated"],
-            raw_preview=completed.stdout[:500],
         )
     if completed.returncode != 0:
         return AdapterResult(
@@ -163,8 +168,7 @@ def _completed_to_result(
             status="error",
             summary="",
             error_code="protocol_error",
-            warnings=[str(exc)],
-            raw_preview=completed.stdout[:500],
+            warnings=[safe_error_text(exc, fallback="backend result failed validation")],
         )
     return AdapterResult(
         status="ok",
@@ -172,7 +176,6 @@ def _completed_to_result(
         evidence=list(parsed["evidence"]),  # type: ignore[arg-type]
         confidence=str(parsed["confidence"]),
         usage={"exit_code": completed.returncode, "backend": backend},
-        raw_preview=completed.stdout[:500],
     )
 
 
@@ -245,7 +248,7 @@ class SubprocessCliAdapter:
                 status="error",
                 summary="",
                 error_code="spawn_failed",
-                warnings=[str(exc)],
+                warnings=[safe_error_text(exc, fallback="backend process could not start")],
             )
         return _completed_to_result(completed, backend=self.id)
 

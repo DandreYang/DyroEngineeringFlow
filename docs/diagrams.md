@@ -105,16 +105,16 @@ stateDiagram-v2
   assigned --> in_progress: run 开始
   in_progress --> waiting_answer: 需要人工答案
   waiting_answer --> in_progress: task answer
-  in_progress --> review: gates 通过 · 进入复核
+  in_progress --> review: gates 通过 · 私有证据流程
   in_progress --> failed: 失败
   failed --> assigned: 重试领取
-  review --> review_pending_signoff: require_external_signoff
-  review --> done: 独立复核 PASS
-  review_pending_signoff --> done: task signoff
+  review --> review_pending_signoff: 已验证复核 · 私有流程
+  review --> done: 独立复核 PASS · 私有流程
+  review_pending_signoff --> done: task signoff · 私有流程
   done --> [*]: task merge 进开发线
 ```
 
-非法跳转被拒绝；人工越权需显式 `--force`（见架构文档）。
+非法跳转被拒绝；`--force` 不能进入复核、待签收或完成等质量门状态（见架构文档）。
 
 ---
 
