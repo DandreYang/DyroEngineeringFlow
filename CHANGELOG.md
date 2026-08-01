@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.3 - Unreleased
+## 0.5.3 - 2026-08-01
 
 - Add a preview-first interactive `dyro setup` path, a read-only `dyro next`
   guide, and an explicit non-interactive mode for scripts and CI.

@@ -24,7 +24,16 @@ PyPI Trusted Publishing 将 GitHub Actions 的 OIDC 身份绑定到这个仓库�
 ## 发布一个版本
 
 1. 确认 `pyproject.toml` 的 `project.version` 是未发布的新版本，例如 `X.Y.Z`。
-2. 在本地使用锁定环境运行（不要临时 `pip install --upgrade` 构建工具）：
+2. 在创建 tag 前，将 `CHANGELOG.md` 中对应版本的标题从 `Unreleased`
+   改为实际发布日期，并确认其内容准确。例如：
+
+   ```markdown
+   ## X.Y.Z - 2026-08-01
+   ```
+
+   发布工作流会验证这一状态；不要等到发布后再修改 changelog。
+
+3. 在本地使用锁定环境运行（不要临时 `pip install --upgrade` 构建工具）：
 
    ```bash
    uv lock --check
@@ -35,18 +44,17 @@ PyPI Trusted Publishing 将 GitHub Actions 的 OIDC 身份绑定到这个仓库�
    uv run python -m twine check --strict dist/dyro-*.whl dist/dyro-*.tar.gz
    ```
 
-3. 提交并推送版本变更，创建与版本严格匹配的 tag，例如 `vX.Y.Z`。
-4. 在 GitHub 基于该 tag 创建并发布 Release。工作流会验证 checkout 恰为该 tag、tag commit 是 `origin/main` 的祖先、`uv.lock` 未漂移，再测试、构建、检查 metadata；通过 `pypi` Environment 的人工批准后才上传 PyPI。
-5. 发布完成后验证：
+4. 提交并推送版本变更，创建与版本严格匹配的 tag，例如 `vX.Y.Z`。
+5. 在 GitHub 基于该 tag 创建并发布 Release。工作流会验证 checkout 恰为该 tag、tag commit 是 `origin/main` 的祖先、`uv.lock` 未漂移，再测试、构建、检查 metadata；通过 `pypi` Environment 的人工批准后才上传 PyPI。
+6. 发布完成后验证：
 
    ```bash
    pipx install dyro
    dyro --version
    ```
 
-6. 将 `CHANGELOG.md` 中与 tag 对应的标题从 `Unreleased` 改为实际发布日期，
-   并确保 Git tag、GitHub Release、PyPI 版本和 changelog 都指向同一版本。不要
-   用下一版的发布来掩盖上一版的状态；若旧版本被 yank 或不再可下载，应保留其
+   Git tag、GitHub Release、PyPI 版本和 changelog 必须指向同一版本。不要用
+   下一版的发布来掩盖上一版的状态；若旧版本被 yank 或不再可下载，应保留其
    tag/Release，并在 changelog 或事故记录中写明状态与升级目标。
 
 PyPI 不允许覆盖同一个版本号。发布失败后，如需修改分发文件或 metadata，必须递增版本号并重新创建 Release。
