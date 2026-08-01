@@ -335,7 +335,12 @@ def ask_for_workspace(name_default: str, ask: Callable[[str], str] = input) -> t
     return name, repositories, base
 
 
-def bootstrap(config: Config, *, dry_run: bool = False) -> list[str]:
+def bootstrap(
+    config: Config,
+    *,
+    branch: str | None = None,
+    dry_run: bool = False,
+) -> list[str]:
     """Clone only absent repository anchors with configured remotes.
 
     An existing non-Git directory is an error, never a target for overwrite.
@@ -351,7 +356,14 @@ def bootstrap(config: Config, *, dry_run: bool = False) -> list[str]:
             raise DyroError(f"拒绝覆盖非 Git 目录：{destination}")
         if not repo.remote:
             raise DyroError(f"{repo_id} 缺少 remote，无法 bootstrap：{destination}")
-        command = ("git", "clone", repo.remote, str(destination))
+        command = ("git", "clone")
+        if branch:
+            # A bare remote can retain an empty or stale symbolic HEAD even
+            # when the requested base exists.  Explicitly checking out the
+            # accepted base guarantees that create_line can resolve a local
+            # anchor without trusting that remote default.
+            command += (f"--branch={branch}",)
+        command += (repo.remote, str(destination))
         messages.append(("DRY RUN " if dry_run else "CLONE ") + f"{repo_id}: {' '.join(command)}")
         if not dry_run:
             destination.parent.mkdir(parents=True, exist_ok=True)

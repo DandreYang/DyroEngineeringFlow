@@ -263,7 +263,7 @@ def _apply_setup_plan(plan: SetupPlan, *, dry_run: bool) -> None:
     config = load(plan.root)
     _ensure_state_directories(config.root)
     if plan.needs_bootstrap:
-        for message in bootstrap(config):
+        for message in bootstrap(config, branch=plan.default_base):
             print(message)
     if plan.line_id:
         line = create_line(
