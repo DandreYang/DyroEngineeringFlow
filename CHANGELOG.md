@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.5 - 2026-08-03
 
 - Add an availability-first coding-tool catalog with per-workspace history,
   non-binding project recommendations, and local default/pinned preferences.
