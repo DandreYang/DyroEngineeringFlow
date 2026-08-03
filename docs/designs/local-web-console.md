@@ -203,6 +203,22 @@ C02 只提供无项目数据的静态 shell、一次性 session 交换和认证�
 - C02 没有 CLI `console` 命令、浏览器打开、资源文件读取或 workspace API。它的唯一目的，是在
   接入真实 read model 前先固定并测试本地 HTTP 安全边界。
 
+### 4.3 C03 已落地的全局概览契约
+
+C03 在 listener 外新增 `ConsoleOverviewService`，把既有 registry 与每个工作区的一次
+`WorkspaceReadSnapshot` 投影为只读、分页的 overview：
+
+- listener 只验证 bearer、参数和 ETag；它不拥有 registry、Config 或 workspace 路径。概览服务
+  是可注入的读取边界，后续 worker 化不会改变 HTTP DTO；
+- 工作区按 `repair_required`、`needs_user`、active、paused、waiting、其余健康项目的固定优先级
+  排序。每张卡片只含 alias、已净化展示名、计数、attention、一个安全 CLI 恢复建议和摘要 digest；
+- registry 读取失败收敛为 `REGISTRY_UNAVAILABLE`。单个 Profile 或 snapshot 失败保留
+  `unavailable` 卡片和 `WORKSPACE_UNAVAILABLE`，不会影响其它工作区，也不返回根路径或原始错误；
+- `GET /api/v1/overview` 需要 bearer，`limit` 最大 100。下一页 cursor 与完整的当前概览 digest
+  以进程内 256-bit key 认证；篡改或状态变化后的 cursor 返回稳定错误，绝不退化为不透明 offset；
+- overview 的 `snapshot_sha256` 可作为 ETag 使用；同一脱敏页面带精确 `If-None-Match` 时返回
+  304。C03 仍没有 CLI、浏览器、静态资源或详情 API。
+
 ## 5. 模块设计
 
 建议模块边界：

@@ -1,10 +1,11 @@
-"""Local Console presentation boundary.
+"""Local Console read-side and loopback presentation boundary.
 
-The package starts with read-model composition only.  It deliberately exposes
-no listener, session, browser, subprocess, or mutation capability.
+The package deliberately exposes no browser launcher, subprocess execution,
+workspace mutation, or Core scheduling authority.
 """
 
+from .overview import ConsoleOverviewService
 from .read_model import workspace_envelope
 from .server import create_console_http_server
 
-__all__ = ["create_console_http_server", "workspace_envelope"]
+__all__ = ["ConsoleOverviewService", "create_console_http_server", "workspace_envelope"]
