@@ -269,6 +269,19 @@ Para actualizar, ejecuta `pipx upgrade dyro`. Si el equipo gestiona paquetes Pyt
 python3 -m pip install --user --upgrade dyro
 ```
 
+Los inicios interactivos con `dyro`, `dyro home` o `dyro start` consultan el endpoint oficial de PyPI como máximo una vez al día local. Los errores nunca bloquean el espacio de trabajo y, por defecto, cada actualización requiere confirmación:
+
+```bash
+dyro update check
+dyro update now
+dyro update auto on      # activa actualizaciones automáticas de parches
+dyro update auto off
+dyro update disable
+dyro update enable
+```
+
+Las actualizaciones automáticas nunca cambian la versión menor o mayor ni sobrescriben una instalación editable. `DYRO_NO_UPDATE_CHECK=1` omite la comprobación inicial. Consulta [actualizaciones seguras](docs/updates.md).
+
 Para desarrollar Dyro, usa la cadena de herramientas bloqueada del repositorio y su entrada de pruebas real; los ejemplos de gates de proyectos que siguen no son pruebas de Dyro.
 
 ```bash

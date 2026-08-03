@@ -269,6 +269,19 @@ dyro --version
 python3 -m pip install --user --upgrade dyro
 ```
 
+交互运行 `dyro`、`dyro home` 或 `dyro start` 时，Dyro 每个本地自然日最多访问一次官方 PyPI；断网、超时或状态目录不可写都不会阻塞进入工作区。默认仍由用户确认更新：
+
+```bash
+dyro update check
+dyro update now
+dyro update auto on      # 主动开启补丁版本自动更新
+dyro update auto off
+dyro update disable      # 同时关闭自动更新
+dyro update enable
+```
+
+Dyro 会识别 `uv tool`、`pipx`、当前 `pip`，也能在没有 pip 的普通虚拟环境中回退到 `uv pip`，并在手动更新前展示无 shell 的完整命令。自动更新不会跨次版本或主版本，也不会覆盖 editable 源码安装；设置 `DYRO_NO_UPDATE_CHECK=1` 可临时跳过启动检测，而不修改已保存的偏好。详见[安全更新](docs/updates.md)。
+
 若要开发 Dyro 本身，请使用仓库锁定的工具链和实际测试入口（不要把下文的“受控项目门禁”示例当成 Dyro 的测试命令）：
 
 ```bash

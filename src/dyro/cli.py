@@ -102,6 +102,16 @@ from .tooling import (
     set_default_tool,
     set_pinned_tools,
 )
+from .updates import (
+    EXPLICIT_CHECK_TIMEOUT,
+    UpdateKind,
+    check_for_update,
+    fetch_latest_version,
+    load_update_state,
+    perform_update,
+    set_auto_patch,
+    set_update_enabled,
+)
 from .workspace import create_line, doctor, get_line, list_lines, status_rows
 
 
@@ -796,6 +806,82 @@ def cmd_tool_pin(args: argparse.Namespace) -> None:
         if not tool_ids
         else "工具置顶顺序：" + ", ".join(tool_ids)
     )
+
+
+def _print_update_result(result) -> None:
+    if result.error:
+        raise DyroError(result.error)
+    if result.kind == UpdateKind.NONE:
+        print(f"Dyro {result.current_version} 已是最新稳定版本。")
+        return
+    print(
+        f"发现 Dyro {result.latest_version}（当前 {result.current_version}，"
+        f"{result.kind.value} 更新）"
+    )
+
+
+def cmd_update_check(args: argparse.Namespace) -> None:
+    result = _explicit_update_check()
+    _print_update_result(result)
+    if result.kind != UpdateKind.NONE:
+        print("运行 dyro update now 可确认并完成更新。")
+
+
+def cmd_update_now(args: argparse.Namespace) -> None:
+    result = _explicit_update_check(persist=not args.dry_run)
+    _print_update_result(result)
+    if result.kind == UpdateKind.NONE:
+        return
+    if (
+        not args.yes
+        and not args.dry_run
+        and not (sys.stdin.isatty() and sys.stdout.isatty())
+    ):
+        raise DyroError(
+            "非交互环境不会更新 Dyro；请在终端中运行，或审阅计划后显式添加 --yes"
+        )
+    perform_update(
+        result.latest_version,
+        yes=args.yes,
+        dry_run=args.dry_run,
+    )
+
+
+def _explicit_update_check(*, persist: bool = True):
+    return check_for_update(
+        __version__,
+        force=True,
+        persist=persist,
+        fetch=lambda current: fetch_latest_version(
+            current, timeout=EXPLICIT_CHECK_TIMEOUT
+        ),
+    )
+
+
+def cmd_update_auto(args: argparse.Namespace) -> None:
+    if args.mode == "status":
+        state = load_update_state()
+        print("补丁版本自动更新：" + ("已开启" if state.auto_patch else "已关闭"))
+        return
+    enabled = args.mode == "on"
+    if args.dry_run:
+        print("DRY RUN: 将" + ("开启" if enabled else "关闭") + "补丁版本自动更新")
+        return
+    set_auto_patch(enabled)
+    print("补丁版本自动更新：" + ("已开启" if enabled else "已关闭"))
+    if enabled:
+        print("仅同一主版本、次版本内的补丁更新会自动安装。")
+
+
+def cmd_update_enabled(args: argparse.Namespace) -> None:
+    enabled = args.update_command == "enable"
+    if args.dry_run:
+        print("DRY RUN: 将" + ("开启" if enabled else "关闭") + "每日更新检测")
+        return
+    state = set_update_enabled(enabled)
+    print("每日更新检测：" + ("已开启" if enabled else "已关闭"))
+    if not state.check_enabled:
+        print("补丁版本自动更新也已关闭。")
 
 
 def cmd_config_get(args: argparse.Namespace) -> None:
@@ -1737,6 +1823,23 @@ def build_parser() -> argparse.ArgumentParser:
     tool_pin.add_argument("ids", nargs="*")
     tool_pin.add_argument("--clear", action="store_true")
     tool_pin.set_defaults(func=cmd_tool_pin)
+    update = sub.add_parser("update", help="检测并安全更新 Dyro")
+    update_sub = update.add_subparsers(dest="update_command", required=True)
+    update_sub.add_parser("check", help="立即检查官方 PyPI 的最新稳定版本").set_defaults(
+        func=cmd_update_check
+    )
+    update_now = update_sub.add_parser("now", help="显示计划并更新到最新稳定版本")
+    update_now.add_argument("--yes", action="store_true", help="确认执行已展示的更新命令")
+    update_now.set_defaults(func=cmd_update_now)
+    update_auto = update_sub.add_parser("auto", help="管理补丁版本自动更新")
+    update_auto.add_argument("mode", choices=("on", "off", "status"), nargs="?", default="status")
+    update_auto.set_defaults(func=cmd_update_auto)
+    update_sub.add_parser("enable", help="开启每日首次交互运行更新检测").set_defaults(
+        func=cmd_update_enabled
+    )
+    update_sub.add_parser("disable", help="关闭每日更新检测与自动更新").set_defaults(
+        func=cmd_update_enabled
+    )
     config_command = sub.add_parser("config", help="安全地读取或修改常用 Profile 策略")
     config_sub = config_command.add_subparsers(dest="config_command", required=True)
     config_get = config_sub.add_parser("get")
@@ -2076,6 +2179,50 @@ def _route_experiment_surface(raw: list[str]) -> tuple[str, list[str]] | None:
     return surface, forwarded
 
 
+def _should_run_daily_update(
+    args: argparse.Namespace, *, interactive: bool | None = None
+) -> bool:
+    opt_out = os.environ.get("DYRO_NO_UPDATE_CHECK", "").strip().lower()
+    if opt_out in {"1", "true", "yes", "on"}:
+        return False
+    if getattr(args, "dry_run", False):
+        return False
+    if getattr(args, "command", None) not in {None, "home", "start"}:
+        return False
+    if interactive is None:
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    return interactive
+
+
+def _maybe_run_daily_update(*, install=perform_update) -> None:
+    try:
+        result = check_for_update(__version__)
+        if not result.checked or result.error or result.kind == UpdateKind.NONE:
+            return
+        state = load_update_state()
+    except (DyroError, OSError):
+        return
+    print(
+        f"\n发现 Dyro {result.latest_version}（当前 {result.current_version}）。"
+    )
+    if state.auto_patch and result.kind == UpdateKind.PATCH:
+        print("已开启补丁版本自动更新，正在安全更新……")
+        try:
+            updated = install(
+                result.latest_version,
+                yes=True,
+                dry_run=False,
+            )
+        except (DyroError, OSError) as exc:
+            print(f"自动更新失败：{exc}")
+            print("本次启动继续使用当前版本；稍后可运行 dyro update now 重试。")
+            return
+        if updated:
+            print("自动更新完成；本次启动继续运行，下次将使用新版本。")
+        return
+    print("运行 dyro update now 可一键确认更新；今天不再重复提示。")
+
+
 def main(argv: list[str] | None = None) -> None:
     import sys
 
@@ -2089,6 +2236,8 @@ def main(argv: list[str] | None = None) -> None:
 
             raise SystemExit(dispatch_main(experiment[1]))
         args = parser.parse_args(argv)
+        if _should_run_daily_update(args):
+            _maybe_run_daily_update()
         if hasattr(args, "func"):
             args.func(args)
         else:

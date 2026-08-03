@@ -269,6 +269,26 @@ To upgrade later, run `pipx upgrade dyro`. If your team manages Python packages 
 python3 -m pip install --user --upgrade dyro
 ```
 
+Interactive `dyro`, `dyro home`, and `dyro start` launches check the official
+PyPI endpoint at most once per local day. A failed or slow check never blocks
+workspace entry. Updates remain confirmation-first by default:
+
+```bash
+dyro update check
+dyro update now
+dyro update auto on      # opt in to patch-only automatic updates
+dyro update auto off
+dyro update disable      # also disables automatic updates
+dyro update enable
+```
+
+Dyro detects `uv tool`, `pipx`, the active `pip`, or a pip-less virtual
+environment managed through `uv pip`, and shows the exact shell-free command
+before a manual update. Automatic updates never cross
+a minor or major version, editable source installs are never overwritten, and
+`DYRO_NO_UPDATE_CHECK=1` disables startup checks without changing saved
+preferences. See [safe updates](docs/updates.md).
+
 To develop Dyro itself, use the repository's locked toolchain and its actual
 test entry point (not the per-repository gate examples below):
 

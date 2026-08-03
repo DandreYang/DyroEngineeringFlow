@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Check the official PyPI endpoint at most once per local day on interactive
+  home launches, cache the result in user-level Dyro state, and never block
+  workspace entry when the network or state directory is unavailable.
+- Add `dyro update check|now|enable|disable` and opt-in patch-only automatic
+  updates with installer-aware, shell-free commands and post-update version
+  verification; minor and major updates still require confirmation.
+
 ## 0.5.5 - 2026-08-03
 
 - Add an availability-first coding-tool catalog with per-workspace history,

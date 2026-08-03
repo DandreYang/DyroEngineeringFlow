@@ -269,6 +269,19 @@ dyro --version
 python3 -m pip install --user --upgrade dyro
 ```
 
+대화형 `dyro`, `dyro home`, `dyro start` 실행은 현지 날짜 기준 하루에 한 번만 공식 PyPI 엔드포인트를 확인합니다. 실패해도 작업 공간 진입을 막지 않으며 기본적으로 업데이트 전 확인을 요청합니다.
+
+```bash
+dyro update check
+dyro update now
+dyro update auto on      # 패치 버전 자동 업데이트 사용
+dyro update auto off
+dyro update disable
+dyro update enable
+```
+
+자동 업데이트는 마이너 또는 메이저 버전을 넘지 않고 editable 소스 설치를 덮어쓰지 않습니다. `DYRO_NO_UPDATE_CHECK=1`은 시작 검사를 건너뜁니다. [안전한 업데이트](docs/updates.md)를 참고하세요.
+
 Dyro 자체를 개발할 때는 저장소의 잠긴 도구 체인과 실제 테스트 진입점을 사용합니다. 아래의 프로젝트 gate 예시를 Dyro 테스트 명령으로 사용하지 마세요.
 
 ```bash

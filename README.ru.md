@@ -269,6 +269,19 @@ dyro --version
 python3 -m pip install --user --upgrade dyro
 ```
 
+Интерактивные запуски `dyro`, `dyro home` и `dyro start` проверяют официальный PyPI не чаще одного раза за локальный день. Ошибка не блокирует вход в рабочую область, а по умолчанию обновление требует подтверждения:
+
+```bash
+dyro update check
+dyro update now
+dyro update auto on      # включить автообновление patch-версий
+dyro update auto off
+dyro update disable
+dyro update enable
+```
+
+Автообновление не переходит на новую minor- или major-версию и не заменяет editable-установку из исходников. `DYRO_NO_UPDATE_CHECK=1` отключает проверку при запуске. См. [безопасные обновления](docs/updates.md).
+
 Для разработки самого Dyro используйте зафиксированную toolchain репозитория и настоящий вход тестов; приведённые ниже примеры project gates не являются тестами Dyro.
 
 ```bash
