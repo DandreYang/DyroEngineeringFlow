@@ -60,8 +60,8 @@ command line.
 
 The v1 contract contains:
 
-- `[workspace]`: a safe workspace ID, suggested directory, default line, and
-  fallback Profile base;
+- `[workspace]`: a safe workspace ID, suggested directory, default line,
+  fallback Profile base, and optional non-binding `recommended_tool`;
 - `[repositories.<id>]`: remote, anchor path, development-line mount, and
   argv-array verification gates; and
 - `[lines.<id>]`: one branch name plus a complete `bases` table that maps every
@@ -72,6 +72,10 @@ repository is cloned into a temporary sibling, verified at its pinned commit,
 checked out as a detached anchor, and only then renamed into the workspace.
 The selected development line receives isolated linked worktrees; it never
 shares an anchor checkout.
+
+`workspace.recommended_tool` is copied to the generated Profile and affects
+the interactive home badge and order only. It cannot install a tool, inject an
+install command, create an adapter, or grant delivery authority.
 
 ## Failure and retry behavior
 

@@ -24,45 +24,29 @@ from .tasks import (
     status as task_status,
     worktree_root,
 )
+from .tooling import (
+    TOOL_DEFINITIONS,
+    ToolDefinition,
+    ToolPreferences,
+    ToolState,
+    install_tool,
+    load_tool_preferences,
+    tool_definition,
+    tool_definition_for_command,
+)
 from .workspace import Line, doctor, get_line, line_root, list_lines, status_rows
 
 
-DISCOVERABLE_AGENTS = (
-    ("codex", True),
-    ("claude", False),
-    ("cursor-agent", False),
-    ("grok", False),
-    ("opencode", False),
-    ("hermes", False),
-    ("kimi", False),
+DISCOVERABLE_AGENTS = tuple(
+    (definition.command, definition.id == "codex")
+    for definition in TOOL_DEFINITIONS
+    if definition.interface != "desktop"
 )
 
-TOOL_LABELS = {
-    "codex": "Codex",
-    "claude": "Claude Code",
-    "cursor-agent": "Cursor CLI",
-    "grok": "Grok",
-    "opencode": "OpenCode",
-    "hermes": "Hermes",
-    "kimi": "Kimi",
-    "shell": "Shell",
-}
-
-
-@dataclass(frozen=True)
-class HomeLauncher:
-    id: str
-    argv: tuple[str, ...]
-
-
-HOME_LAUNCHERS = (
-    HomeLauncher("codex", ("codex", "-C", "{workspace}")),
-    HomeLauncher("claude", ("claude",)),
-    HomeLauncher("cursor-agent", ("cursor-agent", "--workspace", "{workspace}")),
-    HomeLauncher("grok", ("grok", "--cwd", "{workspace}")),
-    HomeLauncher("opencode", ("opencode", "{workspace}")),
-    HomeLauncher("hermes", ("hermes",)),
-    HomeLauncher("kimi", ("kimi",)),
+TOOL_LABELS = (
+    {definition.command: definition.label for definition in TOOL_DEFINITIONS}
+    | {definition.id: definition.label for definition in TOOL_DEFINITIONS}
+    | {"shell": "Shell"}
 )
 
 
@@ -79,7 +63,12 @@ class HomeTool:
     label: str
     kind: str
     argv: tuple[str, ...]
-    available: bool
+    environment: tuple[tuple[str, str], ...]
+    state: ToolState
+
+    @property
+    def available(self) -> bool:
+        return self.state in {ToolState.READY, ToolState.NEEDS_SETUP}
 
 
 def interactive_terminal() -> bool:
@@ -149,9 +138,9 @@ def available_adapters(config: Config, *, workspace: Path | None = None) -> list
 
 
 def _shell_argv() -> tuple[str, ...]:
-    configured = os.environ.get("SHELL", "").strip() or os.environ.get(
-        "COMSPEC", ""
-    ).strip()
+    configured = (
+        os.environ.get("SHELL", "").strip() or os.environ.get("COMSPEC", "").strip()
+    )
     if configured:
         return (configured,)
     fallback = shutil.which("zsh") or shutil.which("bash") or shutil.which("sh")
@@ -166,42 +155,140 @@ def _tool_label(adapter_id: str, executable: str) -> str:
     return label
 
 
-def home_tools(config: Config, *, workspace: Path) -> list[HomeTool]:
-    tools: list[HomeTool] = []
-    configured_commands: set[str] = set()
-    for adapter_id in sorted(config.adapters):
-        executable = _adapter_executable(config, adapter_id, workspace=workspace)
-        configured_commands.add(Path(executable).name)
-        tools.append(
-            HomeTool(
-                adapter_id,
-                _tool_label(adapter_id, executable),
-                "adapter",
-                (),
-                executable_available(executable, cwd=workspace),
+def _openclaw_needs_setup() -> bool:
+    configured = os.environ.get("OPENCLAW_CONFIG_PATH", "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+    else:
+        state = os.environ.get("OPENCLAW_STATE_DIR", "").strip()
+        if state:
+            state_path = Path(state).expanduser()
+        else:
+            configured_home = os.environ.get("OPENCLAW_HOME", "").strip()
+            home = (
+                Path(configured_home).expanduser() if configured_home else Path.home()
             )
-        )
+            profile = os.environ.get("OPENCLAW_PROFILE", "").strip()
+            state_path = home / (
+                f".openclaw-{profile}"
+                if profile and profile != "default"
+                else ".openclaw"
+            )
+        path = state_path / "openclaw.json"
+    try:
+        return not path.is_file() or path.stat().st_size == 0
+    except OSError:
+        return True
 
-    for launcher in HOME_LAUNCHERS:
-        if launcher.id in config.adapters or launcher.id in configured_commands:
-            continue
+
+def _cursor_desktop_argv(workspace: Path) -> tuple[tuple[str, ...], bool]:
+    if shutil.which("cursor") is not None:
+        return ("cursor", str(workspace)), True
+    if sys.platform == "darwin":
+        candidates = (
+            Path("/Applications/Cursor.app"),
+            Path.home() / "Applications" / "Cursor.app",
+        )
+        if any(candidate.is_dir() for candidate in candidates) and shutil.which("open"):
+            return ("open", "-a", "Cursor", str(workspace)), True
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            executable = Path(local_app_data) / "Programs" / "cursor" / "Cursor.exe"
+            if executable.is_file():
+                return (str(executable), str(workspace)), True
+    return ("cursor", str(workspace)), False
+
+
+def _launcher_tool(
+    definition: ToolDefinition, *, config: Config, workspace: Path
+) -> HomeTool:
+    if definition.id == "cursor-desktop":
+        argv, installed = _cursor_desktop_argv(workspace)
+    else:
         argv = expand_argv(
-            launcher.argv,
+            definition.launch,
             workspace=workspace,
             root=config.root,
             task="",
             line="",
             prompt="",
         )
+        installed = executable_available(argv[0], cwd=workspace)
+    environment = tuple(
+        (
+            key,
+            value.format(
+                workspace=workspace,
+                root=config.root,
+                task="",
+                line="",
+                prompt="",
+            ),
+        )
+        for key, value in definition.environment
+    )
+    if installed:
+        needs_setup = definition.id == "openclaw" and _openclaw_needs_setup()
+        state = ToolState.NEEDS_SETUP if needs_setup else ToolState.READY
+        if needs_setup:
+            argv = (
+                "openclaw",
+                "onboard",
+                "--workspace",
+                str(workspace),
+                "--skip-bootstrap",
+            )
+            environment = ()
+    else:
+        state = (
+            ToolState.INSTALLABLE
+            if definition.install is not None
+            else ToolState.UNAVAILABLE
+        )
+    return HomeTool(
+        definition.id,
+        definition.label,
+        "launcher",
+        argv,
+        environment,
+        state,
+    )
+
+
+def home_tools(config: Config, *, workspace: Path) -> list[HomeTool]:
+    tools: list[HomeTool] = []
+    configured_commands: set[str] = set()
+    for adapter_id in sorted(config.adapters):
+        executable = _adapter_executable(config, adapter_id, workspace=workspace)
+        command = Path(executable).name
+        configured_commands.add(command)
+        definition = tool_definition_for_command(command)
+        installed = executable_available(executable, cwd=workspace)
         tools.append(
             HomeTool(
-                launcher.id,
-                TOOL_LABELS[launcher.id],
-                "launcher",
-                argv,
-                executable_available(argv[0], cwd=workspace),
+                adapter_id,
+                _tool_label(adapter_id, executable),
+                "adapter",
+                (),
+                (),
+                (
+                    ToolState.READY
+                    if installed
+                    else ToolState.INSTALLABLE
+                    if definition and definition.install
+                    else ToolState.UNAVAILABLE
+                ),
             )
         )
+
+    for definition in TOOL_DEFINITIONS:
+        if (
+            definition.id in config.adapters
+            or definition.command in configured_commands
+        ):
+            continue
+        tools.append(_launcher_tool(definition, config=config, workspace=workspace))
 
     shell_argv = _shell_argv()
     if (
@@ -214,10 +301,53 @@ def home_tools(config: Config, *, workspace: Path) -> list[HomeTool]:
                 TOOL_LABELS["shell"],
                 "launcher",
                 shell_argv,
-                executable_available(shell_argv[0], cwd=workspace),
+                (),
+                (
+                    ToolState.READY
+                    if executable_available(shell_argv[0], cwd=workspace)
+                    else ToolState.UNAVAILABLE
+                ),
             )
         )
     return tools
+
+
+def sort_home_tools(
+    tools: list[HomeTool],
+    *,
+    last_tool: str,
+    recommended_tool: str,
+    preferences: ToolPreferences,
+) -> list[HomeTool]:
+    state_rank = {
+        ToolState.READY: 0,
+        ToolState.NEEDS_SETUP: 1,
+        ToolState.INSTALLABLE: 2,
+        ToolState.UNAVAILABLE: 3,
+    }
+    pinned = {tool_id: index for index, tool_id in enumerate(preferences.pinned_tools)}
+
+    def preference_rank(tool: HomeTool) -> tuple[int, int]:
+        if tool.id == last_tool:
+            return 0, 0
+        if tool.id == recommended_tool:
+            return 1, 0
+        if tool.id == preferences.default_tool:
+            return 2, 0
+        if tool.id in pinned:
+            return 3, pinned[tool.id]
+        return 4, 0
+
+    return sorted(
+        tools,
+        key=lambda tool: (
+            tool.id == "shell",
+            state_rank[tool.state],
+            *preference_rank(tool),
+            tool.kind != "adapter",
+            tool.id,
+        ),
+    )
 
 
 def print_agent_discovery(config: Config) -> None:
@@ -228,6 +358,7 @@ def print_agent_discovery(config: Config) -> None:
     print(f"{'命令':16} {'本机':10} {'Dyro 状态':16} 说明")
     known_commands = {command for command, _ in DISCOVERABLE_AGENTS}
     for command, integrated in DISCOVERABLE_AGENTS:
+        definition = tool_definition_for_command(command)
         installed = shutil.which(command) is not None
         configured_as = ",".join(configured_commands.get(command, ()))
         if configured_as and installed:
@@ -244,8 +375,31 @@ def print_agent_discovery(config: Config) -> None:
             note = "首页可仅打开工作区；不获得执行、门禁或复核权限"
         else:
             state = "-"
-            note = "未安装"
+            note = (
+                f"未安装；可运行 dyro tool install {definition.id}"
+                if definition and definition.install
+                else "未安装；暂无内置安装方案"
+            )
         print(f"{command:16} {'已检测' if installed else '-':10} {state:16} {note}")
+    cursor_definition = next(
+        definition
+        for definition in TOOL_DEFINITIONS
+        if definition.id == "cursor-desktop"
+    )
+    cursor_desktop = _launcher_tool(
+        cursor_definition, config=config, workspace=config.root
+    )
+    desktop_state = "已检测" if cursor_desktop.available else "-"
+    desktop_note = (
+        "首页可打开工作区；不获得执行、门禁或复核权限"
+        if cursor_desktop.available
+        else "未安装；可运行 dyro tool install cursor-desktop"
+    )
+    desktop_integration = "尚未集成" if cursor_desktop.available else "-"
+    print(
+        f"{'cursor-desktop':16} {desktop_state:10} "
+        f"{desktop_integration:16} {desktop_note}"
+    )
     for adapter_id in sorted(config.adapters):
         executable = _adapter_executable(config, adapter_id)
         if Path(executable).name in known_commands:
@@ -299,9 +453,7 @@ def launch_adapter(
         raise DyroError(f"无法启动 Agent {adapter_id}：{exc}") from exc
 
 
-def launch_home_tool(
-    *, workspace: Path, tool: HomeTool, dry_run: bool
-) -> None:
+def launch_home_tool(*, workspace: Path, tool: HomeTool, dry_run: bool) -> None:
     if tool.kind != "launcher" or not tool.argv:
         raise ValidationError(f"首页启动器无效：{tool.id}")
     if not workspace.is_dir():
@@ -312,12 +464,15 @@ def launch_home_tool(
             "运行 dyro agent discover 查看本机状态"
         )
     print(f"工作目录：{workspace}")
-    print("$ " + shlex.join(tool.argv))
+    assignments = [f"{key}={value}" for key, value in tool.environment]
+    print("$ " + shlex.join([*assignments, *tool.argv]))
     if dry_run:
         return
     os.chdir(workspace)
     try:
-        os.execvp(tool.argv[0], list(tool.argv))
+        environment = os.environ.copy()
+        environment.update(dict(tool.environment))
+        os.execvpe(tool.argv[0], list(tool.argv), environment)
     except OSError as exc:
         raise DyroError(f"无法启动编码工具 {tool.label}：{exc}") from exc
 
@@ -535,40 +690,110 @@ def _choose_action(
     raise DyroError("菜单编号超出范围")
 
 
+def _tool_state_labels(
+    tool: HomeTool,
+    *,
+    default: HomeTool,
+    last_tool: str,
+    recommended_tool: str,
+    preferences: ToolPreferences,
+) -> list[str]:
+    definition = tool_definition(tool.id)
+    if tool.kind == "adapter":
+        if tool.state == ToolState.READY:
+            labels = ["已配置"]
+        elif tool.state == ToolState.INSTALLABLE:
+            labels = ["已配置但不可用", "可引导安装"]
+        else:
+            labels = ["已配置但不可用"]
+    elif tool.state == ToolState.READY:
+        interface = definition.interface if definition else "terminal"
+        if interface == "desktop":
+            labels = ["已安装", "桌面应用", "仅打开工作区"]
+        elif interface == "runtime":
+            labels = ["已安装", "外部运行时", "仅打开工作区"]
+        elif tool.id == "shell":
+            labels = ["终端兜底"]
+        else:
+            labels = ["已安装", "仅打开工作区"]
+    elif tool.state == ToolState.NEEDS_SETUP:
+        labels = ["已安装", "待初始化", "仅打开工作区"]
+    elif tool.state == ToolState.INSTALLABLE:
+        labels = ["未安装", "可引导安装"]
+    else:
+        labels = ["未安装", "暂无内置安装方案"]
+    if tool.id == last_tool:
+        labels.append("上次使用")
+    if tool.id == recommended_tool:
+        labels.append("项目推荐")
+    if tool.id == preferences.default_tool:
+        labels.append("个人默认")
+    if tool.id in preferences.pinned_tools:
+        labels.append("已置顶")
+    if tool.id == default.id:
+        labels.append("回车默认")
+    return labels
+
+
+def _install_id(config: Config, tool: HomeTool) -> str:
+    if tool.kind != "adapter":
+        return tool.id
+    command = Path(_adapter_executable(config, tool.id)).name
+    definition = tool_definition_for_command(command)
+    return definition.id if definition else tool.id
+
+
+def _confirm_setup(tool: HomeTool, *, workspace: Path, dry_run: bool) -> bool:
+    if tool.state != ToolState.NEEDS_SETUP:
+        return True
+    print(f"\n{tool.label} 已安装，但还需要完成官方初始化。")
+    print(f"Dyro 会把所选路径设为 OpenClaw 的默认工作区：{workspace}")
+    print("注意：OpenClaw 工作区不是系统沙箱；它仍可能在当前用户权限内访问其他路径。")
+    print("Dyro 会要求 OpenClaw 跳过在项目中生成 bootstrap 文件。")
+    print("它不会因此获得 Dyro 的门禁、复核、合并或 push 权限。")
+    if dry_run:
+        print("DRY RUN: 将启动官方 onboarding；未执行。")
+        return True
+    return input("现在启动初始化？[y/N]：").strip().lower() in {"y", "yes"}
+
+
 def _choose_tool(
-    config: Config, record: WorkspaceRecord | None, *, workspace: Path
+    config: Config,
+    record: WorkspaceRecord | None,
+    *,
+    workspace: Path,
+    dry_run: bool,
 ) -> HomeTool | None:
-    tools = home_tools(config, workspace=workspace)
+    preferences = load_tool_preferences()
+    last_tool = record.last_agent if record else ""
+    tools = sort_home_tools(
+        home_tools(config, workspace=workspace),
+        last_tool=last_tool,
+        recommended_tool=config.recommended_tool,
+        preferences=preferences,
+    )
+    ready = [tool for tool in tools if tool.state == ToolState.READY]
     available = [tool for tool in tools if tool.available]
     if not available:
         print_agent_discovery(config)
-        selector = f"--workspace {record.name}" if record else f"--root {config.root}"
-        raise DyroError(
-            f"当前项目没有可启动的编码工具。下一步："
-            f"dyro {selector} agent add codex --preset codex"
-        )
-    remembered = (
-        record.last_agent
-        if record and any(tool.id == record.last_agent for tool in available)
-        else ""
-    )
-    default = next(
-        (tool for tool in available if tool.id == remembered), available[0]
-    )
+        raise DyroError("当前项目没有可启动的编码工具；请选择可引导安装的工具")
+    default = ready[0] if ready else available[0]
     print("\n使用哪个编码工具？\n")
     for index, tool in enumerate(tools, start=1):
-        states: list[str] = []
-        if tool.kind == "adapter":
-            states.append("已配置" if tool.available else "已配置但不可用")
-        else:
-            states.append("仅打开工作区" if tool.available else "未安装")
-        if tool.id == default.id:
-            states.append("上次使用" if remembered else "默认")
-        print(f"  {index}) {tool.label}（{'，'.join(states)}）")
+        labels = _tool_state_labels(
+            tool,
+            default=default,
+            last_tool=last_tool,
+            recommended_tool=config.recommended_tool,
+            preferences=preferences,
+        )
+        print(f"  {index}) {tool.label}（{'，'.join(labels)}）")
     print("  q) 退出")
-    raw = input(
-        f"\n请选择（输入编号或工具名，直接回车默认 {default.label}）："
-    ).strip().lower()
+    raw = (
+        input(f"\n请选择（输入编号或工具名，直接回车默认 {default.label}）：")
+        .strip()
+        .lower()
+    )
     if not raw:
         return default
     if raw in {"q", "quit"}:
@@ -576,14 +801,40 @@ def _choose_tool(
     if raw.isdigit() and 1 <= int(raw) <= len(tools):
         selected = tools[int(raw) - 1]
     else:
-        selected = next((tool for tool in tools if tool.id == raw), None)
+        selected = next(
+            (
+                tool
+                for tool in tools
+                if tool.id.lower() == raw or tool.label.lower() == raw
+            ),
+            None,
+        )
     if selected is None:
         raise DyroError("无效的编码工具选择")
-    if not selected.available:
-        raise DyroError(
-            f"{selected.label} 未安装或不可执行；"
-            "运行 dyro agent discover 查看本机状态"
+    if selected.state == ToolState.INSTALLABLE:
+        install_id = _install_id(config, selected)
+        if not install_tool(install_id, yes=False, dry_run=dry_run):
+            return None
+        tools = sort_home_tools(
+            home_tools(config, workspace=workspace),
+            last_tool=last_tool,
+            recommended_tool=config.recommended_tool,
+            preferences=preferences,
         )
+        selected = next((tool for tool in tools if tool.id == selected.id), None)
+        if selected is None or not selected.available:
+            raise DyroError(
+                f"安装命令已完成，但当前终端仍未检测到 {install_id}；"
+                "请重新打开终端后再运行 dyro"
+            )
+    if selected.state == ToolState.UNAVAILABLE:
+        raise DyroError(
+            f"{selected.label} 未安装或不可执行，且暂无内置安装方案；"
+            "运行 dyro agent discover 查看详情"
+        )
+    if not _confirm_setup(selected, workspace=workspace, dry_run=dry_run):
+        print("已取消初始化；没有修改工作区。")
+        return None
     return selected
 
 
@@ -635,7 +886,7 @@ def _run_config_home(
         target_workspace = existing_task_workspace(config, task)
     else:
         _, target_workspace = existing_line_workspace(config, target_id, kind)
-    tool = _choose_tool(config, record, workspace=target_workspace)
+    tool = _choose_tool(config, record, workspace=target_workspace, dry_run=dry_run)
     if tool is None:
         return
     if record and not dry_run:

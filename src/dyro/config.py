@@ -66,6 +66,7 @@ class Config:
     repositories: dict[str, Repository]
     adapters: dict[str, Adapter]
     policy: Policy
+    recommended_tool: str = ""
 
     @property
     def task_specs_dir(self) -> Path:
@@ -143,6 +144,12 @@ def load(root: Path | None = None) -> Config:
 
     workspace_raw = raw.get("workspace", {})
     name = _string(workspace_raw.get("name"), "workspace.name")
+    recommended_tool_raw = workspace_raw.get("recommended_tool", "")
+    if not isinstance(recommended_tool_raw, str):
+        raise ValidationError("workspace.recommended_tool 必须是字符串")
+    recommended_tool = recommended_tool_raw.strip()
+    if recommended_tool:
+        validate_id(recommended_tool, "workspace.recommended_tool")
     layout_raw = raw.get("layout", {})
     layout = Layout(
         anchors=_relative(str(layout_raw.get("anchors", "repositories")), "layout.anchors"),
@@ -209,7 +216,15 @@ def load(root: Path | None = None) -> Config:
         write = _argv(entry.get("write", entry.get("command")), f"adapters.{adapter_id}.write")
         launch = _argv(entry.get("launch", entry.get("command", entry.get("write"))), f"adapters.{adapter_id}.launch")
         adapters[adapter_id] = Adapter(adapter_id, launch, read, write)
-    return Config(workspace, name, layout, repositories, adapters, policy)
+    return Config(
+        workspace,
+        name,
+        layout,
+        repositories,
+        adapters,
+        policy,
+        recommended_tool,
+    )
 
 
 def expand_argv(argv: tuple[str, ...], **values: str | Path) -> tuple[str, ...]:

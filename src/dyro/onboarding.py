@@ -244,15 +244,23 @@ def render_config(
     default_base: str = "main",
     *,
     adapter_presets: tuple[str, ...] = (),
+    recommended_tool: str = "",
 ) -> str:
     if not repositories:
         raise ValidationError("向导至少需要一个仓库")
     validate_id(name, "workspace 名称")
+    if recommended_tool:
+        validate_id(recommended_tool, "workspace.recommended_tool")
     chunks = [
         "schema_version = 1",
         "",
         "[workspace]",
         f"name = {_quote(name)}",
+    ]
+    if recommended_tool:
+        chunks.append(f"recommended_tool = {_quote(recommended_tool)}")
+    chunks.extend(
+        [
         "",
         "[layout]",
         'anchors = "repositories"',
@@ -270,7 +278,8 @@ def render_config(
         "require_signed_review = false",
         "require_signed_signoff = false",
         'execution_mode = "local"',
-    ]
+        ]
+    )
     for preset in adapter_presets:
         if preset != "codex":
             raise ValidationError(f"首次设置不支持的 Agent preset：{preset}")

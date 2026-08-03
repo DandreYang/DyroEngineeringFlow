@@ -363,6 +363,27 @@ on the local machine are labeled `open workspace only` and receive no gate,
 review, merge, or push authority. Explicit commands such as
 `dyro open dev --agent codex` continue to launch directly for scripts.
 
+The picker detects Cursor Desktop separately from Cursor CLI and supports
+OpenClaw as a launch-only external runtime. Ready tools appear before tools that
+need setup or installation; the current workspace's last choice, project
+recommendation, personal default, and pinned order provide stable tie-breaking.
+Selecting a missing supported tool opens a confirmation-first guided installer:
+
+```bash
+dyro tool list
+dyro tool default cursor-desktop
+dyro tool pin cursor-desktop codex openclaw
+dyro --dry-run tool install openclaw
+dyro tool install openclaw
+```
+
+Install recipes are built into Dyro as shell-free argv. Project files cannot
+supply install commands. Remote-script installers are never executed by Dyro;
+after confirmation it opens the official page instead. See
+[coding-tool catalog and guided installation](docs/tool-catalog.md).
+An OpenClaw workspace is a default working directory, not an operating-system
+sandbox; the onboarding prompt calls out that boundary before launch.
+
 Projects can also be registered, selected, and inspected explicitly. These commands manage global entry points only; they never move or delete a project:
 
 ```bash
@@ -515,7 +536,7 @@ dyro --dry-run task run API-101
 | `line create/list` | Create, register, and inspect feature development lines. |
 | `hotfix create` | Create a hotfix line from an explicit production base. |
 | `changeset create/list/verify` | Pin and verify the exact clean Git heads that make up a multi-repository delivery. |
-| `config get/set` / `agent list/add/test/discover` / `open` | Safely manage policy and adapters, discover or validate local commands, or open an agent in the correct line. |
+| `config get/set` / `agent list/add/test/discover` / `tool list/install/default/pin` / `open` | Safely manage policy, adapters, tool discovery and personal launch preferences, or open an agent in the correct line. |
 | `task create/open/list/board/status/next/graph/explain/attempts/binding` | Create or enter tasks, manage state, validate the task graph, explain scheduling, inspect provenance, and output review bindings. |
 | `task run/answer/gates/review/signoff` | Run tasks, resolve questions, execute gates, request independent review, and record external sign-off when a Profile requires it. |
 | `task claim --output` / `task evidence build/execution/review` | One-time claim with a create-only runner handoff file, portable execution-evidence build/import, and receipt-bound review import. |

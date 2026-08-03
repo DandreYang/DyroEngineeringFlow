@@ -24,12 +24,15 @@ from .config import CONFIG_NAME, Config, load, validate_id
 from .evidence import build_execution_bundle, unpack_execution_bundle
 from .errors import DyroError, ValidationError
 from .home import (
+    home_tools,
     open_line,
     open_task,
     print_agent_discovery,
     print_all_status,
     print_status,
+    resolve_home_config,
     run_home,
+    sort_home_tools,
 )
 from .hub import (
     add_workspace,
@@ -91,6 +94,13 @@ from .tasks import (
     stats,
     status as task_status,
     task_template,
+)
+from .tooling import (
+    ToolState,
+    install_tool,
+    load_tool_preferences,
+    set_default_tool,
+    set_pinned_tools,
 )
 from .workspace import create_line, doctor, get_line, list_lines, status_rows
 
@@ -589,6 +599,8 @@ def cmd_blueprint_validate(args: argparse.Namespace) -> None:
     print(f"来源：{document.source}")
     print(f"SHA-256：{document.sha256}")
     print(f"仓库：{len(blueprint.repositories)} 个")
+    if blueprint.recommended_tool:
+        print(f"推荐编码工具：{blueprint.recommended_tool}（仅推荐，不自动安装）")
     print(
         "开发线："
         + "、".join(
@@ -700,6 +712,90 @@ def cmd_agent_test(args: argparse.Namespace) -> None:
 
 def cmd_agent_discover(args: argparse.Namespace) -> None:
     print_agent_discovery(_config(args))
+
+
+def cmd_tool_list(args: argparse.Namespace) -> None:
+    resolved = resolve_home_config(
+        root=getattr(args, "root", None),
+        workspace=getattr(args, "workspace_alias", None),
+        dry_run=True,
+    )
+    if resolved is None:
+        raise DyroError("还没有可用工作区；先运行 dyro setup 或 dyro join")
+    config, record = resolved
+    preferences = load_tool_preferences()
+    tools = sort_home_tools(
+        home_tools(config, workspace=config.root),
+        last_tool=record.last_agent if record else "",
+        recommended_tool=config.recommended_tool,
+        preferences=preferences,
+    )
+    labels = {
+        ToolState.READY: "可使用",
+        ToolState.NEEDS_SETUP: "待初始化",
+        ToolState.INSTALLABLE: "可引导安装",
+        ToolState.UNAVAILABLE: "不可用",
+    }
+    print(f"{'ID':20} {'状态':12} {'类型':10} 名称")
+    for tool in tools:
+        markers: list[str] = []
+        if record and tool.id == record.last_agent:
+            markers.append("上次使用")
+        if tool.id == config.recommended_tool:
+            markers.append("项目推荐")
+        if tool.id == preferences.default_tool:
+            markers.append("个人默认")
+        suffix = f" [{' / '.join(markers)}]" if markers else ""
+        print(
+            f"{tool.id:20} {labels[tool.state]:12} {tool.kind:10} "
+            f"{tool.label}{suffix}"
+        )
+
+
+def cmd_tool_install(args: argparse.Namespace) -> None:
+    if (
+        not args.yes
+        and not args.dry_run
+        and not (sys.stdin.isatty() and sys.stdout.isatty())
+    ):
+        raise DyroError(
+            "非交互环境不会安装工具；请在终端中运行，或审阅计划后显式添加 --yes"
+        )
+    install_tool(args.id, yes=args.yes, dry_run=args.dry_run)
+
+
+def cmd_tool_default(args: argparse.Namespace) -> None:
+    tool_id = "" if args.clear else (args.id or "")
+    if not tool_id and not args.clear:
+        raise DyroError("请提供工具 ID，或使用 --clear 清除个人默认")
+    if args.dry_run:
+        print(
+            "DRY RUN: 将清除个人默认工具"
+            if not tool_id
+            else f"DRY RUN: 将个人默认工具设为 {tool_id}"
+        )
+        return
+    set_default_tool(tool_id)
+    print("已清除个人默认工具" if not tool_id else f"个人默认工具：{tool_id}")
+
+
+def cmd_tool_pin(args: argparse.Namespace) -> None:
+    tool_ids = () if args.clear else tuple(args.ids)
+    if not tool_ids and not args.clear:
+        raise DyroError("请提供至少一个工具 ID，或使用 --clear 清除置顶顺序")
+    if args.dry_run:
+        print(
+            "DRY RUN: 将清除工具置顶顺序"
+            if not tool_ids
+            else "DRY RUN: 将工具置顶顺序设为 " + ", ".join(tool_ids)
+        )
+        return
+    set_pinned_tools(tool_ids)
+    print(
+        "已清除工具置顶顺序"
+        if not tool_ids
+        else "工具置顶顺序：" + ", ".join(tool_ids)
+    )
 
 
 def cmd_config_get(args: argparse.Namespace) -> None:
@@ -1624,6 +1720,23 @@ def build_parser() -> argparse.ArgumentParser:
     agent_test = agent_sub.add_parser("test", help="仅检查 adapter 可执行文件是否可用，不启动 Agent")
     agent_test.add_argument("id")
     agent_test.set_defaults(func=cmd_agent_test)
+    tool = sub.add_parser("tool", help="发现、排序和安全安装本地编码工具")
+    tool_sub = tool.add_subparsers(dest="tool_command", required=True)
+    tool_sub.add_parser("list", help="按首页实际顺序显示工具状态").set_defaults(
+        func=cmd_tool_list
+    )
+    tool_install = tool_sub.add_parser("install", help="显示并执行内置的官方安装方案")
+    tool_install.add_argument("id")
+    tool_install.add_argument("--yes", action="store_true", help="确认执行已展示的安装命令或打开官方页面")
+    tool_install.set_defaults(func=cmd_tool_install)
+    tool_default = tool_sub.add_parser("default", help="设置个人默认工具")
+    tool_default.add_argument("id", nargs="?")
+    tool_default.add_argument("--clear", action="store_true")
+    tool_default.set_defaults(func=cmd_tool_default)
+    tool_pin = tool_sub.add_parser("pin", help="设置个人工具置顶顺序")
+    tool_pin.add_argument("ids", nargs="*")
+    tool_pin.add_argument("--clear", action="store_true")
+    tool_pin.set_defaults(func=cmd_tool_pin)
     config_command = sub.add_parser("config", help="安全地读取或修改常用 Profile 策略")
     config_sub = config_command.add_subparsers(dest="config_command", required=True)
     config_get = config_sub.add_parser("get")

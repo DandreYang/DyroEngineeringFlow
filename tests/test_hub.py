@@ -4,13 +4,19 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from dyro.cli import _route_experiment_surface, build_parser, main
 from dyro.config import load
-from dyro.home import home_tools
+from dyro.home import (
+    HomeTool,
+    _openclaw_needs_setup,
+    home_tools,
+    sort_home_tools,
+)
 from dyro.hub import (
     add_workspace,
     get_workspace,
@@ -19,6 +25,12 @@ from dyro.hub import (
     registry_home,
     remove_workspace,
     set_default_workspace,
+)
+from dyro.tooling import (
+    ToolPreferences,
+    ToolState,
+    load_tool_preferences,
+    save_tool_preferences,
 )
 from dyro.tasks import task_template
 from dyro.workspace import create_line
@@ -217,6 +229,191 @@ class HubCliTests(WorkspaceCase):
         self.assertEqual(codex.argv, ("codex", "-C", str(self.root)))
         self.assertTrue(codex.available)
         self.assertNotIn("codex", load(self.root).adapters)
+
+    def test_home_detects_cursor_desktop_separately_from_cursor_cli(self) -> None:
+        def detected(name: str) -> str | None:
+            return "/fake/cursor" if name == "cursor" else None
+
+        with patch("dyro.home.shutil.which", side_effect=detected):
+            tools = home_tools(load(self.root), workspace=self.root)
+
+        desktop = next(tool for tool in tools if tool.id == "cursor-desktop")
+        cli = next(tool for tool in tools if tool.id == "cursor-agent")
+        self.assertEqual(desktop.argv, ("cursor", str(self.root)))
+        self.assertEqual(desktop.state, ToolState.READY)
+        self.assertEqual(cli.state, ToolState.INSTALLABLE)
+
+    def test_openclaw_uses_selected_workspace_without_becoming_an_adapter(self) -> None:
+        with (
+            patch(
+                "dyro.home.shutil.which",
+                side_effect=lambda name: (
+                    "/fake/openclaw" if name == "openclaw" else None
+                ),
+            ),
+            patch("dyro.home._openclaw_needs_setup", return_value=False),
+        ):
+            tools = home_tools(load(self.root), workspace=self.root)
+
+        openclaw = next(tool for tool in tools if tool.id == "openclaw")
+        self.assertEqual(openclaw.state, ToolState.READY)
+        self.assertEqual(
+            openclaw.environment,
+            (("OPENCLAW_WORKSPACE_DIR", str(self.root)),),
+        )
+        self.assertNotIn("openclaw", load(self.root).adapters)
+
+    def test_openclaw_setup_detection_honors_home_and_named_profile(self) -> None:
+        openclaw_home = self.root / "openclaw-home"
+        config = openclaw_home / ".openclaw-work" / "openclaw.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("{}\n", encoding="utf-8")
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_HOME": str(openclaw_home),
+                "OPENCLAW_PROFILE": "work",
+            },
+            clear=True,
+        ):
+            self.assertFalse(_openclaw_needs_setup())
+
+    def test_openclaw_explicit_config_path_takes_precedence(self) -> None:
+        config = self.root / "explicit-openclaw.json"
+        config.write_text("{}\n", encoding="utf-8")
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCLAW_CONFIG_PATH": str(config),
+                "OPENCLAW_STATE_DIR": str(self.root / "missing-state"),
+                "OPENCLAW_HOME": str(self.root / "missing-home"),
+                "OPENCLAW_PROFILE": "work",
+            },
+            clear=True,
+        ):
+            self.assertFalse(_openclaw_needs_setup())
+
+    def test_tool_sorting_prefers_history_then_recommendation_and_availability(
+        self,
+    ) -> None:
+        def tool(tool_id: str, state: ToolState) -> HomeTool:
+            return HomeTool(tool_id, tool_id, "launcher", (), (), state)
+
+        tools = [
+            tool("shell", ToolState.READY),
+            tool("openclaw", ToolState.NEEDS_SETUP),
+            tool("kimi", ToolState.INSTALLABLE),
+            tool("grok", ToolState.UNAVAILABLE),
+            tool("claude", ToolState.READY),
+            tool("cursor-desktop", ToolState.READY),
+            tool("codex", ToolState.READY),
+        ]
+        ordered = sort_home_tools(
+            tools,
+            last_tool="codex",
+            recommended_tool="cursor-desktop",
+            preferences=ToolPreferences(
+                default_tool="claude", pinned_tools=("claude", "codex")
+            ),
+        )
+
+        self.assertEqual(
+            [item.id for item in ordered],
+            [
+                "codex",
+                "cursor-desktop",
+                "claude",
+                "openclaw",
+                "kimi",
+                "grok",
+                "shell",
+            ],
+        )
+
+    def test_tool_preferences_are_local_and_do_not_modify_profile(self) -> None:
+        before = self.root.joinpath("dyro.toml").read_bytes()
+        save_tool_preferences(
+            ToolPreferences(
+                default_tool="cursor-desktop",
+                pinned_tools=("cursor-desktop", "codex"),
+            )
+        )
+
+        self.assertEqual(self.root.joinpath("dyro.toml").read_bytes(), before)
+
+    def test_tool_preference_commands_drive_list_markers(self) -> None:
+        main(["tool", "default", "cursor-desktop"])
+        main(["tool", "pin", "cursor-desktop", "codex", "openclaw"])
+
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", str(self.root), "tool", "list"])
+
+        rendered = output.getvalue()
+        self.assertIn("cursor-desktop", rendered)
+        self.assertIn("个人默认", rendered)
+        preferences = load_tool_preferences()
+        self.assertEqual(preferences.default_tool, "cursor-desktop")
+        self.assertEqual(
+            preferences.pinned_tools,
+            ("cursor-desktop", "codex", "openclaw"),
+        )
+
+    def test_tool_install_dry_run_is_non_mutating_and_noninteractive(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--dry-run", "tool", "install", "openclaw"])
+
+        rendered = output.getvalue()
+        self.assertIn("npm install -g openclaw@latest", rendered)
+        self.assertIn("DRY RUN", rendered)
+
+    def test_home_guides_install_then_rechecks_without_granting_adapter(self) -> None:
+        self._create_line()
+        add_workspace(self.root, name="demo", make_default=True)
+        installed = False
+        calls: list[tuple[str, ...]] = []
+
+        def detected(name: str) -> str | None:
+            if name == "npm":
+                return "/fake/npm"
+            if name == "openclaw" and installed:
+                return "/fake/openclaw"
+            return None
+
+        def run(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+            nonlocal installed
+            calls.append(argv)
+            installed = True
+            return subprocess.CompletedProcess(argv, 0)
+
+        answers = iter(["", "openclaw", "y", "n"])
+        output = StringIO()
+        before = self.root.joinpath("dyro.toml").read_bytes()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("dyro.home.shutil.which", side_effect=detected),
+            patch("dyro.home._openclaw_needs_setup", return_value=True),
+            patch("dyro.tooling._run_install", side_effect=run),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            redirect_stdout(output),
+        ):
+            main([])
+
+        self.assertEqual(
+            calls,
+            [
+                ("/fake/npm", "install", "-g", "openclaw@latest"),
+                ("/fake/openclaw", "--version"),
+            ],
+        )
+        self.assertIn("正在重新检测", output.getvalue())
+        self.assertIn("官方初始化", output.getvalue())
+        self.assertIn("不是系统沙箱", output.getvalue())
+        self.assertNotIn("openclaw", load(self.root).adapters)
+        self.assertEqual(self.root.joinpath("dyro.toml").read_bytes(), before)
 
     def test_unhealthy_line_does_not_block_opening_a_healthy_line(self) -> None:
         self._create_line()

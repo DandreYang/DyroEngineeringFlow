@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add an availability-first coding-tool catalog with per-workspace history,
+  non-binding project recommendations, and local default/pinned preferences.
+- Detect Cursor Desktop separately from Cursor CLI and support OpenClaw as a
+  workspace-scoped external runtime without granting Dyro delivery authority.
+- Guide confirmed installation of missing tools with built-in shell-free argv,
+  official-page fallback for remote scripts, and post-install version checks.
+
 ## 0.5.4 - 2026-08-03
 
 - Add a zero-friction global `dyro` home that registers workspaces and lets

@@ -15,6 +15,7 @@ _BARE_TOML_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 _MANAGED_VALUES = frozenset(
     {
         "workspace.name",
+        "workspace.recommended_tool",
         "policy.default_base",
         "policy.task_branch_prefix",
         "policy.allow_push",
@@ -87,6 +88,8 @@ def config_value(config: Config, key: str) -> str | bool:
         raise ValidationError(f"不支持的配置键：{key}")
     if key == "workspace.name":
         return config.name
+    if key == "workspace.recommended_tool":
+        return config.recommended_tool
     attribute = key.partition(".")[2]
     return getattr(config.policy, attribute)
 
@@ -112,8 +115,8 @@ def _parse_value(key: str, raw: str) -> str | bool:
     value = raw.strip()
     if not value or "\n" in value or "\r" in value:
         raise ValidationError(f"{key} 必须是单行非空字符串")
-    if key == "workspace.name":
-        validate_id(value, "workspace.name")
+    if key.startswith("workspace."):
+        validate_id(value, key)
     if key == "policy.execution_mode" and value not in ("local", "external"):
         raise ValidationError("policy.execution_mode 只能是 local 或 external")
     return value

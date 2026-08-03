@@ -351,6 +351,24 @@ adapter 也不会静默进入。已配置 adapter 仍可参与 Dyro 的执行契
 检测到的受支持命令会标记为“仅打开工作区”，不获得门禁、复核、合并或 push
 权限。`dyro open dev --agent codex` 等显式命令继续直接启动，便于脚本使用。
 
+选择器会分别识别 Cursor Desktop 和 Cursor CLI，并把 OpenClaw 作为“仅打开
+工作区”的外部运行时。可直接使用的工具始终排在待初始化或未安装工具之前；
+当前工作区上次选择、项目推荐、个人默认和置顶顺序用于稳定排序。选择未安装但
+受支持的工具后，会进入先展示计划、再明确确认的安装引导：
+
+```bash
+dyro tool list
+dyro tool default cursor-desktop
+dyro tool pin cursor-desktop codex openclaw
+dyro --dry-run tool install openclaw
+dyro tool install openclaw
+```
+
+安装配方是 Dyro 内置的无 shell argv，项目文件不能提供安装命令。对于需要执行
+远程脚本的官方安装方式，Dyro 不会代为执行，只会在确认后打开官方页面。详见
+[编码工具目录与安装引导](docs/tool-catalog.md)。
+OpenClaw 工作区是默认工作目录，并不是操作系统级沙箱；初始化前会明确提示这一边界。
+
 也可以显式登记、切换和查看所有项目；这些命令只管理全局入口，不会移动或删除项目：
 
 ```bash
@@ -487,7 +505,7 @@ dyro --dry-run task run API-101
 | `line create/list` | 创建、登记和查看功能开发线。 |
 | `hotfix create` | 从显式生产基线创建 Hotfix 开发线。 |
 | `changeset create/list/verify` | 固化并核验一次多仓交付所包含的干净、精确 Git 提交组合。 |
-| `config get/set` / `agent list/add/test/discover` / `open` | 安全管理常用策略与 adapter、发现/校验本机命令，或在正确开发线启动 Agent。 |
+| `config get/set` / `agent list/add/test/discover` / `tool list/install/default/pin` / `open` | 安全管理策略、adapter、工具发现与个人启动偏好，或在正确开发线启动 Agent。 |
 | `task create/open/list/board/status/next/graph/explain/attempts/binding` | 创建或进入任务、管理状态，编译/校验任务图，解释调度，查看 provenance，输出精确复核绑定。 |
 | `task run/answer/gates/review/signoff` | 执行任务、回答追问、运行门禁、申请独立复核；需要时记录外部签收。 |
 | `task claim --output` / `task evidence build/execution/review` | 一次性领取任务并以“仅创建”文件交给隔离执行器，构建/导入可移植执行证据包，并导入与回执绑定的复核证据。 |

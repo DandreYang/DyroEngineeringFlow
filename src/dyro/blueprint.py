@@ -60,6 +60,7 @@ class Blueprint:
     default_base: str
     repositories: Mapping[str, BlueprintRepository]
     lines: Mapping[str, BlueprintLine]
+    recommended_tool: str = ""
 
 
 @dataclass(frozen=True)
@@ -199,7 +200,13 @@ def parse_blueprint(content: bytes) -> Blueprint:
     workspace = _table(raw.get("workspace"), "workspace")
     _reject_unknown(
         workspace,
-        {"name", "suggested_directory", "default_line", "default_base"},
+        {
+            "name",
+            "suggested_directory",
+            "default_line",
+            "default_base",
+            "recommended_tool",
+        },
         "workspace",
     )
     name = validate_id(_string(workspace.get("name"), "workspace.name"), "workspace.name")
@@ -212,6 +219,12 @@ def parse_blueprint(content: bytes) -> Blueprint:
         "workspace.default_line",
     )
     default_base = _string(workspace.get("default_base", "main"), "workspace.default_base")
+    recommended_tool_raw = workspace.get("recommended_tool", "")
+    if not isinstance(recommended_tool_raw, str):
+        raise ValidationError("workspace.recommended_tool 必须是字符串")
+    recommended_tool = recommended_tool_raw.strip()
+    if recommended_tool:
+        validate_id(recommended_tool, "workspace.recommended_tool")
 
     repositories_raw = _table(raw.get("repositories"), "repositories")
     if not repositories_raw:
@@ -292,6 +305,7 @@ def parse_blueprint(content: bytes) -> Blueprint:
         suggested_directory=suggested_directory,
         default_line=default_line,
         default_base=default_base,
+        recommended_tool=recommended_tool,
         repositories=repositories,
         lines=lines,
     )
@@ -472,7 +486,12 @@ def build_join_plan(
         )
         for repository in blueprint.repositories.values()
     ]
-    profile = render_config(blueprint.name, repositories, blueprint.default_base)
+    profile = render_config(
+        blueprint.name,
+        repositories,
+        blueprint.default_base,
+        recommended_tool=blueprint.recommended_tool,
+    )
     return JoinPlan(document=document, root=root, line=line, profile=profile)
 
 
@@ -484,6 +503,8 @@ def render_join_plan(plan: JoinPlan) -> tuple[str, ...]:
         f"开发线：{plan.line.id}（{plan.line.branch}）",
         f"蓝图 SHA-256：{plan.document.sha256}",
     ]
+    if blueprint.recommended_tool:
+        lines.append(f"推荐编码工具：{blueprint.recommended_tool}（仅推荐，不自动安装）")
     for repository_id, repository in blueprint.repositories.items():
         destination = plan.root / repository.path
         action = "复用并核验" if destination.is_dir() else "独立 clone"

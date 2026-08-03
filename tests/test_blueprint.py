@@ -51,6 +51,7 @@ name = "acme-platform"
 suggested_directory = "acme-platform"
 default_line = "feature-a"
 default_base = "main"
+recommended_tool = "cursor-desktop"
 
 [repositories.api]
 remote = "{api_remote}"
@@ -93,6 +94,7 @@ class BlueprintParsingTests(unittest.TestCase):
 
         self.assertEqual(blueprint.name, "acme-platform")
         self.assertEqual(blueprint.default_line, "feature-a")
+        self.assertEqual(blueprint.recommended_tool, "cursor-desktop")
         self.assertEqual(tuple(blueprint.repositories), ("api", "web"))
         self.assertEqual(blueprint.lines["feature-a"].base_for("web"), sha_b)
         self.assertEqual(
@@ -167,6 +169,7 @@ class BlueprintJoinTests(unittest.TestCase):
         apply_join_plan(plan)  # completed plans are safe and resumable
 
         config = load(target)
+        self.assertEqual(config.recommended_tool, "cursor-desktop")
         line = get_line(config, "feature-a")
         self.assertEqual(line.branch, "feat/feature-a")
         self.assertEqual(line.base_for("api"), self.api_head)
@@ -213,6 +216,8 @@ class BlueprintJoinTests(unittest.TestCase):
         self.assertFalse(target.exists())
         self.assertIn("DRY RUN", output.getvalue())
         self.assertIn("仓库：2 个", output.getvalue())
+        self.assertIn("推荐编码工具：cursor-desktop", output.getvalue())
+        self.assertIn("不自动安装", output.getvalue())
 
     def test_join_refuses_an_unrelated_non_empty_target(self) -> None:
         target = self.parent / "occupied"
