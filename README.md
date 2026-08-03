@@ -356,6 +356,13 @@ After setup, run `dyro`. The first run inside a project registers it in a revers
 dyro
 ```
 
+Interactive home always asks which coding tool to use before launching one,
+even when only a single Profile adapter is configured. Configured adapters
+remain eligible for Dyro execution contracts; supported commands detected only
+on the local machine are labeled `open workspace only` and receive no gate,
+review, merge, or push authority. Explicit commands such as
+`dyro open dev --agent codex` continue to launch directly for scripts.
+
 Projects can also be registered, selected, and inspected explicitly. These commands manage global entry points only; they never move or delete a project:
 
 ```bash

@@ -37,12 +37,49 @@ DISCOVERABLE_AGENTS = (
     ("kimi", False),
 )
 
+TOOL_LABELS = {
+    "codex": "Codex",
+    "claude": "Claude Code",
+    "cursor-agent": "Cursor CLI",
+    "grok": "Grok",
+    "opencode": "OpenCode",
+    "hermes": "Hermes",
+    "kimi": "Kimi",
+    "shell": "Shell",
+}
+
+
+@dataclass(frozen=True)
+class HomeLauncher:
+    id: str
+    argv: tuple[str, ...]
+
+
+HOME_LAUNCHERS = (
+    HomeLauncher("codex", ("codex", "-C", "{workspace}")),
+    HomeLauncher("claude", ("claude",)),
+    HomeLauncher("cursor-agent", ("cursor-agent", "--workspace", "{workspace}")),
+    HomeLauncher("grok", ("grok", "--cwd", "{workspace}")),
+    HomeLauncher("opencode", ("opencode", "{workspace}")),
+    HomeLauncher("hermes", ("hermes",)),
+    HomeLauncher("kimi", ("kimi",)),
+)
+
 
 @dataclass(frozen=True)
 class HomeTarget:
     kind: str
     id: str
     label: str
+
+
+@dataclass(frozen=True)
+class HomeTool:
+    id: str
+    label: str
+    kind: str
+    argv: tuple[str, ...]
+    available: bool
 
 
 def interactive_terminal() -> bool:
@@ -111,6 +148,78 @@ def available_adapters(config: Config, *, workspace: Path | None = None) -> list
     ]
 
 
+def _shell_argv() -> tuple[str, ...]:
+    configured = os.environ.get("SHELL", "").strip() or os.environ.get(
+        "COMSPEC", ""
+    ).strip()
+    if configured:
+        return (configured,)
+    fallback = shutil.which("zsh") or shutil.which("bash") or shutil.which("sh")
+    return (fallback or "sh",)
+
+
+def _tool_label(adapter_id: str, executable: str) -> str:
+    command = Path(executable).name
+    label = TOOL_LABELS.get(command, adapter_id)
+    if adapter_id != command and label != adapter_id:
+        return f"{label} [{adapter_id}]"
+    return label
+
+
+def home_tools(config: Config, *, workspace: Path) -> list[HomeTool]:
+    tools: list[HomeTool] = []
+    configured_commands: set[str] = set()
+    for adapter_id in sorted(config.adapters):
+        executable = _adapter_executable(config, adapter_id, workspace=workspace)
+        configured_commands.add(Path(executable).name)
+        tools.append(
+            HomeTool(
+                adapter_id,
+                _tool_label(adapter_id, executable),
+                "adapter",
+                (),
+                executable_available(executable, cwd=workspace),
+            )
+        )
+
+    for launcher in HOME_LAUNCHERS:
+        if launcher.id in config.adapters or launcher.id in configured_commands:
+            continue
+        argv = expand_argv(
+            launcher.argv,
+            workspace=workspace,
+            root=config.root,
+            task="",
+            line="",
+            prompt="",
+        )
+        tools.append(
+            HomeTool(
+                launcher.id,
+                TOOL_LABELS[launcher.id],
+                "launcher",
+                argv,
+                executable_available(argv[0], cwd=workspace),
+            )
+        )
+
+    shell_argv = _shell_argv()
+    if (
+        "shell" not in config.adapters
+        and Path(shell_argv[0]).name not in configured_commands
+    ):
+        tools.append(
+            HomeTool(
+                "shell",
+                TOOL_LABELS["shell"],
+                "launcher",
+                shell_argv,
+                executable_available(shell_argv[0], cwd=workspace),
+            )
+        )
+    return tools
+
+
 def print_agent_discovery(config: Config) -> None:
     configured_commands: dict[str, list[str]] = {}
     for adapter_id in config.adapters:
@@ -132,7 +241,7 @@ def print_agent_discovery(config: Config) -> None:
             note = f"运行 dyro agent add {command} --preset {command}"
         elif installed:
             state = "尚未集成"
-            note = "已检测到命令，但不会绕过 Profile 授权"
+            note = "首页可仅打开工作区；不获得执行、门禁或复核权限"
         else:
             state = "-"
             note = "未安装"
@@ -188,6 +297,29 @@ def launch_adapter(
         os.execvp(argv[0], list(argv))
     except OSError as exc:
         raise DyroError(f"无法启动 Agent {adapter_id}：{exc}") from exc
+
+
+def launch_home_tool(
+    *, workspace: Path, tool: HomeTool, dry_run: bool
+) -> None:
+    if tool.kind != "launcher" or not tool.argv:
+        raise ValidationError(f"首页启动器无效：{tool.id}")
+    if not workspace.is_dir():
+        raise DyroError(f"工作目录不存在：{workspace}")
+    if not executable_available(tool.argv[0], cwd=workspace):
+        raise DyroError(
+            f"{tool.label} 未安装或不可执行：{tool.argv[0]}；"
+            "运行 dyro agent discover 查看本机状态"
+        )
+    print(f"工作目录：{workspace}")
+    print("$ " + shlex.join(tool.argv))
+    if dry_run:
+        return
+    os.chdir(workspace)
+    try:
+        os.execvp(tool.argv[0], list(tool.argv))
+    except OSError as exc:
+        raise DyroError(f"无法启动编码工具 {tool.label}：{exc}") from exc
 
 
 def existing_line_workspace(
@@ -403,31 +535,56 @@ def _choose_action(
     raise DyroError("菜单编号超出范围")
 
 
-def _choose_agent(
+def _choose_tool(
     config: Config, record: WorkspaceRecord | None, *, workspace: Path
-) -> str:
-    available = available_adapters(config, workspace=workspace)
+) -> HomeTool | None:
+    tools = home_tools(config, workspace=workspace)
+    available = [tool for tool in tools if tool.available]
     if not available:
         print_agent_discovery(config)
         selector = f"--workspace {record.name}" if record else f"--root {config.root}"
         raise DyroError(
-            f"当前项目没有可启动的 Agent。下一步：dyro {selector} agent add codex --preset codex"
+            f"当前项目没有可启动的编码工具。下一步："
+            f"dyro {selector} agent add codex --preset codex"
         )
-    default = (
-        record.last_agent if record and record.last_agent in available else available[0]
+    remembered = (
+        record.last_agent
+        if record and any(tool.id == record.last_agent for tool in available)
+        else ""
     )
-    if len(available) == 1:
-        return available[0]
-    print("\n使用哪个 Agent？\n")
-    for index, adapter_id in enumerate(available, start=1):
-        suffix = "（上次使用）" if adapter_id == default else ""
-        print(f"  {index}) {adapter_id}{suffix}")
-    raw = input(f"\n请选择（直接回车默认 {default}）：").strip()
+    default = next(
+        (tool for tool in available if tool.id == remembered), available[0]
+    )
+    print("\n使用哪个编码工具？\n")
+    for index, tool in enumerate(tools, start=1):
+        states: list[str] = []
+        if tool.kind == "adapter":
+            states.append("已配置" if tool.available else "已配置但不可用")
+        else:
+            states.append("仅打开工作区" if tool.available else "未安装")
+        if tool.id == default.id:
+            states.append("上次使用" if remembered else "默认")
+        print(f"  {index}) {tool.label}（{'，'.join(states)}）")
+    print("  q) 退出")
+    raw = input(
+        f"\n请选择（输入编号或工具名，直接回车默认 {default.label}）："
+    ).strip().lower()
     if not raw:
         return default
-    if not raw.isdigit() or not (1 <= int(raw) <= len(available)):
-        raise DyroError("无效的 Agent 选择")
-    return available[int(raw) - 1]
+    if raw in {"q", "quit"}:
+        return None
+    if raw.isdigit() and 1 <= int(raw) <= len(tools):
+        selected = tools[int(raw) - 1]
+    else:
+        selected = next((tool for tool in tools if tool.id == raw), None)
+    if selected is None:
+        raise DyroError("无效的编码工具选择")
+    if not selected.available:
+        raise DyroError(
+            f"{selected.label} 未安装或不可执行；"
+            "运行 dyro agent discover 查看本机状态"
+        )
+    return selected
 
 
 def _switch_workspace(dry_run: bool) -> None:
@@ -478,15 +635,21 @@ def _run_config_home(
         target_workspace = existing_task_workspace(config, task)
     else:
         _, target_workspace = existing_line_workspace(config, target_id, kind)
-    agent = _choose_agent(config, record, workspace=target_workspace)
+    tool = _choose_tool(config, record, workspace=target_workspace)
+    if tool is None:
+        return
     if record and not dry_run:
         mark_workspace_used(
-            record.name, target_kind=kind, target_id=target_id, agent=agent
+            record.name, target_kind=kind, target_id=target_id, agent=tool.id
         )
-    if kind == "task":
-        open_task(config, target_id, agent=agent, prompt="", dry_run=dry_run)
+    if tool.kind == "launcher":
+        launch_home_tool(workspace=target_workspace, tool=tool, dry_run=dry_run)
+    elif kind == "task":
+        open_task(config, target_id, agent=tool.id, prompt="", dry_run=dry_run)
     else:
-        open_line(config, target_id, kind=kind, agent=agent, prompt="", dry_run=dry_run)
+        open_line(
+            config, target_id, kind=kind, agent=tool.id, prompt="", dry_run=dry_run
+        )
 
 
 def run_home(*, root: str | None, workspace: str | None, dry_run: bool) -> None:

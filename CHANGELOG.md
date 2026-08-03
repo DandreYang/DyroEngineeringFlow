@@ -9,6 +9,9 @@
 - Make joins resumable without overwriting unrelated targets, reject embedded
   credentials and symbolic-link redirects, and keep organization-specific
   repository details outside Dyro Core.
+- Always show the interactive coding-tool picker before opening a line or task,
+  and allow supported locally detected tools to open the workspace without
+  granting them Dyro execution, gate, review, merge, or push authority.
 
 ## 0.5.3 - 2026-08-01
 
