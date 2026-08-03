@@ -113,6 +113,7 @@ class ConsoleServerTests(unittest.TestCase):
         payload = json.loads(body)
         self.assertEqual(payload["schema_version"], 1)
         self.assertEqual(payload["data"]["capabilities"], ["overview"])
+        self.assertEqual(payload["data"]["initial_workspace"], "")
         self.assertIn("session_expires_at", payload["data"])
 
     def test_api_refuses_cors_preflight_mutations_and_invalid_request_framing(self) -> None:

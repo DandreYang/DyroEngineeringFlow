@@ -238,6 +238,22 @@ C04 将真实工作区读取移出 HTTP 请求线程，并补齐概览的单工�
 - overview 和 workspace 的 ETag 覆盖 data 以及 `freshness.state`、`partial` 和 warnings，排除仅
   表示采样时刻的 `captured_at`，因此 warning-only 变化也会使条件请求重新获得 200。
 
+### 4.5 C05 已落地的 Console 启动与浏览器交接
+
+C05 提供前台入口 `dyro console [--no-open] [--port PORT]`，但不增加任何浏览器写能力：
+
+- listener 仍只能绑定 `127.0.0.1`，默认端口为 `0`，没有 `--host` 选项；启动器只会把固定的
+  Console server factory 与只读 `IsolatedOverviewService` 组合起来；
+- listener 就绪后，CLI 仅将一次性 bootstrap secret 放入浏览器 fragment。自动打开成功时，终端
+  只显示不含 secret 的 origin；`--no-open` 或浏览器打开失败才打印完整的、单次且 60 秒有效的
+  手工 URL；
+- `Ctrl-C` 或任意前台返回路径都会关闭 listener，并清空内存 session；`--dry-run` 仅输出
+  `127.0.0.1:<port>`、焦点和浏览器计划，绝不 bind、生成 secret、读写 recent state 或打开浏览器；
+- `--workspace` 只写入认证后可见的初始焦点，不减少或增加 registry 可读取的工作区；`--root`
+  先验证 Profile，再将该 root 作为临时的单 workspace 只读 inspection 目标，不登记到全局 registry；
+- bare `dyro` Home 新增“查看全部项目控制台”。它复用当前已登记工作区作为初始焦点，且 Home 的
+  dry-run 会保留零副作用；需要不登记某个 Profile 时，应显式使用 `dyro --root PATH console`。
+
 ## 5. 模块设计
 
 建议模块边界：

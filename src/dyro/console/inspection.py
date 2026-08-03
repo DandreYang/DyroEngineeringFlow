@@ -67,6 +67,7 @@ class IsolatedOverviewService:
         timeout_seconds: float = 5.0,
         cursor_secret: bytes | None = None,
         python_executable: str | None = None,
+        target_root: Path | None = None,
     ) -> None:
         if (
             not isinstance(timeout_seconds, (int, float))
@@ -82,6 +83,14 @@ class IsolatedOverviewService:
         self._timeout_seconds = float(timeout_seconds)
         self._cursor_secret = cursor_secret or os.urandom(32)
         self._python_executable = python_executable or sys.executable
+        if target_root is not None and not isinstance(target_root, Path):
+            raise ValueError("Console target_root 必须是 Path")
+        self._target_root = target_root.absolute() if target_root is not None else None
+
+    @property
+    def target_root(self) -> Path | None:
+        """The transient, read-only Profile root selected by ``--root``."""
+        return self._target_root
 
     def page(self, *, cursor: str | None = None, limit: int = 20) -> dict[str, object]:
         return self._request({"op": "overview", "cursor": cursor, "limit": limit})
@@ -90,8 +99,11 @@ class IsolatedOverviewService:
         return self._request({"op": "workspace", "alias": alias})
 
     def _request(self, request: Mapping[str, object]) -> dict[str, object]:
+        worker_request = dict(request)
+        if self._target_root is not None:
+            worker_request["target_root"] = str(self._target_root)
         encoded_request = base64.urlsafe_b64encode(
-            json.dumps(dict(request), sort_keys=True, separators=(",", ":")).encode("utf-8")
+            json.dumps(worker_request, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).rstrip(b"=").decode("ascii")
         if len(encoded_request) > 2048:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
