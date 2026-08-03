@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from dyro.cli import _route_experiment_surface, build_parser, main
 from dyro.config import load
+from dyro.home import home_tools
 from dyro.hub import (
     add_workspace,
     get_workspace,
@@ -171,8 +172,51 @@ class HubCliTests(WorkspaceCase):
         rendered = output.getvalue()
         self.assertIn("test-workspace", rendered)
         self.assertIn("alpha", rendered)
+        self.assertIn("使用哪个编码工具", rendered)
+        self.assertIn("noop", rendered)
         self.assertIn("/usr/bin/true", rendered)
         self.assertEqual(load_registry().workspaces[0].last_target, "")
+
+    def test_home_can_open_a_detected_tool_without_granting_adapter_capabilities(
+        self,
+    ) -> None:
+        self._create_line()
+        add_workspace(self.root, name="demo", make_default=True)
+        before = self.root.joinpath("dyro.toml").read_bytes()
+        answers = iter(["", "claude"])
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            patch(
+                "dyro.home.shutil.which",
+                side_effect=lambda name: "/fake/claude" if name == "claude" else None,
+            ),
+            redirect_stdout(output),
+        ):
+            main(["--dry-run"])
+
+        rendered = output.getvalue()
+        self.assertIn("Claude Code", rendered)
+        self.assertIn("仅打开工作区", rendered)
+        self.assertIn("$ claude", rendered)
+        self.assertNotIn("claude", load(self.root).adapters)
+        self.assertEqual(self.root.joinpath("dyro.toml").read_bytes(), before)
+
+    def test_home_exposes_detected_codex_without_configuring_an_adapter(
+        self,
+    ) -> None:
+        with patch(
+            "dyro.home.shutil.which",
+            side_effect=lambda name: "/fake/codex" if name == "codex" else None,
+        ):
+            tools = home_tools(load(self.root), workspace=self.root)
+
+        codex = next(tool for tool in tools if tool.id == "codex")
+        self.assertEqual(codex.kind, "launcher")
+        self.assertEqual(codex.argv, ("codex", "-C", str(self.root)))
+        self.assertTrue(codex.available)
+        self.assertNotIn("codex", load(self.root).adapters)
 
     def test_unhealthy_line_does_not_block_opening_a_healthy_line(self) -> None:
         self._create_line()
@@ -356,6 +400,8 @@ class HubCliTests(WorkspaceCase):
         self.assertIn("claude", rendered)
         self.assertIn("尚未配置", rendered)
         self.assertIn("尚未集成", rendered)
+        self.assertIn("首页可仅打开工作区", rendered)
+        self.assertIn("不获得执行、门禁或复核权限", rendered)
 
     def test_agent_discovery_reports_configured_missing_command(self) -> None:
         with self.root.joinpath("dyro.toml").open("a", encoding="utf-8") as handle:
@@ -386,6 +432,7 @@ write = ["codex"]
             main(["--dry-run"])
         rendered = output.getvalue()
         self.assertIn("欢迎使用 Dyro", rendered)
+        self.assertIn("dyro join", rendered)
         self.assertIn("dyro setup", rendered)
         self.assertIn("dyro workspace add", rendered)
         self.assertFalse(self.hub_home.exists())

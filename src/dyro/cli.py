@@ -11,6 +11,14 @@ import sys
 import time
 
 from . import __version__
+from .blueprint import (
+    BLUEPRINT_FILENAME,
+    apply_join_plan,
+    build_join_plan,
+    load_blueprint_source,
+    preflight_join_plan,
+    render_join_plan,
+)
 from .changesets import create_changeset, get_changeset, list_changesets, verify_changeset
 from .config import CONFIG_NAME, Config, load, validate_id
 from .evidence import build_execution_bundle, unpack_execution_bundle
@@ -84,7 +92,7 @@ from .tasks import (
     status as task_status,
     task_template,
 )
-from .workspace import create_line, doctor, get_line, list_lines
+from .workspace import create_line, doctor, get_line, list_lines, status_rows
 
 
 CONFIG_TEMPLATE = '''schema_version = 1
@@ -566,6 +574,92 @@ def cmd_workspace_remove(args: argparse.Namespace) -> None:
     print(f"已移除工作区入口：{args.name}；项目文件未改动")
 
 
+def _blueprint_document(args: argparse.Namespace):
+    return load_blueprint_source(
+        args.source,
+        git_ref=args.blueprint_ref,
+        blueprint_file=args.blueprint_file,
+    )
+
+
+def cmd_blueprint_validate(args: argparse.Namespace) -> None:
+    document = _blueprint_document(args)
+    blueprint = document.blueprint
+    print(f"PASS 蓝图：{blueprint.name}")
+    print(f"来源：{document.source}")
+    print(f"SHA-256：{document.sha256}")
+    print(f"仓库：{len(blueprint.repositories)} 个")
+    print(
+        "开发线："
+        + "、".join(
+            line_id + ("（默认）" if line_id == blueprint.default_line else "")
+            for line_id in blueprint.lines
+        )
+    )
+
+
+def _select_blueprint_line(args: argparse.Namespace, document) -> str:
+    blueprint = document.blueprint
+    if args.line:
+        return args.line
+    if len(blueprint.lines) == 1 or not sys.stdin.isatty():
+        return blueprint.default_line
+    line_ids = list(blueprint.lines)
+    print("\n请选择开发线：")
+    for index, line_id in enumerate(line_ids, start=1):
+        suffix = "（默认）" if line_id == blueprint.default_line else ""
+        print(f"  {index}) {line_id}{suffix}")
+    default_index = line_ids.index(blueprint.default_line) + 1
+    answer = input(f"编号（直接回车默认 {default_index}）：").strip()
+    if not answer:
+        return blueprint.default_line
+    if not answer.isdigit() or not 1 <= int(answer) <= len(line_ids):
+        raise DyroError("无效的开发线选择")
+    return line_ids[int(answer) - 1]
+
+
+def cmd_join(args: argparse.Namespace) -> None:
+    document = _blueprint_document(args)
+    line_id = _select_blueprint_line(args, document)
+    plan = build_join_plan(document, target=args.path, line_id=line_id)
+    preflight_join_plan(plan)
+    print("\n加入计划（尚未修改任何文件）：")
+    for item in render_join_plan(plan):
+        print("  - " + item)
+    if args.dry_run:
+        print("DRY RUN: 不会创建目录、clone 仓库、创建 worktree 或登记全局入口")
+        return
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise DyroError("join 会创建工作区和 Git worktree；请先使用 --dry-run，再加 --yes 执行")
+        if not _ask_yes_no("应用此加入计划", default=False):
+            print("已取消；没有修改任何文件。")
+            return
+    config = apply_join_plan(plan)
+    if not args.no_register:
+        record = add_workspace(
+            config.root,
+            name=config.name,
+            make_default=args.make_default,
+        )
+        print(f"已登记全局入口：{record.name}")
+    print("\n工作区已就绪")
+    print(f"位置：{config.root}")
+    print(f"开发线：{plan.line.id}")
+    clean_scopes: dict[str, set[str]] = {
+        repository_id: set() for repository_id in config.repositories
+    }
+    selected_scopes = {"anchor", f"line:{plan.line.id}"}
+    for scope, repository_id, _branch, _head, _upstream, dirty in status_rows(config):
+        if scope in selected_scopes and dirty == 0:
+            clean_scopes[repository_id].add(scope)
+    clean_count = sum(
+        scopes == selected_scopes for scopes in clean_scopes.values()
+    )
+    print(f"仓库：{clean_count}/{len(config.repositories)} clean")
+    print("下一步：dyro")
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     if args.all:
         print_all_status()
@@ -669,7 +763,9 @@ def cmd_next(args: argparse.Namespace) -> None:
     try:
         config = _config(args)
     except ValidationError:
-        print("尚未发现 Dyro 工作区。下一步：dyro setup")
+        print("尚未发现 Dyro 工作区。")
+        print("加入团队项目：dyro join <蓝图地址>")
+        print("设置一个新项目：dyro setup")
         return
     findings = doctor(config)
     failures = [finding for finding in findings if finding.startswith("FAIL")]
@@ -1454,6 +1550,48 @@ def build_parser() -> argparse.ArgumentParser:
     workspace_remove.add_argument("name")
     workspace_remove.add_argument("--yes", action="store_true")
     workspace_remove.set_defaults(func=cmd_workspace_remove)
+
+    blueprint = sub.add_parser("blueprint", help="验证可复用的团队工作区蓝图")
+    blueprint_sub = blueprint.add_subparsers(dest="blueprint_command", required=True)
+    blueprint_validate = blueprint_sub.add_parser("validate", help="只读验证蓝图结构与固定基线")
+    blueprint_validate.add_argument("source", help="本地 TOML/目录、HTTPS 文件或 Git 仓库")
+    blueprint_validate.add_argument("--ref", dest="blueprint_ref", help="Git 蓝图仓库的分支或 tag")
+    blueprint_validate.add_argument(
+        "--file",
+        dest="blueprint_file",
+        default=BLUEPRINT_FILENAME,
+        help=f"Git 蓝图仓库内的文件；默认 {BLUEPRINT_FILENAME}",
+    )
+    blueprint_validate.set_defaults(func=cmd_blueprint_validate)
+
+    join = sub.add_parser("join", help="从团队蓝图安全创建独立的多仓工作区")
+    join.add_argument("source", help="本地 TOML/目录、HTTPS 文件或 Git 仓库")
+    join.add_argument("--path", help="目标目录；默认 ~/DyroProjects/<suggested_directory>")
+    join.add_argument("--line", help="要创建的开发线；默认交互选择或使用蓝图默认值")
+    join.add_argument("--ref", dest="blueprint_ref", help="Git 蓝图仓库的分支或 tag")
+    join.add_argument(
+        "--file",
+        dest="blueprint_file",
+        default=BLUEPRINT_FILENAME,
+        help=f"Git 蓝图仓库内的文件；默认 {BLUEPRINT_FILENAME}",
+    )
+    join.add_argument("--yes", action="store_true", help="确认执行已展示的加入计划")
+    registration = join.add_mutually_exclusive_group()
+    registration.add_argument("--no-register", action="store_true", help="不登记到裸 dyro 的全局首页")
+    registration.add_argument(
+        "--default",
+        dest="make_default",
+        action="store_true",
+        help="将新工作区设为裸 dyro 的默认项目",
+    )
+    join.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="仅预览，不写文件或执行 Git 写操作",
+    )
+    join.set_defaults(func=cmd_join)
 
     sub.add_parser("doctor", help="验证动态工作区结构").set_defaults(func=cmd_doctor)
     status_parser = sub.add_parser("status", help="显示 anchors 与开发线 Git 状态")

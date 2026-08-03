@@ -62,8 +62,8 @@ uncommitted changes are never cleaned, stashed, or rewritten by the home.
 
 ## Non-goals
 
-- Replacing or modifying `hyc-work` in this stage.
-- Importing Huiyichu worktrees automatically.
+- Replacing or modifying another workspace launcher in this stage.
+- Importing worktrees owned by external tools automatically.
 - Creating task worktrees from the home without the existing task controls.
 - Allowing local Agent discovery to bypass Profile adapter policy.
 - Replacing gates, evidence, review, sign-off, merge, or push controls.

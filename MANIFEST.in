@@ -1,0 +1,5 @@
+include CHANGELOG.md
+include README.zh-CN.md
+include SECURITY.md
+include docs/workspace-blueprints.md
+include examples/blueprints/acme-platform.toml

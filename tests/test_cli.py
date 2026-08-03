@@ -270,6 +270,7 @@ class StartTests(WorkspaceCase):
             with redirect_stdout(output):
                 main(["--root", str(Path(tmp) / "empty"), "next"])
 
+            self.assertIn("dyro join", output.getvalue())
             self.assertIn("dyro setup", output.getvalue())
 
 

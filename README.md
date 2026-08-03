@@ -290,6 +290,23 @@ dyro setup
 
 The first-run guide previews its plan before it writes anything. It scans repositories beneath the current directory and derives safe workspace-relative paths and development-line mounts. When invoked from a Git repository root, it offers to create a separate sibling Dyro workspace and clone from `origin`; it never moves, overwrites, or writes Dyro control state into the original project. In an empty directory it can accept an explicit Git remote.
 
+If a team already publishes a workspace blueprint, a new teammate does not
+need to reconstruct its repository layout or branch rules. Validate, preview,
+and join it directly:
+
+```bash
+dyro blueprint validate git@github.com:acme/platform-blueprints.git --ref main
+dyro join git@github.com:acme/platform-blueprints.git --ref main --dry-run
+dyro join git@github.com:acme/platform-blueprints.git --ref main
+```
+
+`join` defaults to `~/DyroProjects/<suggested_directory>`, lets an interactive
+user choose a development line, and asks for one final confirmation. Every
+repository base in the blueprint is a full immutable commit SHA; anchors stay
+detached and development lines receive isolated linked worktrees. Team-specific
+URLs and rules live in the team's blueprint, never in Dyro Core. See the
+[workspace blueprint contract](docs/workspace-blueprints.md).
+
 Before the final confirmation, the guide shows whether it will create a Profile, clone missing repositories, create the first `dev` line, or register a detected supported Agent. It probes common local Agent commands, but registers only an adapter whose Core argv contract is audited; detected-but-unintegrated commands remain untouched. Entering `n` or leaving the guide creates nothing. Afterwards, run:
 
 ```bash
@@ -338,6 +355,13 @@ After setup, run `dyro`. The first run inside a project registers it in a revers
 ```bash
 dyro
 ```
+
+Interactive home always asks which coding tool to use before launching one,
+even when only a single Profile adapter is configured. Configured adapters
+remain eligible for Dyro execution contracts; supported commands detected only
+on the local machine are labeled `open workspace only` and receive no gate,
+review, merge, or push authority. Explicit commands such as
+`dyro open dev --agent codex` continue to launch directly for scripts.
 
 Projects can also be registered, selected, and inspected explicitly. These commands manage global entry points only; they never move or delete a project:
 
@@ -485,6 +509,7 @@ dyro --dry-run task run API-101
 | Command | Purpose |
 | --- | --- |
 | bare `dyro` / `home` / `workspace add/list/default/remove` | Resume recent work from any directory or manage reversible global project entries. |
+| `blueprint validate` / `join` | Validate a team-owned generic blueprint and create a resumable isolated multi-repository workspace. |
 | `setup` / `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | Onboard a teammate without TOML edits, manage anchors, and choose a line and agent. |
 | `doctor` / `status` / `status --all` | Validate and display one or every registered workspace. |
 | `line create/list` | Create, register, and inspect feature development lines. |
@@ -499,6 +524,7 @@ dyro --dry-run task run API-101
 | `dispatch` | Optional local multi-agent dispatch (L0–L4); advisory only — not a substitute for gates/merge. |
 
 See the [architecture and Profile contract](docs/architecture.md),
+the [workspace blueprint contract](docs/workspace-blueprints.md),
 the [existing control-plane migration guide](docs/migrating-existing-control-planes.md),
 and the [PyPI publishing runbook](docs/publishing.md) (maintainers) for implementation detail.
 

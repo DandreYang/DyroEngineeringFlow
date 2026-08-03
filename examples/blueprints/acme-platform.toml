@@ -1,0 +1,35 @@
+schema_version = 1
+
+[workspace]
+name = "acme-platform"
+suggested_directory = "acme-platform"
+default_line = "feature-a"
+default_base = "main"
+
+[repositories.api]
+remote = "https://example.com/acme/api.git"
+path = "repositories/services/api"
+mount = "services/api"
+verify = [["python3", "-m", "pytest", "-q"]]
+
+[repositories.web]
+remote = "https://example.com/acme/web.git"
+path = "repositories/clients/web"
+mount = "clients/web"
+verify = [["npm", "test", "--", "--runInBand"]]
+
+[lines.feature-a]
+branch = "feat/feature-a"
+
+# Every repository base is an immutable full object ID. Replace these example
+# values with commits advertised by the corresponding remotes.
+[lines.feature-a.bases]
+api = "1111111111111111111111111111111111111111"
+web = "2222222222222222222222222222222222222222"
+
+[lines.release-2026-q3]
+branch = "release/2026-q3"
+
+[lines.release-2026-q3.bases]
+api = "3333333333333333333333333333333333333333"
+web = "4444444444444444444444444444444444444444"
