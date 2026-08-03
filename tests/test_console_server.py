@@ -7,6 +7,7 @@ from threading import Thread
 import unittest
 from unittest.mock import Mock
 
+from dyro.console.inspection import IsolatedOverviewService
 from dyro.console.server import create_console_http_server
 
 
@@ -111,7 +112,7 @@ class ConsoleServerTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
         payload = json.loads(body)
         self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(payload["data"]["capabilities"], [])
+        self.assertEqual(payload["data"]["capabilities"], ["overview"])
         self.assertIn("session_expires_at", payload["data"])
 
     def test_api_refuses_cors_preflight_mutations_and_invalid_request_framing(self) -> None:
@@ -140,6 +141,7 @@ class ConsoleServerTests(unittest.TestCase):
 
     def test_server_uses_loopback_only_and_rejects_invalid_ports(self) -> None:
         self.assertEqual(self.server.server_address[0], "127.0.0.1")
+        self.assertIsInstance(self.server.overview_service, IsolatedOverviewService)
         with self.assertRaises(ValueError):
             create_console_http_server(port=-1)
         with self.assertRaises(ValueError):
@@ -234,6 +236,13 @@ class ConsoleOverviewServerTests(unittest.TestCase):
             "freshness": {"state": "fresh", "partial": False, "warnings": []},
             "data": {"workspaces": [], "next_cursor": None},
         }
+        self.overview.workspace.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "e" * 64,
+            "freshness": {"state": "partial", "partial": True, "warnings": []},
+            "data": {"workspace": {"alias": "alpha", "availability": "available"}},
+        }
         self.server = create_console_http_server(
             port=0,
             bootstrap_secret="a" * 43,
@@ -295,6 +304,26 @@ class ConsoleOverviewServerTests(unittest.TestCase):
         )
         self.assertEqual(invalid, 400)
         self.assertEqual(json.loads(body)["error"]["code"], "OVERVIEW_QUERY_INVALID")
+
+    def test_workspace_summary_is_authenticated_alias_only_and_cacheable(self) -> None:
+        bearer = self._bearer()
+        headers = {"Authorization": f"Bearer {bearer}", "Origin": self.origin}
+
+        status, response_headers, body = self._request(
+            "GET", "/api/v1/workspaces/alpha", headers=headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(response_headers["ETag"], '"' + "e" * 64 + '"')
+        self.assertEqual(json.loads(body)["data"]["workspace"]["alias"], "alpha")
+        self.overview.workspace.assert_called_once_with("alpha")
+
+        unsafe, _, unsafe_body = self._request(
+            "GET", "/api/v1/workspaces/%2fprivate", headers=headers
+        )
+        self.assertEqual(unsafe, 400)
+        self.assertEqual(
+            json.loads(unsafe_body)["error"]["code"], "WORKSPACE_ALIAS_INVALID"
+        )
 
 
 if __name__ == "__main__":

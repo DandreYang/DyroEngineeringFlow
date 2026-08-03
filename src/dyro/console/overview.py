@@ -19,7 +19,7 @@ import secrets
 from typing import Any
 
 from ..canonical import canonical_json_bytes
-from ..config import Config, load
+from ..config import Config, load, validate_id
 from ..errors import DyroError, ValidationError
 from ..hub import WorkspaceRegistry, load_registry
 from ..observations import WorkspaceReadSnapshot, capture_workspace_read_snapshot
@@ -87,6 +87,10 @@ class ConsoleOverviewService:
         snapshot_loader: Callable[[Config], WorkspaceReadSnapshot] = capture_workspace_read_snapshot,
         clock: Callable[[], datetime] = _utc_now,
         cursor_secret: bytes | None = None,
+        summary_loader: Callable[
+            [WorkspaceRegistry], tuple[list[dict[str, object]], set[str]]
+        ]
+        | None = None,
     ) -> None:
         if cursor_secret is not None and (
             not isinstance(cursor_secret, bytes) or len(cursor_secret) < 32
@@ -97,6 +101,7 @@ class ConsoleOverviewService:
         self._snapshot_loader = snapshot_loader
         self._clock = clock
         self._cursor_secret = cursor_secret or secrets.token_bytes(32)
+        self._summary_loader = summary_loader
 
     def page(
         self,
@@ -113,11 +118,12 @@ class ConsoleOverviewService:
         if type(limit) is not int or not 1 <= limit <= _MAX_LIMIT:
             raise ConsoleOverviewError("OVERVIEW_LIMIT_INVALID")
         registry = self._load_registry()
-        summaries, warning_codes = self._summaries(registry)
+        summaries, warning_codes = self._load_summaries(registry)
         aggregate = {
             "schema_version": _PAGE_SCHEMA_VERSION,
             "default_workspace": _safe_code(registry.default) if registry.default else "",
             "workspaces": summaries,
+            "warnings": sorted(warning_codes),
         }
         aggregate_sha256 = _sha256(aggregate)
         offset = self._decode_cursor(cursor, aggregate_sha256) if cursor else 0
@@ -139,13 +145,50 @@ class ConsoleOverviewService:
             "attention_counts": attention_counts,
             "highest_priority": self._highest_priority(summaries),
         }
+        return self._envelope(data, warning_codes)
+
+    def workspace(self, alias: str) -> dict[str, object]:
+        """Return one registered workspace summary from the shared projection."""
+        try:
+            alias = validate_id(alias, "工作区别名")
+        except ValidationError:
+            raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID") from None
+        registry = self._load_registry()
+        try:
+            record = next(item for item in registry.workspaces if item.name == alias)
+        except StopIteration:
+            raise ConsoleOverviewError("WORKSPACE_NOT_FOUND") from None
+        summary, warning_codes = self._summary(
+            record.name, record.root, record.name == registry.default
+        )
+        return self._envelope({"workspace": summary}, warning_codes)
+
+    def _envelope(
+        self, data: dict[str, object], warning_codes: set[str]
+    ) -> dict[str, object]:
         partial = bool(warning_codes)
+        freshness_state = "partial" if partial else "fresh"
+        warnings = tuple(sorted(warning_codes))
+        # ``captured_at`` is intentionally excluded: re-sampling identical
+        # facts may update its wall-clock value, while a warning-only change
+        # must still invalidate the HTTP ETag.
+        digest = _sha256(
+            {
+                "schema_version": _PAGE_SCHEMA_VERSION,
+                "freshness": {
+                    "state": freshness_state,
+                    "partial": partial,
+                    "warnings": list(warnings),
+                },
+                "data": data,
+            }
+        )
         return ConsoleEnvelope(
             captured_at=self._capture_time(),
-            snapshot_sha256=_sha256(data),
-            freshness_state="partial" if partial else "fresh",
+            snapshot_sha256=digest,
+            freshness_state=freshness_state,
             partial=partial,
-            warnings=tuple(sorted(warning_codes)),
+            warnings=warnings,
             data=data,
         ).to_payload()
 
@@ -175,6 +218,20 @@ class ConsoleOverviewService:
             warnings.update(codes)
         summaries.sort(key=self._summary_sort_key)
         return summaries, warnings
+
+    def _load_summaries(
+        self, registry: WorkspaceRegistry
+    ) -> tuple[list[dict[str, object]], set[str]]:
+        if self._summary_loader is None:
+            return self._summaries(registry)
+        summaries, warnings = self._summary_loader(registry)
+        if not isinstance(summaries, list) or not isinstance(warnings, set):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        copied = [dict(item) for item in summaries if isinstance(item, dict)]
+        if len(copied) != len(summaries) or not all(isinstance(item, str) for item in warnings):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        copied.sort(key=self._summary_sort_key)
+        return copied, set(warnings)
 
     def _summary(
         self, alias: str, root: Path, is_default: bool
