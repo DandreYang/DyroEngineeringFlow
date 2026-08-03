@@ -454,6 +454,42 @@ class ObjectiveCliTests(WorkspaceCase):
             main(["--root", root, "objective", "status", "release"])
         self.assertIn("Derived result: incomplete", output.getvalue())
 
+    def test_objective_read_only_plan_explain_and_graph_do_not_mutate_state(self) -> None:
+        root = str(self.root)
+        main(
+            [
+                "--root",
+                root,
+                "objective",
+                "start",
+                "--id",
+                "release",
+                "--title",
+                "Release",
+                "--line",
+                "alpha",
+                "--targets",
+                "TASK-A",
+                "--yes",
+            ]
+        )
+        objective_dir = self.config.objectives_dir / "release"
+        before = {path.relative_to(objective_dir): path.read_bytes() for path in objective_dir.rglob("*") if path.is_file()}
+        plan_output = StringIO()
+        with redirect_stdout(plan_output):
+            main(["--root", root, "objective", "plan", "release", "--format", "json"])
+        self.assertIn('"kind": "execute_task"', plan_output.getvalue())
+        explain_output = StringIO()
+        with redirect_stdout(explain_output):
+            main(["--root", root, "objective", "explain", "release"])
+        self.assertIn("Objective: release", explain_output.getvalue())
+        graph_output = StringIO()
+        with redirect_stdout(graph_output):
+            main(["--root", root, "objective", "graph", "release", "--format", "mermaid"])
+        self.assertIn("flowchart LR", graph_output.getvalue())
+        after = {path.relative_to(objective_dir): path.read_bytes() for path in objective_dir.rglob("*") if path.is_file()}
+        self.assertEqual(before, after)
+
 
 class DaemonSelectionTests(WorkspaceCase):
     def test_daemon_selects_backlog_tasks_like_loop(self) -> None:

@@ -298,9 +298,10 @@ def _require_external_security(config: Config) -> None:
         )
 
 
-def external_claim_active(task: Task) -> bool:
+def external_claim_active(task: Task, *, now: datetime | None = None) -> bool:
+    """Return claim liveness at an explicit instant when a caller has one."""
     claim = _claim(task)
-    return claim is not None and not _claim_expired(claim)
+    return claim is not None and not _claim_expired(claim, now=now)
 
 
 def execution_claim_binding(task: Task, *, claim_file: Path | None = None) -> dict[str, object]:
@@ -582,6 +583,7 @@ class ScheduleBlock:
 class SchedulePlan:
     ready: tuple[Task, ...]
     blocked: tuple[ScheduleBlock, ...]
+    review: tuple[Task, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -595,75 +597,39 @@ def plan_tasks(
     *,
     candidates: tuple[Task, ...] | list[Task] | None = None,
 ) -> SchedulePlan:
-    """Build one immutable scheduling snapshot and derive its deterministic ready set."""
-    from .graph import build_task_graph, validate_task_graph
+    """Adapt the shared, immutable scheduler plan for legacy task callers."""
+    from .continuation.planner import build_task_readiness
+    from .continuation.snapshot import build_scheduler_snapshot
 
-    graph = build_task_graph(config)
-    issues = validate_task_graph(graph)
-    if issues:
-        details = "; ".join(issue.message for issue in issues[:5])
-        suffix = f"；另有 {len(issues) - 5} 项" if len(issues) > 5 else ""
-        raise ValidationError(f"任务图结构无效：{details}{suffix}")
-    known_by_id = {task.id: task for task in graph.known_tasks}
-    statuses = {task.id: status(config, task) for task in graph.known_tasks}
-    queued = tuple(graph.known_tasks if candidates is None else candidates)
-    active_conflicts: dict[str, list[str]] = {}
-    for other in graph.known_tasks:
-        other_status = statuses[other.id]
-        active = other_status == "in_progress" or (
-            config.policy.execution_mode == "external"
-            and other_status == "assigned"
-            and external_claim_active(other)
-        )
-        if active and other.conflict_group:
-            active_conflicts.setdefault(other.conflict_group, []).append(other.id)
-    integration_errors: dict[str, str | None] = {}
-    ready: list[Task] = []
-    blocked: list[ScheduleBlock] = []
-    for task in sorted(queued, key=lambda item: item.id):
-        task_status = statuses.get(task.id)
-        if task_status is None:
-            task_status = status(config, task)
-        if task_status not in ("backlog", "assigned"):
-            continue
-        try:
-            unresolved = [
-                decision for decision in task.blocked_on if graph.decisions.get(decision) != "resolved"
-            ]
-            if unresolved:
-                raise DyroError(
-                    f"任务 {task.id} 被未 resolved 的决策点阻塞：{', '.join(unresolved)}"
-                )
-            for dependency in task.depends_on:
-                dependency_task = known_by_id[dependency]
-                dependency_status = statuses[dependency]
-                if dependency_status != "done":
-                    raise DyroError(
-                        f"任务 {task.id} 依赖 {dependency}，当前状态为 {dependency_status}"
-                    )
-                if dependency not in integration_errors:
-                    try:
-                        _assert_dependency_integrated(config, dependency_task)
-                    except DyroError as exc:
-                        integration_errors[dependency] = str(exc)
-                    else:
-                        integration_errors[dependency] = None
-                if integration_errors[dependency]:
-                    raise DyroError(integration_errors[dependency])
-            conflicts = [
-                task_id
-                for task_id in active_conflicts.get(task.conflict_group, ())
-                if task_id != task.id
-            ]
-            if conflicts:
-                raise DyroError(
-                    f"任务 {task.id} 与活跃任务 {', '.join(conflicts)} 共用冲突组 {task.conflict_group}"
-                )
-        except DyroError as exc:
-            blocked.append(ScheduleBlock(task=task, reason=str(exc)))
-            continue
-        ready.append(task)
-    return SchedulePlan(ready=tuple(ready), blocked=tuple(blocked))
+    snapshot = build_scheduler_snapshot(config, candidates=candidates)
+    readiness = build_task_readiness(snapshot)
+    by_id = snapshot.tasks_by_id
+    return SchedulePlan(
+        ready=readiness.ready,
+        blocked=tuple(
+            ScheduleBlock(
+                task=by_id[action.subject_id].task,
+                reason=_schedule_block_reason(action.reason.value, dict(action.facts)),
+            )
+            for action in readiness.blocked
+        ),
+        review=readiness.review,
+    )
+
+
+def _schedule_block_reason(reason: str, facts: dict[str, str]) -> str:
+    """Keep legacy human diagnostics while the planner itself remains locale-free."""
+    if reason == "DECISION_OPEN":
+        return f"任务被未 resolved 的决策点阻塞：{facts.get('decision_ids', '')}"
+    if reason == "DEPENDENCY_PENDING":
+        return f"任务依赖 {facts.get('dependency_id', '')}，当前状态为 {facts.get('dependency_status', '')}"
+    if reason == "TASK_INTEGRATION_PENDING":
+        return f"任务依赖 {facts.get('dependency_id', '')} 已完成但尚未集成"
+    if reason == "CONFLICT_GROUP_ACTIVE":
+        return f"任务与活跃任务 {facts.get('active_task_ids', '')} 共用冲突组 {facts.get('conflict_group', '')}"
+    if reason == "EXTERNAL_CLAIM_ACTIVE":
+        return "任务已有有效的外部执行 claim"
+    return reason
 
 
 def select_task_wave(plan: SchedulePlan, *, limit: int) -> ScheduleWave:
@@ -2129,22 +2095,20 @@ def loop_tasks(config: Config, *, dry_run: bool = False) -> list[tuple[str, str]
     all_tasks = list_tasks(config)
     assert_legacy_scheduler_allowed(config, (task.id for task in all_tasks))
     outcomes: list[tuple[str, str]] = []
+    schedule = plan_tasks(config, candidates=all_tasks)
+    blocked = {item.task.id: item for item in schedule.blocked}
+    ready_ids = {task.id for task in schedule.ready}
     for task in all_tasks:
-        if status(config, task) not in ("backlog", "assigned"):
+        if task.id in blocked:
+            outcomes.append((task.id, f"skipped: {blocked[task.id].reason}"))
             continue
-        plan = plan_tasks(config, candidates=(task,))
-        if plan.blocked:
-            outcomes.append((task.id, f"skipped: {plan.blocked[0].reason}"))
-            continue
-        if not plan.ready:
+        if task.id not in ready_ids:
             continue
         try:
             outcomes.append((task.id, run_task(config, task, dry_run=dry_run, legacy_scheduler=True)))
         except DyroError as exc:
             outcomes.append((task.id, f"skipped: {exc}"))
-    for task in list_tasks(config):
-        if status(config, task) != "review":
-            continue
+    for task in plan_tasks(config).review:
         try:
             outcomes.append((task.id, review_task(config, task, dry_run=dry_run)))
         except DyroError as exc:
