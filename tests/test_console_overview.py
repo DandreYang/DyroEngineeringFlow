@@ -24,13 +24,14 @@ def _snapshot(
     attention_kind: str = "ready",
     reason: str = "TASK_READY",
     partial: bool = False,
+    failure_code: str = "OBJECTIVES_UNAVAILABLE",
 ) -> WorkspaceReadSnapshot:
     observed_at = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
     failures = ()
     if partial:
         from dyro.observations import ReadFailure
 
-        failures = (ReadFailure("objectives", "OBJECTIVES_UNAVAILABLE"),)
+        failures = (ReadFailure("objectives", failure_code),)
     return WorkspaceReadSnapshot(
         schema_version=1,
         workspace_name=name,
@@ -111,7 +112,7 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
             self.alpha_root: SimpleNamespace(name="Alpha Project", repositories={"api": object()}),
             self.beta_root: SimpleNamespace(name="Beta Project", repositories={"web": object()}),
         }
-        snapshots = {
+        self.snapshots = {
             "Alpha Project": _snapshot(
                 name="Alpha Project",
                 attention_kind="needs_user",
@@ -133,7 +134,7 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         self.service = ConsoleOverviewService(
             registry_loader=lambda: self.registry,
             config_loader=config_loader,
-            snapshot_loader=lambda config: snapshots[config.name],
+            snapshot_loader=lambda config: self.snapshots[config.name],
             clock=lambda: datetime(2026, 8, 4, 12, 5, tzinfo=timezone.utc),
             cursor_secret=b"k" * 32,
         )
@@ -185,6 +186,39 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ConsoleOverviewError, "REGISTRY_UNAVAILABLE") as raised:
             service.page()
         self.assertNotIn("/private", str(raised.exception))
+
+    def test_warning_only_change_invalidates_the_page_etag(self) -> None:
+        first = self.service.page(limit=1)
+        self.snapshots["Beta Project"] = _snapshot(
+            name="Beta Project",
+            attention_kind="repair_required",
+            reason="ACTION_UNCERTAIN",
+            partial=True,
+            failure_code="TASKS_UNAVAILABLE",
+        )
+
+        second = self.service.page(limit=1)
+
+        first_data = dict(first["data"])
+        second_data = dict(second["data"])
+        first_cursor = first_data.pop("next_cursor")
+        second_cursor = second_data.pop("next_cursor")
+        self.assertEqual(first_data, second_data)
+        self.assertNotEqual(first_cursor, second_cursor)
+        self.assertNotEqual(first["snapshot_sha256"], second["snapshot_sha256"])
+        self.assertNotEqual(first["freshness"]["warnings"], second["freshness"]["warnings"])
+        with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_CURSOR_INVALID"):
+            self.service.page(cursor=first["data"]["next_cursor"], limit=1)
+
+    def test_single_workspace_reuses_the_same_summary_and_rejects_unsafe_aliases(self) -> None:
+        payload = self.service.workspace("alpha")
+
+        self.assertEqual(payload["data"]["workspace"]["alias"], "alpha")
+        self.assertNotIn("/private", repr(payload))
+        with self.assertRaisesRegex(ConsoleOverviewError, "WORKSPACE_ALIAS_INVALID"):
+            self.service.workspace("%2fprivate")
+        with self.assertRaisesRegex(ConsoleOverviewError, "WORKSPACE_NOT_FOUND"):
+            self.service.workspace("missing")
 
 
 if __name__ == "__main__":

@@ -12,7 +12,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .. import __version__
-from .overview import ConsoleOverviewError, ConsoleOverviewService
+from .inspection import IsolatedOverviewService
+from .overview import ConsoleOverviewError
 from .session import ConsoleSessionStore, SessionRejected
 
 
@@ -54,12 +55,12 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
         port: int,
         bootstrap_secret: str | None,
         session_store: ConsoleSessionStore | None,
-        overview_service: ConsoleOverviewService | None,
+        overview_service: IsolatedOverviewService | None,
         max_concurrent_requests: int,
     ) -> None:
         self._request_slots = threading.BoundedSemaphore(max_concurrent_requests)
         self.sessions = session_store
-        self.overview_service = overview_service
+        self.overview_service = overview_service or IsolatedOverviewService()
         super().__init__((HOST, port), ConsoleRequestHandler)
         if self.sessions is None:
             self.sessions = ConsoleSessionStore(bootstrap_secret=bootstrap_secret)
@@ -306,6 +307,17 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 return
             self._overview(parsed.query)
             return
+        if parsed.path.startswith("/api/v1/workspaces/"):
+            if self.command != "GET":
+                self._method_not_allowed()
+                return
+            if self._has_body():
+                self._error(400, "BAD_REQUEST")
+                return
+            if self._authorized_session() is None:
+                return
+            self._workspace_summary(parsed.path)
+            return
         if parsed.path.startswith("/api/"):
             self._error(401, "UNAUTHORIZED")
             return
@@ -320,19 +332,38 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             cursor, limit = self._overview_parameters(query)
             payload = service.page(cursor=cursor, limit=limit)
         except ConsoleOverviewError as exc:
-            self._error(
-                400
-                if exc.code
-                in {
-                    "OVERVIEW_CURSOR_INVALID",
-                    "OVERVIEW_LIMIT_INVALID",
-                    "OVERVIEW_QUERY_INVALID",
-                }
-                else 503,
-                exc.code,
-            )
+            self._error(self._overview_error_status(exc.code), exc.code)
             return
         self._json(200, payload, etag=str(payload.get("snapshot_sha256", "")))
+
+    def _workspace_summary(self, path: str) -> None:
+        service = self.console.overview_service
+        if service is None:
+            self._error(404, "NOT_FOUND")
+            return
+        alias = path.removeprefix("/api/v1/workspaces/")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", alias):
+            self._error(400, "WORKSPACE_ALIAS_INVALID")
+            return
+        try:
+            payload = service.workspace(alias)
+        except ConsoleOverviewError as exc:
+            self._error(self._overview_error_status(exc.code), exc.code)
+            return
+        self._json(200, payload, etag=str(payload.get("snapshot_sha256", "")))
+
+    @staticmethod
+    def _overview_error_status(code: str) -> int:
+        if code in {
+            "OVERVIEW_CURSOR_INVALID",
+            "OVERVIEW_LIMIT_INVALID",
+            "OVERVIEW_QUERY_INVALID",
+            "WORKSPACE_ALIAS_INVALID",
+        }:
+            return 400
+        if code == "WORKSPACE_NOT_FOUND":
+            return 404
+        return 503
 
     @staticmethod
     def _overview_parameters(query: str) -> tuple[str | None, int]:
@@ -506,7 +537,7 @@ def create_console_http_server(
     port: int = 0,
     bootstrap_secret: str | None = None,
     session_store: ConsoleSessionStore | None = None,
-    overview_service: ConsoleOverviewService | None = None,
+    overview_service: IsolatedOverviewService | None = None,
     max_concurrent_requests: int = MAX_CONCURRENT_REQUESTS,
 ) -> ConsoleHTTPServer:
     """Bind a Console server to IPv4 loopback only; no host override exists."""

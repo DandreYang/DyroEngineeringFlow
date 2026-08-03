@@ -219,6 +219,25 @@ C03 在 listener 外新增 `ConsoleOverviewService`，把既有 registry 与每�
 - overview 的 `snapshot_sha256` 可作为 ETag 使用；同一脱敏页面带精确 `If-None-Match` 时返回
   304。C03 仍没有 CLI、浏览器、静态资源或详情 API。
 
+### 4.4 C04 已落地的 inspection 与工作区摘要契约
+
+C04 将真实工作区读取移出 HTTP 请求线程，并补齐概览的单工作区下钻入口：
+
+- `create_console_http_server()` 默认装配 `IsolatedOverviewService` IPC client。它以固定 `python -m`
+  argv、最小环境和新 session 启动 inspection process；worker 不继承 bearer、bootstrap、编码工具
+  配置或其它宿主环境值，异常 stderr 不会进入 API；
+- inspection outer worker 对单次请求施加 5 秒硬 deadline。它在内部最多运行 4 个 daemon 子进程，
+  每个 workspace 750ms；超时或崩溃只返回该 workspace 的 `unavailable`/`WORKSPACE_TIMEOUT` 卡片，
+  并在父 deadline 后终止整个 process group；
+- 当前 process-tree 回收仅在 POSIX 平台启用；Windows 在具备经验证的 Job Object 回收实现前对
+  inspection fail closed，不会以“只终止 outer process”的方式留下读取子进程；
+- worker 到 listener 只返回有大小上限的规范 JSON。父进程重新校验 schema、digest、freshness 和
+  payload 形状；无效输出、超时或 worker 失败全部 fail closed 为稳定 code；
+- `GET /api/v1/workspaces/{alias}` 需要 bearer，只接收单段安全 alias，复用同一 summary DTO 与
+  ETag。未知 alias、编码 traversal 或双段路径不会落入 workspace 读取；
+- overview 和 workspace 的 ETag 覆盖 data 以及 `freshness.state`、`partial` 和 warnings，排除仅
+  表示采样时刻的 `captured_at`，因此 warning-only 变化也会使条件请求重新获得 200。
+
 ## 5. 模块设计
 
 建议模块边界：
