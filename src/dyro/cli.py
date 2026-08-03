@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -44,6 +45,7 @@ from .continuation.store import (
     resume_objective,
     stop_objective,
 )
+from .continuation.triggers import TriggerConfig, TriggerKind, TriggerProbeInput, probe_builtin
 from .evidence import build_execution_bundle, unpack_execution_bundle
 from .errors import DyroError, ValidationError
 from .home import (
@@ -1776,6 +1778,107 @@ def cmd_objective_graph(args: argparse.Namespace) -> None:
     print(render_projection_mermaid(projection))
 
 
+def _trigger_cli_time(value: str | None, label: str) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise DyroError(f"{label} 必须是带时区的 ISO-8601 时间") from exc
+    if parsed.tzinfo is None:
+        raise DyroError(f"{label} 必须是带时区的 ISO-8601 时间")
+    return parsed.astimezone(timezone.utc)
+
+
+def _trigger_cli_facts(values: list[str] | None, label: str) -> tuple[tuple[str, str], ...]:
+    facts: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for value in values or []:
+        name, separator, state = value.partition("=")
+        name, state = name.strip(), state.strip()
+        if not separator or not name or not state:
+            raise DyroError(f"{label} 必须使用 KEY=VALUE；可重复指定")
+        if name in seen:
+            raise DyroError(f"{label} 不能重复指定同一个 KEY：{name}")
+        seen.add(name)
+        facts.append((name, state))
+    return tuple(facts)
+
+
+def _trigger_payload(observation, *, delivery: str | None = None) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "trigger_id": observation.trigger_id,
+        "state": observation.state.value,
+        "summary": observation.summary,
+        "evidence_ref": observation.evidence_ref,
+        "observed_at": observation.observed_at.isoformat() if observation.observed_at else None,
+        "next_probe_at": observation.next_probe_at.isoformat() if observation.next_probe_at else None,
+    }
+    if delivery is not None:
+        payload["delivery"] = delivery
+    return payload
+
+
+def _print_trigger_observation(args: argparse.Namespace, observation, *, delivery: str | None = None) -> None:
+    payload = _trigger_payload(observation, delivery=delivery)
+    if args.format == "json":
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return
+    print(
+        f"{payload['trigger_id']}: {payload['state']} ({payload['summary']}) "
+        f"@ {payload['observed_at']}"
+    )
+    if delivery:
+        print("只读观测已输出；尚未写入任务、证据或执行台账。")
+
+
+def cmd_trigger_list(args: argparse.Namespace) -> None:
+    rows = [
+        {
+            "kind": kind.value,
+            "execution": "bounded_adapter_required" if kind is TriggerKind.PROVIDER else "builtin_read_only",
+        }
+        for kind in TriggerKind
+    ]
+    if args.format == "json":
+        print(json.dumps(rows, ensure_ascii=False, sort_keys=True))
+        return
+    for row in rows:
+        print(f"{row['kind']:16} {row['execution']}")
+
+
+def cmd_trigger_probe(args: argparse.Namespace) -> None:
+    kind = TriggerKind(args.kind)
+    if kind is TriggerKind.PROVIDER:
+        raise DyroError("provider Trigger 只能由已登记的有界 adapter 调用；CLI 不接受命令、URL 或脚本")
+    now = _trigger_cli_time(args.at, "--at") or datetime.now(timezone.utc)
+    not_before = _trigger_cli_time(args.not_before, "--not-before")
+    if args.signal and kind is not TriggerKind.MANUAL_SIGNAL:
+        raise DyroError("--signal 只能与 manual_signal Trigger 一起使用")
+    observation = probe_builtin(
+        TriggerProbeInput(
+            config=TriggerConfig(args.id, kind, not_before=not_before),
+            now=now,
+            current_facts=_trigger_cli_facts(args.current, "--current"),
+            previous_facts=_trigger_cli_facts(args.previous, "--previous"),
+            manual_signal=args.signal or "",
+        )
+    )
+    _print_trigger_observation(args, observation, delivery="ephemeral")
+
+
+def cmd_trigger_signal(args: argparse.Namespace) -> None:
+    now = _trigger_cli_time(args.at, "--at") or datetime.now(timezone.utc)
+    observation = probe_builtin(
+        TriggerProbeInput(
+            config=TriggerConfig(args.id, TriggerKind.MANUAL_SIGNAL),
+            now=now,
+            manual_signal=args.signal,
+        )
+    )
+    _print_trigger_observation(args, observation, delivery="ephemeral")
+
+
 def _cmd_objective_transition(args: argparse.Namespace, action: str) -> None:
     config = _config(args)
     _require_objective_yes(args, f"Objective {action}")
@@ -2262,6 +2365,28 @@ def build_parser() -> argparse.ArgumentParser:
         parser_item.add_argument("task")
         parser_item.add_argument("--yes", action="store_true")
         parser_item.set_defaults(func=function)
+
+    trigger = sub.add_parser("trigger", help="只读 Trigger 观测与有界 provider 协议入口")
+    trigger_sub = trigger.add_subparsers(dest="trigger_command", required=True)
+    trigger_list = trigger_sub.add_parser("list", help="列出内置 Trigger 类型与 provider 边界")
+    trigger_list.add_argument("--format", choices=("text", "json"), default="text")
+    trigger_list.set_defaults(func=cmd_trigger_list)
+    trigger_probe = trigger_sub.add_parser("probe", help="用显式事实执行一次只读内置 Trigger 观测")
+    trigger_probe.add_argument("kind", choices=tuple(item.value for item in TriggerKind))
+    trigger_probe.add_argument("--id", default="manual-probe")
+    trigger_probe.add_argument("--at", help="观测时间（带时区 ISO-8601）；默认当前 UTC 时间")
+    trigger_probe.add_argument("--not-before", help="time_due 的最早触发时间（带时区 ISO-8601）")
+    trigger_probe.add_argument("--current", action="append", metavar="KEY=VALUE", help="当前事实；可重复指定")
+    trigger_probe.add_argument("--previous", action="append", metavar="KEY=VALUE", help="上次事实；可重复指定")
+    trigger_probe.add_argument("--signal", help="manual_signal 的非空人工信号")
+    trigger_probe.add_argument("--format", choices=("text", "json"), default="text")
+    trigger_probe.set_defaults(func=cmd_trigger_probe)
+    trigger_signal = trigger_sub.add_parser("signal", help="输出一次临时人工信号观测，不写入任务或控制面")
+    trigger_signal.add_argument("signal")
+    trigger_signal.add_argument("--id", default="manual-signal")
+    trigger_signal.add_argument("--at", help="观测时间（带时区 ISO-8601）；默认当前 UTC 时间")
+    trigger_signal.add_argument("--format", choices=("text", "json"), default="text")
+    trigger_signal.set_defaults(func=cmd_trigger_signal)
 
     task = sub.add_parser("task", help="任务编排")
     task_sub = task.add_subparsers(dest="task_command", required=True)
