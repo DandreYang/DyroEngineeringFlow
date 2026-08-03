@@ -392,6 +392,69 @@ class ExternalClaimCommandsTests(WorkspaceCase):
         self.assertFalse(task_path.joinpath("claim.json").exists())
 
 
+class ObjectiveCliTests(WorkspaceCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.config = load(self.root)
+        create_line(self.config, line_id="alpha", branch="feat/alpha", base="main")
+        directory = self.config.task_specs_dir / "TASK-A"
+        directory.mkdir(parents=True)
+        directory.joinpath("task.toml").write_text(
+            task_template("TASK-A", "Task A", "alpha", "api", "services/api").replace('agent = "codex"', 'agent = "noop"'),
+            encoding="utf-8",
+        )
+        directory.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+
+    def test_objective_start_dry_run_has_zero_writes_and_lifecycle_commands_work(self) -> None:
+        root = str(self.root)
+        main(
+            [
+                "--root",
+                root,
+                "--dry-run",
+                "objective",
+                "start",
+                "--id",
+                "release",
+                "--title",
+                "Release",
+                "--line",
+                "alpha",
+                "--targets",
+                "TASK-A",
+            ]
+        )
+        self.assertFalse(self.config.objectives_dir.exists())
+        main(
+            [
+                "--root",
+                root,
+                "objective",
+                "start",
+                "--id",
+                "release",
+                "--title",
+                "Release",
+                "--line",
+                "alpha",
+                "--targets",
+                "TASK-A",
+                "--yes",
+            ]
+        )
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as rejected:
+            main(["--root", root, "task", "loop"])
+        self.assertEqual(rejected.exception.code, 2)
+        self.assertIn("不能绕过 ownership", stderr.getvalue())
+        main(["--root", root, "objective", "pause", "release", "--yes"])
+        main(["--root", root, "objective", "resume", "release", "--yes"])
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", root, "objective", "status", "release"])
+        self.assertIn("Derived result: incomplete", output.getvalue())
+
+
 class DaemonSelectionTests(WorkspaceCase):
     def test_daemon_selects_backlog_tasks_like_loop(self) -> None:
         from dyro.cli import _daemon_select_runnable

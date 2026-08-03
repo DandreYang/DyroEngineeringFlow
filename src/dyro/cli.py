@@ -21,6 +21,20 @@ from .blueprint import (
 )
 from .changesets import create_changeset, get_changeset, list_changesets, verify_changeset
 from .config import CONFIG_NAME, Config, load, validate_id
+from .continuation.models import Operation, RequestedMode
+from .continuation.resolution import resolve_line, resolve_workspace
+from .continuation.store import (
+    add_objective_target,
+    create_objective,
+    derive_objective_result,
+    get_objective,
+    list_objectives,
+    pause_objective,
+    reconcile_objective,
+    remove_objective_target,
+    resume_objective,
+    stop_objective,
+)
 from .evidence import build_execution_bundle, unpack_execution_bundle
 from .errors import DyroError, ValidationError
 from .home import (
@@ -163,7 +177,12 @@ def _config(args: argparse.Namespace) -> Config:
     elif workspace_arg:
         root = get_workspace(workspace_arg).root
     else:
-        root = Path.cwd()
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+        return resolve_workspace(
+            start=Path.cwd(),
+            interactive=interactive,
+            chooser=(lambda label, values: _choose(label, list(values))) if interactive else None,
+        )
     return load(root)
 
 
@@ -194,6 +213,54 @@ def _repository_assignments(values: list[str] | None, label: str) -> dict[str, s
 def _require_yes(args: argparse.Namespace, label: str) -> None:
     if not args.yes and not args.dry_run:
         raise DyroError(f"{label} 会创建或修改 Git worktree；请先使用 --dry-run 检查，再加 --yes 执行")
+
+
+def _require_objective_yes(args: argparse.Namespace, label: str) -> None:
+    if not args.yes and not args.dry_run:
+        raise DyroError(f"{label} 会修改 Objective 状态；请先使用 --dry-run 检查，再加 --yes 执行")
+
+
+def _objective_contract_from_args(args: argparse.Namespace, config: Config) -> str:
+    if args.file:
+        path = Path(args.file).expanduser()
+        if not path.is_file() or path.is_symlink():
+            raise DyroError(f"Objective 合约文件必须是安全的普通文件：{path}")
+        return path.read_text(encoding="utf-8")
+    if not args.id or not args.title:
+        raise DyroError("非文件模式必须提供 --id 与 --title")
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    selected_line = args.line or resolve_line(
+        config,
+        interactive=interactive,
+        chooser=(lambda label, values: _choose(label, list(values))) if interactive else None,
+    ).id
+    targets = tuple(item.strip() for item in (args.targets or "").split(",") if item.strip())
+    if not targets:
+        raise DyroError("非文件模式必须提供 --targets TASK_ID[,TASK_ID...]；交互选择将在后续版本提供")
+    mode = args.mode or RequestedMode.SUPERVISED.value
+    operations = tuple(args.operation or (Operation.EXECUTE.value, Operation.REVIEW.value))
+    return "\n".join(
+        (
+            "schema_version = 1",
+            f"id = {json.dumps(args.id, ensure_ascii=False)}",
+            f"title = {json.dumps(args.title, ensure_ascii=False)}",
+            f"line = {json.dumps(selected_line, ensure_ascii=False)}",
+            "targets = [" + ", ".join(json.dumps(item, ensure_ascii=False) for item in targets) + "]",
+            "",
+            "[continuation]",
+            f"requested_mode = {json.dumps(mode)}",
+            "operations = [" + ", ".join(json.dumps(item) for item in operations) + "]",
+            "",
+        )
+    )
+
+
+def _print_objective(config: Config, record) -> None:
+    result = derive_objective_result(config, record)
+    print(
+        f"{record.objective.id:28} {record.operator_state:8} {result:16} "
+        f"r{record.revision:<3} {record.objective.line:20} {', '.join(record.objective.targets)}"
+    )
 
 
 def _print_command(argv: tuple[str, ...]) -> None:
@@ -1631,6 +1698,86 @@ def cmd_task_loop(args: argparse.Namespace) -> None:
         print(f"{task_id} -> {result}")
 
 
+def cmd_objective_start(args: argparse.Namespace) -> None:
+    config = _config(args)
+    content = _objective_contract_from_args(args, config)
+    _require_objective_yes(args, "创建 Objective")
+    record = create_objective(config, content, dry_run=args.dry_run)
+    prefix = "DRY RUN: " if args.dry_run else ""
+    print(
+        f"{prefix}Objective {record.objective.id} r{record.revision}："
+        f"line={record.objective.line} targets={', '.join(record.objective.targets)} "
+        f"scope={', '.join(record.scope)}"
+    )
+
+
+def cmd_objective_list(args: argparse.Namespace) -> None:
+    config = _config(args)
+    records = list_objectives(config)
+    if not records:
+        print("暂无 Objective。下一步：dyro objective start --file <objective.toml> --yes")
+        return
+    print(f"{'OBJECTIVE':28} {'STATE':8} {'RESULT':16} {'REV':4} {'LINE':20} TARGETS")
+    for record in records:
+        _print_objective(config, record)
+
+
+def cmd_objective_status(args: argparse.Namespace) -> None:
+    config = _config(args)
+    record = get_objective(config, args.id)
+    print(f"Objective: {record.objective.id}")
+    print(f"Operator state: {record.operator_state}")
+    print(f"Derived result: {derive_objective_result(config, record)}")
+    print(f"Revision: {record.revision}")
+    print(f"Line: {record.objective.line}")
+    print(f"Targets: {', '.join(record.objective.targets)}")
+    print(f"Scope: {', '.join(record.scope)}")
+    print(f"Contract SHA-256: {record.contract_sha256}")
+
+
+def _cmd_objective_transition(args: argparse.Namespace, action: str) -> None:
+    config = _config(args)
+    _require_objective_yes(args, f"Objective {action}")
+    handlers = {
+        "pause": pause_objective,
+        "resume": resume_objective,
+        "stop": stop_objective,
+        "reconcile": reconcile_objective,
+    }
+    record = handlers[action](config, args.id, dry_run=args.dry_run)
+    print(f"{'DRY RUN: ' if args.dry_run else ''}{record.objective.id} -> {record.operator_state} r{record.revision}")
+
+
+def cmd_objective_pause(args: argparse.Namespace) -> None:
+    _cmd_objective_transition(args, "pause")
+
+
+def cmd_objective_resume(args: argparse.Namespace) -> None:
+    _cmd_objective_transition(args, "resume")
+
+
+def cmd_objective_stop(args: argparse.Namespace) -> None:
+    _cmd_objective_transition(args, "stop")
+
+
+def cmd_objective_reconcile(args: argparse.Namespace) -> None:
+    _cmd_objective_transition(args, "reconcile")
+
+
+def cmd_objective_scope_add(args: argparse.Namespace) -> None:
+    config = _config(args)
+    _require_objective_yes(args, "扩展 Objective scope")
+    record = add_objective_target(config, args.id, args.task, dry_run=args.dry_run)
+    print(f"{'DRY RUN: ' if args.dry_run else ''}{record.objective.id} r{record.revision} targets={', '.join(record.objective.targets)}")
+
+
+def cmd_objective_scope_remove(args: argparse.Namespace) -> None:
+    config = _config(args)
+    _require_objective_yes(args, "缩减 Objective scope")
+    record = remove_objective_target(config, args.id, args.task, dry_run=args.dry_run)
+    print(f"{'DRY RUN: ' if args.dry_run else ''}{record.objective.id} r{record.revision} targets={', '.join(record.objective.targets)}")
+
+
 def _daemon_active_conflict_groups(config: Config, tasks: list) -> set[str]:
     """Conflict groups already reserved by running or claimed work.
 
@@ -1652,13 +1799,19 @@ def _daemon_select_runnable(config: Config, tasks: list, *, limit: int) -> list:
 
 
 def cmd_task_daemon(args: argparse.Namespace) -> None:
+    from .continuation.store import assert_legacy_scheduler_allowed
+
     config = _config(args)
     while True:
         tasks = list_tasks(config)
+        assert_legacy_scheduler_allowed(config, (task.id for task in tasks))
         queued = _daemon_select_runnable(config, tasks, limit=max(1, args.parallel))
         if queued:
             with ThreadPoolExecutor(max_workers=max(1, args.parallel), thread_name_prefix="dyro-dispatch") as pool:
-                futures = {pool.submit(run_task, config, task, dry_run=args.dry_run): task for task in queued}
+                futures = {
+                    pool.submit(run_task, config, task, dry_run=args.dry_run, legacy_scheduler=True): task
+                    for task in queued
+                }
                 for future in as_completed(futures):
                     task = futures[future]
                     try:
@@ -2032,6 +2185,44 @@ def build_parser() -> argparse.ArgumentParser:
     changeset_verify = changeset_sub.add_parser("verify")
     changeset_verify.add_argument("id")
     changeset_verify.set_defaults(func=cmd_changeset_verify)
+
+    objective = sub.add_parser("objective", help="持久化并观察一个跨任务 Objective；此阶段不执行 Task")
+    objective_sub = objective.add_subparsers(dest="objective_command", required=True)
+    objective_start = objective_sub.add_parser("start", help="固定 Objective 合约、目标和依赖闭包")
+    objective_start.add_argument("--file", help="完整 Objective v1 TOML 合约")
+    objective_start.add_argument("--id")
+    objective_start.add_argument("--title")
+    objective_start.add_argument("--line")
+    objective_start.add_argument("--targets", help="逗号分隔的 Task ID；非文件模式必填")
+    objective_start.add_argument("--mode", choices=tuple(item.value for item in RequestedMode))
+    objective_start.add_argument("--operation", action="append", choices=tuple(item.value for item in Operation))
+    objective_start.add_argument("--yes", action="store_true")
+    objective_start.set_defaults(func=cmd_objective_start)
+    objective_sub.add_parser("list", help="列出已接受的 Objective").set_defaults(func=cmd_objective_list)
+    objective_status = objective_sub.add_parser("status", help="显示 Objective 状态和派生结果")
+    objective_status.add_argument("id")
+    objective_status.set_defaults(func=cmd_objective_status)
+    for command, function, help_text in (
+        ("pause", cmd_objective_pause, "暂停后续推进，不写完成状态"),
+        ("resume", cmd_objective_resume, "恢复 paused Objective 的 ownership"),
+        ("stop", cmd_objective_stop, "终止 Objective；不能再恢复"),
+        ("reconcile", cmd_objective_reconcile, "重新固定 TaskGraph scope 与 contract 哈希"),
+    ):
+        parser_item = objective_sub.add_parser(command, help=help_text)
+        parser_item.add_argument("id")
+        parser_item.add_argument("--yes", action="store_true")
+        parser_item.set_defaults(func=function)
+    objective_scope = objective_sub.add_parser("scope", help="显式调整 Objective targets 并建立新 revision")
+    objective_scope_sub = objective_scope.add_subparsers(dest="objective_scope_command", required=True)
+    for command, function, help_text in (
+        ("add", cmd_objective_scope_add, "将同一开发线的 Task 加入 targets"),
+        ("remove", cmd_objective_scope_remove, "从 targets 移除一个 Task"),
+    ):
+        parser_item = objective_scope_sub.add_parser(command, help=help_text)
+        parser_item.add_argument("id")
+        parser_item.add_argument("task")
+        parser_item.add_argument("--yes", action="store_true")
+        parser_item.set_defaults(func=function)
 
     task = sub.add_parser("task", help="任务编排")
     task_sub = task.add_subparsers(dest="task_command", required=True)

@@ -813,9 +813,10 @@ def _reserve_local_execution(
     allowed: tuple[str, ...],
     action: str,
     dry_run: bool,
+    legacy_scheduler: bool = False,
 ) -> None:
     """Check dispatch constraints and atomically reserve the task before starting an Agent."""
-    with exclusive_lock(_dispatch_lock_path(config)):
+    def reserve() -> None:
         with exclusive_lock(_state_lock_path(task)):
             current = status(config, task)
             if current not in allowed:
@@ -826,6 +827,16 @@ def _reserve_local_execution(
             if current in ("backlog", "failed"):
                 set_status(config, task, "assigned", force=current == "failed")
             set_status(config, task, "in_progress")
+
+    if legacy_scheduler:
+        from .continuation.store import legacy_scheduler_reservation
+
+        with legacy_scheduler_reservation(config, (task.id,)):
+            with exclusive_lock(_dispatch_lock_path(config)):
+                reserve()
+        return
+    with exclusive_lock(_dispatch_lock_path(config)):
+        reserve()
 
 
 def worktree_root(config: Config, task: Task) -> Path:
@@ -1325,7 +1336,13 @@ def run_gates(config: Config, task: Task, *, dry_run: bool = False) -> bool:
     return all_passed
 
 
-def run_task(config: Config, task: Task, *, dry_run: bool = False) -> str:
+def run_task(
+    config: Config,
+    task: Task,
+    *,
+    dry_run: bool = False,
+    legacy_scheduler: bool = False,
+) -> str:
     _require_local_execution(config, "任务", dry_run=dry_run)
     if dry_run:
         return _run_task(config, task, dry_run=True)
@@ -1337,6 +1354,7 @@ def run_task(config: Config, task: Task, *, dry_run: bool = False) -> str:
                 allowed=("backlog", "assigned", "failed"),
                 action="启动执行",
                 dry_run=False,
+                legacy_scheduler=legacy_scheduler,
             )
             attempt = begin_execution_attempt(
                 task.directory,
@@ -2106,8 +2124,12 @@ def loop_tasks(config: Config, *, dry_run: bool = False) -> list[tuple[str, str]
     This is deliberately deterministic.  `task daemon` is the concurrent
     scheduler; `task loop` is the inspectable, one-pass coordination command.
     """
+    from .continuation.store import assert_legacy_scheduler_allowed
+
+    all_tasks = list_tasks(config)
+    assert_legacy_scheduler_allowed(config, (task.id for task in all_tasks))
     outcomes: list[tuple[str, str]] = []
-    for task in list_tasks(config):
+    for task in all_tasks:
         if status(config, task) not in ("backlog", "assigned"):
             continue
         plan = plan_tasks(config, candidates=(task,))
@@ -2117,7 +2139,7 @@ def loop_tasks(config: Config, *, dry_run: bool = False) -> list[tuple[str, str]
         if not plan.ready:
             continue
         try:
-            outcomes.append((task.id, run_task(config, task, dry_run=dry_run)))
+            outcomes.append((task.id, run_task(config, task, dry_run=dry_run, legacy_scheduler=True)))
         except DyroError as exc:
             outcomes.append((task.id, f"skipped: {exc}"))
     for task in list_tasks(config):
