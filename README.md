@@ -6,6 +6,8 @@
 
 **Keep engineering moving from task to delivery.**
 
+![Dyro — multi-repository delivery control](docs/assets/dyro-github-cover-long-running-work-v5.png)
+
 DyroEngineeringFlow is not coupled to Codex, Claude, or any business domain. Each team supplies a `dyro.toml` Profile for repositories, layouts, agent adapters, and delivery policy; business rules, model cost, and release practices stay in that Profile.
 
 ## What it enforces
