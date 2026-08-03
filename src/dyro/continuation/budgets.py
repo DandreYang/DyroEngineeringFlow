@@ -181,7 +181,11 @@ class BudgetRequest:
             raise TypeError("BudgetRequest.task_id 不能为空")
         for field in ("actions", "attempts", "failures", "parallel", "provider_usage"):
             value = _non_negative(getattr(self, field), f"BudgetRequest.{field}")
-            if field in {"actions", "attempts", "parallel"} and value < 1:
+            # A review consumes an Action and a scheduler slot but is not a
+            # new execution attempt.  Keep that distinction expressible at
+            # the budget boundary instead of charging reviews against the
+            # per-task execution-attempt ceiling.
+            if field in {"actions", "parallel"} and value < 1:
                 raise TypeError(f"BudgetRequest.{field} 必须是正整数")
         if type(self.provider_usage_trusted) is not bool:
             raise TypeError("BudgetRequest.provider_usage_trusted 必须是 bool")

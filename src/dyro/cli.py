@@ -55,6 +55,14 @@ from .continuation.store import (
     resume_objective,
     stop_objective,
 )
+from .continuation.supervision import (
+    apply_supervised_wave,
+    build_supervised_wave,
+    render_supervised_outcomes,
+    render_supervised_wave_text,
+    supervised_outcomes_payload,
+    supervised_wave_payload,
+)
 from .continuation.triggers import TriggerConfig, TriggerKind, TriggerProbeInput, probe_builtin
 from .evidence import build_execution_bundle, unpack_execution_bundle
 from .errors import DyroError, ValidationError
@@ -1820,6 +1828,40 @@ def cmd_objective_attention(args: argparse.Namespace) -> None:
     print(render_attention_text(projection))
 
 
+def cmd_objective_apply(args: argparse.Namespace) -> None:
+    """Display an exact supervised wave, then apply it only after confirmation."""
+    config = _config(args)
+    wave = build_supervised_wave(config, args.id)
+    if args.format == "text":
+        print(render_supervised_wave_text(wave))
+    if args.dry_run:
+        if args.format == "json":
+            print(json.dumps({"wave": supervised_wave_payload(wave), "dry_run": True}, ensure_ascii=False, sort_keys=True, indent=2))
+        else:
+            print("DRY RUN: 未创建 owner lease、Action intent、Action-start 或 Task 执行。")
+        return
+    if args.yes and args.confirm_sha != wave.confirmation_sha256:
+        raise DyroError("--yes 必须同时提供当前 Confirmation SHA-256；请先运行 objective apply --dry-run 后复制摘要")
+    if not args.yes:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise DyroError("非交互执行必须提供 --yes 与 --confirm-sha；先使用 --dry-run 查看精确 wave")
+        if not _ask_yes_no("确认按上述顺序执行该受监督 Action wave", default=False):
+            print("已取消；未写入 Objective 或 Task 状态。")
+            return
+    outcomes = apply_supervised_wave(config, wave)
+    if args.format == "json":
+        print(
+            json.dumps(
+                {"wave": supervised_wave_payload(wave), "dry_run": False, "outcomes": supervised_outcomes_payload(outcomes)},
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+        )
+    elif outcomes:
+        print(render_supervised_outcomes(outcomes))
+
+
 def _trigger_cli_time(value: str | None, label: str) -> datetime | None:
     if value is None:
         return None
@@ -2398,6 +2440,15 @@ def build_parser() -> argparse.ArgumentParser:
     objective_attention.add_argument("id")
     objective_attention.add_argument("--format", choices=("text", "json"), default="text")
     objective_attention.set_defaults(func=cmd_objective_attention)
+    objective_apply = objective_sub.add_parser(
+        "apply",
+        help="显示精确 Action wave；确认后仅受监督地执行 execute/review，不 merge 或 push",
+    )
+    objective_apply.add_argument("id")
+    objective_apply.add_argument("--confirm-sha", help="非交互 --yes 必填；必须等于当前 Confirmation SHA-256")
+    objective_apply.add_argument("--yes", action="store_true", help="确认当前显示的精确 wave 后执行")
+    objective_apply.add_argument("--format", choices=("text", "json"), default="text")
+    objective_apply.set_defaults(func=cmd_objective_apply)
     for command, function, help_text in (
         ("pause", cmd_objective_pause, "暂停后续推进，不写完成状态"),
         ("resume", cmd_objective_resume, "恢复 paused Objective 的 ownership"),
