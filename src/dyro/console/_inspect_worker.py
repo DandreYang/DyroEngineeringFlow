@@ -12,12 +12,13 @@ import base64
 import json
 from multiprocessing import get_context
 import os
+from pathlib import Path
 import queue
 import sys
 import time
 from typing import Any
 
-from ..config import validate_id
+from ..config import load, validate_id
 from ..hub import WorkspaceRecord, WorkspaceRegistry
 from .overview import ConsoleOverviewError, ConsoleOverviewService
 
@@ -249,9 +250,34 @@ def _decode_request(value: str) -> dict[str, object]:
         decoded = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeError, json.JSONDecodeError):
         raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE") from None
-    if not isinstance(decoded, dict) or set(decoded) - {"op", "cursor", "limit", "alias"}:
+    if not isinstance(decoded, dict) or set(decoded) - {
+        "op",
+        "cursor",
+        "limit",
+        "alias",
+        "target_root",
+    }:
         raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
     return decoded
+
+
+def _target_registry(request: dict[str, object]) -> WorkspaceRegistry | None:
+    raw_root = request.get("target_root")
+    if raw_root is None:
+        return None
+    if not isinstance(raw_root, str) or not raw_root or len(raw_root) > 4096:
+        raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+    root = Path(raw_root)
+    if not root.is_absolute():
+        raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+    try:
+        config = load(root)
+    except Exception:
+        raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE") from None
+    return WorkspaceRegistry(
+        default=config.name,
+        workspaces=(WorkspaceRecord(name=config.name, root=config.root),),
+    )
 
 
 def _response(payload: dict[str, object] | None = None, *, code: str = "") -> int:
@@ -275,10 +301,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         request = _decode_request(args.request)
-        service = ConsoleOverviewService(
-            cursor_secret=_secret_from_environment(),
-            summary_loader=_isolated_summaries,
-        )
+        target_registry = _target_registry(request)
+        service_arguments: dict[str, object] = {
+            "cursor_secret": _secret_from_environment(),
+            "summary_loader": _isolated_summaries,
+        }
+        if target_registry is not None:
+            service_arguments["registry_loader"] = lambda: target_registry
+        service = ConsoleOverviewService(**service_arguments)
         operation = request.get("op")
         if operation == "overview":
             payload = service.page(

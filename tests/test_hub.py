@@ -189,6 +189,21 @@ class HubCliTests(WorkspaceCase):
         self.assertIn("/usr/bin/true", rendered)
         self.assertEqual(load_registry().workspaces[0].last_target, "")
 
+    def test_home_console_choice_honors_dry_run(self) -> None:
+        self._create_line()
+        add_workspace(self.root, name="demo", make_default=True)
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", return_value="3"),
+            patch("dyro.console.launcher.create_console_http_server") as server_factory,
+            redirect_stdout(output),
+        ):
+            main(["--dry-run"])
+
+        self.assertIn("DRY RUN: 将启动只读本地 Console", output.getvalue())
+        server_factory.assert_not_called()
+
     def test_home_can_open_a_detected_tool_without_granting_adapter_capabilities(
         self,
     ) -> None:

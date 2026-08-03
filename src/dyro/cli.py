@@ -22,6 +22,7 @@ from .blueprint import (
 )
 from .changesets import create_changeset, get_changeset, list_changesets, verify_changeset
 from .config import CONFIG_NAME, Config, load, validate_id
+from .console.launcher import launch_console, render_console_plan
 from .continuation.attention import (
     build_attention_projection,
     render_attention_json,
@@ -650,6 +651,33 @@ def cmd_home(args: argparse.Namespace) -> None:
         root=getattr(args, "root", None),
         workspace=getattr(args, "workspace_alias", None),
         dry_run=args.dry_run,
+    )
+
+
+def cmd_console(args: argparse.Namespace) -> None:
+    initial_workspace = getattr(args, "workspace_alias", None)
+    root_arg = getattr(args, "root", None)
+    target_root: Path | None = None
+    if args.dry_run:
+        target_root = Path(root_arg).expanduser().absolute() if root_arg else None
+        render_console_plan(
+            port=args.port,
+            no_open=args.no_open,
+            initial_workspace=initial_workspace,
+            target_root=target_root,
+        )
+        return
+    if root_arg:
+        config = load(Path(root_arg).expanduser())
+        target_root = config.root
+        initial_workspace = config.name
+    elif initial_workspace:
+        get_workspace(initial_workspace)
+    launch_console(
+        port=args.port,
+        no_open=args.no_open,
+        initial_workspace=initial_workspace,
+        target_root=target_root,
     )
 
 
@@ -2101,6 +2129,10 @@ def build_parser() -> argparse.ArgumentParser:
     setup.set_defaults(func=cmd_setup)
 
     sub.add_parser("home", help="打开当前或默认项目首页").set_defaults(func=cmd_home)
+    console = sub.add_parser("console", help="启动只读本地项目控制台")
+    console.add_argument("--no-open", action="store_true", help="不自动打开浏览器，打印一次性本地 URL")
+    console.add_argument("--port", type=int, default=0, help="loopback 端口；默认 0 由系统分配")
+    console.set_defaults(func=cmd_console)
     workspace = sub.add_parser("workspace", help="管理可从任意目录进入的全局工作区")
     workspace_sub = workspace.add_subparsers(dest="workspace_command", required=True)
     workspace_add = workspace_sub.add_parser("add", help="登记已有 Dyro 工作区")

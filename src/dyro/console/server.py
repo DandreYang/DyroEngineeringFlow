@@ -56,11 +56,17 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
         bootstrap_secret: str | None,
         session_store: ConsoleSessionStore | None,
         overview_service: IsolatedOverviewService | None,
+        initial_workspace: str | None,
         max_concurrent_requests: int,
     ) -> None:
         self._request_slots = threading.BoundedSemaphore(max_concurrent_requests)
         self.sessions = session_store
         self.overview_service = overview_service or IsolatedOverviewService()
+        if initial_workspace is not None and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", initial_workspace
+        ):
+            raise ValueError("Console initial_workspace 无效")
+        self.initial_workspace = initial_workspace or ""
         super().__init__((HOST, port), ConsoleRequestHandler)
         if self.sessions is None:
             self.sessions = ConsoleSessionStore(bootstrap_secret=bootstrap_secret)
@@ -291,6 +297,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     "data": {
                         "version": __version__,
                         "capabilities": ["overview"] if self.console.overview_service else [],
+                        "initial_workspace": self.console.initial_workspace,
                         "session_expires_at": session.expires_at.isoformat(),
                     },
                 },
@@ -538,6 +545,7 @@ def create_console_http_server(
     bootstrap_secret: str | None = None,
     session_store: ConsoleSessionStore | None = None,
     overview_service: IsolatedOverviewService | None = None,
+    initial_workspace: str | None = None,
     max_concurrent_requests: int = MAX_CONCURRENT_REQUESTS,
 ) -> ConsoleHTTPServer:
     """Bind a Console server to IPv4 loopback only; no host override exists."""
@@ -552,5 +560,6 @@ def create_console_http_server(
         bootstrap_secret=bootstrap_secret,
         session_store=session_store,
         overview_service=overview_service,
+        initial_workspace=initial_workspace,
         max_concurrent_requests=max_concurrent_requests,
     )

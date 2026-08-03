@@ -664,7 +664,9 @@ def _choose_action(
         print(f"  {index}) {target.label}")
     status_index = len(targets) + 1
     print(f"  {status_index}) 查看当前项目状态")
-    switch_index = status_index + 1
+    console_index = status_index + 1
+    print(f"  {console_index}) 查看全部项目控制台")
+    switch_index = console_index + 1
     if can_switch:
         print(f"  {switch_index}) 切换项目")
     print("  q) 退出")
@@ -685,6 +687,8 @@ def _choose_action(
         return target.kind, target.id
     if selected == status_index:
         return "status", ""
+    if selected == console_index:
+        return "console", ""
     if can_switch and selected == switch_index:
         return "switch", ""
     raise DyroError("菜单编号超出范围")
@@ -877,6 +881,24 @@ def _run_config_home(
     kind, target_id = action
     if kind == "status":
         print_status(config)
+        return
+    if kind == "console":
+        from .console.launcher import launch_console, render_console_plan
+
+        initial_workspace = record.name if record else config.name
+        target_root = None if record else config.root
+        if dry_run:
+            render_console_plan(
+                port=0,
+                no_open=False,
+                initial_workspace=initial_workspace,
+                target_root=target_root,
+            )
+        else:
+            launch_console(
+                initial_workspace=initial_workspace,
+                target_root=target_root,
+            )
         return
     if kind == "switch":
         _switch_workspace(dry_run)
