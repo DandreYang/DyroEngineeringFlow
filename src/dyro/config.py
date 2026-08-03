@@ -93,6 +93,20 @@ class Config:
         return self.root / CHANGESETS_DIR
 
 
+def external_security_errors(policy: Policy) -> tuple[str, ...]:
+    """Return the explicit migration requirements for an external Profile."""
+    if policy.execution_mode != "external":
+        return ()
+    missing: list[str] = []
+    if not getattr(policy, "require_signed_execution", True):
+        missing.append("policy.require_signed_execution = true")
+    if not getattr(policy, "require_signed_review", True):
+        missing.append("policy.require_signed_review = true")
+    if getattr(policy, "require_external_signoff", False) and not getattr(policy, "require_signed_signoff", True):
+        missing.append("policy.require_signed_signoff = true")
+    return tuple(missing)
+
+
 def validate_id(value: str, label: str = "ID") -> str:
     if not SAFE_ID.fullmatch(value):
         raise ValidationError(f"{label} 只能包含字母、数字、点、下划线和连字符：{value!r}")

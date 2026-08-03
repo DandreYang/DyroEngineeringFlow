@@ -11,7 +11,7 @@ import tempfile
 from typing import Iterator, TYPE_CHECKING
 import zipfile
 
-from .config import Config, expand_argv
+from .config import Config, expand_argv, external_security_errors
 from .errors import DyroError, ValidationError
 from .process import git, require_ok, run
 from .state import atomic_write_bytes
@@ -190,6 +190,13 @@ def build_execution_bundle(
     """Package the receipt, gate logs, and exact HEADs generated in an isolated runner."""
     if config.policy.execution_mode != "external":
         raise DyroError("证据包仅用于 execution_mode = external 的 Profile")
+    requirements = external_security_errors(config.policy)
+    if requirements:
+        raise DyroError(
+            "external Profile 的身份边界尚未迁移；必须显式启用 "
+            + "、".join(requirements)
+            + "；先运行 dyro doctor"
+        )
     workspace = workspace.expanduser().resolve()
     if not workspace.is_dir():
         raise DyroError(f"外部执行工作区不存在：{workspace}")
@@ -243,6 +250,8 @@ def build_execution_bundle(
             gates_sha256=hashlib.sha256(gates_bytes).hexdigest() if gates_bytes else "",
             task_heads_sha256=hashlib.sha256(task_heads_bytes).hexdigest() if task_heads_bytes else "",
         )
+        if claim_binding is not None:
+            provenance["actor"] = claim_binding["runner"]
         if signing_key is not None and key_id is not None:
             from .signing import sign_record
 

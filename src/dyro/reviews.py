@@ -7,7 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .errors import ValidationError
-from .signing import sign_record, signature_key_id, verify_record
+from .signing import (
+    sign_record,
+    signature_key_id,
+    trusted_key_principal_from_directory,
+    verify_record,
+)
 
 
 @dataclass(frozen=True)
@@ -15,6 +20,7 @@ class ReviewEvidence:
     content: bytes
     reviewer: str
     key_id: str | None
+    principal_id: str | None
     signed: bool
 
 
@@ -38,6 +44,7 @@ def build_signed_review_record(
         "type": "dyro.review",
         "task_id": task_id,
         "reviewer": reviewer,
+        "actor": reviewer,
         "review_sha256": hashlib.sha256(review_content).hexdigest(),
         "review_text": review_text,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -67,7 +74,7 @@ def load_review_evidence(
     if not isinstance(decoded, dict) or decoded.get("type") != "dyro.review":
         if require_signature:
             raise ValidationError("策略要求导入 signed review JSON")
-        return ReviewEvidence(raw, "", None, False)
+        return ReviewEvidence(raw, "", None, None, False)
     verify_record(
         decoded,
         purpose="review",
@@ -83,12 +90,19 @@ def load_review_evidence(
         or not isinstance(decoded.get("review_sha256"), str)
     ):
         raise ValidationError("signed review 身份或内容字段无效")
+    key_id = signature_key_id(decoded)
+    if key_id is None:
+        raise ValidationError("signed review 缺少 signature key ID")
+    principal_id = trusted_key_principal_from_directory(trust_directory, key_id)
+    if decoded.get("actor") != decoded["reviewer"] or str(decoded["reviewer"]).strip() != principal_id:
+        raise ValidationError("signed review actor 必须等于 review key 的 principal")
     content = str(decoded["review_text"]).encode("utf-8")
     if hashlib.sha256(content).hexdigest() != decoded["review_sha256"]:
         raise ValidationError("signed review 的 review_sha256 不匹配")
     return ReviewEvidence(
         content=content,
         reviewer=str(decoded["reviewer"]).strip(),
-        key_id=signature_key_id(decoded),
+        key_id=key_id,
+        principal_id=principal_id,
         signed="signature" in decoded,
     )

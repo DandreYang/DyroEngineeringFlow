@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 from typing import Iterable, Mapping
 
-from .config import Config, validate_id
+from .config import Config, external_security_errors, validate_id
 from .errors import DyroError, ValidationError
 from .process import git, require_ok
 from .state import atomic_write_text
@@ -338,6 +338,8 @@ def status_rows(config: Config) -> list[tuple[str, str, str, str, str, int]]:
 def doctor(config: Config) -> list[str]:
     """Return diagnostics.  Callers decide whether any FAIL means non-zero."""
     findings: list[str] = []
+    for requirement in external_security_errors(config.policy):
+        findings.append(f"FAIL external Profile requires {requirement}")
     root_git = _is_git_repo(config.root)
     findings.append(("WARN" if root_git else "PASS") + " workspace root " + ("is a Git repository" if root_git else "is not a Git repository"))
     for repo_id in sorted(config.repositories):

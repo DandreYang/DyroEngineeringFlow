@@ -24,11 +24,24 @@ from dyro.tasks import Task, execution_claim_binding
 
 
 class SignedSecurityBoundaryTests(unittest.TestCase):
-    def _keys(self, root: Path, key_id: str, purpose: str) -> tuple[Path, Path]:
+    def _keys(
+        self,
+        root: Path,
+        key_id: str,
+        purpose: str,
+        *,
+        principal_id: str | None = None,
+    ) -> tuple[Path, Path]:
         private_key = root / f"{key_id}.private.pem"
         public_key = root / f"{key_id}.public.pem"
         generate_keypair(key_id, private_key=private_key, public_key=public_key)
-        trust_public_key(root, key_id, purpose=purpose, source=public_key)
+        trust_public_key(
+            root,
+            key_id,
+            purpose=purpose,
+            source=public_key,
+            principal_id=principal_id,
+        )
         return private_key, public_key
 
     def test_required_signature_does_not_downgrade_when_trust_store_is_empty(self) -> None:
@@ -140,6 +153,33 @@ class SignedSecurityBoundaryTests(unittest.TestCase):
             self.assertEqual(evidence.content, content)
             self.assertEqual(evidence.reviewer, "reviewer-1")
             self.assertEqual(evidence.key_id, "reviewer-1")
+
+    def test_signed_review_rejects_actor_that_does_not_match_key_principal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            private_key, _ = self._keys(
+                root,
+                "reviewer-key",
+                "review",
+                principal_id="independent-reviewer",
+            )
+            record = build_signed_review_record(
+                "A",
+                reviewer="runner-principal",
+                review_content=b"verdict: FAIL\n",
+                signing_key=private_key,
+                key_id="reviewer-key",
+            )
+            path = root / "review.json"
+            path.write_text(json.dumps(record), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValidationError, "principal"):
+                load_review_evidence(
+                    path,
+                    task_id="A",
+                    trust_directory=trusted_keys_directory(root, "review"),
+                    require_signature=True,
+                )
 
 
 if __name__ == "__main__":

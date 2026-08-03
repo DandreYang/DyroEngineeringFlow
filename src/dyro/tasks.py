@@ -10,7 +10,7 @@ import tomllib
 import uuid
 from typing import Any, Iterable
 
-from .config import Config, expand_argv, strict_bool, validate_id
+from .config import Config, expand_argv, external_security_errors, strict_bool, validate_id
 from .evidence_store import (
     EvidenceGeneration,
     cleanup_evidence_generations,
@@ -52,6 +52,7 @@ RECEIPT_SHA_RE = re.compile(r"^receipt_sha256:\s*([0-9a-f]{64})\s*$", re.IGNOREC
 TASK_HEADS_SHA_RE = re.compile(r"^task_heads_sha256:\s*([0-9a-f]{64})\s*$", re.IGNORECASE | re.MULTILINE)
 GIT_HEAD_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$", re.IGNORECASE)
 TASK_HEADS_FILE = "task-heads.json"
+REVIEW_IDENTITY_FILE = "review-identity.json"
 MERGE_LOCK_TIMEOUT_SECONDS = 1800.0
 MAX_TASK_TIMEOUT_MINUTES = 24 * 60
 MAX_GATE_TIMEOUT_SECONDS = 24 * 60 * 60
@@ -287,6 +288,16 @@ def _claim_expired(claim: dict[str, object], *, now: datetime | None = None) -> 
     return expires <= (now or datetime.now(timezone.utc))
 
 
+def _require_external_security(config: Config) -> None:
+    requirements = external_security_errors(config.policy)
+    if requirements:
+        raise DyroError(
+            "external Profile 的身份边界尚未迁移；必须显式启用 "
+            + "、".join(requirements)
+            + "；先运行 dyro doctor"
+        )
+
+
 def external_claim_active(task: Task) -> bool:
     claim = _claim(task)
     return claim is not None and not _claim_expired(claim)
@@ -333,6 +344,7 @@ def claim_task(
     """Atomically reserve an external task for one runner identity."""
     if config.policy.execution_mode != "external":
         raise DyroError("task claim 仅用于 execution_mode = external 的 Profile")
+    _require_external_security(config)
     runner = runner.strip()
     if not runner:
         raise ValidationError("执行器标识不能为空")
@@ -340,11 +352,13 @@ def claim_task(
     if require_signed_execution and not key_id:
         raise ValidationError("require_signed_execution = true 时 claim 必须提供 --key-id")
     if key_id:
-        from .signing import trusted_key_ids, validate_key_id
+        from .signing import trusted_key_ids, trusted_key_principal, validate_key_id
 
         key_id = validate_key_id(key_id)
         if key_id not in trusted_key_ids(config.root, "execution"):
             raise ValidationError(f"execution key ID 尚未受信任：{key_id}")
+        if require_signed_execution and trusted_key_principal(config.root, "execution", key_id) != runner:
+            raise ValidationError("execution claim runner 必须等于 trusted key 的 principal")
     lease_seconds = _claim_lease_seconds(lease_seconds)
     with exclusive_lock(_dispatch_lock_path(config)):
         with exclusive_lock(_state_lock_path(task)):
@@ -398,6 +412,7 @@ def renew_task_claim(
 ) -> str:
     if config.policy.execution_mode != "external":
         raise DyroError("task claim renew 仅用于 execution_mode = external 的 Profile")
+    _require_external_security(config)
     runner = runner.strip()
     lease_seconds = _claim_lease_seconds(lease_seconds)
     with exclusive_lock(_dispatch_lock_path(config)):
@@ -429,6 +444,7 @@ def release_task_claim(
 ) -> str:
     if config.policy.execution_mode != "external":
         raise DyroError("task claim release 仅用于 execution_mode = external 的 Profile")
+    _require_external_security(config)
     runner = runner.strip()
     with exclusive_lock(_dispatch_lock_path(config)):
         with exclusive_lock(_state_lock_path(task)):
@@ -1008,6 +1024,40 @@ def _review_decision(task: Task) -> tuple[str, str, str]:
     )
 
 
+def _external_execution_and_reviewer_principals(config: Config, task: Task) -> tuple[str, str]:
+    """Return the independently authenticated execution and review principals."""
+    from .signing import trusted_key_principal
+
+    claim = _require_external_claim(config, task)
+    execution_principal = trusted_key_principal(
+        config.root,
+        "execution",
+        str(claim["execution_key_id"]),
+    )
+    identity_path = task.directory / REVIEW_IDENTITY_FILE
+    try:
+        review_identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValidationError("缺少可信的 external review identity") from exc
+    if not isinstance(review_identity, dict):
+        raise ValidationError("external review identity 无效")
+    key_id = review_identity.get("key_id")
+    reviewer_principal = review_identity.get("principal_id")
+    review_sha256 = review_identity.get("review_sha256")
+    if (
+        review_identity.get("task_id") != task.id
+        or not isinstance(key_id, str)
+        or not key_id
+        or not isinstance(reviewer_principal, str)
+        or not reviewer_principal
+        or not isinstance(review_sha256, str)
+        or review_sha256 != _file_sha256(task.directory / "review.md")
+        or trusted_key_principal(config.root, "review", key_id) != reviewer_principal
+    ):
+        raise ValidationError("external review identity 与当前复核证据不匹配")
+    return execution_principal, reviewer_principal
+
+
 def _valid_external_signoff(config: Config, task: Task) -> bool:
     signoff_path = task.directory / "signoff.json"
     if not signoff_path.is_file():
@@ -1019,7 +1069,7 @@ def _valid_external_signoff(config: Config, task: Task) -> bool:
     if not isinstance(signoff, dict) or not isinstance(signoff.get("approver"), str) or not signoff["approver"].strip():
         return False
     try:
-        from .signing import trusted_keys_directory, verify_record
+        from .signing import signature_key_id, trusted_key_principal, trusted_keys_directory, verify_record
 
         verify_record(
             signoff,
@@ -1027,7 +1077,20 @@ def _valid_external_signoff(config: Config, task: Task) -> bool:
             trust_directory=trusted_keys_directory(config.root, "signoff"),
             required=getattr(config.policy, "require_signed_signoff", False),
         )
-    except ValidationError:
+        if config.policy.execution_mode == "external":
+            signoff_key_id = signature_key_id(signoff)
+            if signoff_key_id is None:
+                return False
+            approver_principal = trusted_key_principal(config.root, "signoff", signoff_key_id)
+            if (
+                signoff.get("actor") != signoff["approver"]
+                or approver_principal != signoff["approver"]
+            ):
+                return False
+            execution_principal, reviewer_principal = _external_execution_and_reviewer_principals(config, task)
+            if approver_principal in (execution_principal, reviewer_principal):
+                return False
+    except (DyroError, ValidationError):
         return False
     if not _valid_review_acceptance(config, task):
         return False
@@ -1237,6 +1300,7 @@ def _validate_external_heads(config: Config, task: Task, heads: Path | None) -> 
 def _require_external_claim(config: Config, task: Task) -> dict[str, object]:
     if config.policy.execution_mode != "external":
         raise DyroError("导入外部证据要求 Profile 使用 execution_mode = external")
+    _require_external_security(config)
     claim = _claim(task)
     if claim is None:
         raise DyroError(f"任务 {task.id} 尚未领取；请先运行 task claim")
@@ -1398,7 +1462,7 @@ def _import_execution_evidence(
         config.policy.execution_mode,
         claim_binding=claim_binding,
     )
-    from .signing import signature_key_id, trusted_keys_directory
+    from .signing import signature_key_id, trusted_key_principal, trusted_keys_directory
 
     external_attempt = import_external_execution_attempt(
         task.directory,
@@ -1415,6 +1479,14 @@ def _import_execution_evidence(
     )
     if claim_binding is not None and signature_key_id(external_attempt) != claim_binding["execution_key_id"]:
         raise ValidationError("execution signature key ID 与当前 claim 不匹配")
+    if claim_binding is not None:
+        execution_principal = trusted_key_principal(
+            config.root,
+            "execution",
+            str(claim_binding["execution_key_id"]),
+        )
+        if external_attempt.get("actor") != claim_binding["runner"] or execution_principal != claim_binding["runner"]:
+            raise ValidationError("execution signature actor 必须等于当前 claim runner principal")
     if dry_run:
         return "review" if result == "DONE" else "waiting_answer" if result == "QUESTION" else "failed"
     from .provenance import persist_external_execution_attempt
@@ -1601,13 +1673,6 @@ def _apply_review_decision(config: Config, task: Task, *, dry_run: bool = False)
         next_status = "review_pending_signoff" if config.policy.require_external_signoff else "done"
         if config.policy.execution_mode == "local":
             _assert_task_heads_current(config, task)
-        if next_status == "done" and task.merge_auto and config.policy.execution_mode == "local":
-            try:
-                _merge_task_repositories(config, task, push=task.merge_push, dry_run=dry_run)
-            except DyroError as exc:
-                if not dry_run:
-                    ledger(config, task.id, "auto_merge_failed", error=str(exc))
-                raise
         _set_quality_gate_status(config, task, next_status, dry_run=dry_run)
         if not dry_run:
             ledger(
@@ -1672,7 +1737,7 @@ def _import_review_evidence(config: Config, task: Task, *, review: Path, dry_run
     if status(config, task) != "review":
         raise DyroError(f"仅 review 任务可导入复核证据：{task.id}")
     from .reviews import load_review_evidence
-    from .signing import trusted_keys_directory
+    from .signing import trusted_key_principal, trusted_keys_directory
 
     evidence = load_review_evidence(
         review,
@@ -1680,14 +1745,37 @@ def _import_review_evidence(config: Config, task: Task, *, review: Path, dry_run
         trust_directory=trusted_keys_directory(config.root, "review"),
         require_signature=getattr(config.policy, "require_signed_review", False),
     )
-    if not evidence.signed:
+    if config.policy.execution_mode == "external":
         claim = _require_external_claim(config, task)
-        reviewer = str(claim["runner"])
+        if not evidence.signed or evidence.key_id is None or evidence.principal_id is None:
+            raise ValidationError("external review 必须使用带 principal 的 signed review")
+        execution_key_id = str(claim.get("execution_key_id", ""))
+        execution_principal = trusted_key_principal(config.root, "execution", execution_key_id)
+        if evidence.principal_id == execution_principal:
+            raise ValidationError("execution claimant 不得复核自己的结果")
+        reviewer = evidence.principal_id
+    elif not evidence.signed:
+        reviewer = "local-reviewer"
     else:
         reviewer = evidence.reviewer
     if dry_run:
         return "dry-run"
     atomic_write_bytes(task.directory / "review.md", evidence.content)
+    if evidence.signed and evidence.key_id is not None and evidence.principal_id is not None:
+        atomic_write_text(
+            task.directory / REVIEW_IDENTITY_FILE,
+            json.dumps(
+                {
+                    "task_id": task.id,
+                    "key_id": evidence.key_id,
+                    "principal_id": evidence.principal_id,
+                    "review_sha256": _file_sha256(task.directory / "review.md"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+        )
     ledger(
         config,
         task.id,
@@ -1754,6 +1842,7 @@ def _signoff_task(
     signoff = {
         "task_id": task.id,
         "approver": approver,
+        "actor": approver,
         "receipt_sha256": receipt_hash,
         "task_heads_sha256": task_heads_hash,
         "review_sha256": _file_sha256(task.directory / "review.md"),
@@ -1763,7 +1852,7 @@ def _signoff_task(
     }
     if (signing_key is None) != (key_id is None):
         raise ValidationError("--signing-key 与 --key-id 必须同时提供")
-    from .signing import sign_record, trusted_keys_directory, verify_record
+    from .signing import sign_record, trusted_key_principal, trusted_keys_directory, verify_record
 
     if signing_key is not None and key_id is not None:
         signoff = sign_record(
@@ -1778,6 +1867,15 @@ def _signoff_task(
         trust_directory=trusted_keys_directory(config.root, "signoff"),
         required=getattr(config.policy, "require_signed_signoff", False),
     )
+    if config.policy.execution_mode == "external":
+        if key_id is None:
+            raise ValidationError("external signoff 必须提供 --signing-key 与 --key-id")
+        approver_principal = trusted_key_principal(config.root, "signoff", key_id)
+        if approver_principal != approver or signoff.get("actor") != approver:
+            raise ValidationError("signoff actor 必须等于 signoff key 的 principal")
+        execution_principal, reviewer_principal = _external_execution_and_reviewer_principals(config, task)
+        if approver_principal in (execution_principal, reviewer_principal):
+            raise ValidationError("signoff principal 必须独立于 execution 与 review principal")
     if not dry_run:
         atomic_write_text(task.directory / "signoff.json", json.dumps(signoff, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
         _set_quality_gate_status(config, task, "done")

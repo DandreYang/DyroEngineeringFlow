@@ -2,12 +2,14 @@ import hashlib
 import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 import zipfile
 
 from dyro.config import ValidationError, load
 from dyro.evidence import build_execution_bundle, unpack_execution_bundle
-from dyro.evidence_store import resolve_evidence_path
 from dyro.errors import DyroError
+from dyro.reviews import build_signed_review_record
+from dyro.signing import generate_keypair, sign_record, trust_public_key
 from dyro.tasks import (
     answer_task,
     claim_task,
@@ -28,6 +30,38 @@ from .support import WorkspaceCase, shell
 
 
 class TaskTests(WorkspaceCase):
+    def _external_config(self):
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                "require_clean_merge = true",
+                "\n".join(
+                    (
+                        "require_clean_merge = true",
+                        'execution_mode = "external"',
+                        "require_signed_execution = true",
+                        "require_signed_review = true",
+                    )
+                ),
+            ),
+            encoding="utf-8",
+        )
+        return load(self.root)
+
+    def _trusted_key(self, config, key_id: str, purpose: str, principal: str) -> Path:
+        secure = self.root / "secure"
+        private_key = secure / f"{key_id}.private.pem"
+        public_key = secure / f"{key_id}.public.pem"
+        generate_keypair(key_id, private_key=private_key, public_key=public_key)
+        trust_public_key(
+            config.root,
+            key_id,
+            purpose=purpose,
+            source=public_key,
+            principal_id=principal,
+        )
+        return private_key
+
     @staticmethod
     def _write_bound_review(task_path: Path) -> None:
         from dyro.provenance import review_binding
@@ -240,7 +274,7 @@ class TaskTests(WorkspaceCase):
         with self.assertRaisesRegex(DyroError, "外部隔离执行器"):
             run_task(config, task)
 
-    def test_external_runner_claims_and_imports_receipt_gate_and_review_evidence(self) -> None:
+    def test_legacy_external_profile_cannot_claim_until_signed_identity_is_enabled(self) -> None:
         config_path = self.root / "dyro.toml"
         config_path.write_text(
             config_path.read_text(encoding="utf-8").replace(
@@ -249,6 +283,22 @@ class TaskTests(WorkspaceCase):
             encoding="utf-8",
         )
         config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-LEGACY-EXTERNAL"
+        task_path.mkdir(parents=True)
+        task_path.joinpath("task.toml").write_text(
+            task_template("TASK-LEGACY-EXTERNAL", "requires signed identity", "alpha", "api", "services/api").replace(
+                'agent = "codex"', 'agent = "noop"'
+            ),
+            encoding="utf-8",
+        )
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(DyroError, "身份边界尚未迁移"):
+            claim_task(config, load_task(config, "TASK-LEGACY-EXTERNAL"), runner="runner")
+
+    def test_external_runner_rejects_unsigned_execution_evidence(self) -> None:
+        config = self._external_config()
         create_line(config, line_id="alpha", branch="feat/alpha", base="main")
         task_path = config.task_specs_dir / "TASK-IMPORT"
         task_path.mkdir(parents=True)
@@ -261,76 +311,71 @@ class TaskTests(WorkspaceCase):
         runner_dir = self.root / "external-runner"
         runner_dir.mkdir()
         receipt = runner_dir / "receipt.md"
-        receipt.write_text("result: DONE\n", encoding="utf-8")
-        receipt_hash = hashlib.sha256(receipt.read_bytes()).hexdigest()
-        gate_log = runner_dir / "diff-check.log"
-        gate_log.write_text("diff check passed\n", encoding="utf-8")
-        gate_log_hash = hashlib.sha256(gate_log.read_bytes()).hexdigest()
-        gates = runner_dir / "gates.json"
-        gates.write_text(
-            '{"schema_version": 1, "task_id": "TASK-IMPORT", "receipt_sha256": "'
-            + receipt_hash
-            + '", "gates": [{"name": "diff-check", "exit_code": 0, "log": "diff-check.log", "log_sha256": "'
-            + gate_log_hash
-            + '"}]}\n',
-            encoding="utf-8",
-        )
-        heads = runner_dir / "task-heads.json"
-        heads.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "task_id": "TASK-IMPORT",
-                    "line": "alpha",
-                    "branch": "task/TASK-IMPORT",
-                    "repositories": {"api": "a" * 40},
-                },
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+        receipt.write_text("result: QUESTION\n", encoding="utf-8")
+        self._trusted_key(config, "runner-import", "execution", "isolated-runner-1")
 
-        self.assertEqual(claim_task(config, task, runner="isolated-runner-1"), "assigned")
         self.assertEqual(
+            claim_task(
+                config,
+                task,
+                runner="isolated-runner-1",
+                key_id="runner-import",
+            ),
+            "assigned",
+        )
+        with self.assertRaisesRegex(ValidationError, "策略要求"):
             import_execution_evidence(
                 config,
                 task,
                 receipt=receipt,
-                gates=gates,
-                heads=heads,
                 allow_legacy_provenance=True,
-            ),
-            "review",
-        )
-        self.assertEqual(status(config, task), "review")
-        self.assertEqual(
-            resolve_evidence_path(task_path, "gates/gate-1.log").read_text(encoding="utf-8"),
-            "diff check passed\n",
-        )
-        review = runner_dir / "review.md"
-        heads_hash = hashlib.sha256(heads.read_bytes()).hexdigest()
-        from dyro.provenance import review_binding
+            )
 
-        binding = review_binding(task_path)
-        self.assertIsNotNone(binding)
-        review.write_text(
-            f"verdict: PASS\nreceipt_sha256: {receipt_hash}\ntask_heads_sha256: {heads_hash}\n"
-            f"attempt_id: {binding[0]}\nplan_sha256: {binding[1]}\n",
+    def test_external_review_rejects_execution_principal_with_a_different_key(self) -> None:
+        config = self._external_config()
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-SELF-REVIEW"
+        task_path.mkdir(parents=True)
+        task_path.joinpath("task.toml").write_text(
+            task_template("TASK-SELF-REVIEW", "reject self review", "alpha", "api", "services/api").replace(
+                'agent = "codex"', 'agent = "noop"'
+            ),
             encoding="utf-8",
         )
-        self.assertEqual(import_review_evidence(config, task, review=review), "done")
-        self.assertEqual(status(config, task), "done")
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task = load_task(config, "TASK-SELF-REVIEW")
+        self._trusted_key(config, "runner-self-review", "execution", "shared-principal")
+        reviewer_private = self._trusted_key(
+            config,
+            "reviewer-self-review",
+            "review",
+            "shared-principal",
+        )
+        self.assertEqual(
+            claim_task(
+                config,
+                task,
+                runner="shared-principal",
+                key_id="runner-self-review",
+            ),
+            "assigned",
+        )
+        task_path.joinpath("status").write_text("review\n", encoding="utf-8")
+        record = build_signed_review_record(
+            task.id,
+            reviewer="shared-principal",
+            review_content=b"verdict: FAIL\n",
+            signing_key=reviewer_private,
+            key_id="reviewer-self-review",
+        )
+        review_path = self.root / "self-review.json"
+        review_path.write_text(json.dumps(record), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValidationError, "不得复核自己的结果"):
+            import_review_evidence(config, task, review=review_path)
 
     def test_external_claim_is_serialized_for_two_local_process_threads(self) -> None:
-        config_path = self.root / "dyro.toml"
-        config_path.write_text(
-            config_path.read_text(encoding="utf-8").replace(
-                "require_clean_merge = true", "require_clean_merge = true\nexecution_mode = \"external\""
-            ),
-            encoding="utf-8",
-        )
-        config = load(self.root)
+        config = self._external_config()
         create_line(config, line_id="alpha", branch="feat/alpha", base="main")
         task_path = config.task_specs_dir / "TASK-CLAIM-LOCK"
         task_path.mkdir(parents=True)
@@ -342,10 +387,12 @@ class TaskTests(WorkspaceCase):
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
         task = load_task(config, "TASK-CLAIM-LOCK")
+        for runner in ("runner-a", "runner-b"):
+            self._trusted_key(config, f"{runner}-key", "execution", runner)
 
         def claim(runner: str) -> str:
             try:
-                return claim_task(config, task, runner=runner)
+                return claim_task(config, task, runner=runner, key_id=f"{runner}-key")
             except DyroError:
                 return "rejected"
 
@@ -355,14 +402,7 @@ class TaskTests(WorkspaceCase):
         self.assertEqual(status(config, task), "assigned")
 
     def test_external_claim_blocks_another_task_in_the_same_conflict_group(self) -> None:
-        config_path = self.root / "dyro.toml"
-        config_path.write_text(
-            config_path.read_text(encoding="utf-8").replace(
-                "require_clean_merge = true", "require_clean_merge = true\nexecution_mode = \"external\""
-            ),
-            encoding="utf-8",
-        )
-        config = load(self.root)
+        config = self._external_config()
         create_line(config, line_id="alpha", branch="feat/alpha", base="main")
         for task_id in ("TASK-GROUP-A", "TASK-GROUP-B"):
             task_path = config.task_specs_dir / task_id
@@ -375,19 +415,27 @@ class TaskTests(WorkspaceCase):
             )
             task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
 
-        self.assertEqual(claim_task(config, load_task(config, "TASK-GROUP-A"), runner="runner-a"), "assigned")
+        self._trusted_key(config, "runner-a-key", "execution", "runner-a")
+        self._trusted_key(config, "runner-b-key", "execution", "runner-b")
+        self.assertEqual(
+            claim_task(
+                config,
+                load_task(config, "TASK-GROUP-A"),
+                runner="runner-a",
+                key_id="runner-a-key",
+            ),
+            "assigned",
+        )
         with self.assertRaisesRegex(DyroError, "活跃任务"):
-            claim_task(config, load_task(config, "TASK-GROUP-B"), runner="runner-b")
+            claim_task(
+                config,
+                load_task(config, "TASK-GROUP-B"),
+                runner="runner-b",
+                key_id="runner-b-key",
+            )
 
     def test_external_runner_builds_and_imports_a_portable_evidence_bundle(self) -> None:
-        config_path = self.root / "dyro.toml"
-        config_path.write_text(
-            config_path.read_text(encoding="utf-8").replace(
-                "require_clean_merge = true", "require_clean_merge = true\nexecution_mode = \"external\""
-            ),
-            encoding="utf-8",
-        )
-        config = load(self.root)
+        config = self._external_config()
         create_line(config, line_id="alpha", branch="feat/alpha", base="main")
         task_path = config.task_specs_dir / "TASK-BUNDLE"
         task_path.mkdir(parents=True)
@@ -408,8 +456,32 @@ class TaskTests(WorkspaceCase):
         receipt = workspace / "receipt.md"
         receipt.write_text("result: DONE\n", encoding="utf-8")
         bundle = self.root / "execution.zip"
+        runner_private = self._trusted_key(
+            config,
+            "runner-bundle",
+            "execution",
+            "isolated-runner-1",
+        )
+        self.assertEqual(
+            claim_task(
+                config,
+                task,
+                runner="isolated-runner-1",
+                key_id="runner-bundle",
+            ),
+            "assigned",
+        )
 
-        result = build_execution_bundle(config, task, workspace=workspace, receipt=receipt, output=bundle)
+        result = build_execution_bundle(
+            config,
+            task,
+            workspace=workspace,
+            receipt=receipt,
+            output=bundle,
+            signing_key=runner_private,
+            key_id="runner-bundle",
+            claim=task_path / "claim.json",
+        )
         self.assertEqual(result.result, "DONE")
         self.assertTrue(result.gates_passed)
         self.assertTrue(bundle.is_file())
@@ -428,7 +500,6 @@ class TaskTests(WorkspaceCase):
         self.assertTrue(symlink_bundle.is_symlink())
         self.assertFalse(escaped_bundle.exists())
 
-        self.assertEqual(claim_task(config, task, runner="isolated-runner-1"), "assigned")
         with unpack_execution_bundle(bundle) as evidence:
             self.assertEqual(
                 import_execution_evidence(
@@ -444,14 +515,7 @@ class TaskTests(WorkspaceCase):
         self.assertEqual(status(config, task), "review")
 
     def test_external_question_can_be_answered_by_the_claimed_runner(self) -> None:
-        config_path = self.root / "dyro.toml"
-        config_path.write_text(
-            config_path.read_text(encoding="utf-8").replace(
-                "require_clean_merge = true", "require_clean_merge = true\nexecution_mode = \"external\""
-            ),
-            encoding="utf-8",
-        )
-        config = load(self.root)
+        config = self._external_config()
         create_line(config, line_id="alpha", branch="feat/alpha", base="main")
         task_path = config.task_specs_dir / "TASK-QUESTION"
         task_path.mkdir(parents=True)
@@ -465,14 +529,51 @@ class TaskTests(WorkspaceCase):
         task = load_task(config, "TASK-QUESTION")
         receipt = self.root / "question-receipt.md"
         receipt.write_text("result: QUESTION\n", encoding="utf-8")
+        runner_private = self._trusted_key(
+            config,
+            "runner-question",
+            "execution",
+            "isolated-runner-1",
+        )
 
-        self.assertEqual(claim_task(config, task, runner="isolated-runner-1"), "assigned")
+        self.assertEqual(
+            claim_task(
+                config,
+                task,
+                runner="isolated-runner-1",
+                key_id="runner-question",
+            ),
+            "assigned",
+        )
+        from dyro.provenance import build_external_attempt_record, external_execution_plan
+        from dyro.tasks import execution_claim_binding
+
+        provenance = build_external_attempt_record(
+            task_path,
+            task.id,
+            external_execution_plan(
+                task,
+                config.policy.execution_mode,
+                claim_binding=execution_claim_binding(task),
+            ),
+            result="QUESTION",
+            receipt_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest(),
+        )
+        provenance["actor"] = "isolated-runner-1"
+        signed_provenance = sign_record(
+            provenance,
+            purpose="execution",
+            key_id="runner-question",
+            private_key=runner_private,
+        )
+        provenance_path = self.root / "question-provenance.json"
+        provenance_path.write_text(json.dumps(signed_provenance), encoding="utf-8")
         self.assertEqual(
             import_execution_evidence(
                 config,
                 task,
                 receipt=receipt,
-                allow_legacy_provenance=True,
+                provenance=provenance_path,
             ),
             "waiting_answer",
         )
@@ -634,7 +735,7 @@ class TaskTests(WorkspaceCase):
             run_task(config, task)
         self.assertEqual(status(config, task), "failed")
 
-    def test_auto_merge_failure_does_not_mark_task_done(self) -> None:
+    def test_pass_review_never_runs_implicit_merge_or_push(self) -> None:
         config = load(self.root)
         create_line(config, line_id="alpha", branch="feat/alpha", base="main")
         task_path = config.task_specs_dir / "TASK-AUTO"
@@ -642,7 +743,8 @@ class TaskTests(WorkspaceCase):
         task_path.joinpath("task.toml").write_text(
             task_template("TASK-AUTO", "safe auto merge", "alpha", "api", "services/api")
             .replace('agent = "codex"', 'agent = "noop"')
-            .replace("auto = false", "auto = true"),
+            .replace("auto = false", "auto = true")
+            .replace("push = false", "push = true"),
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
@@ -650,12 +752,12 @@ class TaskTests(WorkspaceCase):
         task = load_task(config, "TASK-AUTO")
         self.assertEqual(run_task(config, task), "review")
         self._write_bound_review(task_path)
-        line_repository = self.root / "versions/alpha/services/api"
-        line_repository.joinpath("DIRTY.txt").write_text("dirty\n", encoding="utf-8")
 
-        with self.assertRaisesRegex(DyroError, "开发线仓库不干净"):
-            review_task(config, task)
-        self.assertEqual(status(config, task), "review")
+        with patch("dyro.tasks._merge_task_repositories") as merge_repositories:
+            self.assertEqual(review_task(config, task), "done")
+
+        merge_repositories.assert_not_called()
+        self.assertEqual(status(config, task), "done")
 
     def test_cross_repository_merge_rolls_back_when_later_repository_conflicts(self) -> None:
         web_anchor = self.root / "repositories/web"

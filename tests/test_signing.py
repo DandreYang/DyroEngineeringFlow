@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from dyro import signing
 from dyro.errors import ValidationError
 from dyro.signing import (
     generate_keypair,
@@ -12,6 +17,7 @@ from dyro.signing import (
     sign_record,
     trust_public_key,
     trusted_key_ids,
+    trusted_key_principal,
     trusted_key_records,
     trusted_keys_directory,
     verify_record,
@@ -19,6 +25,76 @@ from dyro.signing import (
 
 
 class Ed25519SigningTests(unittest.TestCase):
+    def test_concurrent_delivery_trust_rejects_cross_purpose_key_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            private_key = root / "shared.private.pem"
+            public_key = root / "shared.public.pem"
+            generate_keypair("shared", private_key=private_key, public_key=public_key)
+            first_metadata_install = threading.Event()
+            original_install = signing._atomic_install
+
+            def delayed_install(path: Path, content: bytes, mode: int = 0o600) -> None:
+                if path.name.endswith(".metadata.json") and not first_metadata_install.is_set():
+                    first_metadata_install.set()
+                    time.sleep(0.2)
+                original_install(path, content, mode)
+
+            def trust(purpose: str) -> str:
+                try:
+                    trust_public_key(
+                        root,
+                        f"shared-{purpose}",
+                        purpose=purpose,
+                        source=public_key,
+                        principal_id=f"{purpose}-principal",
+                    )
+                    return "trusted"
+                except ValidationError:
+                    return "rejected"
+
+            with patch("dyro.signing._atomic_install", side_effect=delayed_install):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    first = pool.submit(trust, "execution")
+                    self.assertTrue(first_metadata_install.wait(timeout=2.0))
+                    second = pool.submit(trust, "review")
+                    outcomes = (first.result(timeout=5.0), second.result(timeout=5.0))
+
+            self.assertEqual(sorted(outcomes), ["rejected", "trusted"])
+
+    def test_delivery_key_principal_is_immutable_and_a_key_cannot_cross_delivery_purposes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            private_key = root / "runner-private.pem"
+            public_key = root / "runner-public.pem"
+            generate_keypair("runner", private_key=private_key, public_key=public_key)
+
+            trust_public_key(
+                root,
+                "runner",
+                purpose="execution",
+                source=public_key,
+                principal_id="runner-principal",
+            )
+            self.assertEqual(trusted_key_principal(root, "execution", "runner"), "runner-principal")
+
+            with self.assertRaisesRegex(ValidationError, "principal"):
+                trust_public_key(
+                    root,
+                    "runner",
+                    purpose="execution",
+                    source=public_key,
+                    principal_id="other-principal",
+                )
+            with self.assertRaisesRegex(ValidationError, "用途"):
+                trust_public_key(
+                    root,
+                    "runner-review",
+                    purpose="review",
+                    source=public_key,
+                    principal_id="runner-principal",
+                )
+
     def test_signed_record_verifies_and_tampering_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -76,7 +152,10 @@ class Ed25519SigningTests(unittest.TestCase):
                 key_id="key-1",
                 private_key=private_key,
             )
-            trust_public_key(root, "key-1", purpose="signoff", source=public_key)
+            signoff_private = root / "signoff-private.pem"
+            signoff_public = root / "signoff-public.pem"
+            generate_keypair("signoff-1", private_key=signoff_private, public_key=signoff_public)
+            trust_public_key(root, "signoff-1", purpose="signoff", source=signoff_public)
             with self.assertRaisesRegex(ValidationError, "envelope"):
                 verify_record(
                     signed,

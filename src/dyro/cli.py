@@ -95,6 +95,7 @@ from .tasks import (
     status as task_status,
     task_template,
 )
+from .terminology import load_terminology_policy, scan_terminology
 from .tooling import (
     ToolState,
     install_tool,
@@ -529,6 +530,23 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         print(finding)
     if any(item.startswith("FAIL") for item in findings):
         raise DyroError("doctor 发现结构错误")
+
+
+def cmd_terminology_check(args: argparse.Namespace) -> None:
+    root = _config(args).root if args.workspace_alias else Path(args.root or ".").expanduser().resolve()
+    policy = load_terminology_policy(
+        root,
+        policy_file=Path(args.policy_file) if args.policy_file else None,
+    )
+    result = scan_terminology(
+        root,
+        policy,
+        base_ref=args.base_ref,
+        candidate_messages=tuple(args.message),
+    )
+    print(json.dumps(result.as_dict(), ensure_ascii=False, sort_keys=True))
+    if result.violations:
+        raise DyroError("术语策略扫描发现不合规候选；详情仅显示位置与计数")
 
 
 def cmd_home(args: argparse.Namespace) -> None:
@@ -1379,6 +1397,7 @@ def cmd_key_trust(args: argparse.Namespace) -> None:
         args.id,
         purpose=args.purpose,
         source=Path(args.public_key),
+        principal_id=args.principal,
         not_before=args.not_before,
         not_after=args.not_after,
     )
@@ -1408,7 +1427,7 @@ def cmd_key_list(args: argparse.Namespace) -> None:
     if args.show_status:
         for record in trusted_key_records(config.root, args.purpose):
             print(
-                f"{record['key_id']}\t{record['status']}\t"
+                f"{record['key_id']}\t{record['principal_id'] or '-'}\t{record['status']}\t"
                 f"{record['not_before'] or '-'}\t{record['not_after'] or '-'}"
             )
         return
@@ -1776,6 +1795,28 @@ def build_parser() -> argparse.ArgumentParser:
     join.set_defaults(func=cmd_join)
 
     sub.add_parser("doctor", help="验证动态工作区结构").set_defaults(func=cmd_doctor)
+    terminology = sub.add_parser("terminology", help="使用仓库外策略扫描候选术语")
+    terminology_sub = terminology.add_subparsers(dest="terminology_command", required=True)
+    terminology_check = terminology_sub.add_parser(
+        "check",
+        help="扫描工作区、分支、diff 与提交候选；策略不写入仓库",
+    )
+    terminology_check.add_argument(
+        "--policy-file",
+        help="仓库外的 UTF-8 策略文件；也可使用外部环境输入",
+    )
+    terminology_check.add_argument(
+        "--base-ref",
+        default="origin/main",
+        help="候选分支和提交的比较基线；默认 origin/main",
+    )
+    terminology_check.add_argument(
+        "--message",
+        action="append",
+        default=[],
+        help="额外扫描的提交候选说明；可重复指定",
+    )
+    terminology_check.set_defaults(func=cmd_terminology_check)
     status_parser = sub.add_parser("status", help="显示 anchors 与开发线 Git 状态")
     status_parser.add_argument("--all", action="store_true", help="汇总所有全局登记工作区")
     status_parser.set_defaults(func=cmd_status)
@@ -1864,6 +1905,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     key_trust.add_argument("--public-key", required=True)
+    key_trust.add_argument("--principal", help="不可变签名主体；省略时使用 key ID")
     key_trust.add_argument("--not-before", help="ISO-8601 生效时间；必须包含时区")
     key_trust.add_argument("--not-after", help="ISO-8601 失效时间；必须包含时区")
     key_trust.set_defaults(func=cmd_key_trust)

@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 from .canonical import canonical_json_bytes
 from .errors import ValidationError
+from .state import exclusive_lock
 
 SIGNATURE_ALGORITHM = "ed25519"
 TRUST_PURPOSES = (
@@ -35,9 +36,12 @@ TRUST_PURPOSES = (
     "production-quota",
 )
 KEY_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+PRINCIPAL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 KEY_METADATA_SUFFIX = ".metadata.json"
 KEY_REVOCATION_SUFFIX = ".revoked.json"
 TRUST_AUDIT_FILE = "audit.jsonl"
+DELIVERY_TRUST_PURPOSES = frozenset({"execution", "review", "signoff"})
+DELIVERY_TRUST_LOCK = "delivery.lock"
 
 
 def validate_key_id(key_id: str) -> str:
@@ -45,6 +49,13 @@ def validate_key_id(key_id: str) -> str:
     if not KEY_ID_PATTERN.fullmatch(key_id):
         raise ValidationError("key ID 只能包含字母、数字、点、下划线和连字符，最长 64 字符")
     return key_id
+
+
+def validate_principal_id(principal_id: str) -> str:
+    principal_id = principal_id.strip()
+    if not PRINCIPAL_ID_PATTERN.fullmatch(principal_id):
+        raise ValidationError("principal ID 只能包含字母、数字、点、下划线和连字符，最长 128 字符")
+    return principal_id
 
 
 def validate_purpose(purpose: str) -> str:
@@ -196,12 +207,18 @@ def _key_status(
         return "active", None
     metadata = _read_json_file(metadata_path, "密钥元数据")
     if (
-        metadata.get("schema_version") != 1
+        metadata.get("schema_version") not in (1, 2)
         or metadata.get("key_id") != key_id
         or metadata.get("purpose") != directory.name
         or not isinstance(metadata.get("fingerprint_sha256"), str)
     ):
         raise ValidationError(f"密钥元数据格式无效：{metadata_path}")
+    if metadata.get("schema_version") == 2 and (
+        not isinstance(metadata.get("principal_id"), str)
+        or not metadata["principal_id"].strip()
+        or validate_principal_id(str(metadata["principal_id"])) != metadata["principal_id"]
+    ):
+        raise ValidationError(f"密钥元数据 principal_id 无效：{metadata_path}")
     now = (at or _utc_now()).astimezone(timezone.utc)
     not_before = _parse_effective_at(str(metadata.get("not_before") or "") or None, "not_before")
     not_after = _parse_effective_at(str(metadata.get("not_after") or "") or None, "not_after")
@@ -231,6 +248,7 @@ def trusted_key_records(root: Path, purpose: str) -> tuple[dict[str, object], ..
             {
                 "key_id": key_id,
                 "status": status,
+                "principal_id": str((metadata or {}).get("principal_id", "")),
                 "not_before": str((metadata or {}).get("not_before", "")),
                 "not_after": str((metadata or {}).get("not_after", "")),
             }
@@ -244,6 +262,24 @@ def trusted_key_ids(root: Path, purpose: str) -> tuple[str, ...]:
         for record in trusted_key_records(root, purpose)
         if record["status"] == "active"
     )
+
+
+def trusted_key_principal_from_directory(directory: Path, key_id: str) -> str:
+    """Return the immutable principal bound to one active trusted delivery key."""
+    key_id = validate_key_id(key_id)
+    _validate_trust_directory(directory)
+    public_key_path = directory / f"{key_id}.pem"
+    _read_regular_file(public_key_path, "信任公钥")
+    status, metadata = _key_status(directory, key_id)
+    if status != "active":
+        raise ValidationError(f"签名 key ID 当前不可用：{key_id} ({status})")
+    if metadata is None or metadata.get("schema_version") != 2:
+        raise ValidationError(f"信任 key ID 缺少不可变 principal_id：{key_id}")
+    return validate_principal_id(str(metadata.get("principal_id", "")))
+
+
+def trusted_key_principal(root: Path, purpose: str, key_id: str) -> str:
+    return trusted_key_principal_from_directory(trusted_keys_directory(root.resolve(), purpose), key_id)
 
 
 def _canonical_record(record: dict[str, object]) -> bytes:
@@ -401,6 +437,27 @@ def trusted_key_fingerprint(
     return fingerprint
 
 
+def _assert_delivery_key_is_purpose_separated(root: Path, purpose: str, normalized: bytes) -> None:
+    if purpose not in DELIVERY_TRUST_PURPOSES:
+        return
+    fingerprint = hashlib.sha256(normalized).hexdigest()
+    for other_purpose in DELIVERY_TRUST_PURPOSES - {purpose}:
+        directory = trusted_keys_directory(root.resolve(), other_purpose)
+        if not directory.exists() and not directory.is_symlink():
+            continue
+        _validate_trust_directory(directory)
+        for candidate in directory.glob("*.pem"):
+            candidate_key = _load_public_key_bytes(_read_regular_file(candidate, "信任公钥"), candidate)
+            candidate_normalized = candidate_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            if hashlib.sha256(candidate_normalized).hexdigest() == fingerprint:
+                raise ValidationError(
+                    f"交付签名密钥不得跨用途复用：已存在于 {other_purpose} trust store"
+                )
+
+
 def generate_keypair(key_id: str, *, private_key: Path, public_key: Path) -> None:
     validate_key_id(key_id)
     private_key = private_key.expanduser().resolve()
@@ -471,43 +528,35 @@ def read_trust_audit(root: Path) -> tuple[dict[str, object], ...]:
     return tuple(records)
 
 
-def trust_public_key(
+def _install_trusted_public_key(
     root: Path,
     key_id: str,
     *,
     purpose: str,
-    source: Path,
-    not_before: str | None = None,
-    not_after: str | None = None,
+    normalized: bytes,
+    principal_id: str,
+    effective_from: datetime | None,
+    effective_until: datetime | None,
 ) -> Path:
-    key_id = validate_key_id(key_id)
-    purpose = validate_purpose(purpose)
-    source = source.expanduser().resolve()
-    if not source.is_file():
-        raise ValidationError(f"公钥文件不存在：{source}")
-    key = _load_public_key_bytes(source.read_bytes(), source)
-    normalized = key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    effective_from = _parse_effective_at(not_before, "not_before")
-    effective_until = _parse_effective_at(not_after, "not_after")
-    if effective_from is not None and effective_until is not None and effective_from >= effective_until:
-        raise ValidationError("not_before 必须早于 not_after")
-    directory = trusted_keys_directory(root.resolve(), purpose)
+    _assert_delivery_key_is_purpose_separated(root, purpose, normalized)
+    directory = trusted_keys_directory(root, purpose)
     _ensure_real_directory(directory)
     target = directory / f"{key_id}.pem"
     if _revocation_path(directory, key_id).exists() or _revocation_path(directory, key_id).is_symlink():
         raise ValidationError(f"key ID 已撤销，不能重新绑定：{key_id}")
     if target.exists() or target.is_symlink():
-        if _read_regular_file(target, "信任公钥") == normalized:
-            return target
-        raise ValidationError(f"key ID 已绑定其他公钥：{key_id}")
+        if _read_regular_file(target, "信任公钥") != normalized:
+            raise ValidationError(f"key ID 已绑定其他公钥：{key_id}")
+        existing = _read_json_file(_metadata_path(directory, key_id), "密钥元数据")
+        if existing.get("schema_version") != 2 or existing.get("principal_id") != principal_id:
+            raise ValidationError(f"key ID 存在冲突的 principal 信任元数据：{key_id}")
+        return target
     trusted_at = _utc_now().isoformat(timespec="microseconds")
     metadata = {
-        "schema_version": 1,
+        "schema_version": 2,
         "key_id": key_id,
         "purpose": purpose,
+        "principal_id": principal_id,
         "fingerprint_sha256": hashlib.sha256(normalized).hexdigest(),
         "not_before": _format_effective_at(effective_from),
         "not_after": _format_effective_at(effective_until),
@@ -538,6 +587,7 @@ def trust_public_key(
             "event": "trust",
             "key_id": key_id,
             "purpose": purpose,
+            "principal_id": metadata.get("principal_id", ""),
             "fingerprint_sha256": hashlib.sha256(normalized).hexdigest(),
             "not_before": metadata.get("not_before", ""),
             "not_after": metadata.get("not_after", ""),
@@ -545,6 +595,56 @@ def trust_public_key(
         },
     )
     return target
+
+
+def trust_public_key(
+    root: Path,
+    key_id: str,
+    *,
+    purpose: str,
+    source: Path,
+    principal_id: str | None = None,
+    not_before: str | None = None,
+    not_after: str | None = None,
+) -> Path:
+    key_id = validate_key_id(key_id)
+    purpose = validate_purpose(purpose)
+    principal_id = validate_principal_id(principal_id or key_id)
+    root = root.expanduser().resolve()
+    source = source.expanduser().resolve()
+    if not source.is_file():
+        raise ValidationError(f"公钥文件不存在：{source}")
+    key = _load_public_key_bytes(source.read_bytes(), source)
+    normalized = key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    effective_from = _parse_effective_at(not_before, "not_before")
+    effective_until = _parse_effective_at(not_after, "not_after")
+    if effective_from is not None and effective_until is not None and effective_from >= effective_until:
+        raise ValidationError("not_before 必须早于 not_after")
+    if purpose not in DELIVERY_TRUST_PURPOSES:
+        return _install_trusted_public_key(
+            root,
+            key_id,
+            purpose=purpose,
+            normalized=normalized,
+            principal_id=principal_id,
+            effective_from=effective_from,
+            effective_until=effective_until,
+        )
+    trust_root = root / ".dyro" / "trust" / "ed25519"
+    _ensure_real_directory(trust_root)
+    with exclusive_lock(trust_root / DELIVERY_TRUST_LOCK):
+        return _install_trusted_public_key(
+            root,
+            key_id,
+            purpose=purpose,
+            normalized=normalized,
+            principal_id=principal_id,
+            effective_from=effective_from,
+            effective_until=effective_until,
+        )
 
 
 def revoke_public_key(

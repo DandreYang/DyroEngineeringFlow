@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from dyro.config import ValidationError, expand_argv, load
+from dyro.config import ValidationError, expand_argv, external_security_errors, load
 from dyro.profile import config_value, set_config_value
 
 from .support import WorkspaceCase
@@ -76,3 +76,18 @@ class ConfigTests(WorkspaceCase):
 
         with self.assertRaisesRegex(ValidationError, "policy.require_clean_merge 必须为 true"):
             load(self.root)
+
+    def test_external_profile_reports_required_signed_identity_migration(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                "require_clean_merge = true",
+                'require_clean_merge = true\nexecution_mode = "external"',
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            external_security_errors(load(self.root).policy),
+            ("policy.require_signed_execution = true", "policy.require_signed_review = true"),
+        )

@@ -22,7 +22,14 @@ class SignedExternalCliFlowTests(WorkspaceCase):
         with redirect_stdout(io.StringIO()):
             main(["--root", str(self.root), *arguments])
 
-    def _generate_and_trust(self, key_id: str, purpose: str, secure: Path) -> tuple[Path, Path]:
+    def _generate_and_trust(
+        self,
+        key_id: str,
+        purpose: str,
+        secure: Path,
+        *,
+        principal: str,
+    ) -> tuple[Path, Path]:
         private_key = secure / f"{key_id}.private.pem"
         public_key = secure / f"{key_id}.public.pem"
         self._cli(
@@ -42,6 +49,8 @@ class SignedExternalCliFlowTests(WorkspaceCase):
             purpose,
             "--public-key",
             str(public_key),
+            "--principal",
+            principal,
             "--not-after",
             "2999-01-01T00:00:00+00:00",
         )
@@ -82,9 +91,15 @@ class SignedExternalCliFlowTests(WorkspaceCase):
         task_path.joinpath("handoff.md").write_text("# signed flow\n", encoding="utf-8")
 
         secure = self.root / "secure"
-        runner_private, _ = self._generate_and_trust("runner-e2e", "execution", secure)
-        reviewer_private, _ = self._generate_and_trust("reviewer-e2e", "review", secure)
-        approver_private, _ = self._generate_and_trust("approver-e2e", "signoff", secure)
+        runner_private, _ = self._generate_and_trust(
+            "runner-e2e", "execution", secure, principal="isolated-runner"
+        )
+        reviewer_private, _ = self._generate_and_trust(
+            "reviewer-e2e", "review", secure, principal="independent-reviewer"
+        )
+        approver_private, _ = self._generate_and_trust(
+            "approver-e2e", "signoff", secure, principal="release-manager"
+        )
 
         self._cli(
             "task",
@@ -171,6 +186,29 @@ class SignedExternalCliFlowTests(WorkspaceCase):
             "--file",
             str(signed_review),
         )
+        for key_id, principal in (
+            ("runner-approver-e2e", "isolated-runner"),
+            ("reviewer-approver-e2e", "independent-reviewer"),
+        ):
+            conflicting_private, _ = self._generate_and_trust(
+                key_id,
+                "signoff",
+                secure,
+                principal=principal,
+            )
+            with self.assertRaises(SystemExit) as rejected:
+                self._cli(
+                    "task",
+                    "signoff",
+                    "TASK-SIGNED-E2E",
+                    "--by",
+                    principal,
+                    "--signing-key",
+                    str(conflicting_private),
+                    "--key-id",
+                    key_id,
+                )
+            self.assertEqual(rejected.exception.code, 2)
         self._cli(
             "task",
             "signoff",
