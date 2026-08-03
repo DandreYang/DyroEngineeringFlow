@@ -19,6 +19,7 @@ class RepositoryInput:
     path: str
     mount: str
     remote: str = ""
+    verify: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -222,7 +223,7 @@ def append_repository(config: Config, repository: RepositoryInput, *, dry_run: b
     ]
     if repository.remote:
         chunks.append(f"remote = {_quote(repository.remote)}")
-    chunks.append("verify = []")
+    chunks.append(f"verify = {_quote([list(command) for command in repository.verify])}")
     if dry_run:
         return
     with exclusive_lock(config.root / ".dyro" / "profile.lock"):
@@ -287,7 +288,7 @@ def render_config(
         chunks.extend(("", f"[repositories.{_toml_table_key(repo.id)}]", f"path = {_quote(repo.path)}", f"mount = {_quote(repo.mount)}"))
         if repo.remote:
             chunks.append(f"remote = {_quote(repo.remote)}")
-        chunks.append("verify = []")
+        chunks.append(f"verify = {_quote([list(command) for command in repo.verify])}")
     return "\n".join(chunks) + "\n"
 
 

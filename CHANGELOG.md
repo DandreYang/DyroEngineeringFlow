@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add a generic, team-owned workspace-blueprint contract with
+  `dyro blueprint validate` and preview-first `dyro join` onboarding.
+- Pin every repository in a joined development line to an immutable full
+  commit SHA, keep anchors detached, and create isolated linked worktrees.
+- Make joins resumable without overwriting unrelated targets, reject embedded
+  credentials and symbolic-link redirects, and keep organization-specific
+  repository details outside Dyro Core.
+
 ## 0.5.3 - 2026-08-01
 
 - Add a preview-first interactive `dyro setup` path, a read-only `dyro next`

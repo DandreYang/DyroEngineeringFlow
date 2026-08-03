@@ -305,17 +305,24 @@ def resolve_home_config(
 
 def _first_use(dry_run: bool) -> None:
     print("欢迎使用 Dyro。这里还没有可直接打开的工作区。")
-    print("  1) 设置当前项目：dyro setup")
-    print("  2) 登记已有工作区：dyro workspace add <路径>")
+    print("  1) 加入团队工作区：dyro join <蓝图地址>")
+    print("  2) 设置一个新项目：dyro setup")
+    print("  3) 登记已有工作区：dyro workspace add <路径>")
     if not interactive_terminal():
         print("在交互终端中再次运行 dyro，可直接选择下一步。")
         return
-    choice = input("\n请选择（直接回车默认查看设置指引，q 退出）：").strip().lower()
+    choice = input("\n请选择（直接回车默认加入团队工作区，q 退出）：").strip().lower()
     if choice in {"q", "quit"}:
         print("已退出；没有修改任何文件。")
     elif choice in {"", "1"}:
-        print("下一步：dyro setup（确认设置计划前不会修改任何文件）")
+        source = input("团队蓝图地址或本地文件：").strip()
+        if source:
+            print(f"下一步：dyro join {shlex.quote(source)}")
+        else:
+            print("下一步：dyro join <蓝图地址>")
     elif choice == "2":
+        print("下一步：dyro setup（确认设置计划前不会修改任何文件）")
+    elif choice == "3":
         raw_path = input("已有 Dyro 工作区路径：").strip()
         if not raw_path:
             print("已取消；没有修改任何文件。")
@@ -327,7 +334,7 @@ def _first_use(dry_run: bool) -> None:
             record = add_workspace(config.root, name=config.name, make_default=True)
             print(f"已登记工作区：{record.name}。再次运行 dyro 即可进入。")
     else:
-        raise DyroError("请选择 1、2 或 q")
+        raise DyroError("请选择 1、2、3 或 q")
 
 
 def _targets(config: Config, record: WorkspaceRecord | None) -> list[HomeTarget]:

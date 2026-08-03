@@ -287,6 +287,16 @@ dyro setup
 
 首次引导会先展示计划，确认前不写入任何文件。它会扫描当前目录下的 Git 仓库、推断工作区相对路径与开发线挂载位置；若你在一个 Git 项目根目录运行，它会建议在同级创建独立 Dyro 工作区并从 `origin` clone，绝不移动、覆盖或把 Dyro 控制状态写入原项目。空目录时可直接输入一个 Git remote。
 
+如果团队已经发布了工作区蓝图，新成员不需要重新理解仓库目录、分支或特殊基线规则，可以直接验证、预览并加入：
+
+```bash
+dyro blueprint validate git@github.com:acme/platform-blueprints.git --ref main
+dyro join git@github.com:acme/platform-blueprints.git --ref main --dry-run
+dyro join git@github.com:acme/platform-blueprints.git --ref main
+```
+
+`join` 默认创建到 `~/DyroProjects/<suggested_directory>`，在交互终端中让用户选择开发线，并只要求一次最终确认。蓝图必须为每个仓库声明完整、不可移动的提交 SHA；anchor 保持 detached，开发线使用隔离的 linked worktree。团队自己的仓库地址和规则只存在于团队蓝图，不进入 Dyro Core。完整格式见[工作区蓝图契约](docs/workspace-blueprints.md)。
+
 引导会在最终确认前说明是否将创建 Profile、clone 缺失仓库、创建首条 `dev` 开发线或登记已检测到的受支持 Agent。它会探测常见的本机 Agent 命令，但只登记 Core 已审计 argv 契约的 adapter；发现但尚未集成的命令保持不动。输入 `n` 或直接退出不会留下半成品配置。完成后运行：
 
 ```bash
@@ -466,6 +476,7 @@ dyro --dry-run task run API-101
 | 命令 | 作用 |
 | --- | --- |
 | 无子命令的 `dyro` / `home` / `workspace add/list/default/remove` | 从任意目录进入最近工作，或管理可逆的全局项目入口。 |
+| `blueprint validate` / `join` | 验证团队自有的通用蓝图，并创建可续跑的隔离多仓工作区。 |
 | `setup` / `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | 无需手改 TOML 地完成新人引导、仓库管理与开发线、Agent 选择。 |
 | `doctor` / `status` / `status --all` | 验证并显示当前或全部已登记工作区状态。 |
 | `line create/list` | 创建、登记和查看功能开发线。 |
@@ -479,7 +490,7 @@ dyro --dry-run task run API-101
 | `task loop/daemon/stats/decisions` | 受控批处理、调度、台账报表和决策门禁。 |
 | `dispatch` | 可选本地多 Agent 派发（L0–L4）；仅建议，不替代 gates/merge。 |
 
-实现细节见[零摩擦全局首页 ADR](docs/adr/0003-zero-friction-global-home.md)、[架构与 Profile 契约](docs/architecture.md)、[既有控制面迁移指南](docs/migrating-existing-control-planes.md)，以及维护者用的 [PyPI 发布说明](docs/publishing.md)。
+实现细节见[零摩擦全局首页 ADR](docs/adr/0003-zero-friction-global-home.md)、[架构与 Profile 契约](docs/architecture.md)、[工作区蓝图契约](docs/workspace-blueprints.md)、[既有控制面迁移指南](docs/migrating-existing-control-planes.md)，以及维护者用的 [PyPI 发布说明](docs/publishing.md)。
 
 ## 语言与文档
 

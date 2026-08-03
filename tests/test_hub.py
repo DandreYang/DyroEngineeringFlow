@@ -386,6 +386,7 @@ write = ["codex"]
             main(["--dry-run"])
         rendered = output.getvalue()
         self.assertIn("欢迎使用 Dyro", rendered)
+        self.assertIn("dyro join", rendered)
         self.assertIn("dyro setup", rendered)
         self.assertIn("dyro workspace add", rendered)
         self.assertFalse(self.hub_home.exists())
