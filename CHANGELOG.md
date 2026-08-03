@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.4 - 2026-08-03
+
+- Add a zero-friction global `dyro` home that registers workspaces and lets
+  users resume a recent workspace, development line, or task from any
+  directory.
+- Keep explicit workspace and Agent commands available for scripts, and make
+  stale or unhealthy entries actionable without blocking healthy workspaces.
 - Add a generic, team-owned workspace-blueprint contract with
   `dyro blueprint validate` and preview-first `dyro join` onboarding.
 - Pin every repository in a joined development line to an immutable full
