@@ -414,6 +414,12 @@ accepted revision、scope manifest、policy digest、activation generation 或�
 start 的旧 generation 动作可提交与其 start binding 匹配的终态 receipt，但不能创建下一动作。
 例如 review 执行期间 lease 到期，只能接收 review receipt，不能顺带启动 merge。
 
+涉及 Objective event 的取消计划与 event 同写入 pending transaction：只有 event 已持久化后才
+materialize cancellation receipt；崩溃恢复会完成该计划，未提交 event 则丢弃计划且不改变 Action。
+lease 接管使用独立 pending record 绑定新 lease 的完整内容；先持久化 lease，随后完成取消，恢复时
+仅在新 lease 精确匹配时完成取消，若仍是接管前 lease 则丢弃计划，其余组合 fail-closed，避免在
+新 owner 未成立时取消旧 intent。
+
 ### 7.2 恢复分类
 
 | 发现状态 | 恢复动作 |

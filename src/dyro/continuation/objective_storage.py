@@ -346,7 +346,11 @@ def _event_for(record: StoredObjective, event_name: str) -> dict[str, object]:
     return event
 
 
-def _pending_payload(event: dict[str, object], contract_content: bytes | None) -> dict[str, object]:
+def _pending_payload(
+    event: dict[str, object],
+    contract_content: bytes | None,
+    action_cancellation: dict[str, object] | None,
+) -> dict[str, object]:
     return {
         "schema_version": OBJECTIVE_STORE_SCHEMA_VERSION,
         "event": event,
@@ -354,6 +358,7 @@ def _pending_payload(event: dict[str, object], contract_content: bytes | None) -
         "contract_sha256": (
             hashlib.sha256(contract_content).hexdigest() if contract_content is not None else ""
         ),
+        "action_cancellation": action_cancellation,
     }
 
 
@@ -365,9 +370,11 @@ def read_pending(directory: ObjectiveDirectory) -> dict[str, object] | None:
         payload = json.loads(_read_file(directory, _PENDING_FILE, "Objective pending transaction").decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValidationError(f"Objective pending transaction JSON 无效：{path}") from exc
-    if not isinstance(payload, dict) or set(payload) != {
-        "schema_version", "event", "contract_revision", "contract_sha256"
-    }:
+    pending_fields = (
+        {"schema_version", "event", "contract_revision", "contract_sha256"},
+        {"schema_version", "event", "contract_revision", "contract_sha256", "action_cancellation"},
+    )
+    if not isinstance(payload, dict) or set(payload) not in pending_fields:
         raise ValidationError(f"Objective pending transaction 结构无效：{path}")
     if payload.get("schema_version") != OBJECTIVE_STORE_SCHEMA_VERSION:
         raise ValidationError(f"Objective pending transaction 版本无效：{path}")
@@ -389,7 +396,19 @@ def read_pending(directory: ObjectiveDirectory) -> dict[str, object] | None:
         and (len(contract_digest) != 64 or any(char not in "0123456789abcdef" for char in contract_digest))
     ):
         raise ValidationError(f"Objective pending transaction contract 哈希无效：{path}")
+    action_cancellation = payload.get("action_cancellation")
+    if action_cancellation is not None and not isinstance(action_cancellation, dict):
+        raise ValidationError(f"Objective pending transaction Action cancellation 无效：{path}")
     return payload
+
+
+def _apply_pending_action_cancellation(directory: ObjectiveDirectory, pending: dict[str, object]) -> None:
+    action_cancellation = pending.get("action_cancellation")
+    if action_cancellation is None:
+        return
+    from .actions import apply_action_cancellation
+
+    apply_action_cancellation(directory, action_cancellation)
 
 
 def _contract_name(revision: int) -> str:
@@ -421,6 +440,7 @@ def recover_pending(directory: ObjectiveDirectory) -> bool:
             event_sha256=expected_sha,
             contract_content=_read_file(directory, _contract_name(revision), "Objective contract"),
         )
+        _apply_pending_action_cancellation(directory, pending)
         write_projection(directory, record)
         _remove_file(directory, _PENDING_FILE, "Objective pending transaction")
         return False
@@ -530,11 +550,12 @@ def commit_event(
     event_name: str,
     *,
     contract_content: bytes | None = None,
+    action_cancellation: dict[str, object] | None = None,
 ) -> StoredObjective:
     """Commit an event with a durable intent record before any new contract."""
     path = _directory_path(directory)
     event = _event_for(record, event_name)
-    pending = _pending_payload(event, contract_content)
+    pending = _pending_payload(event, contract_content, action_cancellation)
     if _file_exists(directory, _PENDING_FILE):
         existing = read_pending(directory)
         if existing is None or _json_bytes(existing) != _json_bytes(pending):
@@ -574,6 +595,7 @@ def commit_event(
         event_seq=int(event["seq"]),
         event_sha256=str(event["sha256"]),
     )
+    _apply_pending_action_cancellation(directory, pending)
     write_projection(directory, persisted)
     _remove_file(directory, _PENDING_FILE, "Objective pending transaction")
     return persisted
