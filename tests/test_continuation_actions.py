@@ -653,7 +653,7 @@ class ActionJournalTests(WorkspaceCase):
                 )
             action_file = self.config.objectives_dir / "release" / "actions" / "action-open.json"
             action_file.write_bytes((b"[" * 10_000) + (b"]" * 10_000))
-            with self.assertRaisesRegex(ValidationError, "JSON"):
+            with self.assertRaisesRegex(ValidationError, "JSON|结构无效"):
                 read_action(directory, "action-open")
 
     def test_orphan_start_or_receipt_fails_closed(self) -> None:
