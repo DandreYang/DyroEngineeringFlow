@@ -5,5 +5,6 @@ no listener, session, browser, subprocess, or mutation capability.
 """
 
 from .read_model import workspace_envelope
+from .server import create_console_http_server
 
-__all__ = ["workspace_envelope"]
+__all__ = ["create_console_http_server", "workspace_envelope"]

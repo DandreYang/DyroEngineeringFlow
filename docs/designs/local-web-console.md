@@ -190,6 +190,19 @@ index、偏好更新、Git 锁写入或其他 hydration mutation。
 - C01 不发布 action receipt、ledger、gate 输出、agent argv、adapter 环境、仓库路径或 remote。
   后续阶段若要扩充字段，必须先扩充显式 DTO 与脱敏测试，而不能把 Core dataclass 直接 JSON 化。
 
+### 4.2 C02 已落地的 listener 契约
+
+C02 只提供无项目数据的静态 shell、一次性 session 交换和认证后的 `/api/v1/meta`：
+
+- `create_console_http_server()` 没有 host 参数，只能绑定 `127.0.0.1`；它对 request line、
+  headers、body、并发数、读取时间和单请求总时限设置固定上限；
+- 每个请求必须使用精确的 `Host: 127.0.0.1:<actual-port>`；转发 header、`Transfer-Encoding`、
+  非 origin-form target 与不允许的方法都 fail closed，且不会启用 CORS 或访问日志；
+- bootstrap 仅在精确 same-origin JSON POST 中使用一次，随后换发独立的内存 bearer。session 没有
+  cookie，使用 30 分钟 idle 与 8 小时 absolute 上限；退出 server 时会清空全部 session；
+- C02 没有 CLI `console` 命令、浏览器打开、资源文件读取或 workspace API。它的唯一目的，是在
+  接入真实 read model 前先固定并测试本地 HTTP 安全边界。
+
 ## 5. 模块设计
 
 建议模块边界：
