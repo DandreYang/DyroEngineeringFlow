@@ -22,6 +22,11 @@ from .blueprint import (
 )
 from .changesets import create_changeset, get_changeset, list_changesets, verify_changeset
 from .config import CONFIG_NAME, Config, load, validate_id
+from .continuation.engine import (
+    build_scheduler_tick,
+    render_scheduler_tick_json,
+    render_scheduler_tick_text,
+)
 from .continuation.models import Operation, RequestedMode
 from .continuation.planner import (
     build_continuation_plan,
@@ -1778,6 +1783,19 @@ def cmd_objective_graph(args: argparse.Namespace) -> None:
     print(render_projection_mermaid(projection))
 
 
+def cmd_objective_tick(args: argparse.Namespace) -> None:
+    """Preview the next bounded Objective mutation wave without applying it."""
+    config = _config(args)
+    record = get_objective(config, args.id, recover=False)
+    snapshot = build_scheduler_snapshot(config, objective=record)
+    plan = build_continuation_plan(snapshot)
+    tick = build_scheduler_tick(snapshot, plan, max_parallel=record.objective.budget.max_parallel)
+    if args.format == "json":
+        print(render_scheduler_tick_json(tick))
+        return
+    print(render_scheduler_tick_text(tick))
+
+
 def _trigger_cli_time(value: str | None, label: str) -> datetime | None:
     if value is None:
         return None
@@ -2344,6 +2362,12 @@ def build_parser() -> argparse.ArgumentParser:
     objective_graph.add_argument("id")
     objective_graph.add_argument("--format", choices=("mermaid", "json"), default="mermaid")
     objective_graph.set_defaults(func=cmd_objective_graph)
+    objective_tick = objective_sub.add_parser(
+        "tick", help="预览下一组有界 Objective Action；不创建 intent 或执行任务"
+    )
+    objective_tick.add_argument("id")
+    objective_tick.add_argument("--format", choices=("text", "json"), default="text")
+    objective_tick.set_defaults(func=cmd_objective_tick)
     for command, function, help_text in (
         ("pause", cmd_objective_pause, "暂停后续推进，不写完成状态"),
         ("resume", cmd_objective_resume, "恢复 paused Objective 的 ownership"),
