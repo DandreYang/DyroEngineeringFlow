@@ -176,6 +176,20 @@ overview、workspace、Objective、Task、graph 与 activity endpoint 只能切�
 不得各自重算 readiness、attention、completion、evidence validity 或 health。读取不能触发 lazy
 index、偏好更新、Git 锁写入或其他 hydration mutation。
 
+### 4.1 C01 已落地的读取契约
+
+首个实现仅建立 Core capture 与 Console DTO 边界，尚未启动 HTTP listener 或浏览器：
+
+- `dyro.observations.capture_workspace_read_snapshot()` 只组合既有 TaskGraph、Objective、
+  scheduler 和 Attention 读取；它不调用编码工具、网络、更新检查、CLI 子进程或任何 mutation API；
+- 读取失败收敛为稳定的组件 code，例如 `TASKS_UNAVAILABLE` 与
+  `OBJECTIVES_UNAVAILABLE`，不返回异常文字、路径或解析原文；一个 Objective 组件失败不得抹掉
+  已捕获的任务和开发线；
+- `dyro.console.workspace_envelope()` 只接受该不可变 snapshot，逐字段白名单化后生成统一封套；
+  `snapshot_sha256` 只覆盖脱敏后的事实，不覆盖 `captured_at`，因此相同状态的轮询可复用 ETag；
+- C01 不发布 action receipt、ledger、gate 输出、agent argv、adapter 环境、仓库路径或 remote。
+  后续阶段若要扩充字段，必须先扩充显式 DTO 与脱敏测试，而不能把 Core dataclass 直接 JSON 化。
+
 ## 5. 模块设计
 
 建议模块边界：

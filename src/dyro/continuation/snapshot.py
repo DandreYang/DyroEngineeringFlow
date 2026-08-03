@@ -40,7 +40,12 @@ class SchedulerTaskSnapshot:
     contract_sha256: str = ""
 
     def __post_init__(self) -> None:
-        if self.integration_state not in {"not_required", "integrated", "pending"}:
+        if self.integration_state not in {
+            "not_required",
+            "not_inspected",
+            "integrated",
+            "pending",
+        }:
             raise TypeError("调度快照 integration_state 无效")
 
 
@@ -165,9 +170,15 @@ def _integration_state(
     task_status: str,
     *,
     required: bool,
+    inspect: bool,
 ) -> str:
     if task_status != "done" or not required:
         return "not_required"
+    if not inspect:
+        # Summary-only Console captures never start a Git subprocess.  This is
+        # distinct from ``pending``: the fact was not inspected, not judged
+        # broken or healthy.
+        return "not_inspected"
     try:
         task_module._assert_dependency_integrated(config, task)
     except (DyroError, ValidationError):
@@ -180,6 +191,7 @@ def build_scheduler_snapshot(
     *,
     objective: StoredObjective | None = None,
     candidates: Iterable[Task] | None = None,
+    inspect_integration: bool = True,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> SchedulerSnapshot:
     """Read the task graph exactly once and publish canonical, immutable facts."""
@@ -226,6 +238,7 @@ def build_scheduler_snapshot(
                 task,
                 statuses[task.id],
                 required=task.id in integration_required_ids,
+                inspect=inspect_integration,
             ),
             contract_sha256=contract_sha256_by_id.get(task.id, ""),
         )
