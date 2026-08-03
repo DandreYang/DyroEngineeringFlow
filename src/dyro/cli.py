@@ -22,6 +22,11 @@ from .blueprint import (
 )
 from .changesets import create_changeset, get_changeset, list_changesets, verify_changeset
 from .config import CONFIG_NAME, Config, load, validate_id
+from .continuation.attention import (
+    build_attention_projection,
+    render_attention_json,
+    render_attention_text,
+)
 from .continuation.engine import (
     build_scheduler_tick,
     render_scheduler_tick_json,
@@ -1796,6 +1801,25 @@ def cmd_objective_tick(args: argparse.Namespace) -> None:
     print(render_scheduler_tick_text(tick))
 
 
+def cmd_objective_attention(args: argparse.Namespace) -> None:
+    """Render the safe, deterministic attention view without mutating state."""
+    config = _config(args)
+    record = get_objective(config, args.id, recover=False)
+    snapshot = build_scheduler_snapshot(config, objective=record)
+    plan = build_continuation_plan(snapshot)
+    scheduler = build_scheduler_projection(snapshot, plan)
+    projection = build_attention_projection(
+        snapshot,
+        plan,
+        scheduler,
+        budget=record.objective.budget,
+    )
+    if args.format == "json":
+        print(render_attention_json(projection))
+        return
+    print(render_attention_text(projection))
+
+
 def _trigger_cli_time(value: str | None, label: str) -> datetime | None:
     if value is None:
         return None
@@ -2368,6 +2392,12 @@ def build_parser() -> argparse.ArgumentParser:
     objective_tick.add_argument("id")
     objective_tick.add_argument("--format", choices=("text", "json"), default="text")
     objective_tick.set_defaults(func=cmd_objective_tick)
+    objective_attention = objective_sub.add_parser(
+        "attention", help="显示安全且只读的 Objective Attention 投影"
+    )
+    objective_attention.add_argument("id")
+    objective_attention.add_argument("--format", choices=("text", "json"), default="text")
+    objective_attention.set_defaults(func=cmd_objective_attention)
     for command, function, help_text in (
         ("pause", cmd_objective_pause, "暂停后续推进，不写完成状态"),
         ("resume", cmd_objective_resume, "恢复 paused Objective 的 ownership"),

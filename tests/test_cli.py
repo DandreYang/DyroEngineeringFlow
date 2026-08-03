@@ -454,7 +454,7 @@ class ObjectiveCliTests(WorkspaceCase):
             main(["--root", root, "objective", "status", "release"])
         self.assertIn("Derived result: incomplete", output.getvalue())
 
-    def test_objective_read_only_plan_explain_graph_and_tick_do_not_mutate_state(self) -> None:
+    def test_objective_read_only_plan_explain_graph_tick_and_attention_do_not_mutate_state(self) -> None:
         root = str(self.root)
         main(
             [
@@ -492,6 +492,11 @@ class ObjectiveCliTests(WorkspaceCase):
             main(["--root", root, "objective", "tick", "release", "--format", "json"])
         self.assertIn('"tick_sha256"', tick_output.getvalue())
         self.assertIn('"wave"', tick_output.getvalue())
+        attention_output = StringIO()
+        with redirect_stdout(attention_output):
+            main(["--root", root, "objective", "attention", "release", "--format", "json"])
+        self.assertIn('"attention_sha256"', attention_output.getvalue())
+        self.assertIn('"items"', attention_output.getvalue())
         after = {path.relative_to(objective_dir): path.read_bytes() for path in objective_dir.rglob("*") if path.is_file()}
         self.assertEqual(before, after)
 
