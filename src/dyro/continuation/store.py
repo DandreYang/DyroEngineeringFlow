@@ -43,6 +43,7 @@ from .actions import (
     verify_owner_lease as _verify_owner_lease,
 )
 from .contracts import canonical_contract, contract_sha256, parse_contract, validate_objective_scope
+from .budgets import BudgetCaps, BudgetDecision, BudgetDecisionInput, BudgetRequest, BudgetReservation, BudgetUsage, decide_budget
 from .models import ActionKind, Objective, Operation, RequestedMode
 from .objective_storage import (
     OBJECTIVE_STORE_SCHEMA_VERSION,
@@ -565,6 +566,129 @@ def reserve_objective_action(
             if intent.owner_generation != lease.generation:
                 raise DyroError("Action intent owner_generation 与当前 Scheduler lease 不匹配")
             return _reserve_action(directory, intent)
+
+
+def _budget_usage(records: Iterable[ActionRecord], *, objective_id: str | None) -> BudgetUsage:
+    """Derive conservative committed usage from durable Action records only.
+
+    A start has crossed the durable side-effect barrier, so it is charged even
+    when its terminal receipt is still missing.  Only not-started intents are
+    treated as reservations by the caller.  ``uncertain`` deliberately counts
+    as a failure: it may have produced a side effect and must never make the
+    next Action look safer than it is.
+    """
+    selected = tuple(
+        record for record in records
+        if objective_id is None or record.intent.objective_id == objective_id
+    )
+    started = tuple(record for record in selected if record.start is not None)
+    attempts: dict[str, int] = {}
+    for record in started:
+        reservation = record.intent.budget_reservation
+        attempts[reservation.task_id] = attempts.get(reservation.task_id, 0) + reservation.attempts
+    terminal = tuple(
+        sorted(
+            (record for record in started if record.receipt is not None),
+            key=lambda record: (record.receipt.recorded_at, record.intent.action_id),  # type: ignore[union-attr]
+        )
+    )
+    failures = sum(
+        record.intent.budget_reservation.failures
+        for record in terminal
+        if record.receipt is not None and record.receipt.status in {ActionStatus.FAILED, ActionStatus.UNCERTAIN}
+    )
+    consecutive = 0
+    for record in terminal:
+        if record.receipt is not None and record.receipt.status in {ActionStatus.FAILED, ActionStatus.UNCERTAIN}:
+            consecutive += record.intent.budget_reservation.failures
+        else:
+            consecutive = 0
+    return BudgetUsage(
+        actions=sum(record.intent.budget_reservation.actions for record in started),
+        failures=failures,
+        consecutive_failures=consecutive,
+        active_parallel=sum(
+            record.intent.budget_reservation.parallel
+            for record in started
+            if record.receipt is None
+        ),
+        attempts_by_task=tuple(sorted(attempts.items())),
+    )
+
+
+def _reserved_budgets(records: Iterable[ActionRecord]) -> tuple[BudgetReservation, ...]:
+    """Return only intents that have not crossed the Action-start barrier."""
+    return tuple(
+        record.intent.budget_reservation
+        for record in records
+        if record.start is None and record.receipt is None
+    )
+
+
+def _all_action_records_unlocked(config: Config) -> tuple[ActionRecord, ...]:
+    """Read every durable Action Journal while the workspace Objective lock is held."""
+    actions: list[ActionRecord] = []
+    for stored in _list_objectives_unlocked(config, recover=False):
+        with open_objective_directory(config, stored.objective.id) as directory:
+            actions.extend(_list_actions(directory))
+    return tuple(actions)
+
+
+def _budget_request(intent: ActionIntent) -> BudgetRequest:
+    """Fix the conservative charge for each supported supervised operation."""
+    if intent.operation is ActionKind.EXECUTE_TASK:
+        return BudgetRequest(intent.subject_id, actions=1, attempts=1, failures=1, parallel=1)
+    if intent.operation is ActionKind.REVIEW_TASK:
+        return BudgetRequest(intent.subject_id, actions=1, attempts=0, failures=1, parallel=1)
+    raise DyroError("受监督执行当前只支持 execute_task 与 review_task")
+
+
+def reserve_supervised_objective_action(
+    config: Config,
+    objective_id: str,
+    *,
+    intent: ActionIntent,
+    grant: OwnerLeaseGrant,
+    now: datetime,
+) -> tuple[ActionRecord, BudgetDecision]:
+    """Atomically recheck durable budgets and reserve one supervised Action.
+
+    This is intentionally separate from the low-level Action-Journal façade:
+    external callers cannot smuggle a smaller reservation between a preview and
+    the create-only intent write.  Workspace-wide accounting runs under the
+    same Objective lock as intent publication, closing the concurrent planner
+    race without holding any Task, dispatch, merge, or Agent lock.
+    """
+    with _objective_lock(config):
+        all_records = _all_action_records_unlocked(config)
+        with open_objective_directory(config, objective_id) as directory:
+            record = _require_actionable_objective(config, objective_id, directory)
+            _assert_action_is_authorized(record, intent)
+            _assert_no_unresolved_actions(directory, operation="创建下一 Action")
+            lease = _verify_owner_lease(directory, grant=grant, now=now)
+            if intent.owner_generation != lease.generation:
+                raise DyroError("Action intent owner_generation 与当前 Scheduler lease 不匹配")
+            request = _budget_request(intent)
+            decision = decide_budget(
+                BudgetDecisionInput(
+                    objective_id=objective_id,
+                    requested=record.objective.budget,
+                    workspace=BudgetCaps(),
+                    activation=None,
+                    usage=_budget_usage(all_records, objective_id=objective_id),
+                    workspace_usage=_budget_usage(all_records, objective_id=None),
+                    reservations=_reserved_budgets(all_records),
+                    now=now,
+                    request=request,
+                    automatic=False,
+                )
+            )
+            if intent.budget_reservation != decision.reservation:
+                raise DyroError("Action intent budget_reservation 未使用受监督操作的固定保守预算")
+            if not decision.allowed:
+                reasons = ", ".join(reason.value for reason in decision.reasons)
+                raise DyroError(f"Objective 预算拒绝此 Action：{reasons}")
+            return _reserve_action(directory, intent), decision
 
 
 def start_objective_action(

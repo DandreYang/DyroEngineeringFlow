@@ -440,6 +440,14 @@ lease 接管使用独立 pending record 绑定新 lease 的完整内容；先持
 
 Action 在启动前声明资源：`task:<id>`、`conflict:<group>`、`agent:<id>`、`line:<id>:merge`。Planner 先生成完整 ready set；`objective tick` 再从同一快照生成可复核、无写入的 wave 预览，按资源和当前并行容量选择候选。已 `in_progress` 的 scope Task 和有效外部 claim 会先占用该 Objective 的并行容量。延期投影只公开受限的 resource class（task、conflict、agent、line），绝不公开资源值。后续 apply 阶段必须重新校验授权、预算、资源与现有 task、dispatch、merge locks，防止计划与执行之间的竞态。预览的 `tick_sha256` 绑定 snapshot、plan、容量、wave 和延期原因，不能当作执行授权或绕过重新校验。
 
+当前监督阶段由 `objective apply` 落地：它先显示精确 wave；交互式用户逐项确认，非交互调用必须显式给出
+`--yes --confirm-sha`。确认摘要排除单次采样时钟，但绑定 Objective revision/event/scope、任务状态与合约、
+决策、容量和精确 Action；因此可跨命令复制，任一语义变化都会拒绝。每个 Action 在真正调用既有 `task run` 或 `task review` 前都会重新规划、重新读取
+Task contract、在 workspace Objective 锁内重验预算并写入 create-only `ActionIntent`，随后才跨越
+`action-start`。执行期间仍由既有 Task/dispatch/review 锁校验状态、依赖和冲突组。Task API 抛错或返回
+非受限结果时写入 `uncertain`，绝不重放；未跨越 `action-start` 的失败才可取消。该阶段只串行调用
+`execute_task` 与 `review_task`；即使 Objective 配置了更高并行上限，也不会隐式启动并发、merge 或 push。
+
 一个 Task 可以被多个 observe-only Objective 引用，但同一时刻最多只有一个 active Objective
 取得其 targets 加依赖闭包的 mutation ownership。ownership 在 workspace Objective 锁下预留；
 重叠 Objective 只能观察并显示 `OBJECTIVE_SCOPE_CONFLICT`。执行 Task API 时不持有 Objective

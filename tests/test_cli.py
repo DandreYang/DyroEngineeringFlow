@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -499,6 +500,81 @@ class ObjectiveCliTests(WorkspaceCase):
         self.assertIn('"items"', attention_output.getvalue())
         after = {path.relative_to(objective_dir): path.read_bytes() for path in objective_dir.rglob("*") if path.is_file()}
         self.assertEqual(before, after)
+
+    def test_objective_apply_dry_run_shows_the_exact_wave_without_writing(self) -> None:
+        root = str(self.root)
+        main(
+            [
+                "--root", root, "objective", "start", "--id", "release", "--title", "Release",
+                "--line", "alpha", "--targets", "TASK-A", "--yes",
+            ]
+        )
+        objective_dir = self.config.objectives_dir / "release"
+        before = {path.relative_to(objective_dir): path.read_bytes() for path in objective_dir.rglob("*") if path.is_file()}
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", root, "--dry-run", "objective", "apply", "release"])
+        after = {path.relative_to(objective_dir): path.read_bytes() for path in objective_dir.rglob("*") if path.is_file()}
+        self.assertIn("Tick SHA-256", output.getvalue())
+        self.assertIn("DRY RUN", output.getvalue())
+        self.assertEqual(before, after)
+
+    def test_objective_apply_noninteractive_uses_stable_confirmation_and_json_envelope(self) -> None:
+        from dyro.continuation.supervision import build_supervised_wave
+
+        root = str(self.root)
+        main(
+            [
+                "--root", root, "objective", "start", "--id", "release", "--title", "Release",
+                "--line", "alpha", "--targets", "TASK-A", "--yes",
+            ]
+        )
+        confirmation = build_supervised_wave(self.config, "release").confirmation_sha256
+        output = StringIO()
+        with (
+            patch("dyro.cli.apply_supervised_wave", return_value=()) as apply,
+            redirect_stdout(output),
+        ):
+            main(
+                [
+                    "--root", root, "objective", "apply", "release", "--yes",
+                    "--confirm-sha", confirmation, "--format", "json",
+                ]
+            )
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["dry_run"])
+        self.assertEqual(payload["outcomes"], [])
+        self.assertIn("confirmation_sha256", payload["wave"])
+        apply.assert_called_once()
+
+    def test_objective_apply_rejects_a_semantically_stale_confirmation(self) -> None:
+        from dyro.continuation.supervision import build_supervised_wave
+        from dyro.tasks import set_status
+
+        root = str(self.root)
+        main(
+            [
+                "--root", root, "objective", "start", "--id", "release", "--title", "Release",
+                "--line", "alpha", "--targets", "TASK-A", "--yes",
+            ]
+        )
+        confirmation = build_supervised_wave(self.config, "release").confirmation_sha256
+        set_status(self.config, load_task(self.config, "TASK-A"), "assigned")
+        stderr = StringIO()
+        with (
+            patch("dyro.cli.apply_supervised_wave") as apply,
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as rejected,
+        ):
+            main(
+                [
+                    "--root", root, "objective", "apply", "release", "--yes",
+                    "--confirm-sha", confirmation,
+                ]
+            )
+        self.assertEqual(rejected.exception.code, 2)
+        self.assertIn("Confirmation SHA-256", stderr.getvalue())
+        apply.assert_not_called()
 
 
 class DaemonSelectionTests(WorkspaceCase):

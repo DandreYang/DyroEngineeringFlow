@@ -780,10 +780,12 @@ def _reserve_local_execution(
     action: str,
     dry_run: bool,
     legacy_scheduler: bool = False,
+    expected_contract_sha256: str | None = None,
 ) -> None:
     """Check dispatch constraints and atomically reserve the task before starting an Agent."""
     def reserve() -> None:
         with exclusive_lock(_state_lock_path(task)):
+            _assert_expected_task_contract(task, expected_contract_sha256)
             current = status(config, task)
             if current not in allowed:
                 raise DyroError(f"任务 {task.id} 当前为 {current}，不能{action}")
@@ -803,6 +805,29 @@ def _reserve_local_execution(
         return
     with exclusive_lock(_dispatch_lock_path(config)):
         reserve()
+
+
+def _assert_expected_task_contract(task: Task, expected_contract_sha256: str | None) -> None:
+    """Fail closed when a supervised Action's pinned Task contract drifted.
+
+    This executes under the Task state lock for execution and immediately
+    before review dispatch.  Direct operator Task commands pass ``None`` and
+    retain their established explicit-command behaviour.
+    """
+    if expected_contract_sha256 is None:
+        return
+    if (
+        not isinstance(expected_contract_sha256, str)
+        or len(expected_contract_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_contract_sha256)
+    ):
+        raise ValidationError("受监督 Action 的 Task contract 摘要无效")
+    try:
+        actual = hashlib.sha256((task.directory / "task.toml").read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ValidationError(f"无法读取任务 {task.id} contract") from exc
+    if actual != expected_contract_sha256:
+        raise DyroError("Task contract 已在受监督 Action 确认后变化；请 objective reconcile 后重新确认")
 
 
 def worktree_root(config: Config, task: Task) -> Path:
@@ -1308,9 +1333,11 @@ def run_task(
     *,
     dry_run: bool = False,
     legacy_scheduler: bool = False,
+    expected_contract_sha256: str | None = None,
 ) -> str:
     _require_local_execution(config, "任务", dry_run=dry_run)
     if dry_run:
+        _assert_expected_task_contract(task, expected_contract_sha256)
         return _run_task(config, task, dry_run=True)
     with exclusive_lock(_execution_lock_path(task), timeout_seconds=1.0):
         try:
@@ -1321,6 +1348,7 @@ def run_task(
                 action="启动执行",
                 dry_run=False,
                 legacy_scheduler=legacy_scheduler,
+                expected_contract_sha256=expected_contract_sha256,
             )
             attempt = begin_execution_attempt(
                 task.directory,
@@ -1678,15 +1706,28 @@ def _apply_review_decision(config: Config, task: Task, *, dry_run: bool = False)
     return "review"
 
 
-def review_task(config: Config, task: Task, *, dry_run: bool = False) -> str:
+def review_task(
+    config: Config,
+    task: Task,
+    *,
+    dry_run: bool = False,
+    expected_contract_sha256: str | None = None,
+) -> str:
     _require_local_execution(config, "复核", dry_run=dry_run)
     if dry_run:
-        return _review_task(config, task, dry_run=True)
+        return _review_task(config, task, dry_run=True, expected_contract_sha256=expected_contract_sha256)
     with exclusive_lock(_review_lock_path(task), timeout_seconds=1.0):
-        return _review_task(config, task, dry_run=False)
+        return _review_task(config, task, dry_run=False, expected_contract_sha256=expected_contract_sha256)
 
 
-def _review_task(config: Config, task: Task, *, dry_run: bool) -> str:
+def _review_task(
+    config: Config,
+    task: Task,
+    *,
+    dry_run: bool,
+    expected_contract_sha256: str | None = None,
+) -> str:
+    _assert_expected_task_contract(task, expected_contract_sha256)
     if status(config, task) != "review":
         raise DyroError(f"仅 review 任务可启动复核：{task.id}")
     workspace = worktree_root(config, task)
