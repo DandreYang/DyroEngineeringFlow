@@ -340,7 +340,13 @@ def build_continuation_plan(snapshot: SchedulerSnapshot) -> ContinuationPlan:
             )
         elif item.status == "done" and item.integration_state != "integrated":
             blocked.append(
-                _action(ActionKind.MERGE_TASK, task_id, ReasonCode.TASK_INTEGRATION_PENDING)
+                _action(
+                    ActionKind.WAIT
+                    if item.integration_state == "not_inspected"
+                    else ActionKind.MERGE_TASK,
+                    task_id,
+                    ReasonCode.TASK_INTEGRATION_PENDING,
+                )
             )
     if not selected and not blocked and not attention:
         selected.append(_action(ActionKind.WAIT, snapshot.objective_id, ReasonCode.NO_PROGRESS))
