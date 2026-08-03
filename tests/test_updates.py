@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+from dyro import __version__
 from dyro.errors import DyroError, ValidationError
 from dyro.updates import (
     PYPI_JSON_URL,
@@ -618,21 +619,25 @@ class DailyCliIntegrationTests(unittest.TestCase):
             patch("dyro.cli.fetch_latest_version", return_value="0.5.5") as fetch,
         ):
             self.assertEqual(_explicit_update_check(), "0.5.5")
-        fetch.assert_called_once_with("0.5.5", timeout=5.0)
+        fetch.assert_called_once_with(__version__, timeout=5.0)
 
     def test_update_now_dry_run_does_not_create_user_state(self) -> None:
         from dyro.cli import main
 
+        major, minor, patch_version = (int(part) for part in __version__.split("."))
+        latest_version = f"{major}.{minor}.{patch_version + 1}"
         with tempfile.TemporaryDirectory(prefix="dyro-update-dry-run-") as tmp:
             with (
                 patch.dict(os.environ, {"DYRO_HOME": tmp}),
-                patch("dyro.cli.fetch_latest_version", return_value="0.5.6"),
+                patch(
+                    "dyro.cli.fetch_latest_version", return_value=latest_version
+                ),
                 patch("dyro.cli.perform_update", return_value=False) as install,
             ):
                 main(["--dry-run", "update", "now"])
             self.assertEqual(list(Path(tmp).iterdir()), [])
             install.assert_called_once_with(
-                "0.5.6", yes=False, dry_run=True
+                latest_version, yes=False, dry_run=True
             )
 
 

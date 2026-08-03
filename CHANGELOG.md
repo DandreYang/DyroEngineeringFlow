@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.6 - 2026-08-03
 
 - Check the official PyPI endpoint at most once per local day on interactive
   home launches, cache the result in user-level Dyro state, and never block
