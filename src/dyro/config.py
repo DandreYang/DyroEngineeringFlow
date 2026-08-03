@@ -16,6 +16,7 @@ HOTFIXES_DIR = ".dyro/hotfixes"
 DECISIONS_FILE = ".dyro/decisions.toml"
 LEDGER_FILE = ".dyro/ledger.jsonl"
 CHANGESETS_DIR = ".dyro/changes"
+OBJECTIVES_DIR = ".dyro/objectives"
 
 SAFE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$")
 
@@ -56,6 +57,9 @@ class Policy:
     require_signed_review: bool = False
     require_signed_signoff: bool = False
     execution_mode: str = "local"
+    allow_unattended_execute: bool = False
+    allow_unattended_review: bool = False
+    allow_unattended_merge: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,10 @@ class Config:
     @property
     def changesets_dir(self) -> Path:
         return self.root / CHANGESETS_DIR
+
+    @property
+    def objectives_dir(self) -> Path:
+        return self.root / OBJECTIVES_DIR
 
 
 def external_security_errors(policy: Policy) -> tuple[str, ...]:
@@ -190,6 +198,18 @@ def load(root: Path | None = None) -> Config:
             policy_raw.get("require_signed_signoff", False), "policy.require_signed_signoff"
         ),
         execution_mode=_string(policy_raw.get("execution_mode", "local"), "policy.execution_mode"),
+        allow_unattended_execute=strict_bool(
+            policy_raw.get("allow_unattended_execute", False),
+            "policy.allow_unattended_execute",
+        ),
+        allow_unattended_review=strict_bool(
+            policy_raw.get("allow_unattended_review", False),
+            "policy.allow_unattended_review",
+        ),
+        allow_unattended_merge=strict_bool(
+            policy_raw.get("allow_unattended_merge", False),
+            "policy.allow_unattended_merge",
+        ),
     )
     if policy.execution_mode not in ("local", "external"):
         raise ValidationError("policy.execution_mode 只能是 local 或 external")

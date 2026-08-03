@@ -91,3 +91,31 @@ class ConfigTests(WorkspaceCase):
             external_security_errors(load(self.root).policy),
             ("policy.require_signed_execution = true", "policy.require_signed_review = true"),
         )
+
+    def test_loads_disabled_unattended_ceiling_and_objectives_location(self) -> None:
+        config = load(self.root)
+
+        self.assertEqual(config.objectives_dir, config.root / ".dyro/objectives")
+        self.assertFalse(config.policy.allow_unattended_execute)
+        self.assertFalse(config.policy.allow_unattended_review)
+        self.assertFalse(config.policy.allow_unattended_merge)
+
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                "require_clean_merge = true",
+                "\n".join(
+                    (
+                        "require_clean_merge = true",
+                        "allow_unattended_execute = true",
+                        "allow_unattended_review = true",
+                        "allow_unattended_merge = true",
+                    )
+                ),
+            ),
+            encoding="utf-8",
+        )
+        updated = load(self.root)
+        self.assertTrue(updated.policy.allow_unattended_execute)
+        self.assertTrue(updated.policy.allow_unattended_review)
+        self.assertTrue(updated.policy.allow_unattended_merge)
