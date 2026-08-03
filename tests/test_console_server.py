@@ -5,6 +5,7 @@ import json
 import socket
 from threading import Thread
 import unittest
+from unittest.mock import Mock
 
 from dyro.console.server import create_console_http_server
 
@@ -221,6 +222,79 @@ class ConsoleServerTests(unittest.TestCase):
         self.assertIn(b" 401 ", response)
         self.assertIn(b"Connection: close", response)
         self.assertNotIn(b"<h1>Dyro Console</h1>", response)
+
+
+class ConsoleOverviewServerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.overview = Mock()
+        self.overview.page.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "f" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {"workspaces": [], "next_cursor": None},
+        }
+        self.server = create_console_http_server(
+            port=0,
+            bootstrap_secret="a" * 43,
+            overview_service=self.overview,
+        )
+        self.thread = Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.port = self.server.server_port
+        self.origin = f"http://127.0.0.1:{self.port}"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+    def _request(
+        self, method: str, path: str, *, body: bytes | None = None, headers: dict[str, str] | None = None
+    ) -> tuple[int, dict[str, str], bytes]:
+        connection = HTTPConnection("127.0.0.1", self.port, timeout=5)
+        connection.request(method, path, body=body, headers=headers or {})
+        response = connection.getresponse()
+        result = response.status, dict(response.getheaders()), response.read()
+        connection.close()
+        return result
+
+    def _bearer(self) -> str:
+        status, _, body = self._request(
+            "POST",
+            "/api/v1/session",
+            body=json.dumps({"bootstrap": "a" * 43}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Origin": self.origin},
+        )
+        self.assertEqual(status, 201)
+        return json.loads(body)["bearer"]
+
+    def test_authenticated_overview_uses_strict_query_and_conditional_etag(self) -> None:
+        bearer = self._bearer()
+        headers = {"Authorization": f"Bearer {bearer}", "Origin": self.origin}
+
+        status, response_headers, body = self._request(
+            "GET", "/api/v1/overview?limit=1", headers=headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(response_headers["ETag"], '"' + "f" * 64 + '"')
+        self.assertEqual(json.loads(body)["data"]["workspaces"], [])
+        self.overview.page.assert_called_once_with(cursor=None, limit=1)
+
+        cached, cached_headers, cached_body = self._request(
+            "GET",
+            "/api/v1/overview?limit=1",
+            headers={**headers, "If-None-Match": response_headers["ETag"]},
+        )
+        self.assertEqual(cached, 304)
+        self.assertEqual(cached_headers["ETag"], response_headers["ETag"])
+        self.assertEqual(cached_body, b"")
+
+        invalid, _, body = self._request(
+            "GET", "/api/v1/overview?limit=1&limit=2", headers=headers
+        )
+        self.assertEqual(invalid, 400)
+        self.assertEqual(json.loads(body)["error"]["code"], "OVERVIEW_QUERY_INVALID")
 
 
 if __name__ == "__main__":

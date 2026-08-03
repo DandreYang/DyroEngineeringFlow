@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .. import __version__
+from .overview import ConsoleOverviewError, ConsoleOverviewService
 from .session import ConsoleSessionStore, SessionRejected
 
 
@@ -53,10 +54,12 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
         port: int,
         bootstrap_secret: str | None,
         session_store: ConsoleSessionStore | None,
+        overview_service: ConsoleOverviewService | None,
         max_concurrent_requests: int,
     ) -> None:
         self._request_slots = threading.BoundedSemaphore(max_concurrent_requests)
         self.sessions = session_store
+        self.overview_service = overview_service
         super().__init__((HOST, port), ConsoleRequestHandler)
         if self.sessions is None:
             self.sessions = ConsoleSessionStore(bootstrap_secret=bootstrap_secret)
@@ -252,7 +255,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if not self._validate_request_envelope():
             return
         parsed = urlsplit(self.path)
-        if parsed.query or parsed.fragment or parsed.path != self.path:
+        if parsed.fragment or not parsed.path or parsed.path.startswith("//"):
+            self._error(400, "BAD_REQUEST")
+            return
+        if parsed.query and parsed.path != "/api/v1/overview":
             self._error(400, "BAD_REQUEST")
             return
         if self.command == "GET" and parsed.path == "/":
@@ -283,16 +289,75 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     "schema_version": 1,
                     "data": {
                         "version": __version__,
-                        "capabilities": [],
+                        "capabilities": ["overview"] if self.console.overview_service else [],
                         "session_expires_at": session.expires_at.isoformat(),
                     },
                 },
             )
             return
+        if parsed.path == "/api/v1/overview":
+            if self.command != "GET":
+                self._method_not_allowed()
+                return
+            if self._has_body():
+                self._error(400, "BAD_REQUEST")
+                return
+            if self._authorized_session() is None:
+                return
+            self._overview(parsed.query)
+            return
         if parsed.path.startswith("/api/"):
             self._error(401, "UNAUTHORIZED")
             return
         self._error(404, "NOT_FOUND")
+
+    def _overview(self, query: str) -> None:
+        service = self.console.overview_service
+        if service is None:
+            self._error(404, "NOT_FOUND")
+            return
+        try:
+            cursor, limit = self._overview_parameters(query)
+            payload = service.page(cursor=cursor, limit=limit)
+        except ConsoleOverviewError as exc:
+            self._error(
+                400
+                if exc.code
+                in {
+                    "OVERVIEW_CURSOR_INVALID",
+                    "OVERVIEW_LIMIT_INVALID",
+                    "OVERVIEW_QUERY_INVALID",
+                }
+                else 503,
+                exc.code,
+            )
+            return
+        self._json(200, payload, etag=str(payload.get("snapshot_sha256", "")))
+
+    @staticmethod
+    def _overview_parameters(query: str) -> tuple[str | None, int]:
+        if not query:
+            return None, 20
+        values: dict[str, str] = {}
+        for segment in query.split("&"):
+            key, separator, value = segment.partition("=")
+            if (
+                not separator
+                or key not in {"cursor", "limit"}
+                or key in values
+                or not value
+            ):
+                raise ConsoleOverviewError("OVERVIEW_QUERY_INVALID")
+            values[key] = value
+        cursor = values.get("cursor")
+        if cursor is not None and (
+            len(cursor) > 512 or not re.fullmatch(r"[A-Za-z0-9_-]+", cursor)
+        ):
+            raise ConsoleOverviewError("OVERVIEW_QUERY_INVALID")
+        raw_limit = values.get("limit", "20")
+        if len(raw_limit) > 3 or not raw_limit.isdecimal():
+            raise ConsoleOverviewError("OVERVIEW_QUERY_INVALID")
+        return cursor, int(raw_limit)
 
     def _validate_request_envelope(self) -> bool:
         if len(self.raw_requestline) > REQUEST_LINE_LIMIT:
@@ -393,13 +458,29 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if self._validate_request_envelope():
             self._method_not_allowed()
 
-    def _json(self, status: int, payload: object) -> None:
-        self._send(status, _json_bytes(payload), "application/json; charset=utf-8")
+    def _json(self, status: int, payload: object, *, etag: str = "") -> None:
+        if status == 200 and self._if_none_match(etag):
+            self._send(304, b"", "application/json; charset=utf-8", etag=etag)
+            return
+        self._send(
+            status,
+            _json_bytes(payload),
+            "application/json; charset=utf-8",
+            etag=etag,
+        )
 
     def _error(self, status: int, code: str) -> None:
         self._json(status, {"schema_version": 1, "error": {"code": code}})
 
-    def _send(self, status: int, body: bytes, content_type: str) -> None:
+    def _if_none_match(self, etag: str) -> bool:
+        if not re.fullmatch(r"[0-9a-f]{64}", etag):
+            return False
+        values = self.headers.get_all("If-None-Match") or []
+        return len(values) == 1 and values[0] == f'"{etag}"'
+
+    def _send(
+        self, status: int, body: bytes, content_type: str, *, etag: str = ""
+    ) -> None:
         # Every response terminates this HTTP/1.1 connection.  In particular,
         # rejected GET or unknown API requests must never leave an unread body
         # that a later handler iteration could interpret as a request line.
@@ -414,6 +495,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("Content-Security-Policy", _CSP)
+        if re.fullmatch(r"[0-9a-f]{64}", etag):
+            self.send_header("ETag", f'"{etag}"')
         self.end_headers()
         self.wfile.write(body)
 
@@ -423,6 +506,7 @@ def create_console_http_server(
     port: int = 0,
     bootstrap_secret: str | None = None,
     session_store: ConsoleSessionStore | None = None,
+    overview_service: ConsoleOverviewService | None = None,
     max_concurrent_requests: int = MAX_CONCURRENT_REQUESTS,
 ) -> ConsoleHTTPServer:
     """Bind a Console server to IPv4 loopback only; no host override exists."""
@@ -436,5 +520,6 @@ def create_console_http_server(
         port=port,
         bootstrap_secret=bootstrap_secret,
         session_store=session_store,
+        overview_service=overview_service,
         max_concurrent_requests=max_concurrent_requests,
     )
