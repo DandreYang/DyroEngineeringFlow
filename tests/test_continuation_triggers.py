@@ -131,7 +131,10 @@ class ContinuationTriggerTests(unittest.TestCase):
                 trigger_id="provider-ci",
                 observed_at=now,
             )
-        with self.assertRaisesRegex(ValueError, "有效 JSON"):
+        # Some Python versions reject this pathological nesting in the JSON
+        # decoder; others parse it then reject its non-object top level. Both
+        # outcomes must fail closed without leaking RecursionError.
+        with self.assertRaises(ValueError):
             parse_provider_observation(
                 (b"[" * 10_000) + (b"]" * 10_000),
                 trigger_id="provider-ci",
