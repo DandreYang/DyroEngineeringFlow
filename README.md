@@ -333,11 +333,24 @@ dyro bootstrap --yes
 dyro doctor
 ```
 
-After setup, `dyro next` recommends the next action. Use this command when you are ready to select a development line and launch a configured local agent:
+After setup, run `dyro`. The first run inside a project registers it in a reversible global home. From then on, the same command can resume a recent development line, hotfix, or existing task worktree from any directory—without remembering `--root`:
 
 ```bash
-dyro start
+dyro
 ```
+
+Projects can also be registered, selected, and inspected explicitly. These commands manage global entry points only; they never move or delete a project:
+
+```bash
+dyro workspace add /path/to/workspace --name my-project --default
+dyro workspace list
+dyro --workspace my-project open dev --agent codex
+dyro --workspace my-project task open API-101 --agent codex
+dyro status --all
+dyro agent discover
+```
+
+`task open` only enters an existing task worktree after validating its anchor and branch topology. It does not execute the task or change task state. `agent discover` distinguishes configured launchable adapters from commands that were merely detected, and never bypasses Profile authorization. The existing `dyro start` line-and-agent selector remains available.
 
 ## Delivery workflow
 
@@ -471,13 +484,14 @@ dyro --dry-run task run API-101
 
 | Command | Purpose |
 | --- | --- |
+| bare `dyro` / `home` / `workspace add/list/default/remove` | Resume recent work from any directory or manage reversible global project entries. |
 | `setup` / `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | Onboard a teammate without TOML edits, manage anchors, and choose a line and agent. |
-| `doctor` / `status` | Validate and display control-plane state. |
+| `doctor` / `status` / `status --all` | Validate and display one or every registered workspace. |
 | `line create/list` | Create, register, and inspect feature development lines. |
 | `hotfix create` | Create a hotfix line from an explicit production base. |
 | `changeset create/list/verify` | Pin and verify the exact clean Git heads that make up a multi-repository delivery. |
-| `config get/set` / `agent list/add/test` / `open` | Safely manage common policy and adapters, validate an executable, or open an agent in the correct development line. |
-| `task create/list/board/status/next/graph/explain/attempts/binding` | Manage task manifests and state, compile or validate the task graph, explain scheduling decisions, inspect provenance, and output the exact review binding. |
+| `config get/set` / `agent list/add/test/discover` / `open` | Safely manage policy and adapters, discover or validate local commands, or open an agent in the correct line. |
+| `task create/open/list/board/status/next/graph/explain/attempts/binding` | Create or enter tasks, manage state, validate the task graph, explain scheduling, inspect provenance, and output review bindings. |
 | `task run/answer/gates/review/signoff` | Run tasks, resolve questions, execute gates, request independent review, and record external sign-off when a Profile requires it. |
 | `task claim --output` / `task evidence build/execution/review` | One-time claim with a create-only runner handoff file, portable execution-evidence build/import, and receipt-bound review import. |
 | `task merge` | Merge a reviewed task branch into its owning development line. |

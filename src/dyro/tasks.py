@@ -836,6 +836,23 @@ def _validate_task_worktree(config: Config, task: Task, repo_id: str, destinatio
         raise DyroError(f"任务 worktree 不属于配置的仓库 anchor：{destination}")
 
 
+def existing_task_workspace(config: Config, task: Task) -> Path:
+    """Return a fully validated existing task workspace without creating it."""
+
+    root = worktree_root(config, task)
+    if not root.is_dir():
+        raise DyroError(f"任务 {task.id} 尚未创建可进入的工作区。下一步：dyro task run {task.id}")
+    branch = f"{config.policy.task_branch_prefix}{task.id}"
+    for repo_id in task.repositories:
+        destination = root / config.repositories[repo_id].mount
+        if not destination.is_dir():
+            raise DyroError(
+                f"任务 {task.id} 工作区不完整，缺少 {repo_id}：{destination}；请先运行 dyro doctor"
+            )
+        _validate_task_worktree(config, task, repo_id, destination, branch)
+    return root
+
+
 def _ensure_task_worktrees(config: Config, task: Task, line: Line, *, dry_run: bool = False) -> Path:
     root = worktree_root(config, task)
     branch = f"{config.policy.task_branch_prefix}{task.id}"

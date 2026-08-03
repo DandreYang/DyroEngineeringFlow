@@ -330,11 +330,24 @@ dyro bootstrap --yes
 dyro doctor
 ```
 
-配置完成后，`dyro next` 会给出推荐操作；需要选择开发线并启动已配置的本机 Agent 时使用：
+配置完成后，直接运行 `dyro`。第一次在项目内运行时，它会把该项目登记到可逆的全局首页；以后在任意目录运行同一个命令，都可以继续最近的开发线、Hotfix 或已有任务 worktree。新人不需要记住工作区路径或 `--root`：
 
 ```bash
-dyro start
+dyro
 ```
+
+也可以显式登记、切换和查看所有项目；这些命令只管理全局入口，不会移动或删除项目：
+
+```bash
+dyro workspace add /path/to/workspace --name my-project --default
+dyro workspace list
+dyro --workspace my-project open dev --agent codex
+dyro --workspace my-project task open API-101 --agent codex
+dyro status --all
+dyro agent discover
+```
+
+`task open` 只进入已经存在且通过 anchor、分支拓扑核验的任务 worktree，不执行任务、不改变状态。`agent discover` 会区分“已配置可启动”与“本机检测到但尚未集成”，不会绕过 Profile 授权。需要传统的开发线与 Agent 选择入口时，`dyro start` 仍保持兼容。
 
 ## 交付流程
 
@@ -452,20 +465,21 @@ dyro --dry-run task run API-101
 
 | 命令 | 作用 |
 | --- | --- |
+| 无子命令的 `dyro` / `home` / `workspace add/list/default/remove` | 从任意目录进入最近工作，或管理可逆的全局项目入口。 |
 | `setup` / `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | 无需手改 TOML 地完成新人引导、仓库管理与开发线、Agent 选择。 |
-| `doctor` / `status` | 验证和显示控制平面状态。 |
+| `doctor` / `status` / `status --all` | 验证并显示当前或全部已登记工作区状态。 |
 | `line create/list` | 创建、登记和查看功能开发线。 |
 | `hotfix create` | 从显式生产基线创建 Hotfix 开发线。 |
 | `changeset create/list/verify` | 固化并核验一次多仓交付所包含的干净、精确 Git 提交组合。 |
-| `config get/set` / `agent list/add/test` / `open` | 安全管理常用策略与 adapter、校验可执行文件，或在正确开发线启动 Agent。 |
-| `task create/list/board/status/next/graph/explain/attempts/binding` | 管理任务清单与状态，编译/校验任务图，解释调度，查看 provenance，输出精确复核绑定。 |
+| `config get/set` / `agent list/add/test/discover` / `open` | 安全管理常用策略与 adapter、发现/校验本机命令，或在正确开发线启动 Agent。 |
+| `task create/open/list/board/status/next/graph/explain/attempts/binding` | 创建或进入任务、管理状态，编译/校验任务图，解释调度，查看 provenance，输出精确复核绑定。 |
 | `task run/answer/gates/review/signoff` | 执行任务、回答追问、运行门禁、申请独立复核；需要时记录外部签收。 |
 | `task claim --output` / `task evidence build/execution/review` | 一次性领取任务并以“仅创建”文件交给隔离执行器，构建/导入可移植执行证据包，并导入与回执绑定的复核证据。 |
 | `task merge` | 将已复核的任务分支合入所属开发线。 |
 | `task loop/daemon/stats/decisions` | 受控批处理、调度、台账报表和决策门禁。 |
 | `dispatch` | 可选本地多 Agent 派发（L0–L4）；仅建议，不替代 gates/merge。 |
 
-实现细节见[架构与 Profile 契约](docs/architecture.md)、[既有控制面迁移指南](docs/migrating-existing-control-planes.md)，以及维护者用的 [PyPI 发布说明](docs/publishing.md)。
+实现细节见[零摩擦全局首页 ADR](docs/adr/0003-zero-friction-global-home.md)、[架构与 Profile 契约](docs/architecture.md)、[既有控制面迁移指南](docs/migrating-existing-control-planes.md)，以及维护者用的 [PyPI 发布说明](docs/publishing.md)。
 
 ## 语言与文档
 

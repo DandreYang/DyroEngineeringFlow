@@ -6,6 +6,7 @@
 
 ```text
 DyroEngineeringFlow Core（`dyro` CLI）
+  ├─ home: 全局工作区入口、最近目标、任意目录导航（无交付权限）
   ├─ workspace: anchors、逐仓基线、开发线、Hotfix、存储模式、doctor
   ├─ launch: Agent adapter 的安全 argv 模板
   ├─ dispatch: 任务 DAG、决策点、冲突组、状态机、回执、复核与外部签收
@@ -20,6 +21,8 @@ Project Profile
 ```
 
 Core 只提供机制，不嵌入仓库名称、客户信息、模型价格、内网地址、发布平台或业务规则。
+
+`home` 位于 Profile 之上，只保存工作区别名、绝对路径和最近使用的目标/Agent，不保存凭据，也不拥有 gates、review、signoff、merge 或 push 权限。当前目录中的 Profile 优先于全局默认项目；显式 `--root` 与 `--workspace` 互斥。全局记录使用原子替换和进程锁，损坏时 fail-closed，详见 [`ADR-0003`](adr/0003-zero-friction-global-home.md)。
 
 ## `dyro.toml`
 

@@ -12,9 +12,24 @@ import time
 
 from . import __version__
 from .changesets import create_changeset, get_changeset, list_changesets, verify_changeset
-from .config import CONFIG_NAME, Config, expand_argv, load, validate_id
+from .config import CONFIG_NAME, Config, load, validate_id
 from .evidence import build_execution_bundle, unpack_execution_bundle
 from .errors import DyroError, ValidationError
+from .home import (
+    open_line,
+    open_task,
+    print_agent_discovery,
+    print_all_status,
+    print_status,
+    run_home,
+)
+from .hub import (
+    add_workspace,
+    get_workspace,
+    load_registry,
+    remove_workspace,
+    set_default_workspace,
+)
 from .onboarding import (
     SetupPlan,
     append_repository,
@@ -69,7 +84,7 @@ from .tasks import (
     status as task_status,
     task_template,
 )
-from .workspace import create_line, doctor, get_line, line_root, list_lines, status_rows
+from .workspace import create_line, doctor, get_line, list_lines
 
 
 CONFIG_TEMPLATE = '''schema_version = 1
@@ -112,7 +127,14 @@ verify = [["npm", "test", "--", "--runInBand"]]
 
 
 def _config(args: argparse.Namespace) -> Config:
-    root = Path(args.root).expanduser() if getattr(args, "root", None) else Path.cwd()
+    root_arg = getattr(args, "root", None)
+    workspace_arg = getattr(args, "workspace_alias", None)
+    if root_arg:
+        root = Path(root_arg).expanduser()
+    elif workspace_arg:
+        root = get_workspace(workspace_arg).root
+    else:
+        root = Path.cwd()
     return load(root)
 
 
@@ -481,12 +503,74 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         raise DyroError("doctor 发现结构错误")
 
 
+def cmd_home(args: argparse.Namespace) -> None:
+    run_home(
+        root=getattr(args, "root", None),
+        workspace=getattr(args, "workspace_alias", None),
+        dry_run=args.dry_run,
+    )
+
+
+def cmd_workspace_add(args: argparse.Namespace) -> None:
+    if args.dry_run:
+        config = load(Path(args.path).expanduser())
+        print(
+            "DRY RUN: 将登记工作区 "
+            f"{args.name or config.name} -> {config.root.resolve()}"
+        )
+        return
+    record = add_workspace(
+        args.path,
+        name=args.name,
+        make_default=args.default,
+    )
+    print(f"已登记工作区：{record.name} -> {record.root}")
+
+
+def cmd_workspace_list(args: argparse.Namespace) -> None:
+    registry = load_registry()
+    if not registry.workspaces:
+        print("还没有登记全局工作区。下一步：dyro workspace add <路径>")
+        return
+    print(f"{'默认':4} {'名称':20} {'状态':8} 路径")
+    for record in registry.workspaces:
+        marker = "*" if record.name == registry.default else "-"
+        try:
+            load(record.root)
+        except (DyroError, ValidationError):
+            state = "不可用"
+        else:
+            state = "可用"
+        print(f"{marker:4} {record.name:20} {state:8} {record.root}")
+
+
+def cmd_workspace_default(args: argparse.Namespace) -> None:
+    if args.dry_run:
+        get_workspace(args.name)
+        print(f"DRY RUN: 将默认工作区设为 {args.name}")
+        return
+    set_default_workspace(args.name)
+    print(f"默认工作区：{args.name}")
+
+
+def cmd_workspace_remove(args: argparse.Namespace) -> None:
+    get_workspace(args.name)
+    if not args.yes and not args.dry_run:
+        raise DyroError(
+            "移除只会删除全局首页入口，不会删除项目文件；确认后请加 --yes"
+        )
+    if args.dry_run:
+        print(f"DRY RUN: 将移除工作区入口 {args.name}；不会删除项目文件")
+        return
+    remove_workspace(args.name)
+    print(f"已移除工作区入口：{args.name}；项目文件未改动")
+
+
 def cmd_status(args: argparse.Namespace) -> None:
-    rows = status_rows(_config(args))
-    print(f"{'SCOPE':24} {'REPOSITORY':14} {'BRANCH':24} {'HEAD':12} {'DIRTY':>5} UPSTREAM")
-    for scope, repo_id, branch, head, upstream, dirty in rows:
-        dirty_text = "-" if dirty < 0 else str(dirty)
-        print(f"{scope:24} {repo_id:14} {branch:24} {head:12} {dirty_text:>5} {upstream}")
+    if args.all:
+        print_all_status()
+        return
+    print_status(_config(args))
 
 
 def cmd_agent_list(args: argparse.Namespace) -> None:
@@ -520,6 +604,10 @@ def cmd_agent_test(args: argparse.Namespace) -> None:
         raise DyroError(f"Agent adapter 不可用：{args.id}（{', '.join(failures)}）")
 
 
+def cmd_agent_discover(args: argparse.Namespace) -> None:
+    print_agent_discovery(_config(args))
+
+
 def cmd_config_get(args: argparse.Namespace) -> None:
     value = config_value(_config(args), args.key)
     print(json.dumps(value, ensure_ascii=False))
@@ -534,21 +622,14 @@ def cmd_config_set(args: argparse.Namespace) -> None:
 
 
 def cmd_open(args: argparse.Namespace) -> None:
-    config = _config(args)
-    line = get_line(config, args.line, args.kind)
-    try:
-        adapter = config.adapters[args.agent]
-    except KeyError as exc:
-        raise DyroError(f"未配置 Agent adapter：{args.agent}") from exc
-    workspace = line_root(config, line)
-    if not workspace.is_dir():
-        raise DyroError(f"开发线工作区不存在：{workspace}")
-    argv = expand_argv(adapter.launch, workspace=workspace, root=config.root, task="", line=line.id, prompt=args.prompt or "")
-    _print_command(argv)
-    if args.dry_run:
-        return
-    os.chdir(workspace)
-    os.execvp(argv[0], list(argv))
+    open_line(
+        _config(args),
+        args.line,
+        kind=args.kind,
+        agent=args.agent,
+        prompt=args.prompt or "",
+        dry_run=args.dry_run,
+    )
 
 
 def _choose(label: str, values: list[str]) -> str:
@@ -770,6 +851,16 @@ def cmd_task_run(args: argparse.Namespace) -> None:
     task = load_task(config, args.id)
     result = run_task(config, task, dry_run=args.dry_run)
     print(f"{task.id} -> {result}")
+
+
+def cmd_task_open(args: argparse.Namespace) -> None:
+    open_task(
+        _config(args),
+        args.id,
+        agent=args.agent,
+        prompt=args.prompt or "",
+        dry_run=args.dry_run,
+    )
 
 
 def cmd_task_claim(args: argparse.Namespace) -> None:
@@ -1293,7 +1384,13 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--root", help="工作区根目录；默认从当前目录向上查找 dyro.toml")
+    location = parser.add_mutually_exclusive_group()
+    location.add_argument("--root", help="工作区根目录；默认从当前目录向上查找 dyro.toml")
+    location.add_argument(
+        "--workspace",
+        dest="workspace_alias",
+        help="全局登记的工作区别名；可从任意目录使用",
+    )
     parser.add_argument("--dry-run", action="store_true", help="仅输出计划，不写文件、不调用 Agent 或 Git 写操作")
 
 
@@ -1301,7 +1398,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dyro", description="DyroEngineeringFlow：本地优先的多仓工程自动化与交付控制平台")
     parser.add_argument("--version", action="version", version=f"dyro {__version__}")
     _add_common(parser)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
     # Real handling is early-exit in main(); these document commands in --help.
     sub.add_parser(
@@ -1339,8 +1436,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     setup.set_defaults(func=cmd_setup)
 
+    sub.add_parser("home", help="打开当前或默认项目首页").set_defaults(func=cmd_home)
+    workspace = sub.add_parser("workspace", help="管理可从任意目录进入的全局工作区")
+    workspace_sub = workspace.add_subparsers(dest="workspace_command", required=True)
+    workspace_add = workspace_sub.add_parser("add", help="登记已有 Dyro 工作区")
+    workspace_add.add_argument("path", nargs="?", default=".")
+    workspace_add.add_argument("--name", help="便于记忆的工作区别名；默认读取 Profile 名称")
+    workspace_add.add_argument("--default", action="store_true", help="设为裸 dyro 的默认项目")
+    workspace_add.set_defaults(func=cmd_workspace_add)
+    workspace_sub.add_parser("list", help="显示已登记工作区及可用状态").set_defaults(
+        func=cmd_workspace_list
+    )
+    workspace_default = workspace_sub.add_parser("default", help="设置裸 dyro 的默认项目")
+    workspace_default.add_argument("name")
+    workspace_default.set_defaults(func=cmd_workspace_default)
+    workspace_remove = workspace_sub.add_parser("remove", help="移除全局入口，不删除项目文件")
+    workspace_remove.add_argument("name")
+    workspace_remove.add_argument("--yes", action="store_true")
+    workspace_remove.set_defaults(func=cmd_workspace_remove)
+
     sub.add_parser("doctor", help="验证动态工作区结构").set_defaults(func=cmd_doctor)
-    sub.add_parser("status", help="显示 anchors 与开发线 Git 状态").set_defaults(func=cmd_status)
+    status_parser = sub.add_parser("status", help="显示 anchors 与开发线 Git 状态")
+    status_parser.add_argument("--all", action="store_true", help="汇总所有全局登记工作区")
+    status_parser.set_defaults(func=cmd_status)
     bootstrap_parser = sub.add_parser("bootstrap", help="clone 配置了 remote 的缺失仓库 anchor")
     bootstrap_parser.add_argument("--yes", action="store_true")
     bootstrap_parser.set_defaults(func=cmd_bootstrap)
@@ -1356,6 +1474,9 @@ def build_parser() -> argparse.ArgumentParser:
     agent = sub.add_parser("agent", help="Agent adapters")
     agent_sub = agent.add_subparsers(dest="agent_command", required=True)
     agent_sub.add_parser("list", help="显示已登记的 Agent adapter").set_defaults(func=cmd_agent_list)
+    agent_sub.add_parser("discover", help="检测本机 Agent，并区分已配置与尚未集成").set_defaults(
+        func=cmd_agent_discover
+    )
     agent_add = agent_sub.add_parser("add", help="通过预设或命令登记 Agent，无需编辑 TOML")
     agent_add.add_argument("id")
     agent_source = agent_add.add_mutually_exclusive_group(required=True)
@@ -1548,6 +1669,11 @@ def build_parser() -> argparse.ArgumentParser:
     task_run = task_sub.add_parser("run")
     task_run.add_argument("id")
     task_run.set_defaults(func=cmd_task_run)
+    task_open = task_sub.add_parser("open", help="进入已存在的任务工作树，不改变任务状态")
+    task_open.add_argument("id")
+    task_open.add_argument("--agent", default="codex")
+    task_open.add_argument("--prompt", default="")
+    task_open.set_defaults(func=cmd_task_open)
     task_claim = task_sub.add_parser("claim", help="由隔离执行器一次性领取任务")
     task_claim.add_argument("id")
     task_claim.add_argument("--by", required=True, help="执行器实例或受信任身份")
@@ -1650,14 +1776,30 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _route_experiment_surface(raw: list[str]) -> tuple[str, list[str]] | None:
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--root")
-    common.add_argument("--dry-run", action="store_true")
-    global_args, remaining = common.parse_known_args(raw)
-    if not remaining or remaining[0] != "dispatch":
+    command_index = 0
+    while command_index < len(raw):
+        token = raw[command_index]
+        if token in {"--root", "--workspace"}:
+            command_index += 2
+            continue
+        if token.startswith("--root=") or token.startswith("--workspace="):
+            command_index += 1
+            continue
+        if token == "--dry-run":
+            command_index += 1
+            continue
+        break
+    if command_index >= len(raw) or raw[command_index] != "dispatch":
         return None
-    surface = remaining[0]
-    forwarded = list(remaining[1:])
+
+    common = argparse.ArgumentParser(add_help=False)
+    location = common.add_mutually_exclusive_group()
+    location.add_argument("--root")
+    location.add_argument("--workspace", dest="workspace_alias")
+    common.add_argument("--dry-run", action="store_true")
+    global_args = common.parse_args(raw[:command_index])
+    surface = raw[command_index]
+    forwarded = list(raw[command_index + 1 :])
     if surface == "dispatch":
         dispatch_common = argparse.ArgumentParser(add_help=False)
         dispatch_common.add_argument("--home")
@@ -1666,15 +1808,18 @@ def _route_experiment_surface(raw: list[str]) -> tuple[str, list[str]] | None:
         dispatch_command = (
             dispatch_remaining[0] if dispatch_remaining else ""
         )
+        selected_root = global_args.root
+        if global_args.workspace_alias:
+            selected_root = str(get_workspace(global_args.workspace_alias).root)
         if (
-            global_args.root
+            selected_root
             and dispatch_command in {"run", "panel"}
             and not any(
                 token == "--project" or token.startswith("--project=")
                 for token in forwarded
             )
         ):
-            forwarded.extend(["--project", global_args.root])
+            forwarded.extend(["--project", selected_root])
         if global_args.dry_run:
             forwarded.insert(0, "--dry-run")
     return surface, forwarded
@@ -1685,15 +1830,18 @@ def main(argv: list[str] | None = None) -> None:
 
     # The optional local dispatch surface ships in the dyro wheel.
     raw = list(sys.argv[1:] if argv is None else argv)
-    experiment = _route_experiment_surface(raw)
-    if experiment is not None and experiment[0] == "dispatch":
-        from experiments.local_agent_dispatch.cli import main as dispatch_main
-
-        raise SystemExit(dispatch_main(experiment[1]))
     parser = build_parser()
-    args = parser.parse_args(argv)
     try:
-        args.func(args)
+        experiment = _route_experiment_surface(raw)
+        if experiment is not None and experiment[0] == "dispatch":
+            from experiments.local_agent_dispatch.cli import main as dispatch_main
+
+            raise SystemExit(dispatch_main(experiment[1]))
+        args = parser.parse_args(argv)
+        if hasattr(args, "func"):
+            args.func(args)
+        else:
+            cmd_home(args)
     except DyroError as exc:
         parser.exit(2, f"错误：{exc}\n")
 
