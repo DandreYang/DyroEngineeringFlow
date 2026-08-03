@@ -434,7 +434,7 @@ lease 接管使用独立 pending record 绑定新 lease 的完整内容；先持
 
 ### 7.3 并发资源
 
-Action 在启动前声明资源：`task:<id>`、`conflict:<group>`、`agent:<id>`、`line:<id>:merge`。Planner 先生成完整 ready set，再按资源和预算选择 wave；apply 阶段仍重新获取现有 task、dispatch 和 merge locks，防止计划与执行之间的竞态。
+Action 在启动前声明资源：`task:<id>`、`conflict:<group>`、`agent:<id>`、`line:<id>:merge`。Planner 先生成完整 ready set；`objective tick` 再从同一快照生成可复核、无写入的 wave 预览，按资源和当前并行容量选择候选。已 `in_progress` 的 scope Task 和有效外部 claim 会先占用该 Objective 的并行容量。延期投影只公开受限的 resource class（task、conflict、agent、line），绝不公开资源值。后续 apply 阶段必须重新校验授权、预算、资源与现有 task、dispatch、merge locks，防止计划与执行之间的竞态。预览的 `tick_sha256` 绑定 snapshot、plan、容量、wave 和延期原因，不能当作执行授权或绕过重新校验。
 
 一个 Task 可以被多个 observe-only Objective 引用，但同一时刻最多只有一个 active Objective
 取得其 targets 加依赖闭包的 mutation ownership。ownership 在 workspace Objective 锁下预留；

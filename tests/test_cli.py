@@ -454,7 +454,7 @@ class ObjectiveCliTests(WorkspaceCase):
             main(["--root", root, "objective", "status", "release"])
         self.assertIn("Derived result: incomplete", output.getvalue())
 
-    def test_objective_read_only_plan_explain_and_graph_do_not_mutate_state(self) -> None:
+    def test_objective_read_only_plan_explain_graph_and_tick_do_not_mutate_state(self) -> None:
         root = str(self.root)
         main(
             [
@@ -487,6 +487,11 @@ class ObjectiveCliTests(WorkspaceCase):
         with redirect_stdout(graph_output):
             main(["--root", root, "objective", "graph", "release", "--format", "mermaid"])
         self.assertIn("flowchart LR", graph_output.getvalue())
+        tick_output = StringIO()
+        with redirect_stdout(tick_output):
+            main(["--root", root, "objective", "tick", "release", "--format", "json"])
+        self.assertIn('"tick_sha256"', tick_output.getvalue())
+        self.assertIn('"wave"', tick_output.getvalue())
         after = {path.relative_to(objective_dir): path.read_bytes() for path in objective_dir.rglob("*") if path.is_file()}
         self.assertEqual(before, after)
 

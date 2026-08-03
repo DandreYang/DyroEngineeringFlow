@@ -6,6 +6,7 @@ stages through explicit Core-owned modules.
 """
 
 from .contracts import canonical_contract, contract_sha256, parse_contract, validate_objective_scope
+from .engine import SchedulerTick, WaveDeferral, WaveDeferralReason, build_scheduler_tick, scheduler_tick_payload
 from .models import (
     ActionKind,
     AttentionItem,
@@ -44,10 +45,15 @@ __all__ = (
     "SchedulerEdge",
     "SchedulerNode",
     "SchedulerReadProjection",
+    "SchedulerTick",
     "TriggerObservation",
     "TriggerState",
+    "WaveDeferral",
+    "WaveDeferralReason",
+    "build_scheduler_tick",
     "canonical_contract",
     "contract_sha256",
     "parse_contract",
+    "scheduler_tick_payload",
     "validate_objective_scope",
 )
