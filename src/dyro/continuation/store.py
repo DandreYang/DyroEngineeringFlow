@@ -8,6 +8,7 @@ Agent, changes a Task state, or treats a lifecycle flag as completion proof.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -23,8 +24,26 @@ from ..state import (
     exclusive_lock,
 )
 from ..tasks import Task, list_tasks, status as task_status
+from .actions import (
+    ActionIntent,
+    ActionReceipt,
+    ActionRecord,
+    ActionStatus,
+    OwnerLease,
+    OwnerLeaseGrant,
+    acquire_owner_lease as _acquire_owner_lease,
+    list_actions as _list_actions,
+    prepare_action_cancellation as _prepare_action_cancellation,
+    read_action as _read_action,
+    record_action_receipt as _record_action_receipt,
+    release_owner_lease as _release_owner_lease,
+    renew_owner_lease as _renew_owner_lease,
+    reserve_action as _reserve_action,
+    start_action as _start_action,
+    verify_owner_lease as _verify_owner_lease,
+)
 from .contracts import canonical_contract, contract_sha256, parse_contract, validate_objective_scope
-from .models import Objective
+from .models import ActionKind, Objective, Operation, RequestedMode
 from .objective_storage import (
     OBJECTIVE_STORE_SCHEMA_VERSION,
     OPERATOR_STATES,
@@ -329,11 +348,11 @@ def _assert_ownership_available(
     exclude_id: str = "",
     recover: bool = True,
 ) -> None:
-    if not record.owns_mutation_scope:
+    if not _retains_mutation_scope(config, record):
         return
     requested = set(record.scope)
     for other in list_objectives(config, recover=recover):
-        if other.objective.id == exclude_id or not other.owns_mutation_scope:
+        if other.objective.id == exclude_id or not _retains_mutation_scope(config, other):
             continue
         overlap = sorted(requested & set(other.scope))
         if overlap:
@@ -421,6 +440,175 @@ def get_objective(config: Config, objective_id: str, *, recover: bool = True) ->
         return _read_stored(config, objective_id, recover=False, directory=directory)
 
 
+def _require_actionable_objective(config: Config, objective_id: str, directory: ObjectiveDirectory) -> StoredObjective:
+    record = _read_stored(config, objective_id, directory=directory)
+    if record.operator_state != "active":
+        raise DyroError("Objective 未处于 active 状态；拒绝取得或使用 Scheduler mutation authority")
+    if not record.owns_mutation_scope:
+        raise DyroError("observe Objective 不取得 Scheduler mutation authority")
+    return record
+
+
+def _assert_action_is_authorized(record: StoredObjective, intent: ActionIntent) -> None:
+    """Keep Action Journal records inside the accepted Objective authority."""
+    if (
+        intent.objective_id != record.objective.id
+        or intent.objective_revision != record.revision
+        or intent.objective_event_seq != record.event_seq
+        or intent.objective_event_sha256 != record.event_sha256
+        or intent.scope_sha256 != record.scope_sha256
+    ):
+        raise DyroError("Action intent 未绑定当前已接受的 Objective revision、事件或 scope")
+    if intent.subject_id not in record.scope:
+        raise DyroError("Action subject 不在当前 Objective mutation scope 内")
+    required_operation = {
+        ActionKind.EXECUTE_TASK: Operation.EXECUTE,
+        ActionKind.REVIEW_TASK: Operation.REVIEW,
+        ActionKind.MERGE_TASK: Operation.MERGE,
+    }.get(intent.operation)
+    if required_operation is None or required_operation not in record.objective.operations:
+        raise DyroError("Action operation 未获当前 Objective contract 授权")
+
+
+def _unresolved_actions(directory: ObjectiveDirectory) -> tuple[ActionRecord, ...]:
+    return tuple(record for record in _list_actions(directory) if record.status is ActionStatus.UNCERTAIN)
+
+
+def _assert_no_unresolved_actions(directory: ObjectiveDirectory, *, operation: str) -> None:
+    unresolved = _unresolved_actions(directory)
+    if unresolved:
+        action_ids = ", ".join(record.intent.action_id for record in unresolved)
+        raise DyroError(f"存在 uncertain Action，拒绝 {operation}：{action_ids}")
+
+
+def _prepared_reserved_action_cancellation(directory: ObjectiveDirectory, *, reason: str) -> dict[str, object] | None:
+    return _prepare_action_cancellation(directory, summary=reason, now=datetime.now(timezone.utc))
+
+
+def _retains_mutation_scope(config: Config, record: StoredObjective) -> bool:
+    """Keep a paused/stopped scope reserved while an Action remains uncertain."""
+    if record.owns_mutation_scope:
+        return True
+    if record.objective.requested_mode is RequestedMode.OBSERVE:
+        return False
+    with open_objective_directory(config, record.objective.id) as directory:
+        return bool(_unresolved_actions(directory))
+
+
+def acquire_objective_owner_lease(
+    config: Config,
+    objective_id: str,
+    *,
+    now: datetime,
+    ttl_seconds: int,
+    pid: int,
+    process_start: str,
+    owner_token: str | None = None,
+) -> OwnerLeaseGrant:
+    """Acquire a fenced scheduler owner lease under the workspace Objective lock."""
+    with _objective_lock(config):
+        with open_objective_directory(config, objective_id) as directory:
+            _require_actionable_objective(config, objective_id, directory)
+            grant = _acquire_owner_lease(
+                directory,
+                objective_id=objective_id,
+                now=now,
+                ttl_seconds=ttl_seconds,
+                pid=pid,
+                process_start=process_start,
+                owner_token=owner_token,
+            )
+            return grant
+
+
+def renew_objective_owner_lease(
+    config: Config,
+    objective_id: str,
+    *,
+    grant: OwnerLeaseGrant,
+    now: datetime,
+    ttl_seconds: int,
+) -> OwnerLeaseGrant:
+    with _objective_lock(config):
+        with open_objective_directory(config, objective_id) as directory:
+            _require_actionable_objective(config, objective_id, directory)
+            return _renew_owner_lease(directory, grant=grant, now=now, ttl_seconds=ttl_seconds)
+
+
+def release_objective_owner_lease(
+    config: Config,
+    objective_id: str,
+    *,
+    grant: OwnerLeaseGrant,
+    now: datetime,
+) -> OwnerLease:
+    with _objective_lock(config):
+        with open_objective_directory(config, objective_id) as directory:
+            return _release_owner_lease(directory, grant=grant, now=now)
+
+
+def reserve_objective_action(
+    config: Config,
+    objective_id: str,
+    *,
+    intent: ActionIntent,
+    grant: OwnerLeaseGrant,
+    now: datetime,
+) -> ActionRecord:
+    """Reserve one fenced ActionIntent without invoking a delivery mutation."""
+    with _objective_lock(config):
+        with open_objective_directory(config, objective_id) as directory:
+            record = _require_actionable_objective(config, objective_id, directory)
+            _assert_action_is_authorized(record, intent)
+            _assert_no_unresolved_actions(directory, operation="创建下一 Action")
+            lease = _verify_owner_lease(directory, grant=grant, now=now)
+            if intent.owner_generation != lease.generation:
+                raise DyroError("Action intent owner_generation 与当前 Scheduler lease 不匹配")
+            return _reserve_action(directory, intent)
+
+
+def start_objective_action(
+    config: Config,
+    objective_id: str,
+    *,
+    action_id: str,
+    grant: OwnerLeaseGrant,
+    now: datetime,
+) -> ActionRecord:
+    """Cross only the durable Action start barrier; never start a process here."""
+    with _objective_lock(config):
+        with open_objective_directory(config, objective_id) as directory:
+            record = _require_actionable_objective(config, objective_id, directory)
+            _assert_action_is_authorized(record, _read_action(directory, action_id).intent)
+            return _start_action(directory, action_id=action_id, grant=grant, now=now)
+
+
+def record_objective_action_receipt(
+    config: Config,
+    objective_id: str,
+    *,
+    receipt: ActionReceipt,
+    grant: OwnerLeaseGrant | None = None,
+    now: datetime | None = None,
+) -> ActionRecord:
+    """Accept only a receipt whose immutable binding matches its ActionIntent."""
+    with _objective_lock(config):
+        with open_objective_directory(config, objective_id) as directory:
+            return _record_action_receipt(directory, receipt, grant=grant, now=now)
+
+
+def list_objective_actions(config: Config, objective_id: str) -> tuple[ActionRecord, ...]:
+    with _objective_lock(config, create=False):
+        with open_objective_directory(config, objective_id) as directory:
+            return _list_actions(directory)
+
+
+def get_objective_action(config: Config, objective_id: str, action_id: str) -> ActionRecord:
+    with _objective_lock(config, create=False):
+        with open_objective_directory(config, objective_id) as directory:
+            return _read_action(directory, action_id)
+
+
 def _persist_revision(
     config: Config,
     current: StoredObjective,
@@ -442,11 +630,17 @@ def _persist_revision(
     )
     _assert_ownership_available(config, candidate, exclude_id=current.objective.id)
     _assert_no_inflight_tasks(config, candidate)
+    _assert_no_unresolved_actions(directory, operation=event_name)
+    cancellation = _prepared_reserved_action_cancellation(
+        directory,
+        reason=f"Objective {event_name}；未 start Action 已取消",
+    )
     return _commit_event(
         directory,
         candidate,
         event_name,
         contract_content=_render_contract(objective).encode("utf-8"),
+        action_cancellation=cancellation,
     )
 
 
@@ -579,7 +773,20 @@ def _transition_objective(config: Config, objective_id: str, next_state: str, *,
         if next_state == "active":
             _assert_ownership_available(config, candidate, exclude_id=current.objective.id)
         _assert_no_inflight_tasks(config, candidate)
-        return _commit_event(directory, candidate, f"state_{next_state}")
+        cancellation = (
+            _prepared_reserved_action_cancellation(
+                directory,
+                reason=f"Objective {next_state}；未 start Action 已取消",
+            )
+            if next_state in {"paused", "stopped"}
+            else None
+        )
+        return _commit_event(
+            directory,
+            candidate,
+            f"state_{next_state}",
+            action_cancellation=cancellation,
+        )
 
     if dry_run:
         current = get_objective(config, objective_id, recover=False)
@@ -649,12 +856,13 @@ def assert_legacy_scheduler_allowed(config: Config, task_ids: Iterable[str]) -> 
     requested = {validate_id(task_id, "任务 ID") for task_id in task_ids}
     if not requested:
         return
-    for record in list_objectives(config):
-        if record.owns_mutation_scope and requested & set(record.scope):
-            raise DyroError(
-                f"任务位于 active Objective {record.objective.id} 的 mutation scope；"
-                "请使用 plan-only Objective 命令，旧 task loop/daemon 不能绕过 ownership"
-            )
+    with _objective_lock(config, create=False):
+        for record in _list_objectives_unlocked(config, recover=True):
+            if _retains_mutation_scope(config, record) and requested & set(record.scope):
+                raise DyroError(
+                    f"任务位于受保护 Objective {record.objective.id} 的 mutation scope；"
+                    "请使用 plan-only Objective 命令，旧 task loop/daemon 不能绕过 ownership"
+                )
 
 
 @contextmanager
