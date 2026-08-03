@@ -22,7 +22,16 @@ from .blueprint import (
 from .changesets import create_changeset, get_changeset, list_changesets, verify_changeset
 from .config import CONFIG_NAME, Config, load, validate_id
 from .continuation.models import Operation, RequestedMode
+from .continuation.planner import (
+    build_continuation_plan,
+    build_scheduler_projection,
+    continuation_plan_payload,
+    render_plan_text,
+    render_projection_json,
+    render_projection_mermaid,
+)
 from .continuation.resolution import resolve_line, resolve_workspace
+from .continuation.snapshot import build_scheduler_snapshot
 from .continuation.store import (
     add_objective_target,
     create_objective,
@@ -1735,6 +1744,38 @@ def cmd_objective_status(args: argparse.Namespace) -> None:
     print(f"Contract SHA-256: {record.contract_sha256}")
 
 
+def _read_objective_plan(config: Config, objective_id: str):
+    """Build an Objective plan without recovery, mutation, dispatch, or agents."""
+    record = get_objective(config, objective_id, recover=False)
+    snapshot = build_scheduler_snapshot(config, objective=record)
+    return snapshot, build_continuation_plan(snapshot)
+
+
+def cmd_objective_plan(args: argparse.Namespace) -> None:
+    _, plan = _read_objective_plan(_config(args), args.id)
+    if args.format == "json":
+        print(json.dumps(continuation_plan_payload(plan), ensure_ascii=False, sort_keys=True, indent=2))
+        return
+    print(render_plan_text(plan))
+
+
+def cmd_objective_explain(args: argparse.Namespace) -> None:
+    _, plan = _read_objective_plan(_config(args), args.id)
+    if args.format == "json":
+        print(json.dumps(continuation_plan_payload(plan), ensure_ascii=False, sort_keys=True, indent=2))
+        return
+    print(render_plan_text(plan))
+
+
+def cmd_objective_graph(args: argparse.Namespace) -> None:
+    snapshot, plan = _read_objective_plan(_config(args), args.id)
+    projection = build_scheduler_projection(snapshot, plan)
+    if args.format == "json":
+        print(render_projection_json(projection))
+        return
+    print(render_projection_mermaid(projection))
+
+
 def _cmd_objective_transition(args: argparse.Namespace, action: str) -> None:
     config = _config(args)
     _require_objective_yes(args, f"Objective {action}")
@@ -1778,20 +1819,6 @@ def cmd_objective_scope_remove(args: argparse.Namespace) -> None:
     print(f"{'DRY RUN: ' if args.dry_run else ''}{record.objective.id} r{record.revision} targets={', '.join(record.objective.targets)}")
 
 
-def _daemon_active_conflict_groups(config: Config, tasks: list) -> set[str]:
-    """Conflict groups already reserved by running or claimed work.
-
-    Matches check_dispatchable: local mode treats only in_progress as active;
-    external mode also treats assigned claims as occupying the group.
-    """
-    active_states = ("assigned", "in_progress") if config.policy.execution_mode == "external" else ("in_progress",)
-    return {
-        task.conflict_group
-        for task in tasks
-        if task.conflict_group and task_status(config, task) in active_states
-    }
-
-
 def _daemon_select_runnable(config: Config, tasks: list, *, limit: int) -> list:
     """Compatibility wrapper around the shared deterministic scheduler."""
     plan = plan_tasks(config, candidates=tasks)
@@ -1818,7 +1845,7 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
                         print(f"dispatch {task.id} -> {future.result()}")
                     except DyroError as exc:
                         print(f"skip {task.id}: {exc}")
-        review_queue = [task for task in list_tasks(config) if task_status(config, task) == "review"]
+        review_queue = list(plan_tasks(config).review)
         if review_queue:
             with ThreadPoolExecutor(max_workers=max(1, args.parallel), thread_name_prefix="dyro-review") as pool:
                 futures = {pool.submit(review_task, config, task, dry_run=args.dry_run): task for task in review_queue}
@@ -2202,6 +2229,18 @@ def build_parser() -> argparse.ArgumentParser:
     objective_status = objective_sub.add_parser("status", help="显示 Objective 状态和派生结果")
     objective_status.add_argument("id")
     objective_status.set_defaults(func=cmd_objective_status)
+    objective_plan = objective_sub.add_parser("plan", help="只读生成确定性 Objective action plan，不执行任务")
+    objective_plan.add_argument("id")
+    objective_plan.add_argument("--format", choices=("text", "json"), default="text")
+    objective_plan.set_defaults(func=cmd_objective_plan)
+    objective_explain = objective_sub.add_parser("explain", help="解释 Objective 当前的可推进项与阻塞原因")
+    objective_explain.add_argument("id")
+    objective_explain.add_argument("--format", choices=("text", "json"), default="text")
+    objective_explain.set_defaults(func=cmd_objective_explain)
+    objective_graph = objective_sub.add_parser("graph", help="渲染 Objective、Task、Decision 与 Action 的只读组合图")
+    objective_graph.add_argument("id")
+    objective_graph.add_argument("--format", choices=("mermaid", "json"), default="mermaid")
+    objective_graph.set_defaults(func=cmd_objective_graph)
     for command, function, help_text in (
         ("pause", cmd_objective_pause, "暂停后续推进，不写完成状态"),
         ("resume", cmd_objective_resume, "恢复 paused Objective 的 ownership"),

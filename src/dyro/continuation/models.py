@@ -75,10 +75,14 @@ class PlanCompletion(str, Enum):
 
 class ReasonCode(str, Enum):
     TASK_READY = "TASK_READY"
+    TASK_REVIEW_READY = "TASK_REVIEW_READY"
     DEPENDENCY_PENDING = "DEPENDENCY_PENDING"
     DECISION_OPEN = "DECISION_OPEN"
     ANSWER_REQUIRED = "ANSWER_REQUIRED"
     EXTERNAL_CLAIM_ACTIVE = "EXTERNAL_CLAIM_ACTIVE"
+    CONFLICT_GROUP_ACTIVE = "CONFLICT_GROUP_ACTIVE"
+    TASK_INTEGRATION_PENDING = "TASK_INTEGRATION_PENDING"
+    TASK_FAILED = "TASK_FAILED"
     TRIGGER_NOT_DUE = "TRIGGER_NOT_DUE"
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
     NO_PROGRESS = "NO_PROGRESS"
@@ -86,6 +90,7 @@ class ReasonCode(str, Enum):
     ACTION_UNCERTAIN = "ACTION_UNCERTAIN"
     TARGETS_INTEGRATED = "TARGETS_INTEGRATED"
     OBJECTIVE_SCOPE_CONFLICT = "OBJECTIVE_SCOPE_CONFLICT"
+    OBJECTIVE_PAUSED = "OBJECTIVE_PAUSED"
     ACTIVATION_REQUIRED = "ACTIVATION_REQUIRED"
     POLICY_DISALLOWS_OPERATION = "POLICY_DISALLOWS_OPERATION"
 
@@ -181,6 +186,81 @@ class AttentionItem:
         if not isinstance(self.reason, ReasonCode):
             raise TypeError("AttentionItem.reason 必须是 ReasonCode")
         object.__setattr__(self, "facts", _frozen_facts(self.facts, "AttentionItem.facts"))
+
+
+@dataclass(frozen=True)
+class SchedulerNode:
+    """A locale-free node in the shared planner projection."""
+
+    id: str
+    kind: str
+    state: str
+    facts: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.id or not self.kind or not self.state:
+            raise TypeError("SchedulerNode 必须包含非空 id、kind 与 state")
+        object.__setattr__(self, "facts", _frozen_facts(self.facts, "SchedulerNode.facts"))
+
+
+@dataclass(frozen=True)
+class SchedulerEdge:
+    """A typed graph relation, distinct from non-graph constraints."""
+
+    source: str
+    target: str
+    kind: str
+
+    def __post_init__(self) -> None:
+        if not self.source or not self.target or not self.kind:
+            raise TypeError("SchedulerEdge 必须包含非空 source、target 与 kind")
+
+
+@dataclass(frozen=True)
+class SchedulerReadProjection:
+    """Immutable, path-free projection shared by CLI and future local console."""
+
+    schema_version: int
+    objective_id: str
+    objective_revision: int
+    snapshot_sha256: str
+    plan_sha256: str
+    completion: PlanCompletion
+    selected_actions: tuple[PlannedAction, ...] = ()
+    blocked: tuple[PlannedAction, ...] = ()
+    attention: tuple[AttentionItem, ...] = ()
+    nodes: tuple[SchedulerNode, ...] = ()
+    edges: tuple[SchedulerEdge, ...] = ()
+    constraints: tuple[tuple[str, str], ...] = ()
+    facts: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise TypeError("SchedulerReadProjection 仅支持 schema_version = 1")
+        if not self.objective_id or self.objective_revision < 1:
+            raise TypeError("SchedulerReadProjection Objective 标识无效")
+        if not isinstance(self.completion, PlanCompletion):
+            raise TypeError("SchedulerReadProjection.completion 必须是 PlanCompletion")
+        selected = _frozen_items(self.selected_actions, "SchedulerReadProjection.selected_actions")
+        blocked = _frozen_items(self.blocked, "SchedulerReadProjection.blocked")
+        attention = _frozen_items(self.attention, "SchedulerReadProjection.attention")
+        nodes = _frozen_items(self.nodes, "SchedulerReadProjection.nodes")
+        edges = _frozen_items(self.edges, "SchedulerReadProjection.edges")
+        if not all(isinstance(item, PlannedAction) for item in selected + blocked):
+            raise TypeError("SchedulerReadProjection actions 必须只包含 PlannedAction")
+        if not all(isinstance(item, AttentionItem) for item in attention):
+            raise TypeError("SchedulerReadProjection.attention 必须只包含 AttentionItem")
+        if not all(isinstance(item, SchedulerNode) for item in nodes):
+            raise TypeError("SchedulerReadProjection.nodes 必须只包含 SchedulerNode")
+        if not all(isinstance(item, SchedulerEdge) for item in edges):
+            raise TypeError("SchedulerReadProjection.edges 必须只包含 SchedulerEdge")
+        object.__setattr__(self, "selected_actions", selected)
+        object.__setattr__(self, "blocked", blocked)
+        object.__setattr__(self, "attention", attention)
+        object.__setattr__(self, "nodes", nodes)
+        object.__setattr__(self, "edges", edges)
+        object.__setattr__(self, "constraints", _frozen_facts(self.constraints, "SchedulerReadProjection.constraints"))
+        object.__setattr__(self, "facts", _frozen_facts(self.facts, "SchedulerReadProjection.facts"))
 
 
 @dataclass(frozen=True)
