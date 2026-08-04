@@ -20,7 +20,12 @@ from .blueprint import (
     preflight_join_plan,
     render_join_plan,
 )
-from .changesets import create_changeset, get_changeset, list_changesets, verify_changeset
+from .changesets import (
+    create_changeset,
+    get_changeset,
+    list_changesets,
+    verify_changeset,
+)
 from .config import CONFIG_NAME, Config, load, validate_id
 from .console.launcher import launch_console, render_console_plan
 from .continuation.attention import (
@@ -64,7 +69,12 @@ from .continuation.supervision import (
     supervised_outcomes_payload,
     supervised_wave_payload,
 )
-from .continuation.triggers import TriggerConfig, TriggerKind, TriggerProbeInput, probe_builtin
+from .continuation.triggers import (
+    TriggerConfig,
+    TriggerKind,
+    TriggerProbeInput,
+    probe_builtin,
+)
 from .evidence import build_execution_bundle, unpack_execution_bundle
 from .errors import DyroError, ValidationError
 from .home import (
@@ -103,8 +113,16 @@ from .onboarding import (
     repository_input_from_path,
     sibling_workspace_for,
 )
-from .profile import append_adapter, command_adapter, config_value, preset_adapter, set_config_value, test_adapter
+from .profile import (
+    append_adapter,
+    command_adapter,
+    config_value,
+    preset_adapter,
+    set_config_value,
+    test_adapter,
+)
 from .state import atomic_write_text, exclusive_lock
+from .terminal import danger, muted, success, title, value as terminal_value, warning
 from .graph import (
     build_task_graph,
     explain_task,
@@ -163,7 +181,7 @@ from .updates import (
 from .workspace import create_line, doctor, get_line, list_lines, status_rows
 
 
-CONFIG_TEMPLATE = '''schema_version = 1
+CONFIG_TEMPLATE = """schema_version = 1
 
 [workspace]
 name = "{name}"
@@ -199,7 +217,7 @@ verify = [["python3", "-m", "pytest", "-q"]]
 path = "repositories/clients/web"
 mount = "clients/web"
 verify = [["npm", "test", "--", "--runInBand"]]
-'''
+"""
 
 
 def _config(args: argparse.Namespace) -> Config:
@@ -214,7 +232,9 @@ def _config(args: argparse.Namespace) -> Config:
         return resolve_workspace(
             start=Path.cwd(),
             interactive=interactive,
-            chooser=(lambda label, values: _choose(label, list(values))) if interactive else None,
+            chooser=(lambda label, values: _choose(label, list(values)))
+            if interactive
+            else None,
         )
     return load(root)
 
@@ -245,12 +265,16 @@ def _repository_assignments(values: list[str] | None, label: str) -> dict[str, s
 
 def _require_yes(args: argparse.Namespace, label: str) -> None:
     if not args.yes and not args.dry_run:
-        raise DyroError(f"{label} 会创建或修改 Git worktree；请先使用 --dry-run 检查，再加 --yes 执行")
+        raise DyroError(
+            f"{label} 会创建或修改 Git worktree；请先使用 --dry-run 检查，再加 --yes 执行"
+        )
 
 
 def _require_objective_yes(args: argparse.Namespace, label: str) -> None:
     if not args.yes and not args.dry_run:
-        raise DyroError(f"{label} 会修改 Objective 状态；请先使用 --dry-run 检查，再加 --yes 执行")
+        raise DyroError(
+            f"{label} 会修改 Objective 状态；请先使用 --dry-run 检查，再加 --yes 执行"
+        )
 
 
 def _objective_contract_from_args(args: argparse.Namespace, config: Config) -> str:
@@ -262,23 +286,36 @@ def _objective_contract_from_args(args: argparse.Namespace, config: Config) -> s
     if not args.id or not args.title:
         raise DyroError("非文件模式必须提供 --id 与 --title")
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
-    selected_line = args.line or resolve_line(
-        config,
-        interactive=interactive,
-        chooser=(lambda label, values: _choose(label, list(values))) if interactive else None,
-    ).id
-    targets = tuple(item.strip() for item in (args.targets or "").split(",") if item.strip())
+    selected_line = (
+        args.line
+        or resolve_line(
+            config,
+            interactive=interactive,
+            chooser=(lambda label, values: _choose(label, list(values)))
+            if interactive
+            else None,
+        ).id
+    )
+    targets = tuple(
+        item.strip() for item in (args.targets or "").split(",") if item.strip()
+    )
     if not targets:
-        raise DyroError("非文件模式必须提供 --targets TASK_ID[,TASK_ID...]；交互选择将在后续版本提供")
+        raise DyroError(
+            "非文件模式必须提供 --targets TASK_ID[,TASK_ID...]；交互选择将在后续版本提供"
+        )
     mode = args.mode or RequestedMode.SUPERVISED.value
-    operations = tuple(args.operation or (Operation.EXECUTE.value, Operation.REVIEW.value))
+    operations = tuple(
+        args.operation or (Operation.EXECUTE.value, Operation.REVIEW.value)
+    )
     return "\n".join(
         (
             "schema_version = 1",
             f"id = {json.dumps(args.id, ensure_ascii=False)}",
             f"title = {json.dumps(args.title, ensure_ascii=False)}",
             f"line = {json.dumps(selected_line, ensure_ascii=False)}",
-            "targets = [" + ", ".join(json.dumps(item, ensure_ascii=False) for item in targets) + "]",
+            "targets = ["
+            + ", ".join(json.dumps(item, ensure_ascii=False) for item in targets)
+            + "]",
             "",
             "[continuation]",
             f"requested_mode = {json.dumps(mode)}",
@@ -315,7 +352,9 @@ def cmd_init(args: argparse.Namespace) -> None:
     elif args.discover:
         repositories = discover_repositories(root)
         if not repositories:
-            raise DyroError("未发现 Git 仓库；可先 clone 仓库，或使用 dyro init --wizard")
+            raise DyroError(
+                "未发现 Git 仓库；可先 clone 仓库，或使用 dyro init --wizard"
+            )
         content = render_config(args.name, repositories, args.base)
     else:
         content = CONFIG_TEMPLATE.format(name=args.name)
@@ -324,13 +363,18 @@ def cmd_init(args: argparse.Namespace) -> None:
         (root / relative).mkdir(parents=True, exist_ok=True)
     print(f"已初始化 {root}")
     if args.discover:
-        print(f"已自动登记 {len(repositories)} 个本地 Git 仓库；下一步：运行 dyro doctor")
+        print(
+            f"已自动登记 {len(repositories)} 个本地 Git 仓库；下一步：运行 dyro doctor"
+        )
     else:
         print("下一步：登记 repositories，随后运行 dyro doctor")
 
 
 def _default_workspace_name(root: Path) -> str:
-    candidate = "".join(character if character.isascii() and character.isalnum() else "-" for character in root.name).strip("-._")
+    candidate = "".join(
+        character if character.isascii() and character.isalnum() else "-"
+        for character in root.name
+    ).strip("-._")
     candidate = candidate or "my-workspace"
     if not candidate[0].isalnum():
         candidate = "workspace-" + candidate
@@ -408,13 +452,17 @@ def _render_setup_registration_plan(
     registration: WorkspaceRegistrationPlan | None,
 ) -> None:
     if registration is None:
-        print("  - Console：不登记全局入口（--no-register）")
+        print("  - Console：" + muted("不登记全局入口（--no-register）"))
         return
     name = registration.name
     root = registration.root
-    action = "已登记，保持现有入口" if registration.already_registered else "将登记全局入口"
+    action = (
+        "已登记，保持现有入口" if registration.already_registered else "将登记全局入口"
+    )
     default = "；设为默认项目" if registration.becomes_default else "；不改变默认项目"
-    print(f"  - Console：{action} {name} → {root}{default}")
+    print(
+        f"  - Console：{action} {terminal_value(name)} → {terminal_value(root)}{default}"
+    )
 
 
 def _register_setup_workspace(
@@ -422,36 +470,48 @@ def _register_setup_workspace(
 ) -> WorkspaceRecord | None:
     if not register:
         return None
-    record = add_workspace(
-        config.root, name=config.name, make_default=make_default
-    )
+    record = add_workspace(config.root, name=config.name, make_default=make_default)
     default = "（默认项目）" if load_registry().default == record.name else ""
-    print(f"已登记全局入口：{record.name}{default}")
+    print(success(f"已登记全局入口：{record.name}{default}"))
     return record
 
 
 def _print_setup_completion(
     config: Config, registration: WorkspaceRecord | None
 ) -> None:
-    print("\n设置完成：")
-    print(f"  - Profile：{config.name}")
+    print("\n" + success("━━ 设置完成 ━━"))
+    print(f"  - Profile：{terminal_value(config.name)}")
     if registration is None:
-        print("  - Console：未登记（--no-register）")
+        print("  - Console：" + muted("未登记（--no-register）"))
     else:
-        print(f"  - Console：{registration.name} 已可在 dyro console 中查看")
-    print("下一步：dyro start")
+        print(
+            f"  - Console：{terminal_value(registration.name)} 已可在 dyro console 中查看"
+        )
+    print("下一步：" + terminal_value("dyro start"))
 
 
 def _render_interactive_setup_plan(
     plan: SetupPlan, registration: WorkspaceRegistrationPlan | None
 ) -> None:
-    print("\n设置计划（尚未修改任何文件）：")
+    print("\n" + title("━━ 设置计划 ━━"))
+    print(muted("尚未修改任何文件。"))
     for item in render_setup_plan(plan):
         print("  - " + item)
     _render_setup_registration_plan(registration)
     if plan.needs_bootstrap:
-        print("  - 将仅 clone 缺失且已明确提供 remote 的仓库")
-    print("  - 不会移动、覆盖或清理现有 Git 仓库")
+        print("  - " + muted("将仅 clone 缺失且已明确提供 remote 的仓库"))
+    print("  - " + muted("不会移动、覆盖或清理现有 Git 仓库"))
+
+
+def _print_doctor_finding(finding: str) -> None:
+    if finding.startswith("PASS"):
+        print(success(finding))
+    elif finding.startswith("WARN"):
+        print(warning(finding))
+    elif finding.startswith("FAIL"):
+        print(danger(finding))
+    else:
+        print(finding)
 
 
 def _apply_setup_plan(
@@ -494,10 +554,14 @@ def _apply_setup_plan(
             base=plan.default_base,
             kind="line",
         )
-        print(f"已创建开发线 {line.id}（{line.branch}）")
+        print(
+            success("已创建开发线 ")
+            + terminal_value(line.id)
+            + f"（{terminal_value(line.branch)}）"
+        )
     findings = doctor(config)
     for finding in findings:
-        print(finding)
+        _print_doctor_finding(finding)
     if any(finding.startswith("FAIL") for finding in findings):
         raise DyroError("设置已保存，但 doctor 发现问题；请修复后运行 dyro next")
     _print_setup_completion(config, registration)
@@ -507,18 +571,23 @@ def _interactive_setup(args: argparse.Namespace) -> None:
     root = Path(args.path).expanduser().resolve()
     config_file = root / CONFIG_NAME
     suggested_base = args.base or "main"
-    print("Dyro 首次设置。先检查环境，确认前不会修改文件。")
+    print("\n" + title("━━ Dyro 首次设置 ━━"))
+    print(muted("先检查环境，确认前不会修改文件。"))
     if config_file.exists():
         config = load(root)
         registration = _setup_registration_plan(config.root, config.name, args)
-        print(f"已发现 Profile：{config_file}（{len(config.repositories)} 个仓库）")
+        print(
+            f"已发现 Profile：{terminal_value(config_file)}（{len(config.repositories)} 个仓库）"
+        )
         _render_setup_registration_plan(registration)
         for finding in doctor(config):
-            print(finding)
+            _print_doctor_finding(finding)
         if args.dry_run or registration is None:
-            print("下一步：dyro next")
+            print("下一步：" + terminal_value("dyro next"))
             return
-        if not args.yes and not _ask_yes_no("将此 Profile 登记到全局 Console", default=False):
+        if not args.yes and not _ask_yes_no(
+            "将此 Profile 登记到全局 Console", default=False
+        ):
             print("已取消；没有修改全局入口。")
             return
         record = _register_setup_workspace(
@@ -527,24 +596,38 @@ def _interactive_setup(args: argparse.Namespace) -> None:
         _print_setup_completion(config, record)
         return
 
-    repositories = discover_repositories(root) if root.exists() and not is_git_repository(root) else []
+    repositories = (
+        discover_repositories(root)
+        if root.exists() and not is_git_repository(root)
+        else []
+    )
     if is_git_repository(root):
         remote = origin_url(root)
         if not remote:
-            print("当前目录是 Git 仓库，但没有 origin。Dyro 不会把控制状态写进该仓库。")
-            print("请先为它配置 origin，或在包含多个仓库的独立目录中运行 dyro setup。")
+            print(
+                warning(
+                    "当前目录是 Git 仓库，但没有 origin。Dyro 不会把控制状态写进该仓库。"
+                )
+            )
+            print(
+                muted(
+                    "请先为它配置 origin，或在包含多个仓库的独立目录中运行 dyro setup。"
+                )
+            )
             return
         source_branch = current_branch(root)
         if source_branch and not args.base:
             suggested_base = source_branch
         suggested_root = sibling_workspace_for(root)
-        raw_root = _ask_value("为这个项目创建独立 Dyro 工作区", default=str(suggested_root))
+        raw_root = _ask_value(
+            "为这个项目创建独立 Dyro 工作区", default=str(suggested_root)
+        )
         root = Path(raw_root).expanduser().resolve()
         if root.exists() and any(root.iterdir()):
             raise DyroError(f"建议工作区必须为空或不存在：{root}")
         repository = repository_from_remote(remote)
         repositories = [repository]
-        print("将从当前仓库的 origin clone 新 anchor；当前仓库保持不变。")
+        print(muted("将从当前仓库的 origin clone 新 anchor；当前仓库保持不变。"))
     elif not repositories:
         remote = _ask_value("未发现本地 Git 仓库。输入一个 Git remote（留空退出）")
         if not remote:
@@ -592,10 +675,11 @@ def _interactive_setup(args: argparse.Namespace) -> None:
 def _setup_quick(args: argparse.Namespace) -> None:
     root = Path(args.path).expanduser().resolve()
     config = load(root)
-    print(f"检查现有 Profile：{config.root}")
+    print("\n" + title("━━ 快速检查 ━━"))
+    print(f"检查现有 Profile：{terminal_value(config.root)}")
     for finding in doctor(config):
-        print(finding)
-    print("下一步：dyro next")
+        _print_doctor_finding(finding)
+    print("下一步：" + terminal_value("dyro next"))
 
 
 def _non_interactive_setup(args: argparse.Namespace) -> None:
@@ -605,26 +689,34 @@ def _non_interactive_setup(args: argparse.Namespace) -> None:
     created = False
     if config_file.exists():
         config = load(root)
-        print(f"复用已有 Profile：{config_file}")
+        print(f"复用已有 Profile：{terminal_value(config_file)}")
         registration = _setup_registration_plan(config.root, config.name, args)
     else:
         repositories = discover_repositories(root)
         if not repositories:
-            raise DyroError("未发现 Git 仓库；请先 clone 仓库到工作区，或使用 dyro init --wizard")
+            raise DyroError(
+                "未发现 Git 仓库；请先 clone 仓库到工作区，或使用 dyro init --wizard"
+            )
         name = args.name or _default_workspace_name(root)
         validate_id(name, "workspace 名称")
         registration = _setup_registration_plan(root, name, args)
         if args.dry_run:
-            print(f"DRY RUN: 将创建 {config_file}，自动登记 {len(repositories)} 个 Git 仓库")
+            print(
+                f"DRY RUN: 将创建 {config_file}，自动登记 {len(repositories)} 个 Git 仓库"
+            )
             _render_setup_registration_plan(registration)
             if not args.no_line:
-                print(f"DRY RUN: 将创建开发线 {args.line}（分支 {args.branch or f'feat/{args.line}'}）")
+                print(
+                    f"DRY RUN: 将创建开发线 {args.line}（分支 {args.branch or f'feat/{args.line}'}）"
+                )
             return
         root.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(config_file, render_config(name, repositories, args.base or "main"))
+        atomic_write_text(
+            config_file, render_config(name, repositories, args.base or "main")
+        )
         config = load(root)
         created = True
-        print(f"已创建 Profile，并自动登记 {len(repositories)} 个 Git 仓库")
+        print(success(f"已创建 Profile，并自动登记 {len(repositories)} 个 Git 仓库"))
     if config_file.exists() or not args.dry_run:
         _render_setup_registration_plan(registration)
     if not args.dry_run:
@@ -650,12 +742,18 @@ def _non_interactive_setup(args: argparse.Namespace) -> None:
                 kind="line",
                 dry_run=args.dry_run,
             )
-            print(f"{'DRY RUN: ' if args.dry_run else ''}已创建开发线 {line.id}（{line.branch}）")
+            prefix = "DRY RUN: " if args.dry_run else ""
+            print(
+                prefix
+                + success("已创建开发线 ")
+                + terminal_value(line.id)
+                + f"（{terminal_value(line.branch)}）"
+            )
         else:
             print(f"开发线已存在：{existing.id}（{existing.branch}）")
     findings = doctor(config)
     for finding in findings:
-        print(finding)
+        _print_doctor_finding(finding)
     if any(finding.startswith("FAIL") for finding in findings):
         raise DyroError("setup 已完成基础配置，但 doctor 仍发现结构错误")
     if created or registered is not None:
@@ -692,9 +790,15 @@ def cmd_setup(args: argparse.Namespace) -> None:
 
 def cmd_repo_list(args: argparse.Namespace) -> None:
     config = _config(args)
-    print(f"{'ID':18} {'ANCHOR':36} {'MOUNT':28} REMOTE")
+    print("\n" + title("━━ 已登记仓库 ━━"))
+    print(muted(f"Profile：{config.name} · {len(config.repositories)} 个仓库"))
+    print(muted(f"{'ID':18} {'ANCHOR':36} {'MOUNT':28} REMOTE"))
     for repository_id, repository in sorted(config.repositories.items()):
-        print(f"{repository_id:18} {repository.path:36} {repository.mount:28} {'configured' if repository.remote else '-'}")
+        remote = success("configured") if repository.remote else muted("-")
+        print(
+            f"{terminal_value(f'{repository_id:18}')} "
+            f"{repository.path:36} {repository.mount:28} {remote}"
+        )
 
 
 def cmd_repo_add(args: argparse.Namespace) -> None:
@@ -721,23 +825,34 @@ def cmd_repo_add(args: argparse.Namespace) -> None:
 def cmd_bootstrap(args: argparse.Namespace) -> None:
     _require_yes(args, "bootstrap")
     config = _config(args)
+    print("\n" + title("━━ 初始化仓库 ━━"))
+    print(muted("只处理当前 Profile 中缺失的 anchor 仓库。"))
     for message in bootstrap(config, dry_run=args.dry_run):
         print(message)
     if not args.dry_run:
+        print("\n" + title("━━ 初始化后检查 ━━"))
         for finding in doctor(config):
-            print(finding)
+            _print_doctor_finding(finding)
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
-    findings = doctor(_config(args))
+    config = _config(args)
+    print("\n" + title("━━ Dyro 健康检查 ━━"))
+    print(muted(f"Profile：{config.name} · 检查仓库、基线与隔离工作区。"))
+    findings = doctor(config)
     for finding in findings:
-        print(finding)
+        _print_doctor_finding(finding)
     if any(item.startswith("FAIL") for item in findings):
         raise DyroError("doctor 发现结构错误")
+    print("\n" + success("检查通过。") + " 下一步：" + terminal_value("dyro"))
 
 
 def cmd_terminology_check(args: argparse.Namespace) -> None:
-    root = _config(args).root if args.workspace_alias else Path(args.root or ".").expanduser().resolve()
+    root = (
+        _config(args).root
+        if args.workspace_alias
+        else Path(args.root or ".").expanduser().resolve()
+    )
     policy = load_terminology_policy(
         root,
         policy_file=Path(args.policy_file) if args.policy_file else None,
@@ -801,7 +916,12 @@ def cmd_workspace_add(args: argparse.Namespace) -> None:
         name=args.name,
         make_default=args.default,
     )
-    print(f"已登记工作区：{record.name} -> {record.root}")
+    print(
+        success("已登记工作区：")
+        + terminal_value(record.name)
+        + " → "
+        + terminal_value(record.root)
+    )
 
 
 def cmd_workspace_list(args: argparse.Namespace) -> None:
@@ -809,16 +929,25 @@ def cmd_workspace_list(args: argparse.Namespace) -> None:
     if not registry.workspaces:
         print("还没有登记全局工作区。下一步：dyro workspace add <路径>")
         return
-    print(f"{'默认':4} {'名称':20} {'状态':8} 路径")
+    print("\n" + title("━━ 全局工作区 ━━"))
+    print(muted("这里只管理首页入口，不会移动或删除项目文件。"))
+    print(muted(f"{'默认':4} {'名称':20} {'状态':8} 路径"))
     for record in registry.workspaces:
-        marker = "*" if record.name == registry.default else "-"
+        marker = (
+            success(f"{'●':4}")
+            if record.name == registry.default
+            else muted(f"{'·':4}")
+        )
         try:
             load(record.root)
         except (DyroError, ValidationError):
-            state = "不可用"
+            state = danger(f"{'不可用':8}")
         else:
-            state = "可用"
-        print(f"{marker:4} {record.name:20} {state:8} {record.root}")
+            state = success(f"{'可用':8}")
+        print(
+            f"{marker}{terminal_value(f'{record.name:20}')} {state} "
+            f"{terminal_value(record.root)}"
+        )
 
 
 def cmd_workspace_default(args: argparse.Namespace) -> None:
@@ -833,9 +962,7 @@ def cmd_workspace_default(args: argparse.Namespace) -> None:
 def cmd_workspace_remove(args: argparse.Namespace) -> None:
     get_workspace(args.name)
     if not args.yes and not args.dry_run:
-        raise DyroError(
-            "移除只会删除全局首页入口，不会删除项目文件；确认后请加 --yes"
-        )
+        raise DyroError("移除只会删除全局首页入口，不会删除项目文件；确认后请加 --yes")
     if args.dry_run:
         print(f"DRY RUN: 将移除工作区入口 {args.name}；不会删除项目文件")
         return
@@ -902,7 +1029,9 @@ def cmd_join(args: argparse.Namespace) -> None:
         return
     if not args.yes:
         if not sys.stdin.isatty():
-            raise DyroError("join 会创建工作区和 Git worktree；请先使用 --dry-run，再加 --yes 执行")
+            raise DyroError(
+                "join 会创建工作区和 Git worktree；请先使用 --dry-run，再加 --yes 执行"
+            )
         if not _ask_yes_no("应用此加入计划", default=False):
             print("已取消；没有修改任何文件。")
             return
@@ -924,9 +1053,7 @@ def cmd_join(args: argparse.Namespace) -> None:
     for scope, repository_id, _branch, _head, _upstream, dirty in status_rows(config):
         if scope in selected_scopes and dirty == 0:
             clean_scopes[repository_id].add(scope)
-    clean_count = sum(
-        scopes == selected_scopes for scopes in clean_scopes.values()
-    )
+    clean_count = sum(scopes == selected_scopes for scopes in clean_scopes.values())
     print(f"仓库：{clean_count}/{len(config.repositories)} clean")
     print("下一步：dyro")
 
@@ -940,8 +1067,12 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 def cmd_agent_list(args: argparse.Namespace) -> None:
     config = _config(args)
+    print("\n" + title("━━ 已登记 Agent ━━"))
     for adapter_id, adapter in sorted(config.adapters.items()):
-        print(f"{adapter_id:16} launch={shlex.join(adapter.launch)}")
+        print(
+            f"{terminal_value(f'{adapter_id:16}')} "
+            f"{muted('launch=')}{shlex.join(adapter.launch)}"
+        )
 
 
 def cmd_agent_add(args: argparse.Namespace) -> None:
@@ -955,14 +1086,17 @@ def cmd_agent_add(args: argparse.Namespace) -> None:
             raise DyroError(f"Agent command 解析失败：{exc}") from exc
         adapter = command_adapter(args.id, command)
     append_adapter(config, adapter, dry_run=args.dry_run)
-    print(f"{'DRY RUN: 将添加' if args.dry_run else '已添加'} Agent adapter：{adapter.id}")
+    print(
+        f"{'DRY RUN: 将添加' if args.dry_run else '已添加'} Agent adapter：{adapter.id}"
+    )
 
 
 def cmd_agent_test(args: argparse.Namespace) -> None:
     checks = test_adapter(_config(args), args.id)
     failures = []
     for mode, available, executable in checks:
-        print(f"{'PASS' if available else 'FAIL'} {args.id}.{mode}: {executable}")
+        rendered = f"{'PASS' if available else 'FAIL'} {args.id}.{mode}: {executable}"
+        print(success(rendered) if available else danger(rendered))
         if not available:
             failures.append(mode)
     if failures:
@@ -995,7 +1129,15 @@ def cmd_tool_list(args: argparse.Namespace) -> None:
         ToolState.INSTALLABLE: "可引导安装",
         ToolState.UNAVAILABLE: "不可用",
     }
-    print(f"{'ID':20} {'状态':12} {'类型':10} 名称")
+    print("\n" + title("━━ 编码工具 ━━"))
+    print(muted("顺序已综合上次使用、项目推荐与个人偏好。"))
+    print(muted(f"{'ID':20} {'状态':12} {'类型':10} 名称"))
+    state_styles = {
+        ToolState.READY: success,
+        ToolState.NEEDS_SETUP: warning,
+        ToolState.INSTALLABLE: warning,
+        ToolState.UNAVAILABLE: danger,
+    }
     for tool in tools:
         markers: list[str] = []
         if record and tool.id == record.last_agent:
@@ -1006,8 +1148,9 @@ def cmd_tool_list(args: argparse.Namespace) -> None:
             markers.append("个人默认")
         suffix = f" [{' / '.join(markers)}]" if markers else ""
         print(
-            f"{tool.id:20} {labels[tool.state]:12} {tool.kind:10} "
-            f"{tool.label}{suffix}"
+            f"{terminal_value(f'{tool.id:20}')} "
+            f"{state_styles[tool.state](f'{labels[tool.state]:12}')} "
+            f"{muted(f'{tool.kind:10}')} {terminal_value(tool.label)}{muted(suffix)}"
         )
 
 
@@ -1051,9 +1194,7 @@ def cmd_tool_pin(args: argparse.Namespace) -> None:
         return
     set_pinned_tools(tool_ids)
     print(
-        "已清除工具置顶顺序"
-        if not tool_ids
-        else "工具置顶顺序：" + ", ".join(tool_ids)
+        "已清除工具置顶顺序" if not tool_ids else "工具置顶顺序：" + ", ".join(tool_ids)
     )
 
 
@@ -1143,7 +1284,9 @@ def cmd_config_set(args: argparse.Namespace) -> None:
     value = set_config_value(config, args.key, args.value, dry_run=args.dry_run)
     if not args.dry_run:
         load(config.root)
-    print(f"{'DRY RUN: 将设置' if args.dry_run else '已设置'} {args.key} = {json.dumps(value, ensure_ascii=False)}")
+    print(
+        f"{'DRY RUN: 将设置' if args.dry_run else '已设置'} {args.key} = {json.dumps(value, ensure_ascii=False)}"
+    )
 
 
 def cmd_open(args: argparse.Namespace) -> None:
@@ -1178,13 +1321,22 @@ def cmd_start(args: argparse.Namespace) -> None:
     failures = [finding for finding in findings if finding.startswith("FAIL")]
     if failures:
         print("\n".join(failures))
-        raise DyroError("工作区尚未就绪；先修复 doctor 失败项，或运行 dyro bootstrap --yes")
+        raise DyroError(
+            "工作区尚未就绪；先修复 doctor 失败项，或运行 dyro bootstrap --yes"
+        )
     if not config.adapters:
         raise DyroError("尚未配置可启动的 Agent；先运行 dyro next 查看安全的下一步")
     line_id = args.line or _choose("开发线", [line.id for line in list_lines(config)])
     line = get_line(config, line_id, args.kind)
     agent = args.agent or _choose("Agent", sorted(config.adapters))
-    open_args = argparse.Namespace(root=str(config.root), line=line.id, kind=line.kind, agent=agent, prompt=args.prompt or "", dry_run=args.dry_run)
+    open_args = argparse.Namespace(
+        root=str(config.root),
+        line=line.id,
+        kind=line.kind,
+        agent=agent,
+        prompt=args.prompt or "",
+        dry_run=args.dry_run,
+    )
     cmd_open(open_args)
 
 
@@ -1204,7 +1356,9 @@ def cmd_next(args: argparse.Namespace) -> None:
         print("工作区还不能开始任务：")
         for finding in failures:
             print("  " + finding)
-        print("下一步：dyro doctor；若仓库缺失且已配置 remote，则运行 dyro bootstrap --yes")
+        print(
+            "下一步：dyro doctor；若仓库缺失且已配置 remote，则运行 dyro bootstrap --yes"
+        )
         return
     lines = list_lines(config)
     if not lines:
@@ -1212,12 +1366,18 @@ def cmd_next(args: argparse.Namespace) -> None:
         return
     if not config.adapters:
         if shutil.which("codex"):
-            print("工作区已就绪，检测到 Codex 尚未加入 Profile。下一步：dyro agent add codex --preset codex")
+            print(
+                "工作区已就绪，检测到 Codex 尚未加入 Profile。下一步：dyro agent add codex --preset codex"
+            )
         else:
-            print("工作区已就绪，但尚未配置可启动的 Agent。下一步：dyro agent add <id> --command '…'")
+            print(
+                "工作区已就绪，但尚未配置可启动的 Agent。下一步：dyro agent add <id> --command '…'"
+            )
         return
     if len(lines) == 1 and len(config.adapters) == 1:
-        print(f"工作区已就绪。下一步：dyro start --line {lines[0].id} --agent {next(iter(config.adapters))}")
+        print(
+            f"工作区已就绪。下一步：dyro start --line {lines[0].id} --agent {next(iter(config.adapters))}"
+        )
         return
     print("工作区已就绪。下一步：dyro start")
 
@@ -1231,17 +1391,24 @@ def cmd_line_list(args: argparse.Namespace) -> None:
     print(f"{'KIND':8} {'ID':28} {'BRANCH':30} {'BASE':24} REPOSITORIES")
     for line in lines:
         repositories = ", ".join(
-            f"{repo_id}@{line.base_for(repo_id)}[{line.storage_for(repo_id)}]" for repo_id in line.repositories
+            f"{repo_id}@{line.base_for(repo_id)}[{line.storage_for(repo_id)}]"
+            for repo_id in line.repositories
         )
-        print(f"{line.kind:8} {line.id:28} {line.branch:30} {line.base:24} {repositories}")
+        print(
+            f"{line.kind:8} {line.id:28} {line.branch:30} {line.base:24} {repositories}"
+        )
 
 
 def _create_line(args: argparse.Namespace, kind: str) -> None:
     config = _config(args)
     _require_yes(args, "创建开发线")
-    branch = args.branch or (f"hotfix/{args.id}" if kind == "hotfix" else f"feat/{args.id}")
+    branch = args.branch or (
+        f"hotfix/{args.id}" if kind == "hotfix" else f"feat/{args.id}"
+    )
     if kind == "hotfix" and not args.base:
-        raise DyroError("Hotfix 必须显式提供 --base（已核实的 release/tag/deployed SHA）")
+        raise DyroError(
+            "Hotfix 必须显式提供 --base（已核实的 release/tag/deployed SHA）"
+        )
     base = args.base or config.policy.default_base
     repository_bases = _repository_assignments(args.repo_base, "--repo-base")
     storage_modes = _repository_assignments(args.storage, "--storage")
@@ -1256,8 +1423,12 @@ def _create_line(args: argparse.Namespace, kind: str) -> None:
         kind=kind,
         dry_run=args.dry_run,
     )
-    bases = ", ".join(f"{repo_id}={line.base_for(repo_id)}" for repo_id in line.repositories)
-    print(f"{'DRY RUN: ' if args.dry_run else ''}已创建 {line.kind} {line.id}，分支 {line.branch}，仓库基线：{bases}")
+    bases = ", ".join(
+        f"{repo_id}={line.base_for(repo_id)}" for repo_id in line.repositories
+    )
+    print(
+        f"{'DRY RUN: ' if args.dry_run else ''}已创建 {line.kind} {line.id}，分支 {line.branch}，仓库基线：{bases}"
+    )
 
 
 def cmd_line_create(args: argparse.Namespace) -> None:
@@ -1277,8 +1448,13 @@ def cmd_changeset_create(args: argparse.Namespace) -> None:
         repositories=_repositories(args.repos),
         dry_run=args.dry_run,
     )
-    heads = ", ".join(f"{repository}={changeset.heads[repository][:12]}" for repository in changeset.repositories)
-    print(f"{'DRY RUN: ' if args.dry_run else ''}已创建 Change Set {changeset.id}：{heads}")
+    heads = ", ".join(
+        f"{repository}={changeset.heads[repository][:12]}"
+        for repository in changeset.repositories
+    )
+    print(
+        f"{'DRY RUN: ' if args.dry_run else ''}已创建 Change Set {changeset.id}：{heads}"
+    )
 
 
 def cmd_changeset_list(args: argparse.Namespace) -> None:
@@ -1288,7 +1464,9 @@ def cmd_changeset_list(args: argparse.Namespace) -> None:
         return
     print(f"{'ID':28} {'LINE':24} {'BRANCH':28} REPOSITORIES")
     for changeset in changesets:
-        print(f"{changeset.id:28} {changeset.line:24} {changeset.branch:28} {', '.join(changeset.repositories)}")
+        print(
+            f"{changeset.id:28} {changeset.line:24} {changeset.branch:28} {', '.join(changeset.repositories)}"
+        )
 
 
 def cmd_changeset_verify(args: argparse.Namespace) -> None:
@@ -1315,8 +1493,13 @@ def cmd_task_create(args: argparse.Namespace) -> None:
             raise DyroError(f"任务目录已存在：{path}")
         path.mkdir(parents=True)
         mount = config.repositories[args.repository].mount
-        atomic_write_text(path / "task.toml", task_template(args.id, args.title, args.line, args.repository, mount))
-        atomic_write_text(path / "handoff.md", f"# {args.title}\n\n- 目标：\n- 范围：\n- 验收：\n")
+        atomic_write_text(
+            path / "task.toml",
+            task_template(args.id, args.title, args.line, args.repository, mount),
+        )
+        atomic_write_text(
+            path / "handoff.md", f"# {args.title}\n\n- 目标：\n- 范围：\n- 验收：\n"
+        )
     print(f"已创建任务：{path}")
 
 
@@ -1356,7 +1539,9 @@ def cmd_task_binding(args: argparse.Namespace) -> None:
 def cmd_task_list(args: argparse.Namespace) -> None:
     config = _config(args)
     for task in list_tasks(config):
-        print(f"{task.id:30} {task_status(config, task):16} {task.line:20} {task.title}")
+        print(
+            f"{task.id:30} {task_status(config, task):16} {task.line:20} {task.title}"
+        )
 
 
 def cmd_task_board(args: argparse.Namespace) -> None:
@@ -1393,15 +1578,11 @@ def cmd_task_open(args: argparse.Namespace) -> None:
 def cmd_task_claim(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
-    requested_output = (
-        Path(args.output).expanduser() if args.output else None
-    )
+    requested_output = Path(args.output).expanduser() if args.output else None
     if requested_output is not None and (
         requested_output.exists() or requested_output.is_symlink()
     ):
-        raise DyroError(
-            f"拒绝覆盖已有 claim 导出文件：{requested_output}"
-        )
+        raise DyroError(f"拒绝覆盖已有 claim 导出文件：{requested_output}")
     output = (
         requested_output.parent.resolve() / requested_output.name
         if requested_output is not None
@@ -1412,9 +1593,7 @@ def cmd_task_claim(args: argparse.Namespace) -> None:
         try:
             output.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            raise DyroError(
-                f"无法创建 claim 导出目录：{output.parent}"
-            ) from exc
+            raise DyroError(f"无法创建 claim 导出目录：{output.parent}") from exc
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         flags |= getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -1422,9 +1601,7 @@ def cmd_task_claim(args: argparse.Namespace) -> None:
         try:
             descriptor = os.open(output, flags, initial_mode)
         except FileExistsError as exc:
-            raise DyroError(
-                f"拒绝覆盖已有 claim 导出文件：{output}"
-            ) from exc
+            raise DyroError(f"拒绝覆盖已有 claim 导出文件：{output}") from exc
         except OSError as exc:
             raise DyroError(f"无法创建 claim 导出文件：{output}") from exc
     try:
@@ -1487,7 +1664,9 @@ def cmd_task_claim_release(args: argparse.Namespace) -> None:
 
     config = _config(args)
     task = load_task(config, args.id)
-    print(f"{task.id} -> {release_task_claim(config, task, runner=args.by, dry_run=args.dry_run)}")
+    print(
+        f"{task.id} -> {release_task_claim(config, task, runner=args.by, dry_run=args.dry_run)}"
+    )
 
 
 def cmd_task_next(args: argparse.Namespace) -> None:
@@ -1500,7 +1679,10 @@ def cmd_task_next(args: argparse.Namespace) -> None:
     if not args.run:
         for task in candidates:
             print(f"{task.id:30} {task.line:20} {task.title}")
-        print("运行：dyro task next --run --yes" + (" --id <任务ID>" if len(candidates) > 1 else ""))
+        print(
+            "运行：dyro task next --run --yes"
+            + (" --id <任务ID>" if len(candidates) > 1 else "")
+        )
         return
     _require_yes(args, "启动下一个任务")
     if len(candidates) > 1:
@@ -1565,7 +1747,9 @@ def cmd_task_evidence_execution(args: argparse.Namespace) -> None:
                 receipt=evidence["receipt"],
                 gates=evidence["gates"] if evidence["gates"].is_file() else None,
                 heads=evidence["heads"] if evidence["heads"].is_file() else None,
-                provenance=evidence["provenance"] if evidence["provenance"].is_file() else None,
+                provenance=evidence["provenance"]
+                if evidence["provenance"].is_file()
+                else None,
                 allow_legacy_provenance=args.allow_legacy,
                 dry_run=args.dry_run,
             )
@@ -1715,20 +1899,28 @@ def cmd_witness_serve(args: argparse.Namespace) -> None:
         raise ValidationError(
             f"环境变量 {args.auth_token_env} 未设置；本地测试才可使用 --allow-unauthenticated"
         )
-    if args.allow_unauthenticated and args.host not in {"127.0.0.1", "::1", "localhost"}:
+    if args.allow_unauthenticated and args.host not in {
+        "127.0.0.1",
+        "::1",
+        "localhost",
+    }:
         raise ValidationError("--allow-unauthenticated 只能绑定 loopback host")
     if (args.tls_cert is None) != (args.tls_key is None):
         raise ValidationError("Witness TLS cert 与 key 必须同时设置")
     if args.tls_cert is None:
         if not args.allow_http:
-            raise ValidationError("Witness 必须设置 TLS，或显式使用仅本地的 --allow-http")
+            raise ValidationError(
+                "Witness 必须设置 TLS，或显式使用仅本地的 --allow-http"
+            )
         if args.host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValidationError("--allow-http 只能绑定 loopback host")
     bindings: dict[str, str] = {}
     for value in args.client_workspace_binding:
         key_id, separator, workspace_id = value.partition("=")
         if not separator or not key_id or not workspace_id:
-            raise ValidationError("--client-workspace-binding 必须为 KEY_ID=WORKSPACE_ID")
+            raise ValidationError(
+                "--client-workspace-binding 必须为 KEY_ID=WORKSPACE_ID"
+            )
         if key_id in bindings:
             raise ValidationError(f"--client-workspace-binding 重复：{key_id}")
         bindings[key_id] = workspace_id
@@ -1772,7 +1964,9 @@ def cmd_witness_serve(args: argparse.Namespace) -> None:
 def cmd_task_evidence_review(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
-    print(f"{task.id} -> {import_review_evidence(config, task, review=Path(args.file), dry_run=args.dry_run)}")
+    print(
+        f"{task.id} -> {import_review_evidence(config, task, review=Path(args.file), dry_run=args.dry_run)}"
+    )
 
 
 def cmd_task_evidence_review_build(args: argparse.Namespace) -> None:
@@ -1797,7 +1991,8 @@ def cmd_task_evidence_review_build(args: argparse.Namespace) -> None:
         return
     atomic_write_bytes(
         output,
-        json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8") + b"\n",
+        json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
+        + b"\n",
     )
     print(f"{task.id} -> signed review: {output}")
 
@@ -1819,7 +2014,13 @@ def cmd_task_evidence_generations(args: argparse.Namespace) -> None:
     )
     target_ids = {record.generation_id for record in targets}
     for record in records:
-        state = "current" if record.current else "temporary" if record.temporary else "history"
+        state = (
+            "current"
+            if record.current
+            else "temporary"
+            if record.temporary
+            else "history"
+        )
         action = "prune" if record.generation_id in target_ids else "keep"
         print(
             f"{record.generation_id}\t{state}\t{record.modified_at.isoformat()}\t"
@@ -1835,7 +2036,10 @@ def cmd_task_merge(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
     merge_task(config, task, push=args.push, dry_run=args.dry_run)
-    print(f"{'DRY RUN: ' if args.dry_run else ''}已合并 {task.id}" + (" 并推送" if args.push else ""))
+    print(
+        f"{'DRY RUN: ' if args.dry_run else ''}已合并 {task.id}"
+        + (" 并推送" if args.push else "")
+    )
 
 
 def cmd_task_decisions(args: argparse.Namespace) -> None:
@@ -1854,7 +2058,9 @@ def cmd_task_stats(args: argparse.Namespace) -> None:
         return
     print(f"{'AGENT':18} {'EXEC':>5} {'EXEC OK':>8} {'REVIEW':>7} {'REVIEW OK':>10}")
     for agent, counters in sorted(report.items()):
-        print(f"{agent:18} {counters['executor']:>5} {counters['executor_ok']:>8} {counters['review']:>7} {counters['review_ok']:>10}")
+        print(
+            f"{agent:18} {counters['executor']:>5} {counters['executor_ok']:>8} {counters['review']:>7} {counters['review_ok']:>10}"
+        )
 
 
 def cmd_task_loop(args: argparse.Namespace) -> None:
@@ -1879,7 +2085,9 @@ def cmd_objective_list(args: argparse.Namespace) -> None:
     config = _config(args)
     records = list_objectives(config)
     if not records:
-        print("暂无 Objective。下一步：dyro objective start --file <objective.toml> --yes")
+        print(
+            "暂无 Objective。下一步：dyro objective start --file <objective.toml> --yes"
+        )
         return
     print(f"{'OBJECTIVE':28} {'STATE':8} {'RESULT':16} {'REV':4} {'LINE':20} TARGETS")
     for record in records:
@@ -1909,7 +2117,14 @@ def _read_objective_plan(config: Config, objective_id: str):
 def cmd_objective_plan(args: argparse.Namespace) -> None:
     _, plan = _read_objective_plan(_config(args), args.id)
     if args.format == "json":
-        print(json.dumps(continuation_plan_payload(plan), ensure_ascii=False, sort_keys=True, indent=2))
+        print(
+            json.dumps(
+                continuation_plan_payload(plan),
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+        )
         return
     print(render_plan_text(plan))
 
@@ -1917,7 +2132,14 @@ def cmd_objective_plan(args: argparse.Namespace) -> None:
 def cmd_objective_explain(args: argparse.Namespace) -> None:
     _, plan = _read_objective_plan(_config(args), args.id)
     if args.format == "json":
-        print(json.dumps(continuation_plan_payload(plan), ensure_ascii=False, sort_keys=True, indent=2))
+        print(
+            json.dumps(
+                continuation_plan_payload(plan),
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+        )
         return
     print(render_plan_text(plan))
 
@@ -1937,7 +2159,9 @@ def cmd_objective_tick(args: argparse.Namespace) -> None:
     record = get_objective(config, args.id, recover=False)
     snapshot = build_scheduler_snapshot(config, objective=record)
     plan = build_continuation_plan(snapshot)
-    tick = build_scheduler_tick(snapshot, plan, max_parallel=record.objective.budget.max_parallel)
+    tick = build_scheduler_tick(
+        snapshot, plan, max_parallel=record.objective.budget.max_parallel
+    )
     if args.format == "json":
         print(render_scheduler_tick_json(tick))
         return
@@ -1971,15 +2195,28 @@ def cmd_objective_apply(args: argparse.Namespace) -> None:
         print(render_supervised_wave_text(wave))
     if args.dry_run:
         if args.format == "json":
-            print(json.dumps({"wave": supervised_wave_payload(wave), "dry_run": True}, ensure_ascii=False, sort_keys=True, indent=2))
+            print(
+                json.dumps(
+                    {"wave": supervised_wave_payload(wave), "dry_run": True},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                )
+            )
         else:
-            print("DRY RUN: 未创建 owner lease、Action intent、Action-start 或 Task 执行。")
+            print(
+                "DRY RUN: 未创建 owner lease、Action intent、Action-start 或 Task 执行。"
+            )
         return
     if args.yes and args.confirm_sha != wave.confirmation_sha256:
-        raise DyroError("--yes 必须同时提供当前 Confirmation SHA-256；请先运行 objective apply --dry-run 后复制摘要")
+        raise DyroError(
+            "--yes 必须同时提供当前 Confirmation SHA-256；请先运行 objective apply --dry-run 后复制摘要"
+        )
     if not args.yes:
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
-            raise DyroError("非交互执行必须提供 --yes 与 --confirm-sha；先使用 --dry-run 查看精确 wave")
+            raise DyroError(
+                "非交互执行必须提供 --yes 与 --confirm-sha；先使用 --dry-run 查看精确 wave"
+            )
         if not _ask_yes_no("确认按上述顺序执行该受监督 Action wave", default=False):
             print("已取消；未写入 Objective 或 Task 状态。")
             return
@@ -1987,7 +2224,11 @@ def cmd_objective_apply(args: argparse.Namespace) -> None:
     if args.format == "json":
         print(
             json.dumps(
-                {"wave": supervised_wave_payload(wave), "dry_run": False, "outcomes": supervised_outcomes_payload(outcomes)},
+                {
+                    "wave": supervised_wave_payload(wave),
+                    "dry_run": False,
+                    "outcomes": supervised_outcomes_payload(outcomes),
+                },
                 ensure_ascii=False,
                 sort_keys=True,
                 indent=2,
@@ -2009,7 +2250,9 @@ def _trigger_cli_time(value: str | None, label: str) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _trigger_cli_facts(values: list[str] | None, label: str) -> tuple[tuple[str, str], ...]:
+def _trigger_cli_facts(
+    values: list[str] | None, label: str
+) -> tuple[tuple[str, str], ...]:
     facts: list[tuple[str, str]] = []
     seen: set[str] = set()
     for value in values or []:
@@ -2030,15 +2273,21 @@ def _trigger_payload(observation, *, delivery: str | None = None) -> dict[str, o
         "state": observation.state.value,
         "summary": observation.summary,
         "evidence_ref": observation.evidence_ref,
-        "observed_at": observation.observed_at.isoformat() if observation.observed_at else None,
-        "next_probe_at": observation.next_probe_at.isoformat() if observation.next_probe_at else None,
+        "observed_at": observation.observed_at.isoformat()
+        if observation.observed_at
+        else None,
+        "next_probe_at": observation.next_probe_at.isoformat()
+        if observation.next_probe_at
+        else None,
     }
     if delivery is not None:
         payload["delivery"] = delivery
     return payload
 
 
-def _print_trigger_observation(args: argparse.Namespace, observation, *, delivery: str | None = None) -> None:
+def _print_trigger_observation(
+    args: argparse.Namespace, observation, *, delivery: str | None = None
+) -> None:
     payload = _trigger_payload(observation, delivery=delivery)
     if args.format == "json":
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
@@ -2055,7 +2304,9 @@ def cmd_trigger_list(args: argparse.Namespace) -> None:
     rows = [
         {
             "kind": kind.value,
-            "execution": "bounded_adapter_required" if kind is TriggerKind.PROVIDER else "builtin_read_only",
+            "execution": "bounded_adapter_required"
+            if kind is TriggerKind.PROVIDER
+            else "builtin_read_only",
         }
         for kind in TriggerKind
     ]
@@ -2069,7 +2320,9 @@ def cmd_trigger_list(args: argparse.Namespace) -> None:
 def cmd_trigger_probe(args: argparse.Namespace) -> None:
     kind = TriggerKind(args.kind)
     if kind is TriggerKind.PROVIDER:
-        raise DyroError("provider Trigger 只能由已登记的有界 adapter 调用；CLI 不接受命令、URL 或脚本")
+        raise DyroError(
+            "provider Trigger 只能由已登记的有界 adapter 调用；CLI 不接受命令、URL 或脚本"
+        )
     now = _trigger_cli_time(args.at, "--at") or datetime.now(timezone.utc)
     not_before = _trigger_cli_time(args.not_before, "--not-before")
     if args.signal and kind is not TriggerKind.MANUAL_SIGNAL:
@@ -2108,7 +2361,9 @@ def _cmd_objective_transition(args: argparse.Namespace, action: str) -> None:
         "reconcile": reconcile_objective,
     }
     record = handlers[action](config, args.id, dry_run=args.dry_run)
-    print(f"{'DRY RUN: ' if args.dry_run else ''}{record.objective.id} -> {record.operator_state} r{record.revision}")
+    print(
+        f"{'DRY RUN: ' if args.dry_run else ''}{record.objective.id} -> {record.operator_state} r{record.revision}"
+    )
 
 
 def cmd_objective_pause(args: argparse.Namespace) -> None:
@@ -2131,14 +2386,18 @@ def cmd_objective_scope_add(args: argparse.Namespace) -> None:
     config = _config(args)
     _require_objective_yes(args, "扩展 Objective scope")
     record = add_objective_target(config, args.id, args.task, dry_run=args.dry_run)
-    print(f"{'DRY RUN: ' if args.dry_run else ''}{record.objective.id} r{record.revision} targets={', '.join(record.objective.targets)}")
+    print(
+        f"{'DRY RUN: ' if args.dry_run else ''}{record.objective.id} r{record.revision} targets={', '.join(record.objective.targets)}"
+    )
 
 
 def cmd_objective_scope_remove(args: argparse.Namespace) -> None:
     config = _config(args)
     _require_objective_yes(args, "缩减 Objective scope")
     record = remove_objective_target(config, args.id, args.task, dry_run=args.dry_run)
-    print(f"{'DRY RUN: ' if args.dry_run else ''}{record.objective.id} r{record.revision} targets={', '.join(record.objective.targets)}")
+    print(
+        f"{'DRY RUN: ' if args.dry_run else ''}{record.objective.id} r{record.revision} targets={', '.join(record.objective.targets)}"
+    )
 
 
 def _daemon_select_runnable(config: Config, tasks: list, *, limit: int) -> list:
@@ -2156,9 +2415,17 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
         assert_legacy_scheduler_allowed(config, (task.id for task in tasks))
         queued = _daemon_select_runnable(config, tasks, limit=max(1, args.parallel))
         if queued:
-            with ThreadPoolExecutor(max_workers=max(1, args.parallel), thread_name_prefix="dyro-dispatch") as pool:
+            with ThreadPoolExecutor(
+                max_workers=max(1, args.parallel), thread_name_prefix="dyro-dispatch"
+            ) as pool:
                 futures = {
-                    pool.submit(run_task, config, task, dry_run=args.dry_run, legacy_scheduler=True): task
+                    pool.submit(
+                        run_task,
+                        config,
+                        task,
+                        dry_run=args.dry_run,
+                        legacy_scheduler=True,
+                    ): task
                     for task in queued
                 }
                 for future in as_completed(futures):
@@ -2169,8 +2436,13 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
                         print(f"skip {task.id}: {exc}")
         review_queue = list(plan_tasks(config).review)
         if review_queue:
-            with ThreadPoolExecutor(max_workers=max(1, args.parallel), thread_name_prefix="dyro-review") as pool:
-                futures = {pool.submit(review_task, config, task, dry_run=args.dry_run): task for task in review_queue}
+            with ThreadPoolExecutor(
+                max_workers=max(1, args.parallel), thread_name_prefix="dyro-review"
+            ) as pool:
+                futures = {
+                    pool.submit(review_task, config, task, dry_run=args.dry_run): task
+                    for task in review_queue
+                }
                 for future in as_completed(futures):
                     task = futures[future]
                     try:
@@ -2184,17 +2456,26 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
     location = parser.add_mutually_exclusive_group()
-    location.add_argument("--root", help="工作区根目录；默认从当前目录向上查找 dyro.toml")
+    location.add_argument(
+        "--root", help="工作区根目录；默认从当前目录向上查找 dyro.toml"
+    )
     location.add_argument(
         "--workspace",
         dest="workspace_alias",
         help="全局登记的工作区别名；可从任意目录使用",
     )
-    parser.add_argument("--dry-run", action="store_true", help="仅输出计划，不写文件、不调用 Agent 或 Git 写操作")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="仅输出计划，不写文件、不调用 Agent 或 Git 写操作",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="dyro", description="DyroEngineeringFlow：本地优先的多仓工程自动化与交付控制平台")
+    parser = argparse.ArgumentParser(
+        prog="dyro",
+        description="DyroEngineeringFlow：本地优先的多仓工程自动化与交付控制平台",
+    )
     parser.add_argument("--version", action="version", version=f"dyro {__version__}")
     _add_common(parser)
     sub = parser.add_subparsers(dest="command")
@@ -2210,17 +2491,29 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--name", default="my-workspace")
     init.add_argument("--base", default="main", help="--discover 时写入的默认基线分支")
     init_mode = init.add_mutually_exclusive_group()
-    init_mode.add_argument("--wizard", action="store_true", help="交互式登记真实仓库与可选 remote")
-    init_mode.add_argument("--discover", action="store_true", help="自动发现当前目录下的 Git 仓库并登记 origin")
+    init_mode.add_argument(
+        "--wizard", action="store_true", help="交互式登记真实仓库与可选 remote"
+    )
+    init_mode.add_argument(
+        "--discover",
+        action="store_true",
+        help="自动发现当前目录下的 Git 仓库并登记 origin",
+    )
     init.set_defaults(func=cmd_init)
 
-    setup = sub.add_parser("setup", help="首次引导：预览并安全创建 Profile、仓库与首条开发线")
+    setup = sub.add_parser(
+        "setup", help="首次引导：预览并安全创建 Profile、仓库与首条开发线"
+    )
     setup.add_argument("path", nargs="?", default=".")
     setup.add_argument("--name", help="新 Profile 的工作区名称；默认由目录名推断")
     setup.add_argument("--base", help="首条开发线与新 Profile 的默认基线；默认 main")
     setup.add_argument("--line", default="dev", help="首条功能开发线 ID；默认 dev")
     setup.add_argument("--branch", help="首条开发线分支；默认 feat/<line>")
-    setup.add_argument("--no-line", action="store_true", help="仅建立 Profile，不创建 Git worktree 开发线")
+    setup.add_argument(
+        "--no-line",
+        action="store_true",
+        help="仅建立 Profile，不创建 Git worktree 开发线",
+    )
     setup.add_argument(
         "--yes",
         action="store_true",
@@ -2239,9 +2532,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="登记后设为裸 dyro 的默认项目",
     )
     setup_mode = setup.add_mutually_exclusive_group()
-    setup_mode.add_argument("--interactive", action="store_true", help="强制运行交互式首次设置")
-    setup_mode.add_argument("--non-interactive", action="store_true", help="禁用交互提示；适合脚本与 CI")
-    setup.add_argument("--quick", action="store_true", help="只检查现有 Profile 并给出下一步")
+    setup_mode.add_argument(
+        "--interactive", action="store_true", help="强制运行交互式首次设置"
+    )
+    setup_mode.add_argument(
+        "--non-interactive", action="store_true", help="禁用交互提示；适合脚本与 CI"
+    )
+    setup.add_argument(
+        "--quick", action="store_true", help="只检查现有 Profile 并给出下一步"
+    )
     setup.add_argument(
         "--dry-run",
         dest="dry_run",
@@ -2253,32 +2552,50 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("home", help="打开当前或默认项目首页").set_defaults(func=cmd_home)
     console = sub.add_parser("console", help="启动只读本地项目控制台")
-    console.add_argument("--no-open", action="store_true", help="不自动打开浏览器，打印一次性本地 URL")
-    console.add_argument("--port", type=int, default=0, help="loopback 端口；默认 0 由系统分配")
+    console.add_argument(
+        "--no-open", action="store_true", help="不自动打开浏览器，打印一次性本地 URL"
+    )
+    console.add_argument(
+        "--port", type=int, default=0, help="loopback 端口；默认 0 由系统分配"
+    )
     console.set_defaults(func=cmd_console)
     workspace = sub.add_parser("workspace", help="管理可从任意目录进入的全局工作区")
     workspace_sub = workspace.add_subparsers(dest="workspace_command", required=True)
     workspace_add = workspace_sub.add_parser("add", help="登记已有 Dyro 工作区")
     workspace_add.add_argument("path", nargs="?", default=".")
-    workspace_add.add_argument("--name", help="便于记忆的工作区别名；默认读取 Profile 名称")
-    workspace_add.add_argument("--default", action="store_true", help="设为裸 dyro 的默认项目")
+    workspace_add.add_argument(
+        "--name", help="便于记忆的工作区别名；默认读取 Profile 名称"
+    )
+    workspace_add.add_argument(
+        "--default", action="store_true", help="设为裸 dyro 的默认项目"
+    )
     workspace_add.set_defaults(func=cmd_workspace_add)
     workspace_sub.add_parser("list", help="显示已登记工作区及可用状态").set_defaults(
         func=cmd_workspace_list
     )
-    workspace_default = workspace_sub.add_parser("default", help="设置裸 dyro 的默认项目")
+    workspace_default = workspace_sub.add_parser(
+        "default", help="设置裸 dyro 的默认项目"
+    )
     workspace_default.add_argument("name")
     workspace_default.set_defaults(func=cmd_workspace_default)
-    workspace_remove = workspace_sub.add_parser("remove", help="移除全局入口，不删除项目文件")
+    workspace_remove = workspace_sub.add_parser(
+        "remove", help="移除全局入口，不删除项目文件"
+    )
     workspace_remove.add_argument("name")
     workspace_remove.add_argument("--yes", action="store_true")
     workspace_remove.set_defaults(func=cmd_workspace_remove)
 
     blueprint = sub.add_parser("blueprint", help="验证可复用的团队工作区蓝图")
     blueprint_sub = blueprint.add_subparsers(dest="blueprint_command", required=True)
-    blueprint_validate = blueprint_sub.add_parser("validate", help="只读验证蓝图结构与固定基线")
-    blueprint_validate.add_argument("source", help="本地 TOML/目录、HTTPS 文件或 Git 仓库")
-    blueprint_validate.add_argument("--ref", dest="blueprint_ref", help="Git 蓝图仓库的分支或 tag")
+    blueprint_validate = blueprint_sub.add_parser(
+        "validate", help="只读验证蓝图结构与固定基线"
+    )
+    blueprint_validate.add_argument(
+        "source", help="本地 TOML/目录、HTTPS 文件或 Git 仓库"
+    )
+    blueprint_validate.add_argument(
+        "--ref", dest="blueprint_ref", help="Git 蓝图仓库的分支或 tag"
+    )
     blueprint_validate.add_argument(
         "--file",
         dest="blueprint_file",
@@ -2289,7 +2606,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     join = sub.add_parser("join", help="从团队蓝图安全创建独立的多仓工作区")
     join.add_argument("source", help="本地 TOML/目录、HTTPS 文件或 Git 仓库")
-    join.add_argument("--path", help="目标目录；默认 ~/DyroProjects/<suggested_directory>")
+    join.add_argument(
+        "--path", help="目标目录；默认 ~/DyroProjects/<suggested_directory>"
+    )
     join.add_argument("--line", help="要创建的开发线；默认交互选择或使用蓝图默认值")
     join.add_argument("--ref", dest="blueprint_ref", help="Git 蓝图仓库的分支或 tag")
     join.add_argument(
@@ -2300,7 +2619,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     join.add_argument("--yes", action="store_true", help="确认执行已展示的加入计划")
     registration = join.add_mutually_exclusive_group()
-    registration.add_argument("--no-register", action="store_true", help="不登记到裸 dyro 的全局首页")
+    registration.add_argument(
+        "--no-register", action="store_true", help="不登记到裸 dyro 的全局首页"
+    )
     registration.add_argument(
         "--default",
         dest="make_default",
@@ -2318,7 +2639,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="验证动态工作区结构").set_defaults(func=cmd_doctor)
     terminology = sub.add_parser("terminology", help="使用仓库外策略扫描候选术语")
-    terminology_sub = terminology.add_subparsers(dest="terminology_command", required=True)
+    terminology_sub = terminology.add_subparsers(
+        dest="terminology_command", required=True
+    )
     terminology_check = terminology_sub.add_parser(
         "check",
         help="扫描工作区、分支、diff 与提交候选；策略不写入仓库",
@@ -2340,9 +2663,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     terminology_check.set_defaults(func=cmd_terminology_check)
     status_parser = sub.add_parser("status", help="显示 anchors 与开发线 Git 状态")
-    status_parser.add_argument("--all", action="store_true", help="汇总所有全局登记工作区")
+    status_parser.add_argument(
+        "--all", action="store_true", help="汇总所有全局登记工作区"
+    )
     status_parser.set_defaults(func=cmd_status)
-    bootstrap_parser = sub.add_parser("bootstrap", help="clone 配置了 remote 的缺失仓库 anchor")
+    bootstrap_parser = sub.add_parser(
+        "bootstrap", help="clone 配置了 remote 的缺失仓库 anchor"
+    )
     bootstrap_parser.add_argument("--yes", action="store_true")
     bootstrap_parser.set_defaults(func=cmd_bootstrap)
     repo = sub.add_parser("repo", help="免手改 TOML 的仓库配置管理")
@@ -2352,21 +2679,31 @@ def build_parser() -> argparse.ArgumentParser:
     repo_add.add_argument("path", help="工作区内的仓库路径")
     repo_add.add_argument("--id", help="仓库标识；默认使用目录名")
     repo_add.add_argument("--mount", help="开发线内挂载路径；默认智能推断")
-    repo_add.add_argument("--remote", help="缺失路径的 clone remote，或覆盖自动发现的 origin")
+    repo_add.add_argument(
+        "--remote", help="缺失路径的 clone remote，或覆盖自动发现的 origin"
+    )
     repo_add.set_defaults(func=cmd_repo_add)
     agent = sub.add_parser("agent", help="Agent adapters")
     agent_sub = agent.add_subparsers(dest="agent_command", required=True)
-    agent_sub.add_parser("list", help="显示已登记的 Agent adapter").set_defaults(func=cmd_agent_list)
-    agent_sub.add_parser("discover", help="检测本机 Agent，并区分已配置与尚未集成").set_defaults(
-        func=cmd_agent_discover
+    agent_sub.add_parser("list", help="显示已登记的 Agent adapter").set_defaults(
+        func=cmd_agent_list
     )
-    agent_add = agent_sub.add_parser("add", help="通过预设或命令登记 Agent，无需编辑 TOML")
+    agent_sub.add_parser(
+        "discover", help="检测本机 Agent，并区分已配置与尚未集成"
+    ).set_defaults(func=cmd_agent_discover)
+    agent_add = agent_sub.add_parser(
+        "add", help="通过预设或命令登记 Agent，无需编辑 TOML"
+    )
     agent_add.add_argument("id")
     agent_source = agent_add.add_mutually_exclusive_group(required=True)
     agent_source.add_argument("--preset", choices=("codex", "noop"))
-    agent_source.add_argument("--command", help="作为 launch/read/write 的 argv 命令行；不会经 shell 执行")
+    agent_source.add_argument(
+        "--command", help="作为 launch/read/write 的 argv 命令行；不会经 shell 执行"
+    )
     agent_add.set_defaults(func=cmd_agent_add)
-    agent_test = agent_sub.add_parser("test", help="仅检查 adapter 可执行文件是否可用，不启动 Agent")
+    agent_test = agent_sub.add_parser(
+        "test", help="仅检查 adapter 可执行文件是否可用，不启动 Agent"
+    )
     agent_test.add_argument("id")
     agent_test.set_defaults(func=cmd_agent_test)
     tool = sub.add_parser("tool", help="发现、排序和安全安装本地编码工具")
@@ -2376,7 +2713,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tool_install = tool_sub.add_parser("install", help="显示并执行内置的官方安装方案")
     tool_install.add_argument("id")
-    tool_install.add_argument("--yes", action="store_true", help="确认执行已展示的安装命令或打开官方页面")
+    tool_install.add_argument(
+        "--yes", action="store_true", help="确认执行已展示的安装命令或打开官方页面"
+    )
     tool_install.set_defaults(func=cmd_tool_install)
     tool_default = tool_sub.add_parser("default", help="设置个人默认工具")
     tool_default.add_argument("id", nargs="?")
@@ -2388,14 +2727,18 @@ def build_parser() -> argparse.ArgumentParser:
     tool_pin.set_defaults(func=cmd_tool_pin)
     update = sub.add_parser("update", help="检测并安全更新 Dyro")
     update_sub = update.add_subparsers(dest="update_command", required=True)
-    update_sub.add_parser("check", help="立即检查官方 PyPI 的最新稳定版本").set_defaults(
-        func=cmd_update_check
-    )
+    update_sub.add_parser(
+        "check", help="立即检查官方 PyPI 的最新稳定版本"
+    ).set_defaults(func=cmd_update_check)
     update_now = update_sub.add_parser("now", help="显示计划并更新到最新稳定版本")
-    update_now.add_argument("--yes", action="store_true", help="确认执行已展示的更新命令")
+    update_now.add_argument(
+        "--yes", action="store_true", help="确认执行已展示的更新命令"
+    )
     update_now.set_defaults(func=cmd_update_now)
     update_auto = update_sub.add_parser("auto", help="管理补丁版本自动更新")
-    update_auto.add_argument("mode", choices=("on", "off", "status"), nargs="?", default="status")
+    update_auto.add_argument(
+        "mode", choices=("on", "off", "status"), nargs="?", default="status"
+    )
     update_auto.set_defaults(func=cmd_update_auto)
     update_sub.add_parser("enable", help="开启每日首次交互运行更新检测").set_defaults(
         func=cmd_update_enabled
@@ -2414,12 +2757,16 @@ def build_parser() -> argparse.ArgumentParser:
     config_set.set_defaults(func=cmd_config_set)
     key = sub.add_parser("key", help="Ed25519 签名密钥与工作区信任根")
     key_sub = key.add_subparsers(dest="key_command", required=True)
-    key_generate = key_sub.add_parser("generate", help="生成 runner 或 approver Ed25519 密钥对")
+    key_generate = key_sub.add_parser(
+        "generate", help="生成 runner 或 approver Ed25519 密钥对"
+    )
     key_generate.add_argument("id")
     key_generate.add_argument("--private-key", required=True)
     key_generate.add_argument("--public-key", required=True)
     key_generate.set_defaults(func=cmd_key_generate)
-    key_trust = key_sub.add_parser("trust", help="将公钥安装到用途隔离的工作区 trust store")
+    key_trust = key_sub.add_parser(
+        "trust", help="将公钥安装到用途隔离的工作区 trust store"
+    )
     key_trust.add_argument("id")
     key_trust.add_argument(
         "--purpose",
@@ -2431,7 +2778,9 @@ def build_parser() -> argparse.ArgumentParser:
     key_trust.add_argument("--not-before", help="ISO-8601 生效时间；必须包含时区")
     key_trust.add_argument("--not-after", help="ISO-8601 失效时间；必须包含时区")
     key_trust.set_defaults(func=cmd_key_trust)
-    key_revoke = key_sub.add_parser("revoke", help="撤销指定用途的 trusted key ID；保留公钥与审计记录")
+    key_revoke = key_sub.add_parser(
+        "revoke", help="撤销指定用途的 trusted key ID；保留公钥与审计记录"
+    )
     key_revoke.add_argument("id")
     key_revoke.add_argument(
         "--purpose",
@@ -2446,9 +2795,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=TRUST_PURPOSES,
         required=True,
     )
-    key_list.add_argument("--show-status", action="store_true", help="同时显示 pending、expired 与 revoked key")
+    key_list.add_argument(
+        "--show-status",
+        action="store_true",
+        help="同时显示 pending、expired 与 revoked key",
+    )
     key_list.set_defaults(func=cmd_key_list)
-    key_sub.add_parser("audit", help="输出 trust/revoke JSONL 审计记录").set_defaults(func=cmd_key_audit)
+    key_sub.add_parser("audit", help="输出 trust/revoke JSONL 审计记录").set_defaults(
+        func=cmd_key_audit
+    )
     key_audit_sync = key_sub.add_parser(
         "audit-sync",
         help="将本地 trust 审计链同步到远程 Witness",
@@ -2470,7 +2825,9 @@ def build_parser() -> argparse.ArgumentParser:
     key_audit_sync.set_defaults(func=cmd_key_audit_sync)
     witness = sub.add_parser("witness", help="运行独立的远程 audit Witness 服务")
     witness_sub = witness.add_subparsers(dest="witness_command", required=True)
-    witness_serve = witness_sub.add_parser("serve", help="验证批次、签发回执并持久化 Witness ledger")
+    witness_serve = witness_sub.add_parser(
+        "serve", help="验证批次、签发回执并持久化 Witness ledger"
+    )
     witness_serve.add_argument("--storage-root", required=True)
     witness_serve.add_argument("--client-trust-root", required=True)
     witness_serve.add_argument("--witness-id", required=True)
@@ -2514,7 +2871,9 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--agent")
     start.add_argument("--prompt", default="")
     start.set_defaults(func=cmd_start)
-    sub.add_parser("next", help="根据当前状态给出新手的唯一安全下一步").set_defaults(func=cmd_next)
+    sub.add_parser("next", help="根据当前状态给出新手的唯一安全下一步").set_defaults(
+        func=cmd_next
+    )
 
     line = sub.add_parser("line", help="功能开发线")
     line_sub = line.add_subparsers(dest="line_command", required=True)
@@ -2525,9 +2884,21 @@ def build_parser() -> argparse.ArgumentParser:
     line_create.add_argument("id")
     line_create.add_argument("--branch")
     line_create.add_argument("--base")
-    line_create.add_argument("--repos", help="逗号分隔；默认全部 configured repositories")
-    line_create.add_argument("--repo-base", action="append", metavar="REPOSITORY=REF", help="为一个仓库覆盖默认基线；可重复")
-    line_create.add_argument("--storage", action="append", metavar="REPOSITORY=MODE", help="仓库存储方式：linked-worktree 或 anchor-reference；可重复")
+    line_create.add_argument(
+        "--repos", help="逗号分隔；默认全部 configured repositories"
+    )
+    line_create.add_argument(
+        "--repo-base",
+        action="append",
+        metavar="REPOSITORY=REF",
+        help="为一个仓库覆盖默认基线；可重复",
+    )
+    line_create.add_argument(
+        "--storage",
+        action="append",
+        metavar="REPOSITORY=MODE",
+        help="仓库存储方式：linked-worktree 或 anchor-reference；可重复",
+    )
     line_create.add_argument("--yes", action="store_true")
     line_create.set_defaults(func=cmd_line_create)
 
@@ -2538,8 +2909,18 @@ def build_parser() -> argparse.ArgumentParser:
     hotfix_create.add_argument("--branch")
     hotfix_create.add_argument("--base", required=True)
     hotfix_create.add_argument("--repos")
-    hotfix_create.add_argument("--repo-base", action="append", metavar="REPOSITORY=REF", help="为一个仓库覆盖 --base；可重复")
-    hotfix_create.add_argument("--storage", action="append", metavar="REPOSITORY=MODE", help="仓库存储方式：linked-worktree 或 anchor-reference；可重复")
+    hotfix_create.add_argument(
+        "--repo-base",
+        action="append",
+        metavar="REPOSITORY=REF",
+        help="为一个仓库覆盖 --base；可重复",
+    )
+    hotfix_create.add_argument(
+        "--storage",
+        action="append",
+        metavar="REPOSITORY=MODE",
+        help="仓库存储方式：linked-worktree 或 anchor-reference；可重复",
+    )
     hotfix_create.add_argument("--yes", action="store_true")
     hotfix_create.set_defaults(func=cmd_hotfix_create)
 
@@ -2555,33 +2936,53 @@ def build_parser() -> argparse.ArgumentParser:
     changeset_verify.add_argument("id")
     changeset_verify.set_defaults(func=cmd_changeset_verify)
 
-    objective = sub.add_parser("objective", help="持久化并观察一个跨任务 Objective；此阶段不执行 Task")
+    objective = sub.add_parser(
+        "objective", help="持久化并观察一个跨任务 Objective；此阶段不执行 Task"
+    )
     objective_sub = objective.add_subparsers(dest="objective_command", required=True)
-    objective_start = objective_sub.add_parser("start", help="固定 Objective 合约、目标和依赖闭包")
+    objective_start = objective_sub.add_parser(
+        "start", help="固定 Objective 合约、目标和依赖闭包"
+    )
     objective_start.add_argument("--file", help="完整 Objective v1 TOML 合约")
     objective_start.add_argument("--id")
     objective_start.add_argument("--title")
     objective_start.add_argument("--line")
     objective_start.add_argument("--targets", help="逗号分隔的 Task ID；非文件模式必填")
-    objective_start.add_argument("--mode", choices=tuple(item.value for item in RequestedMode))
-    objective_start.add_argument("--operation", action="append", choices=tuple(item.value for item in Operation))
+    objective_start.add_argument(
+        "--mode", choices=tuple(item.value for item in RequestedMode)
+    )
+    objective_start.add_argument(
+        "--operation", action="append", choices=tuple(item.value for item in Operation)
+    )
     objective_start.add_argument("--yes", action="store_true")
     objective_start.set_defaults(func=cmd_objective_start)
-    objective_sub.add_parser("list", help="列出已接受的 Objective").set_defaults(func=cmd_objective_list)
-    objective_status = objective_sub.add_parser("status", help="显示 Objective 状态和派生结果")
+    objective_sub.add_parser("list", help="列出已接受的 Objective").set_defaults(
+        func=cmd_objective_list
+    )
+    objective_status = objective_sub.add_parser(
+        "status", help="显示 Objective 状态和派生结果"
+    )
     objective_status.add_argument("id")
     objective_status.set_defaults(func=cmd_objective_status)
-    objective_plan = objective_sub.add_parser("plan", help="只读生成确定性 Objective action plan，不执行任务")
+    objective_plan = objective_sub.add_parser(
+        "plan", help="只读生成确定性 Objective action plan，不执行任务"
+    )
     objective_plan.add_argument("id")
     objective_plan.add_argument("--format", choices=("text", "json"), default="text")
     objective_plan.set_defaults(func=cmd_objective_plan)
-    objective_explain = objective_sub.add_parser("explain", help="解释 Objective 当前的可推进项与阻塞原因")
+    objective_explain = objective_sub.add_parser(
+        "explain", help="解释 Objective 当前的可推进项与阻塞原因"
+    )
     objective_explain.add_argument("id")
     objective_explain.add_argument("--format", choices=("text", "json"), default="text")
     objective_explain.set_defaults(func=cmd_objective_explain)
-    objective_graph = objective_sub.add_parser("graph", help="渲染 Objective、Task、Decision 与 Action 的只读组合图")
+    objective_graph = objective_sub.add_parser(
+        "graph", help="渲染 Objective、Task、Decision 与 Action 的只读组合图"
+    )
     objective_graph.add_argument("id")
-    objective_graph.add_argument("--format", choices=("mermaid", "json"), default="mermaid")
+    objective_graph.add_argument(
+        "--format", choices=("mermaid", "json"), default="mermaid"
+    )
     objective_graph.set_defaults(func=cmd_objective_graph)
     objective_tick = objective_sub.add_parser(
         "tick", help="预览下一组有界 Objective Action；不创建 intent 或执行任务"
@@ -2593,29 +2994,43 @@ def build_parser() -> argparse.ArgumentParser:
         "attention", help="显示安全且只读的 Objective Attention 投影"
     )
     objective_attention.add_argument("id")
-    objective_attention.add_argument("--format", choices=("text", "json"), default="text")
+    objective_attention.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
     objective_attention.set_defaults(func=cmd_objective_attention)
     objective_apply = objective_sub.add_parser(
         "apply",
         help="显示精确 Action wave；确认后仅受监督地执行 execute/review，不 merge 或 push",
     )
     objective_apply.add_argument("id")
-    objective_apply.add_argument("--confirm-sha", help="非交互 --yes 必填；必须等于当前 Confirmation SHA-256")
-    objective_apply.add_argument("--yes", action="store_true", help="确认当前显示的精确 wave 后执行")
+    objective_apply.add_argument(
+        "--confirm-sha", help="非交互 --yes 必填；必须等于当前 Confirmation SHA-256"
+    )
+    objective_apply.add_argument(
+        "--yes", action="store_true", help="确认当前显示的精确 wave 后执行"
+    )
     objective_apply.add_argument("--format", choices=("text", "json"), default="text")
     objective_apply.set_defaults(func=cmd_objective_apply)
     for command, function, help_text in (
         ("pause", cmd_objective_pause, "暂停后续推进，不写完成状态"),
         ("resume", cmd_objective_resume, "恢复 paused Objective 的 ownership"),
         ("stop", cmd_objective_stop, "终止 Objective；不能再恢复"),
-        ("reconcile", cmd_objective_reconcile, "重新固定 TaskGraph scope 与 contract 哈希"),
+        (
+            "reconcile",
+            cmd_objective_reconcile,
+            "重新固定 TaskGraph scope 与 contract 哈希",
+        ),
     ):
         parser_item = objective_sub.add_parser(command, help=help_text)
         parser_item.add_argument("id")
         parser_item.add_argument("--yes", action="store_true")
         parser_item.set_defaults(func=function)
-    objective_scope = objective_sub.add_parser("scope", help="显式调整 Objective targets 并建立新 revision")
-    objective_scope_sub = objective_scope.add_subparsers(dest="objective_scope_command", required=True)
+    objective_scope = objective_sub.add_parser(
+        "scope", help="显式调整 Objective targets 并建立新 revision"
+    )
+    objective_scope_sub = objective_scope.add_subparsers(
+        dest="objective_scope_command", required=True
+    )
     for command, function, help_text in (
         ("add", cmd_objective_scope_add, "将同一开发线的 Task 加入 targets"),
         ("remove", cmd_objective_scope_remove, "从 targets 移除一个 Task"),
@@ -2626,42 +3041,70 @@ def build_parser() -> argparse.ArgumentParser:
         parser_item.add_argument("--yes", action="store_true")
         parser_item.set_defaults(func=function)
 
-    trigger = sub.add_parser("trigger", help="只读 Trigger 观测与有界 provider 协议入口")
+    trigger = sub.add_parser(
+        "trigger", help="只读 Trigger 观测与有界 provider 协议入口"
+    )
     trigger_sub = trigger.add_subparsers(dest="trigger_command", required=True)
-    trigger_list = trigger_sub.add_parser("list", help="列出内置 Trigger 类型与 provider 边界")
+    trigger_list = trigger_sub.add_parser(
+        "list", help="列出内置 Trigger 类型与 provider 边界"
+    )
     trigger_list.add_argument("--format", choices=("text", "json"), default="text")
     trigger_list.set_defaults(func=cmd_trigger_list)
-    trigger_probe = trigger_sub.add_parser("probe", help="用显式事实执行一次只读内置 Trigger 观测")
-    trigger_probe.add_argument("kind", choices=tuple(item.value for item in TriggerKind))
+    trigger_probe = trigger_sub.add_parser(
+        "probe", help="用显式事实执行一次只读内置 Trigger 观测"
+    )
+    trigger_probe.add_argument(
+        "kind", choices=tuple(item.value for item in TriggerKind)
+    )
     trigger_probe.add_argument("--id", default="manual-probe")
-    trigger_probe.add_argument("--at", help="观测时间（带时区 ISO-8601）；默认当前 UTC 时间")
-    trigger_probe.add_argument("--not-before", help="time_due 的最早触发时间（带时区 ISO-8601）")
-    trigger_probe.add_argument("--current", action="append", metavar="KEY=VALUE", help="当前事实；可重复指定")
-    trigger_probe.add_argument("--previous", action="append", metavar="KEY=VALUE", help="上次事实；可重复指定")
+    trigger_probe.add_argument(
+        "--at", help="观测时间（带时区 ISO-8601）；默认当前 UTC 时间"
+    )
+    trigger_probe.add_argument(
+        "--not-before", help="time_due 的最早触发时间（带时区 ISO-8601）"
+    )
+    trigger_probe.add_argument(
+        "--current", action="append", metavar="KEY=VALUE", help="当前事实；可重复指定"
+    )
+    trigger_probe.add_argument(
+        "--previous", action="append", metavar="KEY=VALUE", help="上次事实；可重复指定"
+    )
     trigger_probe.add_argument("--signal", help="manual_signal 的非空人工信号")
     trigger_probe.add_argument("--format", choices=("text", "json"), default="text")
     trigger_probe.set_defaults(func=cmd_trigger_probe)
-    trigger_signal = trigger_sub.add_parser("signal", help="输出一次临时人工信号观测，不写入任务或控制面")
+    trigger_signal = trigger_sub.add_parser(
+        "signal", help="输出一次临时人工信号观测，不写入任务或控制面"
+    )
     trigger_signal.add_argument("signal")
     trigger_signal.add_argument("--id", default="manual-signal")
-    trigger_signal.add_argument("--at", help="观测时间（带时区 ISO-8601）；默认当前 UTC 时间")
+    trigger_signal.add_argument(
+        "--at", help="观测时间（带时区 ISO-8601）；默认当前 UTC 时间"
+    )
     trigger_signal.add_argument("--format", choices=("text", "json"), default="text")
     trigger_signal.set_defaults(func=cmd_trigger_signal)
 
     task = sub.add_parser("task", help="任务编排")
     task_sub = task.add_subparsers(dest="task_command", required=True)
     task_graph = task_sub.add_parser("graph", help="编译、校验或渲染任务图")
-    task_graph.add_argument("action", nargs="?", choices=("show", "check"), default="show")
+    task_graph.add_argument(
+        "action", nargs="?", choices=("show", "check"), default="show"
+    )
     task_graph.add_argument("--line", help="只显示或校验指定开发线")
     task_graph.add_argument("--format", choices=("mermaid", "json"), default="mermaid")
     task_graph.set_defaults(func=cmd_task_graph)
-    task_explain = task_sub.add_parser("explain", help="解释任务当前为什么可调度或被阻塞")
+    task_explain = task_sub.add_parser(
+        "explain", help="解释任务当前为什么可调度或被阻塞"
+    )
     task_explain.add_argument("id")
     task_explain.set_defaults(func=cmd_task_explain)
-    task_attempts = task_sub.add_parser("attempts", help="显示任务的本地执行 provenance")
+    task_attempts = task_sub.add_parser(
+        "attempts", help="显示任务的本地执行 provenance"
+    )
     task_attempts.add_argument("id")
     task_attempts.set_defaults(func=cmd_task_attempts)
-    task_binding = task_sub.add_parser("binding", help="输出 review 所需的完整 attempt 与 plan binding")
+    task_binding = task_sub.add_parser(
+        "binding", help="输出 review 所需的完整 attempt 与 plan binding"
+    )
     task_binding.add_argument("id")
     task_binding.set_defaults(func=cmd_task_binding)
     task_create = task_sub.add_parser("create")
@@ -2680,7 +3123,9 @@ def build_parser() -> argparse.ArgumentParser:
     task_run = task_sub.add_parser("run")
     task_run.add_argument("id")
     task_run.set_defaults(func=cmd_task_run)
-    task_open = task_sub.add_parser("open", help="进入已存在的任务工作树，不改变任务状态")
+    task_open = task_sub.add_parser(
+        "open", help="进入已存在的任务工作树，不改变任务状态"
+    )
     task_open.add_argument("id")
     task_open.add_argument("--agent", default="codex")
     task_open.add_argument("--prompt", default="")
@@ -2689,20 +3134,32 @@ def build_parser() -> argparse.ArgumentParser:
     task_claim.add_argument("id")
     task_claim.add_argument("--by", required=True, help="执行器实例或受信任身份")
     task_claim.add_argument("--key-id", help="与 claim 绑定的 trusted execution key ID")
-    task_claim.add_argument("--lease-seconds", type=int, default=3600, help="claim 租约秒数；默认 3600")
+    task_claim.add_argument(
+        "--lease-seconds", type=int, default=3600, help="claim 租约秒数；默认 3600"
+    )
     task_claim.add_argument(
         "--output",
         help="把新 claim 以 0600 权限导出到 runner 交接路径；拒绝覆盖",
     )
     task_claim.set_defaults(func=cmd_task_claim)
-    task_claim_renew = task_sub.add_parser("claim-renew", help="由当前 runner 续租未过期 claim")
+    task_claim_renew = task_sub.add_parser(
+        "claim-renew", help="由当前 runner 续租未过期 claim"
+    )
     task_claim_renew.add_argument("id")
-    task_claim_renew.add_argument("--by", required=True, help="当前执行器实例或受信任身份")
-    task_claim_renew.add_argument("--lease-seconds", type=int, default=3600, help="续租秒数；默认 3600")
+    task_claim_renew.add_argument(
+        "--by", required=True, help="当前执行器实例或受信任身份"
+    )
+    task_claim_renew.add_argument(
+        "--lease-seconds", type=int, default=3600, help="续租秒数；默认 3600"
+    )
     task_claim_renew.set_defaults(func=cmd_task_claim_renew)
-    task_claim_release = task_sub.add_parser("claim-release", help="释放当前 runner 的 claim")
+    task_claim_release = task_sub.add_parser(
+        "claim-release", help="释放当前 runner 的 claim"
+    )
     task_claim_release.add_argument("id")
-    task_claim_release.add_argument("--by", required=True, help="当前执行器实例或受信任身份")
+    task_claim_release.add_argument(
+        "--by", required=True, help="当前执行器实例或受信任身份"
+    )
     task_claim_release.set_defaults(func=cmd_task_claim_release)
     task_next = task_sub.add_parser("next", help="显示或启动下一个满足依赖的任务")
     task_next.add_argument("--id")
@@ -2729,32 +3186,64 @@ def build_parser() -> argparse.ArgumentParser:
     task_signoff.set_defaults(func=cmd_task_signoff)
     evidence = task_sub.add_parser("evidence", help="构建或导入隔离执行器证据")
     evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
-    evidence_execution = evidence_sub.add_parser("execution", help="导入执行回执与门禁结果")
+    evidence_execution = evidence_sub.add_parser(
+        "execution", help="导入执行回执与门禁结果"
+    )
     evidence_execution.add_argument("id")
     evidence_input = evidence_execution.add_mutually_exclusive_group(required=True)
     evidence_input.add_argument("--receipt")
-    evidence_input.add_argument("--bundle", help="由 task evidence build 生成的可移植 ZIP 证据包")
-    evidence_execution.add_argument("--gates", help="外部门禁 JSON；任务含 gates 时必填")
-    evidence_execution.add_argument("--heads", help="执行后逐仓 Git HEAD JSON；DONE 回执时必填")
-    evidence_execution.add_argument("--provenance", help="可选的外部 execution provenance JSON")
-    evidence_execution.add_argument("--allow-legacy", action="store_true", help="显式允许导入缺少 provenance 的旧证据")
+    evidence_input.add_argument(
+        "--bundle", help="由 task evidence build 生成的可移植 ZIP 证据包"
+    )
+    evidence_execution.add_argument(
+        "--gates", help="外部门禁 JSON；任务含 gates 时必填"
+    )
+    evidence_execution.add_argument(
+        "--heads", help="执行后逐仓 Git HEAD JSON；DONE 回执时必填"
+    )
+    evidence_execution.add_argument(
+        "--provenance", help="可选的外部 execution provenance JSON"
+    )
+    evidence_execution.add_argument(
+        "--allow-legacy",
+        action="store_true",
+        help="显式允许导入缺少 provenance 的旧证据",
+    )
     evidence_execution.set_defaults(func=cmd_task_evidence_execution)
-    evidence_build = evidence_sub.add_parser("build", help="在隔离 runner 中运行门禁并构建可导入 ZIP 证据包")
+    evidence_build = evidence_sub.add_parser(
+        "build", help="在隔离 runner 中运行门禁并构建可导入 ZIP 证据包"
+    )
     evidence_build.add_argument("id")
-    evidence_build.add_argument("--workspace", required=True, help="隔离 runner 中任务分支的多仓工作区")
-    evidence_build.add_argument("--receipt", required=True, help="执行器写出的 receipt.md")
-    evidence_build.add_argument("--output", required=True, help="新 ZIP 证据包的输出路径；拒绝覆盖已有文件")
+    evidence_build.add_argument(
+        "--workspace", required=True, help="隔离 runner 中任务分支的多仓工作区"
+    )
+    evidence_build.add_argument(
+        "--receipt", required=True, help="执行器写出的 receipt.md"
+    )
+    evidence_build.add_argument(
+        "--output", required=True, help="新 ZIP 证据包的输出路径；拒绝覆盖已有文件"
+    )
     evidence_build.add_argument("--signing-key", help="Ed25519 runner 私钥 PEM")
-    evidence_build.add_argument("--key-id", help="已安装到 execution trust store 的 key ID")
-    evidence_build.add_argument("--claim", help="控制面导出的 claim.json；默认读取任务目录")
+    evidence_build.add_argument(
+        "--key-id", help="已安装到 execution trust store 的 key ID"
+    )
+    evidence_build.add_argument(
+        "--claim", help="控制面导出的 claim.json；默认读取任务目录"
+    )
     evidence_build.set_defaults(func=cmd_task_evidence_build)
-    evidence_review = evidence_sub.add_parser("review", help="导入 receipt-bound 复核结果")
+    evidence_review = evidence_sub.add_parser(
+        "review", help="导入 receipt-bound 复核结果"
+    )
     evidence_review.add_argument("id")
     evidence_review.add_argument("--file", required=True)
     evidence_review.set_defaults(func=cmd_task_evidence_review)
-    evidence_review_build = evidence_sub.add_parser("review-build", help="构建独立 reviewer 签名的 review JSON")
+    evidence_review_build = evidence_sub.add_parser(
+        "review-build", help="构建独立 reviewer 签名的 review JSON"
+    )
     evidence_review_build.add_argument("id")
-    evidence_review_build.add_argument("--file", required=True, help="包含 verdict 与绑定字段的 review.md")
+    evidence_review_build.add_argument(
+        "--file", required=True, help="包含 verdict 与绑定字段的 review.md"
+    )
     evidence_review_build.add_argument("--reviewer", required=True)
     evidence_review_build.add_argument("--output", required=True)
     evidence_review_build.add_argument("--signing-key", required=True)
@@ -2765,7 +3254,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="列出证据世代，或按年龄与保留数量安全清理非当前世代",
     )
     evidence_generations.add_argument("id")
-    evidence_generations.add_argument("--prune", action="store_true", help="执行或预演清理计划")
+    evidence_generations.add_argument(
+        "--prune", action="store_true", help="执行或预演清理计划"
+    )
     evidence_generations.add_argument("--older-than-days", type=int, default=30)
     evidence_generations.add_argument("--keep", type=int, default=10)
     evidence_generations.add_argument("--yes", action="store_true")
@@ -2816,9 +3307,7 @@ def _route_experiment_surface(raw: list[str]) -> tuple[str, list[str]] | None:
         dispatch_common.add_argument("--home")
         dispatch_common.add_argument("--dry-run", action="store_true")
         _, dispatch_remaining = dispatch_common.parse_known_args(forwarded)
-        dispatch_command = (
-            dispatch_remaining[0] if dispatch_remaining else ""
-        )
+        dispatch_command = dispatch_remaining[0] if dispatch_remaining else ""
         selected_root = global_args.root
         if global_args.workspace_alias:
             selected_root = str(get_workspace(global_args.workspace_alias).root)
@@ -2859,9 +3348,7 @@ def _maybe_run_daily_update(*, install=perform_update) -> None:
         state = load_update_state()
     except (DyroError, OSError):
         return
-    print(
-        f"\n发现 Dyro {result.latest_version}（当前 {result.current_version}）。"
-    )
+    print(f"\n发现 Dyro {result.latest_version}（当前 {result.current_version}）。")
     if state.auto_patch and result.kind == UpdateKind.PATCH:
         print("已开启补丁版本自动更新，正在安全更新……")
         try:
@@ -2900,7 +3387,16 @@ def main(argv: list[str] | None = None) -> None:
         else:
             cmd_home(args)
     except DyroError as exc:
-        parser.exit(2, f"错误：{exc}\n")
+        parser.exit(2, danger(f"错误：{exc}\n", stream=sys.stderr))
+    except (KeyboardInterrupt, EOFError):
+        parser.exit(
+            130,
+            muted(
+                "\n已停止当前操作；未完成的步骤不会继续。"
+                "若刚开始执行写入、clone 或创建 worktree，请运行 dyro doctor 确认状态。\n",
+                stream=sys.stderr,
+            ),
+        )
 
 
 if __name__ == "__main__":

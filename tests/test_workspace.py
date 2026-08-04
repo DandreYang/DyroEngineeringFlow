@@ -3,7 +3,13 @@ from pathlib import Path
 from dyro.config import load
 from dyro.errors import DyroError
 from dyro.process import Result
-from dyro.workspace import create_line, doctor, line_repository_path, list_lines
+from dyro.workspace import (
+    create_line,
+    doctor,
+    line_repository_path,
+    list_lines,
+    preflight_line,
+)
 
 from .support import WorkspaceCase, shell
 
@@ -44,6 +50,21 @@ class WorkspaceTests(WorkspaceCase):
                 repository_bases={"web": "missing-ref"},
             )
         self.assertFalse((self.root / "versions/partial-preflight").exists())
+        self.assertEqual(list_lines(config), [])
+
+    def test_public_preflight_detects_a_dirty_anchor_without_mutating(self) -> None:
+        config = load(self.root)
+        self.anchor.joinpath("dirty.txt").write_text("pending\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(DyroError, "仓库不干净"):
+            preflight_line(
+                config,
+                line_id="dirty-anchor",
+                branch="feat/dirty-anchor",
+                base="main",
+            )
+
+        self.assertFalse((self.root / "versions/dirty-anchor").exists())
         self.assertEqual(list_lines(config), [])
 
     def test_create_line_rolls_back_when_a_later_repository_fails(self) -> None:

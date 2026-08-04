@@ -7,7 +7,13 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from unittest.mock import patch
 
-from dyro.cli import _route_experiment_surface, _setup_provider_preset, main
+from dyro.cli import (
+    _print_doctor_finding,
+    _print_setup_completion,
+    _route_experiment_surface,
+    _setup_provider_preset,
+    main,
+)
 from dyro.changesets import get_changeset
 from dyro.config import load
 from dyro.hub import load_registry
@@ -53,6 +59,44 @@ class CliTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("invalid choice", stderr.getvalue())
 
+    def test_interrupted_setup_exits_without_a_traceback(self) -> None:
+        stderr = StringIO()
+        with (
+            patch("dyro.cli._interactive_setup", side_effect=KeyboardInterrupt),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(["setup", "--interactive"])
+
+        self.assertEqual(raised.exception.code, 130)
+        self.assertIn("已停止当前操作", stderr.getvalue())
+        self.assertIn("dyro doctor", stderr.getvalue())
+
+    def test_management_views_have_clear_plain_text_headings(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            root = Path(tmp) / "workspace"
+            repository = root / "repositories/api"
+            repository.mkdir(parents=True)
+            from .support import shell
+
+            shell("git", "init", "-b", "main", cwd=repository)
+            shell("git", "config", "user.name", "Test User", cwd=repository)
+            shell("git", "config", "user.email", "test@example.com", cwd=repository)
+            repository.joinpath("README.md").write_text("anchor\n", encoding="utf-8")
+            shell("git", "add", "README.md", cwd=repository)
+            shell("git", "commit", "-m", "chore: initial", cwd=repository)
+            main(["setup", str(root), "--name", "demo", "--no-line"])
+            output = StringIO()
+            with redirect_stdout(output):
+                main(["workspace", "list"])
+                main(["--root", str(root), "doctor"])
+
+            rendered = output.getvalue()
+            self.assertIn("━━ 全局工作区 ━━", rendered)
+            self.assertIn("●", rendered)
+            self.assertIn("━━ Dyro 健康检查 ━━", rendered)
+            self.assertIn("检查通过。", rendered)
+
     def test_init_creates_workspace_contract(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
             root = Path(tmp) / "workspace"
@@ -60,6 +104,22 @@ class CliTests(unittest.TestCase):
             self.assertTrue((root / "dyro.toml").exists())
             self.assertTrue((root / ".dyro/tasks").is_dir())
             self.assertEqual(load(root).name, "demo")
+
+    def test_setup_presentation_uses_semantic_color_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            root = Path(tmp) / "workspace"
+            main(["init", str(root), "--name", "demo"])
+            output = StringIO()
+            with patch.dict(os.environ, {"DYRO_COLOR": "always"}):
+                os.environ.pop("NO_COLOR", None)
+                with redirect_stdout(output):
+                    _print_setup_completion(load(root), None)
+                    _print_doctor_finding("PASS repository api: ready")
+
+            rendered = output.getvalue()
+            self.assertIn("\033[1;32m━━ 设置完成 ━━\033[0m", rendered)
+            self.assertIn("\033[1;36mdemo\033[0m", rendered)
+            self.assertIn("\033[1;32mPASS repository api: ready\033[0m", rendered)
 
     def test_init_discover_creates_config_from_local_git_repositories(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
@@ -241,7 +301,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("not allowed with argument", stderr.getvalue())
 
-    def test_setup_reports_detected_but_unintegrated_providers_without_registering_them(self) -> None:
+    def test_setup_reports_detected_but_unintegrated_providers_without_registering_them(
+        self,
+    ) -> None:
         discovered = {
             "agy",
             "claude",
@@ -254,7 +316,12 @@ class CliTests(unittest.TestCase):
         }
         output = StringIO()
         with (
-            patch("dyro.cli.shutil.which", side_effect=lambda command: f"/fake/{command}" if command in discovered else None),
+            patch(
+                "dyro.cli.shutil.which",
+                side_effect=lambda command: (
+                    f"/fake/{command}" if command in discovered else None
+                ),
+            ),
             redirect_stdout(output),
         ):
             self.assertIsNone(_setup_provider_preset())
@@ -355,7 +422,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(len(config.repositories), 1)
             self.assertTrue((sibling / "versions/dev").is_dir())
 
-    def test_interactive_setup_uses_the_source_branch_as_the_suggested_base(self) -> None:
+    def test_interactive_setup_uses_the_source_branch_as_the_suggested_base(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
             parent = Path(tmp)
             remote = parent / "api-origin.git"
@@ -390,7 +459,18 @@ class StartTests(WorkspaceCase):
     def test_start_dry_run_uses_selected_line_and_adapter(self) -> None:
         config = load(self.root)
         create_line(config, line_id="alpha", branch="feat/alpha", base="main")
-        main(["--root", str(self.root), "--dry-run", "start", "--line", "alpha", "--agent", "noop"])
+        main(
+            [
+                "--root",
+                str(self.root),
+                "--dry-run",
+                "start",
+                "--line",
+                "alpha",
+                "--agent",
+                "noop",
+            ]
+        )
 
     def test_next_without_a_profile_explains_how_to_begin(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
@@ -403,7 +483,9 @@ class StartTests(WorkspaceCase):
 
 
 class LineCommandsTests(WorkspaceCase):
-    def test_line_create_records_per_repository_base_and_storage_without_toml_edits(self) -> None:
+    def test_line_create_records_per_repository_base_and_storage_without_toml_edits(
+        self,
+    ) -> None:
         main(
             [
                 "--root",
@@ -423,34 +505,66 @@ class LineCommandsTests(WorkspaceCase):
         self.assertEqual(line.base_for("api"), "main")
         self.assertEqual(line.storage_for("api"), "linked-worktree")
 
-    def test_changeset_create_records_a_delivery_line_without_manual_toml_edit(self) -> None:
+    def test_changeset_create_records_a_delivery_line_without_manual_toml_edit(
+        self,
+    ) -> None:
         config = load(self.root)
         create_line(config, line_id="alpha", branch="feat/alpha", base="main")
 
-        main(["--root", str(self.root), "changeset", "create", "alpha-ready", "--line", "alpha"])
+        main(
+            [
+                "--root",
+                str(self.root),
+                "changeset",
+                "create",
+                "alpha-ready",
+                "--line",
+                "alpha",
+            ]
+        )
 
         self.assertEqual(get_changeset(load(self.root), "alpha-ready").line, "alpha")
 
 
 class RepositoryCommandsTests(WorkspaceCase):
-    def test_repo_add_registers_an_existing_git_repository_without_manual_toml_edit(self) -> None:
+    def test_repo_add_registers_an_existing_git_repository_without_manual_toml_edit(
+        self,
+    ) -> None:
         web = self.root / "repositories/web"
         web.mkdir(parents=True)
         from .support import shell
 
         shell("git", "init", "-b", "main", cwd=web)
-        shell("git", "remote", "add", "origin", "https://example.test/acme/web.git", cwd=web)
+        shell(
+            "git",
+            "remote",
+            "add",
+            "origin",
+            "https://example.test/acme/web.git",
+            cwd=web,
+        )
         main(["--root", str(self.root), "repo", "add", "repositories/web"])
 
         config = load(self.root)
         self.assertEqual(config.repositories["web"].path, "repositories/web")
         self.assertEqual(config.repositories["web"].mount, "web")
-        self.assertEqual(config.repositories["web"].remote, "https://example.test/acme/web.git")
+        self.assertEqual(
+            config.repositories["web"].remote, "https://example.test/acme/web.git"
+        )
 
 
 class ProfileCommandsTests(WorkspaceCase):
     def test_config_and_agent_management_do_not_require_manual_toml_edits(self) -> None:
-        main(["--root", str(self.root), "config", "set", "policy.execution_mode", "external"])
+        main(
+            [
+                "--root",
+                str(self.root),
+                "config",
+                "set",
+                "policy.execution_mode",
+                "external",
+            ]
+        )
         self.assertEqual(load(self.root).policy.execution_mode, "external")
 
         main(["--root", str(self.root), "agent", "add", "isolated", "--preset", "noop"])
@@ -528,12 +642,16 @@ class ObjectiveCliTests(WorkspaceCase):
         directory = self.config.task_specs_dir / "TASK-A"
         directory.mkdir(parents=True)
         directory.joinpath("task.toml").write_text(
-            task_template("TASK-A", "Task A", "alpha", "api", "services/api").replace('agent = "codex"', 'agent = "noop"'),
+            task_template("TASK-A", "Task A", "alpha", "api", "services/api").replace(
+                'agent = "codex"', 'agent = "noop"'
+            ),
             encoding="utf-8",
         )
         directory.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
 
-    def test_objective_start_dry_run_has_zero_writes_and_lifecycle_commands_work(self) -> None:
+    def test_objective_start_dry_run_has_zero_writes_and_lifecycle_commands_work(
+        self,
+    ) -> None:
         root = str(self.root)
         main(
             [
@@ -582,7 +700,9 @@ class ObjectiveCliTests(WorkspaceCase):
             main(["--root", root, "objective", "status", "release"])
         self.assertIn("Derived result: incomplete", output.getvalue())
 
-    def test_objective_read_only_plan_explain_graph_tick_and_attention_do_not_mutate_state(self) -> None:
+    def test_objective_read_only_plan_explain_graph_tick_and_attention_do_not_mutate_state(
+        self,
+    ) -> None:
         root = str(self.root)
         main(
             [
@@ -602,7 +722,11 @@ class ObjectiveCliTests(WorkspaceCase):
             ]
         )
         objective_dir = self.config.objectives_dir / "release"
-        before = {path.relative_to(objective_dir): path.read_bytes() for path in objective_dir.rglob("*") if path.is_file()}
+        before = {
+            path.relative_to(objective_dir): path.read_bytes()
+            for path in objective_dir.rglob("*")
+            if path.is_file()
+        }
         plan_output = StringIO()
         with redirect_stdout(plan_output):
             main(["--root", root, "objective", "plan", "release", "--format", "json"])
@@ -613,7 +737,9 @@ class ObjectiveCliTests(WorkspaceCase):
         self.assertIn("Objective: release", explain_output.getvalue())
         graph_output = StringIO()
         with redirect_stdout(graph_output):
-            main(["--root", root, "objective", "graph", "release", "--format", "mermaid"])
+            main(
+                ["--root", root, "objective", "graph", "release", "--format", "mermaid"]
+            )
         self.assertIn("flowchart LR", graph_output.getvalue())
         tick_output = StringIO()
         with redirect_stdout(tick_output):
@@ -622,38 +748,84 @@ class ObjectiveCliTests(WorkspaceCase):
         self.assertIn('"wave"', tick_output.getvalue())
         attention_output = StringIO()
         with redirect_stdout(attention_output):
-            main(["--root", root, "objective", "attention", "release", "--format", "json"])
+            main(
+                [
+                    "--root",
+                    root,
+                    "objective",
+                    "attention",
+                    "release",
+                    "--format",
+                    "json",
+                ]
+            )
         self.assertIn('"attention_sha256"', attention_output.getvalue())
         self.assertIn('"items"', attention_output.getvalue())
-        after = {path.relative_to(objective_dir): path.read_bytes() for path in objective_dir.rglob("*") if path.is_file()}
+        after = {
+            path.relative_to(objective_dir): path.read_bytes()
+            for path in objective_dir.rglob("*")
+            if path.is_file()
+        }
         self.assertEqual(before, after)
 
     def test_objective_apply_dry_run_shows_the_exact_wave_without_writing(self) -> None:
         root = str(self.root)
         main(
             [
-                "--root", root, "objective", "start", "--id", "release", "--title", "Release",
-                "--line", "alpha", "--targets", "TASK-A", "--yes",
+                "--root",
+                root,
+                "objective",
+                "start",
+                "--id",
+                "release",
+                "--title",
+                "Release",
+                "--line",
+                "alpha",
+                "--targets",
+                "TASK-A",
+                "--yes",
             ]
         )
         objective_dir = self.config.objectives_dir / "release"
-        before = {path.relative_to(objective_dir): path.read_bytes() for path in objective_dir.rglob("*") if path.is_file()}
+        before = {
+            path.relative_to(objective_dir): path.read_bytes()
+            for path in objective_dir.rglob("*")
+            if path.is_file()
+        }
         output = StringIO()
         with redirect_stdout(output):
             main(["--root", root, "--dry-run", "objective", "apply", "release"])
-        after = {path.relative_to(objective_dir): path.read_bytes() for path in objective_dir.rglob("*") if path.is_file()}
+        after = {
+            path.relative_to(objective_dir): path.read_bytes()
+            for path in objective_dir.rglob("*")
+            if path.is_file()
+        }
         self.assertIn("Tick SHA-256", output.getvalue())
         self.assertIn("DRY RUN", output.getvalue())
         self.assertEqual(before, after)
 
-    def test_objective_apply_noninteractive_uses_stable_confirmation_and_json_envelope(self) -> None:
+    def test_objective_apply_noninteractive_uses_stable_confirmation_and_json_envelope(
+        self,
+    ) -> None:
         from dyro.continuation.supervision import build_supervised_wave
 
         root = str(self.root)
         main(
             [
-                "--root", root, "objective", "start", "--id", "release", "--title", "Release",
-                "--line", "alpha", "--targets", "TASK-A", "--yes",
+                "--root",
+                root,
+                "objective",
+                "start",
+                "--id",
+                "release",
+                "--title",
+                "Release",
+                "--line",
+                "alpha",
+                "--targets",
+                "TASK-A",
+                "--yes",
             ]
         )
         confirmation = build_supervised_wave(self.config, "release").confirmation_sha256
@@ -664,8 +836,16 @@ class ObjectiveCliTests(WorkspaceCase):
         ):
             main(
                 [
-                    "--root", root, "objective", "apply", "release", "--yes",
-                    "--confirm-sha", confirmation, "--format", "json",
+                    "--root",
+                    root,
+                    "objective",
+                    "apply",
+                    "release",
+                    "--yes",
+                    "--confirm-sha",
+                    confirmation,
+                    "--format",
+                    "json",
                 ]
             )
         payload = json.loads(output.getvalue())
@@ -681,8 +861,19 @@ class ObjectiveCliTests(WorkspaceCase):
         root = str(self.root)
         main(
             [
-                "--root", root, "objective", "start", "--id", "release", "--title", "Release",
-                "--line", "alpha", "--targets", "TASK-A", "--yes",
+                "--root",
+                root,
+                "objective",
+                "start",
+                "--id",
+                "release",
+                "--title",
+                "Release",
+                "--line",
+                "alpha",
+                "--targets",
+                "TASK-A",
+                "--yes",
             ]
         )
         confirmation = build_supervised_wave(self.config, "release").confirmation_sha256
@@ -695,8 +886,14 @@ class ObjectiveCliTests(WorkspaceCase):
         ):
             main(
                 [
-                    "--root", root, "objective", "apply", "release", "--yes",
-                    "--confirm-sha", confirmation,
+                    "--root",
+                    root,
+                    "objective",
+                    "apply",
+                    "release",
+                    "--yes",
+                    "--confirm-sha",
+                    confirmation,
                 ]
             )
         self.assertEqual(rejected.exception.code, 2)
@@ -715,9 +912,9 @@ class DaemonSelectionTests(WorkspaceCase):
         task_path = config.task_specs_dir / "TASK-DAEMON"
         task_path.mkdir(parents=True)
         task_path.joinpath("task.toml").write_text(
-            task_template("TASK-DAEMON", "daemon backlog", "alpha", "api", "services/api").replace(
-                'agent = "codex"', 'agent = "noop"'
-            ),
+            task_template(
+                "TASK-DAEMON", "daemon backlog", "alpha", "api", "services/api"
+            ).replace('agent = "codex"', 'agent = "noop"'),
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
@@ -736,9 +933,9 @@ class DaemonSelectionTests(WorkspaceCase):
         task_path = config.task_specs_dir / "TASK-ONCE"
         task_path.mkdir(parents=True)
         task_path.joinpath("task.toml").write_text(
-            task_template("TASK-ONCE", "daemon once", "alpha", "api", "services/api").replace(
-                'agent = "codex"', 'agent = "noop"'
-            ),
+            task_template(
+                "TASK-ONCE", "daemon once", "alpha", "api", "services/api"
+            ).replace('agent = "codex"', 'agent = "noop"'),
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
