@@ -242,7 +242,16 @@ class CliTests(unittest.TestCase):
         self.assertIn("not allowed with argument", stderr.getvalue())
 
     def test_setup_reports_detected_but_unintegrated_providers_without_registering_them(self) -> None:
-        discovered = {"claude", "cursor-agent", "grok", "opencode", "hermes", "kimi"}
+        discovered = {
+            "agy",
+            "claude",
+            "cursor-agent",
+            "grok",
+            "opencode",
+            "hermes",
+            "kimi",
+            "qodercli",
+        }
         output = StringIO()
         with (
             patch("dyro.cli.shutil.which", side_effect=lambda command: f"/fake/{command}" if command in discovered else None),

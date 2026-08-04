@@ -365,7 +365,17 @@ def _setup_provider_preset() -> str | None:
 
     discovered = [
         command
-        for command in ("codex", "claude", "cursor-agent", "grok", "opencode", "hermes", "kimi")
+        for command in (
+            "agy",
+            "codex",
+            "claude",
+            "cursor-agent",
+            "grok",
+            "opencode",
+            "hermes",
+            "kimi",
+            "qodercli",
+        )
         if shutil.which(command)
     ]
     if not discovered:

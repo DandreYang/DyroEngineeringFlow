@@ -200,11 +200,26 @@ def _cursor_desktop_argv(workspace: Path) -> tuple[tuple[str, ...], bool]:
     return ("cursor", str(workspace)), False
 
 
+def _zcode_desktop_argv(workspace: Path) -> tuple[tuple[str, ...], bool]:
+    if shutil.which("zcode") is not None:
+        return ("zcode", str(workspace)), True
+    if sys.platform == "darwin":
+        candidates = (
+            Path("/Applications/ZCode.app"),
+            Path.home() / "Applications" / "ZCode.app",
+        )
+        if any(candidate.is_dir() for candidate in candidates) and shutil.which("open"):
+            return ("open", "-a", "ZCode", str(workspace)), True
+    return ("zcode", str(workspace)), False
+
+
 def _launcher_tool(
     definition: ToolDefinition, *, config: Config, workspace: Path
 ) -> HomeTool:
     if definition.id == "cursor-desktop":
         argv, installed = _cursor_desktop_argv(workspace)
+    elif definition.id == "zcode":
+        argv, installed = _zcode_desktop_argv(workspace)
     else:
         argv = expand_argv(
             definition.launch,
@@ -669,6 +684,10 @@ def _choose_action(
     switch_index = console_index + 1
     if can_switch:
         print(f"  {switch_index}) 切换项目")
+    new_line_index = switch_index + 1 if can_switch else console_index + 1
+    new_hotfix_index = new_line_index + 1
+    print(f"  {new_line_index}) 开启新的功能开发线")
+    print(f"  {new_hotfix_index}) 处理新的线上问题 / Hotfix")
     print("  q) 退出")
     if not interactive_terminal():
         print(
@@ -691,6 +710,10 @@ def _choose_action(
         return "console", ""
     if can_switch and selected == switch_index:
         return "switch", ""
+    if selected == new_line_index:
+        return "new-line", ""
+    if selected == new_hotfix_index:
+        return "new-hotfix", ""
     raise DyroError("菜单编号超出范围")
 
 
@@ -705,38 +728,72 @@ def _tool_state_labels(
     definition = tool_definition(tool.id)
     if tool.kind == "adapter":
         if tool.state == ToolState.READY:
-            labels = ["已配置"]
+            labels = ["Dyro 已接入"]
         elif tool.state == ToolState.INSTALLABLE:
-            labels = ["已配置但不可用", "可引导安装"]
+            labels = ["已接入，待安装"]
         else:
-            labels = ["已配置但不可用"]
+            labels = ["已接入但不可用"]
     elif tool.state == ToolState.READY:
         interface = definition.interface if definition else "terminal"
         if interface == "desktop":
-            labels = ["已安装", "桌面应用", "仅打开工作区"]
+            labels = ["桌面应用"]
         elif interface == "runtime":
-            labels = ["已安装", "外部运行时", "仅打开工作区"]
+            labels = ["外部运行时"]
         elif tool.id == "shell":
             labels = ["终端兜底"]
         else:
-            labels = ["已安装", "仅打开工作区"]
+            labels = ["打开工作区"]
     elif tool.state == ToolState.NEEDS_SETUP:
-        labels = ["已安装", "待初始化", "仅打开工作区"]
+        labels = ["待初始化"]
     elif tool.state == ToolState.INSTALLABLE:
-        labels = ["未安装", "可引导安装"]
+        labels = ["未安装，可引导安装"]
     else:
-        labels = ["未安装", "暂无内置安装方案"]
+        labels = ["不可用"]
     if tool.id == last_tool:
-        labels.append("上次使用")
+        labels.append("上次")
     if tool.id == recommended_tool:
         labels.append("项目推荐")
     if tool.id == preferences.default_tool:
-        labels.append("个人默认")
+        labels.append("默认")
     if tool.id in preferences.pinned_tools:
-        labels.append("已置顶")
+        labels.append("置顶")
     if tool.id == default.id:
         labels.append("回车默认")
     return labels
+
+
+def _primary_home_tools(
+    tools: list[HomeTool],
+    *,
+    default: HomeTool,
+    last_tool: str,
+    recommended_tool: str,
+    preferences: ToolPreferences,
+) -> list[HomeTool]:
+    by_id = {tool.id: tool for tool in tools}
+    preferred_ids = (
+        default.id,
+        last_tool,
+        recommended_tool,
+        preferences.default_tool,
+        *preferences.pinned_tools,
+    )
+    primary: list[HomeTool] = []
+    for tool_id in preferred_ids:
+        tool = by_id.get(tool_id)
+        if tool and (tool.available or tool == default) and tool not in primary:
+            primary.append(tool)
+    for tool in tools:
+        if tool.kind == "adapter" and tool.available and tool not in primary:
+            primary.append(tool)
+    return primary[:3]
+
+
+def _matches_home_tool(tool: HomeTool, value: str) -> bool:
+    if tool.id.lower() == value or tool.label.lower() == value:
+        return True
+    definition = tool_definition(tool.id)
+    return bool(definition and definition.command.lower() == value)
 
 
 def _install_id(config: Config, tool: HomeTool) -> str:
@@ -777,44 +834,79 @@ def _choose_tool(
         preferences=preferences,
     )
     ready = [tool for tool in tools if tool.state == ToolState.READY]
-    available = [tool for tool in tools if tool.available]
-    if not available:
+    selectable = [
+        tool
+        for tool in tools
+        if tool.available or tool.state == ToolState.INSTALLABLE
+    ]
+    if not selectable:
         print_agent_discovery(config)
         raise DyroError("当前项目没有可启动的编码工具；请选择可引导安装的工具")
-    default = ready[0] if ready else available[0]
-    print("\n使用哪个编码工具？\n")
-    for index, tool in enumerate(tools, start=1):
-        labels = _tool_state_labels(
-            tool,
-            default=default,
-            last_tool=last_tool,
-            recommended_tool=config.recommended_tool,
-            preferences=preferences,
+    default = ready[0] if ready else selectable[0]
+    show_all = False
+    while True:
+        displayed = (
+            tools
+            if show_all
+            else _primary_home_tools(
+                tools,
+                default=default,
+                last_tool=last_tool,
+                recommended_tool=config.recommended_tool,
+                preferences=preferences,
+            )
         )
-        print(f"  {index}) {tool.label}（{'，'.join(labels)}）")
-    print("  q) 退出")
-    raw = (
-        input(f"\n请选择（输入编号或工具名，直接回车默认 {default.label}）：")
-        .strip()
-        .lower()
-    )
-    if not raw:
-        return default
-    if raw in {"q", "quit"}:
-        return None
-    if raw.isdigit() and 1 <= int(raw) <= len(tools):
-        selected = tools[int(raw) - 1]
-    else:
-        selected = next(
-            (
-                tool
-                for tool in tools
-                if tool.id.lower() == raw or tool.label.lower() == raw
-            ),
-            None,
+        print("\n全部编码工具：\n" if show_all else "\n常用编码工具：\n")
+        for index, tool in enumerate(displayed, start=1):
+            labels = _tool_state_labels(
+                tool,
+                default=default,
+                last_tool=last_tool,
+                recommended_tool=config.recommended_tool,
+                preferences=preferences,
+            )
+            print(f"  {index}) {tool.label}（{'，'.join(labels)}）")
+        if show_all:
+            print("  b) 返回常用工具")
+        else:
+            hidden_ready = sum(
+                tool.available and tool not in displayed for tool in tools
+            )
+            installable = sum(
+                tool.state == ToolState.INSTALLABLE for tool in tools
+            )
+            details = []
+            if hidden_ready:
+                details.append(f"{hidden_ready} 个已安装")
+            if installable:
+                details.append(f"{installable} 个可安装")
+            suffix = f"（{'，'.join(details)}）" if details else ""
+            print(f"  m) 更多工具{suffix}")
+        print("  q) 退出")
+        raw = (
+            input(
+                f"\n请选择（编号或工具名，直接回车默认 {default.label}）："
+            )
+            .strip()
+            .lower()
         )
-    if selected is None:
-        raise DyroError("无效的编码工具选择")
+        if not raw:
+            return default
+        if raw in {"q", "quit"}:
+            return None
+        if raw in {"m", "more", "更多"}:
+            show_all = True
+            continue
+        if raw in {"b", "back", "返回"} and show_all:
+            show_all = False
+            continue
+        if raw.isdigit() and 1 <= int(raw) <= len(displayed):
+            selected = displayed[int(raw) - 1]
+        else:
+            selected = next((tool for tool in tools if _matches_home_tool(tool, raw)), None)
+        if selected is None:
+            raise DyroError("无效的编码工具选择")
+        break
     if selected.state == ToolState.INSTALLABLE:
         install_id = _install_id(config, selected)
         if not install_tool(install_id, yes=False, dry_run=dry_run):
@@ -862,6 +954,21 @@ def _switch_workspace(dry_run: bool) -> None:
     _run_config_home(load(record.root), record, dry_run)
 
 
+def _print_new_line_guidance(config: Config) -> None:
+    print("\n新功能开发线会创建隔离 Git worktree。")
+    print("先确认功能 ID、范围、参与仓库与基线；确认后才会修改 Git 工作区。")
+    print(
+        "下一步："
+        f"dyro line create <ID> --base {shlex.quote(config.policy.default_base)} --yes"
+    )
+
+
+def _print_new_hotfix_guidance() -> None:
+    print("\nHotfix 需要已核实的生产 release 分支、tag 或部署 SHA。")
+    print("确认问题 ID 和基线后，才会创建隔离的 Hotfix worktree。")
+    print("下一步：dyro hotfix create <问题ID> --base <已核实的 release/tag/SHA> --yes")
+
+
 def _run_config_home(
     config: Config, record: WorkspaceRecord | None, dry_run: bool
 ) -> None:
@@ -902,6 +1009,12 @@ def _run_config_home(
         return
     if kind == "switch":
         _switch_workspace(dry_run)
+        return
+    if kind == "new-line":
+        _print_new_line_guidance(config)
+        return
+    if kind == "new-hotfix":
+        _print_new_hotfix_guidance()
         return
     if kind == "task":
         task = load_task(config, target_id)

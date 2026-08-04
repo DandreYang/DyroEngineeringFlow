@@ -15,6 +15,7 @@ from dyro.tooling import (
     install_tool,
     load_tool_preferences,
     save_tool_preferences,
+    tool_definition,
 )
 
 
@@ -54,6 +55,19 @@ class ToolPreferenceTests(unittest.TestCase):
 
 
 class GuidedInstallerTests(unittest.TestCase):
+    def test_catalog_includes_antigravity_qoder_and_zcode(self) -> None:
+        antigravity = tool_definition("antigravity")
+        qoder = tool_definition("qoder")
+        zcode = tool_definition("zcode")
+
+        self.assertEqual(antigravity.command if antigravity else "", "agy")
+        self.assertEqual(qoder.command if qoder else "", "qodercli")
+        self.assertEqual(zcode.interface if zcode else "", "desktop")
+        self.assertEqual(
+            qoder.install.argv if qoder and qoder.install else (),
+            ("npm", "install", "-g", "@qoder-ai/qodercli"),
+        )
+
     def test_command_recipe_is_explicit_argv_and_requires_confirmation(self) -> None:
         calls: list[tuple[str, ...]] = []
 
