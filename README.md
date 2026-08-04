@@ -397,11 +397,15 @@ on the local machine are labeled `open workspace only` and receive no gate,
 review, merge, or push authority. Explicit commands such as
 `dyro open dev --agent codex` continue to launch directly for scripts.
 
-The picker detects Cursor Desktop separately from Cursor CLI and supports
-OpenClaw as a launch-only external runtime. Ready tools appear before tools that
-need setup or installation; the current workspace's last choice, project
-recommendation, personal default, and pinned order provide stable tie-breaking.
-Selecting a missing supported tool opens a confirmation-first guided installer:
+The picker detects Cursor Desktop separately from Cursor CLI, supports
+Antigravity CLI (`agy`) and Qoder CLI (`qodercli`) as launch-only terminal
+tools, opens ZCode as a launch-only desktop tool, and supports OpenClaw as a
+launch-only external runtime. It begins with at most three common choices;
+type `m` for the full catalog or enter a tool ID, label, or command directly.
+Ready tools appear before tools that need setup or installation; the current
+workspace's last choice, project recommendation, personal default, and pinned
+order provide stable tie-breaking. Selecting a missing supported tool opens a
+confirmation-first guided installer:
 
 ```bash
 dyro tool list

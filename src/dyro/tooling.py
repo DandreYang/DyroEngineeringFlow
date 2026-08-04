@@ -62,6 +62,18 @@ _NPM_RISK = "将联网下载软件包，并可能执行软件包提供的安装�
 
 TOOL_DEFINITIONS = (
     ToolDefinition(
+        "antigravity",
+        "Antigravity CLI",
+        "agy",
+        "terminal",
+        ("agy",),
+        install=InstallGuide(
+            "https://antigravity.google/download",
+            "Antigravity 官方用户级安装目录",
+            remote_script_only=True,
+        ),
+    ),
+    ToolDefinition(
         "codex",
         "Codex",
         "codex",
@@ -168,6 +180,32 @@ TOOL_DEFINITIONS = (
             ("npm", "install", "-g", "@moonshot-ai/kimi-code@latest"),
             prerequisite="npm",
             risk=_NPM_RISK,
+        ),
+    ),
+    ToolDefinition(
+        "qoder",
+        "Qoder CLI",
+        "qodercli",
+        "terminal",
+        ("qodercli",),
+        install=InstallGuide(
+            "https://docs.qoder.com/en/cli/quick-start",
+            _NPM_SCOPE,
+            ("npm", "install", "-g", "@qoder-ai/qodercli"),
+            prerequisite="npm",
+            risk=_NPM_RISK,
+        ),
+    ),
+    ToolDefinition(
+        "zcode",
+        "ZCode",
+        "zcode",
+        "desktop",
+        ("zcode", "{workspace}"),
+        install=InstallGuide(
+            "https://zcode.z.ai/en/docs/install",
+            "当前操作系统的桌面应用",
+            remote_script_only=True,
         ),
     ),
 )

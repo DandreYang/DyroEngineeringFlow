@@ -13,6 +13,8 @@ from dyro.cli import _route_experiment_surface, build_parser, main
 from dyro.config import load
 from dyro.home import (
     HomeTool,
+    _choose_action,
+    _choose_tool,
     _openclaw_needs_setup,
     home_tools,
     sort_home_tools,
@@ -175,6 +177,7 @@ class HubCliTests(WorkspaceCase):
         add_workspace(self.root, name="demo", make_default=True)
         output = StringIO()
         with (
+            patch("dyro.home.Path.cwd", return_value=self.root.parent),
             patch("dyro.home.interactive_terminal", return_value=True),
             patch("builtins.input", return_value=""),
             redirect_stdout(output),
@@ -184,7 +187,7 @@ class HubCliTests(WorkspaceCase):
         rendered = output.getvalue()
         self.assertIn("test-workspace", rendered)
         self.assertIn("alpha", rendered)
-        self.assertIn("使用哪个编码工具", rendered)
+        self.assertIn("常用编码工具", rendered)
         self.assertIn("noop", rendered)
         self.assertIn("/usr/bin/true", rendered)
         self.assertEqual(load_registry().workspaces[0].last_target, "")
@@ -194,6 +197,7 @@ class HubCliTests(WorkspaceCase):
         add_workspace(self.root, name="demo", make_default=True)
         output = StringIO()
         with (
+            patch("dyro.home.Path.cwd", return_value=self.root.parent),
             patch("dyro.home.interactive_terminal", return_value=True),
             patch("builtins.input", return_value="3"),
             patch("dyro.console.launcher.create_console_http_server") as server_factory,
@@ -204,6 +208,55 @@ class HubCliTests(WorkspaceCase):
         self.assertIn("DRY RUN: 将启动只读本地 Console", output.getvalue())
         server_factory.assert_not_called()
 
+    def test_home_lists_safe_new_work_entrypoints(self) -> None:
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", return_value="3"),
+            redirect_stdout(output),
+        ):
+            action = _choose_action([], can_switch=False)
+
+        self.assertEqual(action, ("new-line", ""))
+        self.assertIn("开启新的功能开发线", output.getvalue())
+        self.assertIn("处理新的线上问题 / Hotfix", output.getvalue())
+
+    def test_home_new_feature_entrypoint_only_prints_next_step(self) -> None:
+        add_workspace(self.root, name="demo", make_default=True)
+        before_config = self.root.joinpath("dyro.toml").read_bytes()
+        before_registry = load_registry()
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", return_value="3"),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        rendered = output.getvalue()
+        self.assertIn("新功能开发线会创建隔离 Git worktree", rendered)
+        self.assertIn("dyro line create <ID> --base main --yes", rendered)
+        self.assertEqual(self.root.joinpath("dyro.toml").read_bytes(), before_config)
+        self.assertEqual(load_registry(), before_registry)
+
+    def test_home_hotfix_entrypoint_only_prints_next_step(self) -> None:
+        add_workspace(self.root, name="demo", make_default=True)
+        before_config = self.root.joinpath("dyro.toml").read_bytes()
+        before_registry = load_registry()
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", return_value="4"),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        rendered = output.getvalue()
+        self.assertIn("Hotfix 需要已核实的生产 release 分支、tag 或部署 SHA", rendered)
+        self.assertIn("dyro hotfix create <问题ID> --base", rendered)
+        self.assertEqual(self.root.joinpath("dyro.toml").read_bytes(), before_config)
+        self.assertEqual(load_registry(), before_registry)
+
     def test_home_can_open_a_detected_tool_without_granting_adapter_capabilities(
         self,
     ) -> None:
@@ -213,6 +266,7 @@ class HubCliTests(WorkspaceCase):
         answers = iter(["", "claude"])
         output = StringIO()
         with (
+            patch("dyro.home.Path.cwd", return_value=self.root.parent),
             patch("dyro.home.interactive_terminal", return_value=True),
             patch("builtins.input", side_effect=lambda _: next(answers)),
             patch(
@@ -224,8 +278,7 @@ class HubCliTests(WorkspaceCase):
             main(["--dry-run"])
 
         rendered = output.getvalue()
-        self.assertIn("Claude Code", rendered)
-        self.assertIn("仅打开工作区", rendered)
+        self.assertIn("更多工具", rendered)
         self.assertIn("$ claude", rendered)
         self.assertNotIn("claude", load(self.root).adapters)
         self.assertEqual(self.root.joinpath("dyro.toml").read_bytes(), before)
@@ -244,6 +297,67 @@ class HubCliTests(WorkspaceCase):
         self.assertEqual(codex.argv, ("codex", "-C", str(self.root)))
         self.assertTrue(codex.available)
         self.assertNotIn("codex", load(self.root).adapters)
+
+    def test_home_detects_antigravity_qoder_and_zcode_as_launch_only_tools(
+        self,
+    ) -> None:
+        discovered = {"agy", "qodercli", "zcode"}
+        with patch(
+            "dyro.home.shutil.which",
+            side_effect=lambda name: f"/fake/{name}" if name in discovered else None,
+        ):
+            tools = home_tools(load(self.root), workspace=self.root)
+
+        by_id = {tool.id: tool for tool in tools}
+        self.assertEqual(by_id["antigravity"].argv, ("agy",))
+        self.assertEqual(by_id["qoder"].argv, ("qodercli",))
+        self.assertEqual(by_id["zcode"].argv, ("zcode", str(self.root)))
+        for tool_id in ("antigravity", "qoder", "zcode"):
+            self.assertEqual(by_id[tool_id].kind, "launcher")
+            self.assertEqual(by_id[tool_id].state, ToolState.READY)
+            self.assertNotIn(tool_id, load(self.root).adapters)
+
+    def test_home_tool_picker_shows_common_choices_before_full_catalog(self) -> None:
+        discovered = {"agy", "claude", "kimi", "qodercli", "zcode"}
+        answers = iter(["m", "antigravity"])
+        output = StringIO()
+        with (
+            patch(
+                "dyro.home.shutil.which",
+                side_effect=lambda name: f"/fake/{name}" if name in discovered else None,
+            ),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            redirect_stdout(output),
+        ):
+            tool = _choose_tool(
+                load(self.root), None, workspace=self.root, dry_run=True
+            )
+
+        self.assertIsNotNone(tool)
+        self.assertEqual(tool.id if tool else "", "antigravity")
+        rendered = output.getvalue()
+        self.assertIn("更多工具", rendered)
+        self.assertIn("Antigravity CLI", rendered)
+
+    def test_home_tool_picker_offers_installable_default_when_nothing_is_ready(
+        self,
+    ) -> None:
+        installable = HomeTool(
+            "qoder", "Qoder CLI", "launcher", ("qodercli",), (), ToolState.INSTALLABLE
+        )
+        output = StringIO()
+        with (
+            patch("dyro.home.home_tools", return_value=[installable]),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(output),
+        ):
+            tool = _choose_tool(
+                load(self.root), None, workspace=self.root, dry_run=True
+            )
+
+        self.assertEqual(tool, installable)
+        self.assertIn("Qoder CLI", output.getvalue())
+        self.assertIn("未安装，可引导安装", output.getvalue())
 
     def test_home_detects_cursor_desktop_separately_from_cursor_cli(self) -> None:
         def detected(name: str) -> str | None:
@@ -408,6 +522,7 @@ class HubCliTests(WorkspaceCase):
         output = StringIO()
         before = self.root.joinpath("dyro.toml").read_bytes()
         with (
+            patch("dyro.home.Path.cwd", return_value=self.root.parent),
             patch("dyro.home.interactive_terminal", return_value=True),
             patch("dyro.home.shutil.which", side_effect=detected),
             patch("dyro.home._openclaw_needs_setup", return_value=True),
@@ -444,6 +559,7 @@ class HubCliTests(WorkspaceCase):
 
         output = StringIO()
         with (
+            patch("dyro.home.Path.cwd", return_value=self.root.parent),
             patch("dyro.home.interactive_terminal", return_value=True),
             patch("builtins.input", return_value=""),
             redirect_stdout(output),
@@ -638,6 +754,7 @@ write = ["codex"]
     def test_first_use_without_registry_is_actionable_and_non_mutating(self) -> None:
         output = StringIO()
         with (
+            patch("dyro.home.Path.cwd", return_value=self.root.parent),
             patch("dyro.home.interactive_terminal", return_value=False),
             redirect_stdout(output),
         ):

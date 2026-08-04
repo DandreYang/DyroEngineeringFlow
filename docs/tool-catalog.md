@@ -75,10 +75,21 @@ user can inspect and choose the platform-specific installer. This applies to
 Cursor CLI and Hermes; Cursor Desktop likewise opens the official download
 page.
 
-Current catalog entries include Codex, Claude Code, Cursor Desktop, Cursor CLI,
-Grok, OpenCode, OpenClaw, Hermes, Kimi Code, and Shell. An entry can be known
+Current catalog entries include Antigravity CLI, Codex, Claude Code, Cursor
+Desktop, Cursor CLI, Grok, OpenCode, OpenClaw, Hermes, Kimi Code, Qoder CLI,
+ZCode, and Shell. Antigravity uses the official `agy` command; Qoder uses
+`qodercli`; ZCode is opened as a desktop workspace tool. An entry can be known
 without having an audited installation recipe; such entries fail closed with
 an actionable message.
+
+## Compact Home picker
+
+Home starts by showing at most three common choices: the most recent or
+default tool, project recommendation, user pins, and available Dyro adapters.
+This keeps everyday startup short while retaining the full catalog. Enter a
+tool ID, label, or command directly, or type `m` to expand the full list,
+including guided-install choices. The shorter display does not change launch
+authority: launch-only tools still only open the selected workspace.
 
 ## Cursor Desktop and OpenClaw
 
