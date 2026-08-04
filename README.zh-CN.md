@@ -8,6 +8,18 @@
 
 DyroEngineeringFlow 不绑定 Codex、Claude 或任何业务领域。每个团队通过 `dyro.toml` Profile 定义仓库、目录布局、Agent adapter 与交付策略；业务规则、模型成本和发布实践始终留在各自的 Profile 中。
 
+## 本地 Web 控制台
+
+可在任意目录运行 `dyro console`，打开已登记工作区的只读本地总览。它只绑定随机端口的 `127.0.0.1`，通过一次性 fragment secret 与浏览器建立会话，不暴露网络监听，也不提供浏览器写操作。
+
+```bash
+dyro console
+dyro --workspace platform console --no-open
+dyro --root /path/to/profile console
+```
+
+控制台展示工作区健康、需要关注的事项、Task 执行计数、活跃 Objective 和一条安全的下一步 CLI 命令。它不会启动 Agent、改变任务状态、标记最近使用、合并、push 或访问外部服务。只读边界与恢复方式见 [Console 设计](docs/designs/local-web-console.md)。
+
 ## 核心约束
 
 - 一个任务只能属于一条开发线，不能混用功能版本与 Hotfix 工作区。

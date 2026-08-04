@@ -10,6 +10,18 @@
 
 DyroEngineeringFlow is not coupled to Codex, Claude, or any business domain. Each team supplies a `dyro.toml` Profile for repositories, layouts, agent adapters, and delivery policy; business rules, model cost, and release practices stay in that Profile.
 
+## Local web Console
+
+Run `dyro console` from any directory to open a read-only local dashboard for registered workspaces. It binds only to `127.0.0.1` on a random port, hands the browser a one-time fragment secret, and never exposes a network listener or browser write actions.
+
+```bash
+dyro console
+dyro --workspace platform console --no-open
+dyro --root /path/to/profile console
+```
+
+The dashboard surfaces workspace health, attention, task execution counts, active objectives, and a safe next CLI command. It never runs agents, changes task state, marks a workspace as recently used, merges, pushes, or contacts external services. See the [Console design](docs/designs/local-web-console.md) for the read-only boundary and recovery behavior.
+
 ## What it enforces
 
 - A task belongs to exactly one development line—never a mixed feature or hotfix workspace.

@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .. import __version__
+from .assets import ConsoleAssetError, load_asset, validate_assets
 from .inspection import IsolatedOverviewService
 from .overview import ConsoleOverviewError
 from .session import ConsoleSessionStore, SessionRejected
@@ -30,9 +31,6 @@ _CSP = (
     "connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; "
     "form-action 'none'; frame-ancestors 'none'"
 )
-_STATIC_SHELL = b"""<!doctype html>
-<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Dyro Console</title></head>
-<body><main><h1>Dyro Console</h1><p>Secure local session is starting.</p></main></body></html>"""
 _TOKEN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 
@@ -59,6 +57,10 @@ class ConsoleHTTPServer(ThreadingHTTPServer):
         initial_workspace: str | None,
         max_concurrent_requests: int,
     ) -> None:
+        try:
+            validate_assets()
+        except ConsoleAssetError:
+            raise ValueError("Console static assets unavailable") from None
         self._request_slots = threading.BoundedSemaphore(max_concurrent_requests)
         self.sessions = session_store
         self.overview_service = overview_service or IsolatedOverviewService()
@@ -272,7 +274,13 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             if self._has_body():
                 self._error(400, "BAD_REQUEST")
                 return
-            self._send(200, _STATIC_SHELL, "text/html; charset=utf-8")
+            self._asset("index.html")
+            return
+        if self.command == "GET" and parsed.path.startswith("/assets/"):
+            if self._has_body():
+                self._error(400, "BAD_REQUEST")
+                return
+            self._asset(parsed.path.removeprefix("/assets/"))
             return
         if parsed.path == "/api/v1/session":
             if self.command != "POST":
@@ -329,6 +337,17 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             self._error(401, "UNAUTHORIZED")
             return
         self._error(404, "NOT_FOUND")
+
+    def _asset(self, name: str) -> None:
+        if not name or "/" in name or "\\" in name:
+            self._error(404, "NOT_FOUND")
+            return
+        try:
+            asset = load_asset(name)
+        except ConsoleAssetError:
+            self._error(404, "NOT_FOUND")
+            return
+        self._send(200, asset.body, asset.content_type)
 
     def _overview(self, query: str) -> None:
         service = self.console.overview_service

@@ -50,7 +50,7 @@ jobs:
         run: uv run python -m compileall -q src tests experiments
 
   wheel-smoke:
-    name: Wheel/sdist install smoke (dispatch)
+    name: Wheel/sdist install smoke (dispatch + console)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -82,7 +82,12 @@ jobs:
           "$smoke_root/wheel-venv/bin/pip" install /tmp/dyro-dist/dyro-*.whl
           "$smoke_root/wheel-venv/bin/python" -c "import experiments.local_agent_dispatch"
           "$smoke_root/wheel-venv/bin/python" -I -c "import dyro.continuation"
+          "$smoke_root/wheel-venv/bin/python" -I -c "from dyro.console.assets import validate_assets; validate_assets()"
           DYRO_LOCAL_AGENT_DISPATCH_HOME="$smoke_root/wheel-dispatch-home" "$smoke_root/wheel-venv/bin/dyro" dispatch doctor >"$smoke_root/dispatch-doctor.json"
+          uv run python -m venv "$smoke_root/sdist-venv"
+          "$smoke_root/sdist-venv/bin/pip" install /tmp/dyro-dist/dyro-*.tar.gz
+          "$smoke_root/sdist-venv/bin/python" -I -c "import dyro.continuation"
+          "$smoke_root/sdist-venv/bin/python" -I -c "from dyro.console.assets import validate_assets; validate_assets()"
 
   windows-dispatch-import:
     name: Windows dispatch import / fail-closed smoke
