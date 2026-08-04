@@ -50,7 +50,7 @@ jobs:
         run: uv run python -m compileall -q src tests experiments
 
   wheel-smoke:
-    name: Wheel/sdist install smoke (dispatch + console)
+    name: Wheel/sdist install smoke (dispatch)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
