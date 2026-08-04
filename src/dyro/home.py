@@ -6,6 +6,7 @@ from pathlib import Path
 import shlex
 import shutil
 import sys
+from urllib.parse import urlencode
 
 from .config import CONFIG_NAME, Config, expand_argv, load
 from .errors import DyroError, ValidationError
@@ -200,6 +201,41 @@ def _cursor_desktop_argv(workspace: Path) -> tuple[tuple[str, ...], bool]:
     return ("cursor", str(workspace)), False
 
 
+def _macos_app_name(*names: str) -> str | None:
+    if sys.platform != "darwin":
+        return None
+    for name in names:
+        candidates = (
+            Path("/Applications") / f"{name}.app",
+            Path.home() / "Applications" / f"{name}.app",
+        )
+        if any(candidate.is_dir() for candidate in candidates):
+            return name
+    return None
+
+
+def _codex_desktop_argv(workspace: Path) -> tuple[tuple[str, ...], bool]:
+    argv = ("codex", "app", str(workspace))
+    app_name = _macos_app_name("Codex", "ChatGPT")
+    if app_name is None:
+        return argv, False
+    if shutil.which("codex") is not None:
+        return argv, True
+    if shutil.which("open") is not None:
+        return ("open", "-a", app_name, str(workspace)), True
+    return argv, False
+
+
+def _claude_desktop_argv(workspace: Path) -> tuple[tuple[str, ...], bool]:
+    url = "claude://code/new?" + urlencode({"folder": str(workspace)})
+    if (
+        _macos_app_name("Claude", "Claude Code URL Handler") is not None
+        and shutil.which("open") is not None
+    ):
+        return ("open", url), True
+    return ("open", url), False
+
+
 def _zcode_desktop_argv(workspace: Path) -> tuple[tuple[str, ...], bool]:
     if shutil.which("zcode") is not None:
         return ("zcode", str(workspace)), True
@@ -218,6 +254,10 @@ def _launcher_tool(
 ) -> HomeTool:
     if definition.id == "cursor-desktop":
         argv, installed = _cursor_desktop_argv(workspace)
+    elif definition.id == "codex-desktop":
+        argv, installed = _codex_desktop_argv(workspace)
+    elif definition.id == "claude-desktop":
+        argv, installed = _claude_desktop_argv(workspace)
     elif definition.id == "zcode":
         argv, installed = _zcode_desktop_argv(workspace)
     else:
@@ -396,25 +436,23 @@ def print_agent_discovery(config: Config) -> None:
                 else "未安装；暂无内置安装方案"
             )
         print(f"{command:16} {'已检测' if installed else '-':10} {state:16} {note}")
-    cursor_definition = next(
-        definition
-        for definition in TOOL_DEFINITIONS
-        if definition.id == "cursor-desktop"
-    )
-    cursor_desktop = _launcher_tool(
-        cursor_definition, config=config, workspace=config.root
-    )
-    desktop_state = "已检测" if cursor_desktop.available else "-"
-    desktop_note = (
-        "首页可打开工作区；不获得执行、门禁或复核权限"
-        if cursor_desktop.available
-        else "未安装；可运行 dyro tool install cursor-desktop"
-    )
-    desktop_integration = "尚未集成" if cursor_desktop.available else "-"
-    print(
-        f"{'cursor-desktop':16} {desktop_state:10} "
-        f"{desktop_integration:16} {desktop_note}"
-    )
+    for definition in TOOL_DEFINITIONS:
+        if definition.interface != "desktop":
+            continue
+        desktop_tool = _launcher_tool(
+            definition, config=config, workspace=config.root
+        )
+        desktop_state = "已检测" if desktop_tool.available else "-"
+        desktop_note = (
+            "首页可打开工作区；不获得执行、门禁或复核权限"
+            if desktop_tool.available
+            else f"未安装；可运行 dyro tool install {definition.id}"
+        )
+        desktop_integration = "尚未集成" if desktop_tool.available else "-"
+        print(
+            f"{definition.id:16} {desktop_state:10} "
+            f"{desktop_integration:16} {desktop_note}"
+        )
     for adapter_id in sorted(config.adapters):
         executable = _adapter_executable(config, adapter_id)
         if Path(executable).name in known_commands:

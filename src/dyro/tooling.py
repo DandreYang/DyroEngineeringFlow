@@ -88,6 +88,18 @@ TOOL_DEFINITIONS = (
         ),
     ),
     ToolDefinition(
+        "codex-desktop",
+        "Codex App",
+        "codex-desktop",
+        "desktop",
+        ("codex", "app", "{workspace}"),
+        install=InstallGuide(
+            "https://openai.com/codex/",
+            "当前操作系统的 Codex 桌面应用",
+            remote_script_only=True,
+        ),
+    ),
+    ToolDefinition(
         "claude",
         "Claude Code",
         "claude",
@@ -99,6 +111,18 @@ TOOL_DEFINITIONS = (
             ("npm", "install", "-g", "@anthropic-ai/claude-code@latest"),
             prerequisite="npm",
             risk=_NPM_RISK,
+        ),
+    ),
+    ToolDefinition(
+        "claude-desktop",
+        "Claude Code Desktop",
+        "claude-desktop",
+        "desktop",
+        (),
+        install=InstallGuide(
+            "https://claude.com/download",
+            "当前操作系统的 Claude 桌面应用",
+            remote_script_only=True,
         ),
     ),
     ToolDefinition(

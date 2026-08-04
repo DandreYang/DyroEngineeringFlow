@@ -397,7 +397,8 @@ on the local machine are labeled `open workspace only` and receive no gate,
 review, merge, or push authority. Explicit commands such as
 `dyro open dev --agent codex` continue to launch directly for scripts.
 
-The picker detects Cursor Desktop separately from Cursor CLI, supports
+The picker detects Codex App and Claude Code Desktop separately from their
+CLI counterparts, detects Cursor Desktop separately from Cursor CLI, supports
 Antigravity CLI (`agy`) and Qoder CLI (`qodercli`) as launch-only terminal
 tools, opens ZCode as a launch-only desktop tool, and supports OpenClaw as a
 launch-only external runtime. It begins with at most three common choices;

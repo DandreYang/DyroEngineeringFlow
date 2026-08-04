@@ -55,14 +55,18 @@ class ToolPreferenceTests(unittest.TestCase):
 
 
 class GuidedInstallerTests(unittest.TestCase):
-    def test_catalog_includes_antigravity_qoder_and_zcode(self) -> None:
+    def test_catalog_includes_desktop_and_new_terminal_tools(self) -> None:
         antigravity = tool_definition("antigravity")
+        codex_desktop = tool_definition("codex-desktop")
+        claude_desktop = tool_definition("claude-desktop")
         qoder = tool_definition("qoder")
         zcode = tool_definition("zcode")
 
         self.assertEqual(antigravity.command if antigravity else "", "agy")
         self.assertEqual(qoder.command if qoder else "", "qodercli")
         self.assertEqual(zcode.interface if zcode else "", "desktop")
+        self.assertEqual(codex_desktop.interface if codex_desktop else "", "desktop")
+        self.assertEqual(claude_desktop.interface if claude_desktop else "", "desktop")
         self.assertEqual(
             qoder.install.argv if qoder and qoder.install else (),
             ("npm", "install", "-g", "@qoder-ai/qodercli"),
