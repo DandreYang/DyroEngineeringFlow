@@ -11,13 +11,17 @@ from dyro.cli import (
     _print_doctor_finding,
     _print_setup_completion,
     _route_experiment_surface,
+    _setup_default_tool,
     _setup_provider_preset,
     main,
 )
 from dyro.changesets import get_changeset
 from dyro.config import load
+from dyro.home import HomeTool
 from dyro.hub import load_registry
 from dyro.tasks import load_task, status, task_template
+from dyro.tooling import ToolState, load_tool_preferences
+from dyro.updates import load_update_state
 from dyro.workspace import create_line, get_line
 
 from .support import WorkspaceCase
@@ -339,15 +343,17 @@ class CliTests(unittest.TestCase):
             from .support import shell
 
             shell("git", "init", "-b", "main", cwd=repository)
-            answers = iter(["", "", "", "n"])
+            answers = iter(["", "", "", "", "", "n"])
             with (
                 patch("dyro.cli._setup_provider_preset", return_value=None),
+                patch("dyro.cli.launcher_tools", return_value=[]),
                 patch("builtins.input", side_effect=lambda _: next(answers)),
             ):
                 main(["setup", str(root), "--interactive"])
 
             self.assertFalse((root / "dyro.toml").exists())
             self.assertFalse((root / ".dyro").exists())
+            self.assertFalse((Path(self.registry_tmp.name) / "updates.json").exists())
 
     def test_interactive_setup_applies_confirmed_plan(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
@@ -362,9 +368,10 @@ class CliTests(unittest.TestCase):
             repository.joinpath("README.md").write_text("anchor\n", encoding="utf-8")
             shell("git", "add", "README.md", cwd=repository)
             shell("git", "commit", "-m", "chore: initial", cwd=repository)
-            answers = iter(["", "", "", "y"])
+            answers = iter(["", "", "", "", "", "y"])
             with (
                 patch("dyro.cli._setup_provider_preset", return_value=None),
+                patch("dyro.cli.launcher_tools", return_value=[]),
                 patch("builtins.input", side_effect=lambda _: next(answers)),
             ):
                 main(["setup", str(root), "--interactive"])
@@ -409,9 +416,10 @@ class CliTests(unittest.TestCase):
             shell("git", "commit", "-m", "chore: initial", cwd=repository)
             shell("git", "remote", "add", "origin", str(remote), cwd=repository)
             shell("git", "push", "-u", "origin", "main", cwd=repository)
-            answers = iter(["", "", "", "", "y"])
+            answers = iter(["", "", "", "", "", "", "y"])
             with (
                 patch("dyro.cli._setup_provider_preset", return_value=None),
+                patch("dyro.cli.launcher_tools", return_value=[]),
                 patch("builtins.input", side_effect=lambda _: next(answers)),
             ):
                 main(["setup", str(repository), "--interactive"])
@@ -443,9 +451,10 @@ class CliTests(unittest.TestCase):
             shell("git", "remote", "add", "origin", str(remote), cwd=repository)
             shell("git", "push", "-u", "origin", "trunk", cwd=repository)
             shell("git", "symbolic-ref", "HEAD", "refs/heads/trunk", cwd=remote)
-            answers = iter(["", "", "", "", "y"])
+            answers = iter(["", "", "", "", "", "", "y"])
             with (
                 patch("dyro.cli._setup_provider_preset", return_value=None),
+                patch("dyro.cli.launcher_tools", return_value=[]),
                 patch("builtins.input", side_effect=lambda _: next(answers)),
             ):
                 main(["setup", str(repository), "--interactive"])
@@ -453,6 +462,106 @@ class CliTests(unittest.TestCase):
             config = load(sibling)
             self.assertEqual(config.policy.default_base, "trunk")
             self.assertEqual(get_line(config, "dev").base, "trunk")
+
+    def test_interactive_setup_saves_confirmed_personal_preferences(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            root = Path(tmp) / "workspace"
+            repository = root / "repositories/api"
+            repository.mkdir(parents=True)
+            from .support import shell
+
+            shell("git", "init", "-b", "main", cwd=repository)
+            shell("git", "config", "user.name", "Test User", cwd=repository)
+            shell("git", "config", "user.email", "test@example.com", cwd=repository)
+            repository.joinpath("README.md").write_text("anchor\n", encoding="utf-8")
+            shell("git", "add", "README.md", cwd=repository)
+            shell("git", "commit", "-m", "chore: initial", cwd=repository)
+            tools = [
+                HomeTool("codex", "Codex", "launcher", (), (), ToolState.READY)
+            ]
+            answers = iter(["", "", "", "", "", "codex", "y"])
+            with (
+                patch("dyro.cli._setup_provider_preset", return_value="codex"),
+                patch("dyro.cli.launcher_tools", return_value=tools),
+                patch("builtins.input", side_effect=lambda _: next(answers)),
+            ):
+                main(["setup", str(root), "--interactive"])
+
+            updates = load_update_state()
+            self.assertTrue(updates.check_enabled)
+            self.assertFalse(updates.auto_patch)
+            self.assertEqual(load_tool_preferences().default_tool, "codex")
+            self.assertIn("codex", load(root).adapters)
+
+    def test_setup_default_tool_keeps_the_first_screen_short_and_accepts_tool_id(self) -> None:
+        tools = [
+            HomeTool("antigravity", "Antigravity CLI", "launcher", (), (), ToolState.READY),
+            HomeTool("claude", "Claude Code", "launcher", (), (), ToolState.READY),
+            HomeTool("codex", "Codex", "launcher", (), (), ToolState.READY),
+            HomeTool("qoder", "Qoder CLI", "launcher", (), (), ToolState.READY),
+        ]
+        output = StringIO()
+        with (
+            patch("dyro.cli.launcher_tools", return_value=tools),
+            patch("builtins.input", return_value="qoder"),
+            redirect_stdout(output),
+        ):
+            selected = _setup_default_tool(Path("/workspace"), None)
+
+        self.assertEqual(selected, "qoder")
+        rendered = output.getvalue()
+        self.assertIn("查看全部已检测工具", rendered)
+        self.assertNotIn("Qoder CLI", rendered)
+
+    def test_interactive_setup_can_switch_console_default_project(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            existing = Path(tmp) / "existing"
+            main(["init", str(existing), "--name", "existing"])
+            main(["workspace", "add", str(existing), "--default"])
+
+            root = Path(tmp) / "workspace"
+            repository = root / "repositories/api"
+            repository.mkdir(parents=True)
+            from .support import shell
+
+            shell("git", "init", "-b", "main", cwd=repository)
+            shell("git", "config", "user.name", "Test User", cwd=repository)
+            shell("git", "config", "user.email", "test@example.com", cwd=repository)
+            repository.joinpath("README.md").write_text("anchor\n", encoding="utf-8")
+            shell("git", "add", "README.md", cwd=repository)
+            shell("git", "commit", "-m", "chore: initial", cwd=repository)
+            answers = iter(["", "", "", "", "", "2", "y"])
+            with (
+                patch("dyro.cli._setup_provider_preset", return_value=None),
+                patch("dyro.cli.launcher_tools", return_value=[]),
+                patch("builtins.input", side_effect=lambda _: next(answers)),
+            ):
+                main(["setup", str(root), "--interactive"])
+
+            self.assertEqual(load_registry().default, "workspace")
+
+    def test_existing_profile_interactive_setup_dry_run_never_writes_preferences(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            root = Path(tmp) / "workspace"
+            repository = root / "repositories/api"
+            repository.mkdir(parents=True)
+            from .support import shell
+
+            shell("git", "init", "-b", "main", cwd=repository)
+            main(["setup", str(root), "--name", "workspace", "--no-line"])
+            output = StringIO()
+            answers = iter(["", ""])
+            with (
+                patch("dyro.cli.launcher_tools", return_value=[]),
+                patch("builtins.input", side_effect=lambda _: next(answers)),
+                redirect_stdout(output),
+            ):
+                main(["setup", str(root), "--interactive", "--dry-run"])
+
+            self.assertFalse((Path(self.registry_tmp.name) / "updates.json").exists())
+            self.assertIn("DRY RUN: 上述个人偏好和全局入口不会写入。", output.getvalue())
 
 
 class StartTests(WorkspaceCase):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -78,7 +79,9 @@ from .continuation.triggers import (
 from .evidence import build_execution_bundle, unpack_execution_bundle
 from .errors import DyroError, ValidationError
 from .home import (
+    HomeTool,
     home_tools,
+    launcher_tools,
     open_line,
     open_task,
     print_agent_discovery,
@@ -404,6 +407,195 @@ def _ask_yes_no(prompt: str, *, default: bool = False) -> bool:
     raise DyroError("请选择 y 或 n")
 
 
+def _ask_setup_choice(
+    heading: str,
+    choices: tuple[tuple[str, str], ...],
+    *,
+    default: str,
+    aliases: dict[str, str] | None = None,
+    allow_alias_target: bool = False,
+) -> str:
+    """Ask one small, recommendation-first onboarding question."""
+
+    values = {value for value, _ in choices}
+    if default not in values:
+        raise ValueError("首次设置默认选项必须在候选项中")
+    print("\n" + heading)
+    for value, label in choices:
+        print(f"  {value}) {label}")
+    raw = input(f"请选择（直接回车默认 {default}）：").strip().lower()
+    if not raw:
+        return default
+    selected = (aliases or {}).get(raw, raw)
+    if selected not in values and not (allow_alias_target and raw in (aliases or {})):
+        raise DyroError("请输入列表中的编号或工具 ID")
+    return selected
+
+
+@dataclass(frozen=True)
+class SetupPersonalPreferences:
+    """Global, reversible preferences collected before setup applies its plan."""
+
+    check_enabled: bool
+    auto_patch: bool
+    default_tool: str | None
+    make_default_workspace: bool
+
+
+def _setup_update_preferences() -> tuple[bool, bool]:
+    current = load_update_state()
+    check_choice = _ask_setup_choice(
+        "更新检测（仅每日首次交互启动；失败不会阻塞进入项目）",
+        (
+            ("1", "开启每日更新检测（推荐）"),
+            ("2", "关闭更新检测"),
+        ),
+        default="1" if current.check_enabled else "2",
+    )
+    if check_choice == "2":
+        return False, False
+    auto_choice = _ask_setup_choice(
+        "补丁版本自动更新（只允许 X.Y.Z → X.Y.Z，同一主次版本）",
+        (
+            ("1", "保持手动更新（推荐）"),
+            ("2", "自动安装补丁更新"),
+        ),
+        default="2" if current.auto_patch else "1",
+    )
+    return True, auto_choice == "2"
+
+
+def _setup_default_tool(root: Path, provider_preset: str | None) -> str | None:
+    available = [tool for tool in launcher_tools(root) if tool.available]
+    if not available:
+        print(muted("未检测到可直接打开的编码工具；稍后可用 dyro tool default 设置。"))
+        return None
+    current = load_tool_preferences().default_tool
+    recommended = next(
+        (
+            tool.id
+            for tool in available
+            if tool.id == provider_preset
+        ),
+        "",
+    )
+    if not recommended and current in {tool.id for tool in available}:
+        recommended = current
+    ordered = sorted(
+        available,
+        key=lambda tool: (tool.id != recommended, tool.label.casefold(), tool.id),
+    )
+    visible = ordered[:3]
+
+    def choose(candidates: list[HomeTool], *, show_all: bool) -> str:
+        choices = [("0", "暂不设置个人默认工具（每次自行选择）")]
+        aliases = {
+            "none": "0",
+            "skip": "0",
+            **{tool.id: f"tool:{tool.id}" for tool in ordered},
+        }
+        for index, tool in enumerate(candidates, start=1):
+            marker = "（推荐）" if tool.id == recommended else ""
+            choices.append((str(index), f"{tool.label}{marker}"))
+        if not show_all and len(ordered) > len(visible):
+            choices.append(("m", "查看全部已检测工具"))
+            aliases["more"] = "m"
+        default = next(
+            (str(index) for index, tool in enumerate(candidates, start=1) if tool.id == recommended),
+            "0",
+        )
+        return _ask_setup_choice(
+            "常用编码工具（只影响首页排序，不会自动启动或安装工具）"
+            if not show_all
+            else "全部已检测编码工具",
+            tuple(choices),
+            default=default,
+            aliases=aliases,
+            allow_alias_target=True,
+        )
+
+    selected = choose(visible, show_all=False)
+    if selected.startswith("tool:"):
+        return selected.removeprefix("tool:")
+    if selected == "m":
+        selected = choose(ordered, show_all=True)
+        selected_tools = ordered
+    else:
+        selected_tools = visible
+    if selected.startswith("tool:"):
+        return selected.removeprefix("tool:")
+    if selected == "0":
+        return ""
+    return selected_tools[int(selected) - 1].id
+
+
+def _setup_default_workspace(
+    registration: WorkspaceRegistrationPlan | None,
+    args: argparse.Namespace,
+) -> bool:
+    if registration is None or args.make_default or registration.becomes_default:
+        return bool(args.make_default)
+    registry = load_registry()
+    if registry.default == registration.name:
+        return False
+    selected = _ask_setup_choice(
+        "Console 默认项目（裸 dyro 会直接进入该项目）",
+        (
+            ("1", f"保持 {registry.default} 为默认项目（推荐）"),
+            ("2", f"将 {registration.name} 设为默认项目"),
+        ),
+        default="1",
+    )
+    return selected == "2"
+
+
+def _setup_personal_preferences(
+    *,
+    root: Path,
+    provider_preset: str | None,
+    registration: WorkspaceRegistrationPlan | None,
+    args: argparse.Namespace,
+) -> SetupPersonalPreferences:
+    check_enabled, auto_patch = _setup_update_preferences()
+    default_tool = _setup_default_tool(root, provider_preset)
+    make_default_workspace = _setup_default_workspace(registration, args)
+    return SetupPersonalPreferences(
+        check_enabled=check_enabled,
+        auto_patch=auto_patch,
+        default_tool=default_tool,
+        make_default_workspace=make_default_workspace,
+    )
+
+
+def _render_setup_personal_preferences(
+    preferences: SetupPersonalPreferences,
+) -> None:
+    update_summary = (
+        "每日检测；补丁自动更新"
+        if preferences.auto_patch
+        else "每日检测；补丁保持手动更新"
+    ) if preferences.check_enabled else "关闭每日检测与补丁自动更新"
+    print(
+        "  - 更新：" + update_summary
+    )
+    if preferences.default_tool is None:
+        print("  - 编码工具：" + muted("保持当前个人偏好"))
+    elif preferences.default_tool:
+        print("  - 编码工具：个人默认 " + terminal_value(preferences.default_tool))
+    else:
+        print("  - 编码工具：" + muted("不设置个人默认"))
+
+
+def _apply_setup_personal_preferences(preferences: SetupPersonalPreferences) -> None:
+    if preferences.check_enabled:
+        set_update_enabled(True)
+        set_auto_patch(preferences.auto_patch)
+    else:
+        set_update_enabled(False)
+    if preferences.default_tool is not None:
+        set_default_tool(preferences.default_tool)
+
+
 def _setup_provider_preset() -> str | None:
     """Offer only a Provider that Core can configure and execute safely today."""
 
@@ -439,12 +631,18 @@ def _setup_provider_preset() -> str | None:
 
 
 def _setup_registration_plan(
-    root: Path, name: str, args: argparse.Namespace
+    root: Path,
+    name: str,
+    args: argparse.Namespace,
+    *,
+    make_default: bool | None = None,
 ) -> WorkspaceRegistrationPlan | None:
     if args.no_register:
         return None
     return preview_workspace_registration(
-        root, name=name, make_default=args.make_default
+        root,
+        name=name,
+        make_default=args.make_default if make_default is None else make_default,
     )
 
 
@@ -477,7 +675,9 @@ def _register_setup_workspace(
 
 
 def _print_setup_completion(
-    config: Config, registration: WorkspaceRecord | None
+    config: Config,
+    registration: WorkspaceRecord | None,
+    preferences: SetupPersonalPreferences | None = None,
 ) -> None:
     print("\n" + success("━━ 设置完成 ━━"))
     print(f"  - Profile：{terminal_value(config.name)}")
@@ -487,17 +687,33 @@ def _print_setup_completion(
         print(
             f"  - Console：{terminal_value(registration.name)} 已可在 dyro console 中查看"
         )
+    if preferences is not None:
+        update = "每日检测已开启" if preferences.check_enabled else "每日检测已关闭"
+        patch = (
+            "补丁自动更新已开启"
+            if preferences.auto_patch
+            else "补丁保持手动更新"
+            if preferences.check_enabled
+            else "补丁自动更新已关闭"
+        )
+        print(f"  - 更新：{update}；{patch}")
+        if preferences.default_tool is not None:
+            tool = preferences.default_tool or "未设置"
+            print(f"  - 编码工具：个人默认 {terminal_value(tool)}")
     print("下一步：" + terminal_value("dyro start"))
 
 
 def _render_interactive_setup_plan(
-    plan: SetupPlan, registration: WorkspaceRegistrationPlan | None
+    plan: SetupPlan,
+    registration: WorkspaceRegistrationPlan | None,
+    preferences: SetupPersonalPreferences,
 ) -> None:
     print("\n" + title("━━ 设置计划 ━━"))
     print(muted("尚未修改任何文件。"))
     for item in render_setup_plan(plan):
         print("  - " + item)
     _render_setup_registration_plan(registration)
+    _render_setup_personal_preferences(preferences)
     if plan.needs_bootstrap:
         print("  - " + muted("将仅 clone 缺失且已明确提供 remote 的仓库"))
     print("  - " + muted("不会移动、覆盖或清理现有 Git 仓库"))
@@ -520,6 +736,7 @@ def _apply_setup_plan(
     dry_run: bool,
     register: bool,
     make_default: bool,
+    preferences: SetupPersonalPreferences,
 ) -> None:
     if dry_run:
         print("DRY RUN: 上述计划不会写入文件、执行 clone 或创建 Git worktree")
@@ -564,7 +781,8 @@ def _apply_setup_plan(
         _print_doctor_finding(finding)
     if any(finding.startswith("FAIL") for finding in findings):
         raise DyroError("设置已保存，但 doctor 发现问题；请修复后运行 dyro next")
-    _print_setup_completion(config, registration)
+    _apply_setup_personal_preferences(preferences)
+    _print_setup_completion(config, registration, preferences)
 
 
 def _interactive_setup(args: argparse.Namespace) -> None:
@@ -579,21 +797,37 @@ def _interactive_setup(args: argparse.Namespace) -> None:
         print(
             f"已发现 Profile：{terminal_value(config_file)}（{len(config.repositories)} 个仓库）"
         )
-        _render_setup_registration_plan(registration)
         for finding in doctor(config):
             _print_doctor_finding(finding)
-        if args.dry_run or registration is None:
-            print("下一步：" + terminal_value("dyro next"))
+        preferences = _setup_personal_preferences(
+            root=config.root,
+            provider_preset="codex" if "codex" in config.adapters else None,
+            registration=registration,
+            args=args,
+        )
+        registration = _setup_registration_plan(
+            config.root,
+            config.name,
+            args,
+            make_default=preferences.make_default_workspace,
+        )
+        print("\n" + title("━━ 设置计划 ━━"))
+        print(muted("尚未修改任何文件。"))
+        _render_setup_registration_plan(registration)
+        _render_setup_personal_preferences(preferences)
+        if args.dry_run:
+            print("DRY RUN: 上述个人偏好和全局入口不会写入。")
             return
-        if not args.yes and not _ask_yes_no(
-            "将此 Profile 登记到全局 Console", default=False
-        ):
-            print("已取消；没有修改全局入口。")
+        if not args.yes and not _ask_yes_no("应用这些个人偏好", default=False):
+            print("已取消；没有修改任何偏好或全局入口。")
             return
         record = _register_setup_workspace(
-            config, register=True, make_default=args.make_default
+            config,
+            register=registration is not None,
+            make_default=preferences.make_default_workspace,
         )
-        _print_setup_completion(config, record)
+        _apply_setup_personal_preferences(preferences)
+        _print_setup_completion(config, record, preferences)
         return
 
     repositories = (
@@ -652,23 +886,37 @@ def _interactive_setup(args: argparse.Namespace) -> None:
         provider_preset=provider,
     )
     registration = _setup_registration_plan(plan.root, plan.name, args)
-    _render_interactive_setup_plan(plan, registration)
+    preferences = _setup_personal_preferences(
+        root=plan.root,
+        provider_preset=plan.provider_preset,
+        registration=registration,
+        args=args,
+    )
+    registration = _setup_registration_plan(
+        plan.root,
+        plan.name,
+        args,
+        make_default=preferences.make_default_workspace,
+    )
+    _render_interactive_setup_plan(plan, registration, preferences)
     if args.dry_run:
         _apply_setup_plan(
             plan,
             dry_run=True,
             register=not args.no_register,
-            make_default=args.make_default,
+            make_default=preferences.make_default_workspace,
+            preferences=preferences,
         )
         return
-    if not args.yes and not _ask_yes_no("应用此设置计划", default=False):
+    if not args.yes and not _ask_yes_no("应用此设置与个人偏好", default=False):
         print("已取消；没有修改任何文件。")
         return
     _apply_setup_plan(
         plan,
         dry_run=False,
         register=not args.no_register,
-        make_default=args.make_default,
+        make_default=preferences.make_default_workspace,
+        preferences=preferences,
     )
 
 
