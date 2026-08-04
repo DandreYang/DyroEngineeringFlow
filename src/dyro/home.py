@@ -8,7 +8,7 @@ import shutil
 import sys
 from urllib.parse import urlencode
 
-from .config import CONFIG_NAME, Config, expand_argv, load
+from .config import CONFIG_NAME, Config, expand_argv, load, validate_id
 from .errors import DyroError, ValidationError
 from .hub import (
     WorkspaceRecord,
@@ -35,7 +35,19 @@ from .tooling import (
     tool_definition,
     tool_definition_for_command,
 )
-from .workspace import Line, doctor, get_line, line_root, list_lines, status_rows
+from .process import git
+from .terminal import danger, muted, success, title, value, warning
+from .workspace import (
+    Line,
+    create_line,
+    doctor,
+    get_line,
+    line_root,
+    list_lines,
+    preflight_line,
+    repository_path,
+    status_rows,
+)
 
 
 DISCOVERABLE_AGENTS = tuple(
@@ -72,18 +84,52 @@ class HomeTool:
         return self.state in {ToolState.READY, ToolState.NEEDS_SETUP}
 
 
+@dataclass(frozen=True)
+class HomeChoice:
+    value: str
+    label: str
+    recommended: bool = False
+
+
+@dataclass(frozen=True)
+class HomeBase:
+    base: str
+    label: str
+    repository_bases: tuple[tuple[str, str], ...] = ()
+
+    def base_for(self, repo_id: str) -> str:
+        return dict(self.repository_bases).get(repo_id, self.base)
+
+    def overrides(self) -> dict[str, str]:
+        return dict(self.repository_bases)
+
+
+_BACK = object()
+
+
+def _is_back(value: object) -> bool:
+    return value is _BACK
+
+
 def interactive_terminal() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def print_status(config: Config) -> None:
+    print("\n" + title("━━ 当前项目状态 ━━"))
     print(
-        f"{'SCOPE':24} {'REPOSITORY':14} {'BRANCH':24} {'HEAD':12} {'DIRTY':>5} UPSTREAM"
+        muted(
+            f"{'SCOPE':24} {'REPOSITORY':14} {'BRANCH':24} {'HEAD':12} {'DIRTY':>5} UPSTREAM"
+        )
     )
     for scope, repo_id, branch, head, upstream, dirty in status_rows(config):
         dirty_text = "-" if dirty < 0 else str(dirty)
+        dirty_display = (
+            danger(f"{dirty_text:>5}") if dirty > 0 else muted(f"{dirty_text:>5}")
+        )
         print(
-            f"{scope:24} {repo_id:14} {branch:24} {head:12} {dirty_text:>5} {upstream}"
+            f"{scope:24} {value(f'{repo_id:14}')} {value(f'{branch:24}')} "
+            f"{head:12} {dirty_display} {upstream}"
         )
 
 
@@ -92,14 +138,16 @@ def print_all_status() -> None:
     if not registry.workspaces:
         print("还没有登记全局工作区。下一步：dyro workspace add <路径>")
         return
+    print("\n" + title("━━ 全部项目状态 ━━"))
+    print(muted("按全局工作区逐一检查；不会修改项目文件。"))
     for index, record in enumerate(registry.workspaces):
         if index:
             print()
-        print(f"工作区：{record.name} ({record.root})")
+        print(f"工作区：{value(record.name)} ({value(record.root)})")
         try:
             config = load(record.root)
         except (DyroError, ValidationError) as exc:
-            print(f"不可用：{exc}")
+            print(danger(f"不可用：{exc}"))
             continue
         print_status(config)
 
@@ -410,7 +458,18 @@ def print_agent_discovery(config: Config) -> None:
     for adapter_id in config.adapters:
         command = Path(_adapter_executable(config, adapter_id)).name
         configured_commands.setdefault(command, []).append(adapter_id)
-    print(f"{'命令':16} {'本机':10} {'Dyro 状态':16} 说明")
+    print("\n" + title("━━ 本机编码工具 ━━"))
+    print(muted("已配置工具可由 Dyro 启动；其他工具只会打开工作区。"))
+    print(muted(f"{'命令':16} {'本机':10} {'Dyro 状态':16} 说明"))
+
+    def state_cell(state: str, *, installed: bool, configured: bool) -> str:
+        rendered = f"{state:16}"
+        if configured and installed:
+            return success(rendered)
+        if configured or installed:
+            return warning(rendered)
+        return muted(rendered)
+
     known_commands = {command for command, _ in DISCOVERABLE_AGENTS}
     for command, integrated in DISCOVERABLE_AGENTS:
         definition = tool_definition_for_command(command)
@@ -435,23 +494,29 @@ def print_agent_discovery(config: Config) -> None:
                 if definition and definition.install
                 else "未安装；暂无内置安装方案"
             )
-        print(f"{command:16} {'已检测' if installed else '-':10} {state:16} {note}")
+        installed_cell = success(f"{'已检测':10}") if installed else muted(f"{'-':10}")
+        print(
+            f"{value(f'{command:16}')}{installed_cell}"
+            f"{state_cell(state, installed=installed, configured=bool(configured_as))} "
+            f"{muted(note)}"
+        )
     for definition in TOOL_DEFINITIONS:
         if definition.interface != "desktop":
             continue
-        desktop_tool = _launcher_tool(
-            definition, config=config, workspace=config.root
-        )
-        desktop_state = "已检测" if desktop_tool.available else "-"
+        desktop_tool = _launcher_tool(definition, config=config, workspace=config.root)
+        installed = desktop_tool.available
+        desktop_state = "已检测" if installed else "-"
         desktop_note = (
             "首页可打开工作区；不获得执行、门禁或复核权限"
-            if desktop_tool.available
+            if installed
             else f"未安装；可运行 dyro tool install {definition.id}"
         )
-        desktop_integration = "尚未集成" if desktop_tool.available else "-"
+        desktop_integration = "尚未集成" if installed else "-"
         print(
-            f"{definition.id:16} {desktop_state:10} "
-            f"{desktop_integration:16} {desktop_note}"
+            f"{value(f'{definition.id:16}')}"
+            f"{success(f'{desktop_state:10}') if installed else muted(f'{desktop_state:10}')}"
+            f"{warning(f'{desktop_integration:16}') if installed else muted(f'{desktop_integration:16}')} "
+            f"{muted(desktop_note)}"
         )
     for adapter_id in sorted(config.adapters):
         executable = _adapter_executable(config, adapter_id)
@@ -462,7 +527,11 @@ def print_agent_discovery(config: Config) -> None:
         note = (
             "可由当前 Profile 启动" if installed else "命令不可用；请检查 adapter 配置"
         )
-        print(f"{executable:16} {'已检测' if installed else '-':10} {state:16} {note}")
+        installed_cell = success(f"{'已检测':10}") if installed else muted(f"{'-':10}")
+        print(
+            f"{value(f'{executable:16}')}{installed_cell}"
+            f"{state_cell(state, installed=installed, configured=True)} {muted(note)}"
+        )
 
 
 def launch_adapter(
@@ -639,42 +708,58 @@ def resolve_home_config(
     record = _record_for_root(config.root)
     if record is None and not dry_run:
         record = ensure_workspace(config.root)
-        print(f"已将当前项目加入全局首页：{record.name}")
+        print(success(f"已将当前项目加入全局首页：{record.name}"))
     return config, record
 
 
 def _first_use(dry_run: bool) -> None:
-    print("欢迎使用 Dyro。这里还没有可直接打开的工作区。")
+    print("\n" + title("━━ 欢迎使用 Dyro ━━"))
+    print(muted("这里还没有可直接打开的工作区。选择一种开始方式：") + "\n")
     print("  1) 加入团队工作区：dyro join <蓝图地址>")
     print("  2) 设置一个新项目：dyro setup")
     print("  3) 登记已有工作区：dyro workspace add <路径>")
     if not interactive_terminal():
         print("在交互终端中再次运行 dyro，可直接选择下一步。")
         return
-    choice = input("\n请选择（直接回车默认加入团队工作区，q 退出）：").strip().lower()
-    if choice in {"q", "quit"}:
-        print("已退出；没有修改任何文件。")
-    elif choice in {"", "1"}:
-        source = input("团队蓝图地址或本地文件：").strip()
-        if source:
-            print(f"下一步：dyro join {shlex.quote(source)}")
-        else:
-            print("下一步：dyro join <蓝图地址>")
-    elif choice == "2":
-        print("下一步：dyro setup（确认设置计划前不会修改任何文件）")
-    elif choice == "3":
-        raw_path = input("已有 Dyro 工作区路径：").strip()
-        if not raw_path:
-            print("已取消；没有修改任何文件。")
-        elif dry_run:
-            config = load(Path(raw_path).expanduser())
-            print(f"DRY RUN: 将登记工作区 {config.name} -> {config.root.resolve()}")
-        else:
-            config = load(Path(raw_path).expanduser())
+    while True:
+        choice = (
+            input("\n请选择（直接回车默认加入团队工作区，q 退出）：").strip().lower()
+        )
+        if choice in {"q", "quit"}:
+            print("已退出；没有修改任何文件。")
+            return
+        if choice in {"", "1"}:
+            source = input("团队蓝图地址或本地文件（q 返回）：").strip()
+            if source.lower() in {"q", "quit"}:
+                continue
+            if source:
+                print(f"下一步：dyro join {shlex.quote(source)}")
+                return
+            print("需要团队蓝图地址或本地文件；请重新选择。")
+            continue
+        if choice == "2":
+            print("下一步：dyro setup（确认设置计划前不会修改任何文件）")
+            return
+        if choice == "3":
+            raw_path = input("已有 Dyro 工作区路径（q 返回）：").strip()
+            if raw_path.lower() in {"q", "quit"}:
+                continue
+            if not raw_path:
+                print("需要工作区路径；请重新选择。")
+                continue
+            try:
+                config = load(Path(raw_path).expanduser())
+            except (DyroError, OSError) as exc:
+                print(f"无法登记该路径：{exc}。请检查路径后重试。")
+                continue
+            if dry_run:
+                print(f"DRY RUN: 将登记工作区 {config.name} -> {config.root.resolve()}")
+                return
             record = add_workspace(config.root, name=config.name, make_default=True)
-            print(f"已登记工作区：{record.name}。再次运行 dyro 即可进入。")
-    else:
-        raise DyroError("请选择 1、2、3 或 q")
+            print(f"已登记工作区：{record.name}。接下来选择要做什么。")
+            _run_config_home(config, record, dry_run)
+            return
+        print("请选择 1、2、3 或 q。")
 
 
 def _targets(config: Config, record: WorkspaceRecord | None) -> list[HomeTarget]:
@@ -712,10 +797,19 @@ def _targets(config: Config, record: WorkspaceRecord | None) -> list[HomeTarget]
 def _choose_action(
     targets: list[HomeTarget], *, can_switch: bool
 ) -> tuple[str, str] | None:
-    print("\n今天做什么？\n")
+    print("\n" + title("━━ 今天做什么 ━━"))
+    if targets:
+        print("\n" + muted("继续工作"))
     for index, target in enumerate(targets, start=1):
-        print(f"  {index}) {target.label}")
+        prefix, delimiter, target_value = target.label.partition("：")
+        rendered_target = (
+            f"{prefix}{delimiter}{value(target_value)}"
+            if delimiter
+            else value(target.label)
+        )
+        print(f"  {index}) {rendered_target}")
     status_index = len(targets) + 1
+    print("\n" + muted("查看与管理"))
     print(f"  {status_index}) 查看当前项目状态")
     console_index = status_index + 1
     print(f"  {console_index}) 查看全部项目控制台")
@@ -724,35 +818,40 @@ def _choose_action(
         print(f"  {switch_index}) 切换项目")
     new_line_index = switch_index + 1 if can_switch else console_index + 1
     new_hotfix_index = new_line_index + 1
+    print("\n" + muted("开始新的工作"))
     print(f"  {new_line_index}) 开启新的功能开发线")
     print(f"  {new_hotfix_index}) 处理新的线上问题 / Hotfix")
-    print("  q) 退出")
+    print("  " + muted("q) 退出"))
     if not interactive_terminal():
         print(
             "\n在交互终端运行 dyro 可选择并直接进入；也可使用 dyro open 或 dyro task open。"
         )
         return None
-    default = "1" if targets else str(status_index)
-    raw = input(f"\n请选择（直接回车默认 {default}）：").strip().lower() or default
-    if raw in {"q", "quit"}:
-        return None
-    if not raw.isdigit():
-        raise DyroError("请输入菜单编号或 q")
-    selected = int(raw)
-    if 1 <= selected <= len(targets):
-        target = targets[selected - 1]
-        return target.kind, target.id
-    if selected == status_index:
-        return "status", ""
-    if selected == console_index:
-        return "console", ""
-    if can_switch and selected == switch_index:
-        return "switch", ""
-    if selected == new_line_index:
-        return "new-line", ""
-    if selected == new_hotfix_index:
-        return "new-hotfix", ""
-    raise DyroError("菜单编号超出范围")
+    default = "1" if targets else str(new_line_index)
+    while True:
+        raw = (
+            input(f"\n输入编号（回车={default}，q=退出）：").strip().lower() or default
+        )
+        if raw in {"q", "quit"}:
+            return None
+        if not raw.isdigit():
+            print(warning("请输入菜单编号，或输入 q 退出。"))
+            continue
+        selected = int(raw)
+        if 1 <= selected <= len(targets):
+            target = targets[selected - 1]
+            return target.kind, target.id
+        if selected == status_index:
+            return "status", ""
+        if selected == console_index:
+            return "console", ""
+        if can_switch and selected == switch_index:
+            return "switch", ""
+        if selected == new_line_index:
+            return "new-line", ""
+        if selected == new_hotfix_index:
+            return "new-hotfix", ""
+        print(warning("该编号不在当前菜单中；请重新选择，或输入 q 退出。"))
 
 
 def _tool_state_labels(
@@ -873,9 +972,7 @@ def _choose_tool(
     )
     ready = [tool for tool in tools if tool.state == ToolState.READY]
     selectable = [
-        tool
-        for tool in tools
-        if tool.available or tool.state == ToolState.INSTALLABLE
+        tool for tool in tools if tool.available or tool.state == ToolState.INSTALLABLE
     ]
     if not selectable:
         print_agent_discovery(config)
@@ -894,7 +991,12 @@ def _choose_tool(
                 preferences=preferences,
             )
         )
-        print("\n全部编码工具：\n" if show_all else "\n常用编码工具：\n")
+        if show_all:
+            print("\n" + title("━━ 全部编码工具 ━━"))
+            print(muted("可用、可安装与暂不可用工具均列在这里。"))
+        else:
+            print("\n" + title("━━ 常用编码工具 ━━"))
+            print(muted("按上次使用、项目推荐与个人偏好排序。"))
         for index, tool in enumerate(displayed, start=1):
             labels = _tool_state_labels(
                 tool,
@@ -903,28 +1005,26 @@ def _choose_tool(
                 recommended_tool=config.recommended_tool,
                 preferences=preferences,
             )
-            print(f"  {index}) {tool.label}（{'，'.join(labels)}）")
+            print(f"  {index:>2}) {value(tool.label)}")
+            print(f"      {muted(' · '.join(labels))}")
         if show_all:
-            print("  b) 返回常用工具")
+            print("  " + muted("b) 返回常用工具"))
         else:
             hidden_ready = sum(
                 tool.available and tool not in displayed for tool in tools
             )
-            installable = sum(
-                tool.state == ToolState.INSTALLABLE for tool in tools
-            )
+            installable = sum(tool.state == ToolState.INSTALLABLE for tool in tools)
             details = []
             if hidden_ready:
                 details.append(f"{hidden_ready} 个已安装")
             if installable:
                 details.append(f"{installable} 个可安装")
             suffix = f"（{'，'.join(details)}）" if details else ""
-            print(f"  m) 更多工具{suffix}")
-        print("  q) 退出")
+            print("  " + muted(f"m) 更多工具{suffix}"))
+        print("  " + muted("q) 退出"))
+        controls = "b=常用" if show_all else "m=更多"
         raw = (
-            input(
-                f"\n请选择（编号或工具名，直接回车默认 {default.label}）："
-            )
+            input(f"\n输入编号或工具名（回车={default.label}，{controls}，q=退出）：")
             .strip()
             .lower()
         )
@@ -941,9 +1041,24 @@ def _choose_tool(
         if raw.isdigit() and 1 <= int(raw) <= len(displayed):
             selected = displayed[int(raw) - 1]
         else:
-            selected = next((tool for tool in tools if _matches_home_tool(tool, raw)), None)
+            selected = next(
+                (tool for tool in tools if _matches_home_tool(tool, raw)), None
+            )
         if selected is None:
-            raise DyroError("无效的编码工具选择")
+            print(
+                warning(
+                    "未找到该编码工具；请重新选择、输入 m 查看全部工具，或输入 q 退出。"
+                )
+            )
+            continue
+        if selected.state == ToolState.UNAVAILABLE:
+            print(
+                warning(
+                    f"{selected.label} 当前不可用；请选择可用工具，"
+                    "或选择标有“未安装，可引导安装”的工具。"
+                )
+            )
+            continue
         break
     if selected.state == ToolState.INSTALLABLE:
         install_id = _install_id(config, selected)
@@ -961,11 +1076,6 @@ def _choose_tool(
                 f"安装命令已完成，但当前终端仍未检测到 {install_id}；"
                 "请重新打开终端后再运行 dyro"
             )
-    if selected.state == ToolState.UNAVAILABLE:
-        raise DyroError(
-            f"{selected.label} 未安装或不可执行，且暂无内置安装方案；"
-            "运行 dyro agent discover 查看详情"
-        )
     if not _confirm_setup(selected, workspace=workspace, dry_run=dry_run):
         print("已取消初始化；没有修改工作区。")
         return None
@@ -982,36 +1092,843 @@ def _switch_workspace(dry_run: bool) -> None:
         available.append(record)
     if len(available) < 2:
         raise DyroError("没有其他可用工作区；运行 dyro workspace add <路径> 添加项目")
-    print("请选择工作区：")
-    for index, record in enumerate(available, start=1):
-        print(f"  {index}) {record.name}")
-    raw = input("编号：").strip()
-    if not raw.isdigit() or not (1 <= int(raw) <= len(available)):
-        raise DyroError("无效的工作区选择")
-    record = available[int(raw) - 1]
-    _run_config_home(load(record.root), record, dry_run)
+    while True:
+        print("\n" + title("━━ 切换项目 ━━"))
+        print(muted("选择一个已登记的工作区："))
+        for index, record in enumerate(available, start=1):
+            print(f"  {index}) {value(record.name)}")
+        print("  " + muted("q) 返回"))
+        raw = input("输入编号（q=返回）：").strip().lower()
+        if raw in {"q", "quit"}:
+            return
+        if raw.isdigit() and 1 <= int(raw) <= len(available):
+            record = available[int(raw) - 1]
+            _run_config_home(load(record.root), record, dry_run)
+            return
+        print(warning("请输入有效编号，或输入 q 返回。"))
 
 
-def _print_new_line_guidance(config: Config) -> None:
-    print("\n新功能开发线会创建隔离 Git worktree。")
-    print("先确认功能 ID、范围、参与仓库与基线；确认后才会修改 Git 工作区。")
-    print(
-        "下一步："
-        f"dyro line create <ID> --base {shlex.quote(config.policy.default_base)} --yes"
+def _ask_hotfix_id() -> str | None:
+    while True:
+        raw = input("问题 ID（字母、数字、点、下划线或连字符；q 取消）：").strip()
+        if raw.lower() in {"q", "quit"}:
+            print("已取消；没有修改任何 Git 工作区。")
+            return None
+        try:
+            return validate_id(raw, "问题 ID")
+        except ValidationError as exc:
+            print(f"{exc}。请重新输入，或输入 q 取消。")
+
+
+def _ask_choice(
+    question: str,
+    choices: tuple[HomeChoice, ...],
+    *,
+    allow_back: bool = False,
+) -> HomeChoice | object | None:
+    if not choices:
+        raise ValueError("至少提供一个选项")
+    default_index = next(
+        (index for index, choice in enumerate(choices, start=1) if choice.recommended),
+        1,
+    )
+    print("\n" + title(question))
+    for index, choice in enumerate(choices, start=1):
+        suffix = success("（推荐）") if choice.recommended else ""
+        print(f"  {index}) {choice.label}{suffix}")
+    if allow_back:
+        print("  " + muted("b) 返回上一步"))
+    print("  " + muted("q) 取消"))
+    while True:
+        controls = "b=上一步，q=取消" if allow_back else "q=取消"
+        raw = input(f"输入编号（回车={default_index}，{controls}）：").strip().lower()
+        if raw in {"q", "quit"}:
+            print("已取消；没有修改任何 Git 工作区。")
+            return None
+        if allow_back and raw in {"b", "back", "返回"}:
+            return _BACK
+        selected = default_index if not raw else int(raw) if raw.isdigit() else 0
+        if 1 <= selected <= len(choices):
+            return choices[selected - 1]
+        print("请输入有效编号，或输入 q 取消。")
+
+
+def _ask_line_id() -> str | None:
+    while True:
+        raw = input(
+            "\n[1/3] 功能 ID（字母、数字、点、下划线或连字符；q 取消）："
+        ).strip()
+        if raw.lower() in {"q", "quit"}:
+            print("已取消；没有修改任何 Git 工作区。")
+            return None
+        try:
+            return validate_id(raw, "功能 ID")
+        except ValidationError as exc:
+            print(f"{exc}。请重新输入，或输入 q 取消。")
+
+
+def _ask_line_repositories(config: Config) -> tuple[str, ...] | object | None:
+    repositories = tuple(config.repositories)
+    if len(repositories) == 1:
+        print(f"\n[2/3] 参与仓库：{repositories[0]}（唯一已配置仓库）")
+        return repositories
+    custom_choice = HomeChoice("", "自定义：仅选择受影响的仓库")
+    choice = _ask_choice(
+        "\n[2/3] 选择参与仓库：",
+        (
+            HomeChoice(
+                "all",
+                f"全部已配置仓库（{len(repositories)} 个）",
+                recommended=True,
+            ),
+            custom_choice,
+        ),
+        allow_back=True,
+    )
+    if _is_back(choice):
+        return _BACK
+    if choice is None:
+        return None
+    if choice is not custom_choice:
+        return repositories
+    print("\n可选仓库：")
+    for repo_id in repositories:
+        print(f"  - {repo_id}")
+    while True:
+        raw = input("输入受影响的仓库 ID（逗号分隔；b 上一步，q 取消）：").strip()
+        if raw.lower() in {"q", "quit"}:
+            print("已取消；没有修改任何 Git 工作区。")
+            return None
+        if raw.lower() in {"b", "back", "返回"}:
+            return _BACK
+        selected = tuple(
+            dict.fromkeys(item.strip() for item in raw.split(",") if item.strip())
+        )
+        if not selected:
+            print("至少选择一个仓库，或输入 q 取消。")
+            continue
+        unknown = [
+            repo_id for repo_id in selected if repo_id not in config.repositories
+        ]
+        if unknown:
+            print(f"未配置的仓库：{'、'.join(unknown)}。请重新选择。")
+            continue
+        return selected
+
+
+def _ask_line_base(config: Config) -> str | object | None:
+    manual_choice = HomeChoice("", "其他：输入分支、tag 或 commit SHA")
+    choice = _ask_choice(
+        "\n[3/3] 选择功能开发基线：",
+        (
+            HomeChoice(
+                config.policy.default_base,
+                f"{config.policy.default_base}（工作区默认基线）",
+                recommended=True,
+            ),
+            manual_choice,
+        ),
+        allow_back=True,
+    )
+    if _is_back(choice):
+        return _BACK
+    if choice is None:
+        return None
+    if choice is not manual_choice:
+        return choice.value
+    while True:
+        raw = input(
+            "功能开发基线（分支、tag 或 commit SHA；b 上一步，q 取消）："
+        ).strip()
+        if raw.lower() in {"q", "quit"}:
+            print("已取消；没有修改任何 Git 工作区。")
+            return None
+        if raw.lower() in {"b", "back", "返回"}:
+            return _BACK
+        if raw:
+            return raw
+        print("开发基线不能为空；请重新输入，或输入 q 取消。")
+
+
+def _unresolved_base_repositories(
+    config: Config,
+    repositories: tuple[str, ...],
+    selection: HomeBase,
+) -> tuple[tuple[str, str], ...]:
+    unresolved: list[tuple[str, str]] = []
+    for repo_id in repositories:
+        base = selection.base_for(repo_id)
+        if (
+            git(
+                repository_path(config, repo_id),
+                "rev-parse",
+                "--verify",
+                f"{base}^{{commit}}",
+            ).code
+            != 0
+        ):
+            unresolved.append((repo_id, base))
+    return tuple(unresolved)
+
+
+def _resolve_repository_base(
+    config: Config, repo_id: str, requested_base: str
+) -> str | None:
+    """Resolve a user-friendly branch spelling against one repository anchor."""
+    anchor = repository_path(config, repo_id)
+    candidates = [requested_base]
+    if requested_base.startswith("origin/"):
+        candidates.append(requested_base.removeprefix("origin/"))
+    elif "/" not in requested_base:
+        candidates.append(f"origin/{requested_base}")
+    for candidate in dict.fromkeys(candidates):
+        if git(anchor, "rev-parse", "--verify", f"{candidate}^{{commit}}").code == 0:
+            return candidate
+    return None
+
+
+def _normalize_repository_bases(
+    config: Config,
+    repositories: tuple[str, ...],
+    requested_base: str,
+) -> HomeBase | object | None:
+    """Resolve equivalent refs per repository and ask only for true exceptions."""
+    bases: dict[str, str] = {}
+    unresolved: list[str] = []
+    for repo_id in repositories:
+        resolved = _resolve_repository_base(config, repo_id, requested_base)
+        if resolved is None:
+            unresolved.append(repo_id)
+        else:
+            bases[repo_id] = resolved
+    for repo_id in unresolved:
+        print(
+            f"{repo_id} 无法解析 {requested_base}；请为这个仓库单独选择已核实的基线。"
+        )
+        selected = _ask_repository_base(config, repo_id, requested_base)
+        if _is_back(selected):
+            return _BACK
+        if selected is None:
+            return None
+        bases[repo_id] = selected
+    base = bases[repositories[0]]
+    overrides = tuple(
+        (repo_id, repo_base)
+        for repo_id, repo_base in bases.items()
+        if repo_base != base
+    )
+    return HomeBase(base, requested_base, overrides)
+
+
+def _print_unresolved_bases(unresolved: tuple[tuple[str, str], ...]) -> None:
+    print("\n基线未就绪；尚未创建任何 Git worktree：")
+    for repo_id, base in unresolved:
+        print(f"  - {repo_id}: {base}")
+    print("请重新选择基线，或输入 q 取消。")
+
+
+def _print_repository_base_map(
+    repositories: tuple[str, ...], selection: HomeBase | Line
+) -> None:
+    """Render a short, scannable per-repository base map for terminal users."""
+    width = max(len(repo_id) for repo_id in repositories)
+    for repo_id in repositories:
+        marker = "默认" if selection.base_for(repo_id) == selection.base else "覆盖"
+        print(
+            f"    {value(f'{repo_id:<{width}}')}  "
+            f"{value(selection.base_for(repo_id))}  {muted(f'[{marker}]')}"
+        )
+
+
+def _retry_after_preflight_failure(kind: str, exc: Exception) -> bool:
+    print("\n" + danger(f"━━ 创建{kind}前检查未通过 ━━"))
+    print(muted("尚未创建任何 Git worktree。"))
+    print(danger(f"原因：{exc}"))
+    next_step = _ask_choice(
+        "下一步：",
+        (
+            HomeChoice("retry", f"重新填写{kind}信息", recommended=True),
+            HomeChoice("home", "返回首页"),
+        ),
+    )
+    return next_step is not None and next_step.value == "retry"
+
+
+def _previous_editable_step(config: Config) -> int:
+    """Return the preceding editable wizard step for a selected base."""
+    return 2 if len(config.repositories) > 1 else 1
+
+
+def _create_line_from_home(config: Config, dry_run: bool) -> Line | None:
+    print("\n" + title("━━ 开启功能开发线 ━━"))
+    print(muted("新功能开发线会创建隔离 Git worktree；确认前不会修改 Git 工作区。"))
+    print(muted("步骤：功能 ID → 参与仓库 → 开发基线 → 创建确认"))
+    step = 1
+    line_id = ""
+    repositories: tuple[str, ...] = ()
+    while True:
+        if step == 1:
+            line_id = _ask_line_id()
+            if line_id is None:
+                return None
+            step = 2
+            continue
+        if step == 2:
+            selected_repositories = _ask_line_repositories(config)
+            if _is_back(selected_repositories):
+                step = 1
+                continue
+            if selected_repositories is None:
+                return None
+            repositories = selected_repositories
+            step = 3
+            continue
+        if step == 3:
+            base = _ask_line_base(config)
+            if _is_back(base):
+                step = _previous_editable_step(config)
+                continue
+            if base is None:
+                return None
+            base_selection = _normalize_repository_bases(config, repositories, base)
+            if _is_back(base_selection):
+                continue
+            if base_selection is None:
+                return None
+            base_selection = _ask_repository_base_overrides(
+                config,
+                base_selection,
+                kind="功能开发线",
+                repositories=repositories,
+            )
+            if _is_back(base_selection):
+                continue
+            if base_selection is None:
+                return None
+            unresolved = _unresolved_base_repositories(
+                config, repositories, base_selection
+            )
+            if not unresolved:
+                step = 4
+                continue
+            _print_unresolved_bases(unresolved)
+            continue
+
+        branch = f"feat/{line_id}"
+        try:
+            planned = preflight_line(
+                config,
+                line_id=line_id,
+                branch=branch,
+                base=base_selection.base,
+                repositories=repositories,
+                repository_bases=base_selection.overrides(),
+                kind="line",
+            )
+        except (DyroError, ValidationError, OSError) as exc:
+            if _retry_after_preflight_failure("功能开发线", exc):
+                step = 1
+                continue
+            return None
+        print("\n" + title("━━ 创建前确认 ━━"))
+        print(f"  功能 ID：{value(line_id)}")
+        print(f"  分支：{value(branch)}")
+        print(f"  基线：{value(base_selection.base)}")
+        if base_selection.repository_bases:
+            print("  仓库基线：")
+            _print_repository_base_map(planned.repositories, planned)
+        print(f"  仓库：{value('、'.join(repositories))}")
+        print(f"  位置：{value(line_root(config, planned))}")
+        if dry_run:
+            print("DRY RUN: 已展示创建计划；不会创建 Git worktree。")
+            return None
+        confirmation = (
+            input("\n确认创建这些隔离 worktree？[y/b/N；b 返回基线]：").strip().lower()
+        )
+        if confirmation in {"b", "back", "返回"}:
+            step = 3
+            continue
+        if confirmation not in {"y", "yes"}:
+            print("已取消；没有修改任何 Git 工作区。")
+            return None
+        try:
+            line = create_line(
+                config,
+                line_id=line_id,
+                branch=branch,
+                base=base_selection.base,
+                repositories=repositories,
+                repository_bases=base_selection.overrides(),
+                kind="line",
+            )
+        except (DyroError, ValidationError, OSError) as exc:
+            print(danger(f"创建功能开发线失败：{exc}"))
+            print(warning("没有完整创建开发线；请重新运行 dyro 后重试。"))
+            return None
+        print(
+            success("已创建功能开发线：")
+            + value(line.id)
+            + "。接下来选择编码工具并打开隔离工作区。"
+        )
+        return line
+
+
+def _shared_tag_candidates(
+    config: Config,
+    *,
+    repositories: tuple[str, ...] | None = None,
+    limit: int = 4,
+) -> tuple[HomeBase, ...]:
+    """Return recent tags that resolve from every selected repository anchor."""
+    selected_repositories = repositories or tuple(config.repositories)
+    common: set[str] | None = None
+    ordered: list[str] = []
+    for repo_id in selected_repositories:
+        result = git(
+            repository_path(config, repo_id),
+            "for-each-ref",
+            "--sort=-creatordate",
+            "--format=%(refname:short)",
+            "refs/tags",
+        )
+        if result.code != 0:
+            return ()
+        tags = [tag.strip() for tag in result.stdout.splitlines() if tag.strip()]
+        if common is None:
+            ordered = tags
+            common = set(tags)
+        else:
+            common.intersection_update(tags)
+    candidates: list[HomeBase] = []
+    for tag in ordered:
+        if tag not in (common or set()):
+            continue
+        if all(
+            git(
+                repository_path(config, repo_id),
+                "rev-parse",
+                "--verify",
+                f"{tag}^{{commit}}",
+            ).code
+            == 0
+            for repo_id in selected_repositories
+        ):
+            candidates.append(
+                HomeBase(tag, f"发布 tag {tag}（所有已配置仓库均可解析）")
+            )
+        if len(candidates) == limit:
+            break
+    return tuple(candidates)
+
+
+def _shared_release_branch_candidates(
+    config: Config,
+    *,
+    repositories: tuple[str, ...] | None = None,
+    limit: int = 4,
+) -> tuple[HomeBase, ...]:
+    """Return common release branch names, allowing per-repository ref spelling.
+
+    A repository can expose the same branch as ``origin/release`` while another
+    only has a local ``release`` branch.  ``create_line`` already supports this
+    through repository-specific bases, so the home flow should surface it rather
+    than asking the user to guess a string that works everywhere.
+    """
+    selected_repositories = repositories or tuple(config.repositories)
+    common: set[str] | None = None
+    ordered: list[str] = []
+    refs_by_repo: dict[str, dict[str, str]] = {}
+    for repo_id in selected_repositories:
+        result = git(
+            repository_path(config, repo_id),
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes",
+        )
+        if result.code != 0:
+            return ()
+        refs: dict[str, tuple[int, str]] = {}
+        for ref in (item.strip() for item in result.stdout.splitlines()):
+            if ref.startswith("refs/heads/"):
+                name = ref.removeprefix("refs/heads/")
+                priority = 1
+                short_ref = name
+            elif ref.startswith("refs/remotes/"):
+                remote_and_name = ref.removeprefix("refs/remotes/")
+                remote, separator, name = remote_and_name.partition("/")
+                if not separator:
+                    continue
+                priority = 3 if remote == "origin" else 2
+                short_ref = f"{remote}/{name}"
+            else:
+                continue
+            if name == "HEAD" or not (name == "release" or name.startswith("release/")):
+                continue
+            current = refs.get(name)
+            if current is None or priority > current[0]:
+                refs[name] = (priority, short_ref)
+            if repo_id == selected_repositories[0] and name not in ordered:
+                ordered.append(name)
+        refs_by_repo[repo_id] = {name: ref for name, (_, ref) in refs.items()}
+        names = set(refs_by_repo[repo_id])
+        if common is None:
+            common = names
+        else:
+            common.intersection_update(names)
+
+    candidates: list[HomeBase] = []
+    for name in ordered:
+        if name not in (common or set()):
+            continue
+        bases = tuple(
+            (repo_id, refs_by_repo[repo_id][name]) for repo_id in selected_repositories
+        )
+        base = bases[0][1]
+        selection = HomeBase(
+            base,
+            f"发布分支 {name}（所有已配置仓库均可解析）",
+            tuple((repo_id, ref) for repo_id, ref in bases if ref != base),
+        )
+        if not _unresolved_base_repositories(config, selected_repositories, selection):
+            candidates.append(selection)
+        if len(candidates) == limit:
+            break
+    return tuple(candidates)
+
+
+def _repository_base_suggestions(
+    config: Config, repo_id: str, current_base: str
+) -> tuple[str, ...]:
+    """Return safe, local candidates when a single repository needs a base override."""
+    anchor = repository_path(config, repo_id)
+    result = git(
+        anchor,
+        "for-each-ref",
+        "--format=%(refname:short)",
+        "refs/heads/main",
+        "refs/heads/master",
+        "refs/heads/release",
+        "refs/remotes/origin/main",
+        "refs/remotes/origin/master",
+        "refs/remotes/origin/release",
+        "refs/tags",
+    )
+    candidates = [current_base]
+    if result.code == 0:
+        candidates.extend(
+            ref.strip() for ref in result.stdout.splitlines() if ref.strip()
+        )
+    return tuple(
+        dict.fromkeys(
+            ref
+            for ref in candidates
+            if git(anchor, "rev-parse", "--verify", f"{ref}^{{commit}}").code == 0
+        )
     )
 
 
-def _print_new_hotfix_guidance() -> None:
-    print("\nHotfix 需要已核实的生产 release 分支、tag 或部署 SHA。")
-    print("确认问题 ID 和基线后，才会创建隔离的 Hotfix worktree。")
-    print("下一步：dyro hotfix create <问题ID> --base <已核实的 release/tag/SHA> --yes")
+def _ask_repository_base(
+    config: Config, repo_id: str, current_base: str
+) -> str | object | None:
+    suggestions = _repository_base_suggestions(config, repo_id, current_base)
+    manual_choice = HomeChoice("", "其他：输入分支、tag 或 commit SHA")
+    choices = tuple(
+        HomeChoice(
+            base,
+            f"{base}{'（当前映射）' if base == current_base else ''}",
+            recommended=base == current_base,
+        )
+        for base in suggestions
+    ) + (manual_choice,)
+    choice = _ask_choice(f"选择 {repo_id} 的已核实生产基线：", choices, allow_back=True)
+    if _is_back(choice):
+        return _BACK
+    if choice is None:
+        return None
+    if choice is not manual_choice:
+        return choice.value
+    anchor = repository_path(config, repo_id)
+    while True:
+        raw = input(
+            f"{repo_id} 的生产基线（分支、tag 或 commit SHA；b 上一步，q 取消）："
+        ).strip()
+        if raw.lower() in {"q", "quit"}:
+            print("已取消；没有修改任何 Git 工作区。")
+            return None
+        if raw.lower() in {"b", "back", "返回"}:
+            return _BACK
+        if not raw:
+            print("生产基线不能为空；请重新输入，或输入 q 取消。")
+            continue
+        if git(anchor, "rev-parse", "--verify", f"{raw}^{{commit}}").code == 0:
+            return raw
+        print(f"{repo_id} 无法解析 {raw}；该仓库当前没有这个分支、tag 或提交。")
+
+
+def _ask_repository_base_overrides(
+    config: Config,
+    selection: HomeBase,
+    *,
+    kind: str,
+    repositories: tuple[str, ...] | None = None,
+) -> HomeBase | object | None:
+    selected_repositories = repositories or tuple(config.repositories)
+    if len(selected_repositories) == 1:
+        return selection
+    initial_mapping = {
+        repo_id: selection.base_for(repo_id) for repo_id in selected_repositories
+    }
+    print("\n当前仓库基线：")
+    _print_repository_base_map(selected_repositories, selection)
+    scope = _ask_choice(
+        f"确认{kind}的仓库基线：",
+        (
+            HomeChoice("keep", "使用当前映射", recommended=True),
+            HomeChoice("adjust", "按仓库单独调整基线"),
+        ),
+        allow_back=True,
+    )
+    if _is_back(scope):
+        return _BACK
+    if scope is None:
+        return None
+    if scope.value == "keep":
+        return selection
+
+    bases = dict(initial_mapping)
+    while True:
+        choices = tuple(
+            HomeChoice(repo_id, f"{repo_id}：{bases[repo_id]}")
+            for repo_id in selected_repositories
+        ) + (HomeChoice("done", "完成仓库基线设置", recommended=True),)
+        repository_choice = _ask_choice("选择要调整的仓库：", choices, allow_back=True)
+        if _is_back(repository_choice):
+            return _BACK
+        if repository_choice is None:
+            return None
+        if repository_choice.value == "done":
+            overrides = tuple(
+                (repo_id, base)
+                for repo_id, base in bases.items()
+                if base != selection.base
+            )
+            return HomeBase(selection.base, selection.label, overrides)
+        repo_id = repository_choice.value
+        base = _ask_repository_base(config, repo_id, bases[repo_id])
+        if _is_back(base):
+            continue
+        if base is None:
+            return None
+        bases[repo_id] = base
+
+
+def _ask_manual_hotfix_base(kind: str) -> HomeBase | object | None:
+    while True:
+        raw = input(f"已核实的生产 {kind}（b 上一步，q 取消）：").strip()
+        if raw.lower() in {"q", "quit"}:
+            print("已取消；没有修改任何 Git 工作区。")
+            return None
+        if raw.lower() in {"b", "back", "返回"}:
+            return _BACK
+        if raw:
+            return HomeBase(raw, raw)
+        print("生产基线不能为空；Dyro 不会替你猜测或默认选择 main。")
+
+
+def _ask_hotfix_base(
+    config: Config, repositories: tuple[str, ...]
+) -> HomeBase | object | None:
+    candidates = _shared_tag_candidates(
+        config, repositories=repositories
+    ) + _shared_release_branch_candidates(config, repositories=repositories)
+    if candidates:
+        manual_choice = HomeChoice(
+            "", "其他：输入已核实的 release 分支、tag 或部署 SHA"
+        )
+        choices = tuple(
+            HomeChoice(
+                str(index),
+                candidate.label,
+                recommended=index == 0,
+            )
+            for index, candidate in enumerate(candidates)
+        ) + (manual_choice,)
+        print("Dyro 找到以下共同 Git 基线；它们只是可解析的候选，不代表已部署到生产。")
+        choice = _ask_choice("选择你已核实的生产基线：", choices, allow_back=True)
+        if _is_back(choice):
+            return _BACK
+        if choice is None:
+            return None
+        if choice is not manual_choice:
+            return _ask_repository_base_overrides(
+                config,
+                candidates[int(choice.value)],
+                kind="Hotfix",
+                repositories=repositories,
+            )
+        selection = _ask_manual_hotfix_base("基线（release 分支、tag 或部署 SHA）")
+        if _is_back(selection):
+            return _BACK
+        normalized = (
+            _normalize_repository_bases(config, repositories, selection.base)
+            if selection is not None
+            else None
+        )
+        if _is_back(normalized):
+            return _BACK
+        return (
+            _ask_repository_base_overrides(
+                config, normalized, kind="Hotfix", repositories=repositories
+            )
+            if normalized is not None
+            else None
+        )
+
+    print("Dyro 没有发现可供推荐的共同 Git 基线；请按已核实的部署记录选择基线形式。")
+    choice = _ask_choice(
+        "选择生产基线形式：",
+        (
+            HomeChoice("release 分支", "已发布的 release 分支", recommended=True),
+            HomeChoice("tag", "已发布的 tag"),
+            HomeChoice("部署 SHA", "已部署的 commit SHA"),
+        ),
+        allow_back=True,
+    )
+    if _is_back(choice):
+        return _BACK
+    if choice is None:
+        return None
+    selection = _ask_manual_hotfix_base(choice.value)
+    if _is_back(selection):
+        return _BACK
+    normalized = (
+        _normalize_repository_bases(config, repositories, selection.base)
+        if selection is not None
+        else None
+    )
+    if _is_back(normalized):
+        return _BACK
+    return (
+        _ask_repository_base_overrides(
+            config, normalized, kind="Hotfix", repositories=repositories
+        )
+        if normalized is not None
+        else None
+    )
+
+
+def _create_hotfix_from_home(config: Config, dry_run: bool) -> Line | None:
+    print("\n" + title("━━ 处理线上问题 / Hotfix ━━"))
+    print(muted("Hotfix 需要已核实的生产 release 分支、tag 或部署 SHA。"))
+    print(muted("Dyro 只校验 Git 可解析性；是否已部署到生产仍须由你确认。"))
+    print(muted("步骤：问题 ID → 参与仓库 → 生产基线 → 创建确认"))
+    step = 1
+    issue_id = ""
+    repositories: tuple[str, ...] = ()
+    while True:
+        if step == 1:
+            issue_id = _ask_hotfix_id()
+            if issue_id is None:
+                return None
+            step = 2
+            continue
+        if step == 2:
+            selected_repositories = _ask_line_repositories(config)
+            if _is_back(selected_repositories):
+                step = 1
+                continue
+            if selected_repositories is None:
+                return None
+            repositories = selected_repositories
+            step = 3
+            continue
+        if step == 3:
+            base_selection = _ask_hotfix_base(config, repositories)
+            if _is_back(base_selection):
+                step = _previous_editable_step(config)
+                continue
+            if base_selection is None:
+                return None
+            unresolved = _unresolved_base_repositories(
+                config, repositories, base_selection
+            )
+            if not unresolved:
+                step = 4
+                continue
+            _print_unresolved_bases(unresolved)
+            continue
+
+        branch = f"hotfix/{issue_id}"
+        try:
+            planned = preflight_line(
+                config,
+                line_id=issue_id,
+                branch=branch,
+                base=base_selection.base,
+                repositories=repositories,
+                repository_bases=base_selection.overrides(),
+                kind="hotfix",
+            )
+        except (DyroError, ValidationError, OSError) as exc:
+            if _retry_after_preflight_failure("Hotfix", exc):
+                step = 1
+                continue
+            return None
+        print("\n" + title("━━ 创建前确认 ━━"))
+        print(f"  问题 ID：{value(issue_id)}")
+        print(f"  分支：{value(branch)}")
+        print(f"  已核实的生产基线：{value(base_selection.base)}")
+        if base_selection.repository_bases:
+            print("  仓库基线：")
+            _print_repository_base_map(planned.repositories, planned)
+        print(f"  仓库：{value('、'.join(planned.repositories))}")
+        print(f"  位置：{value(line_root(config, planned))}")
+        if dry_run:
+            print("DRY RUN: 已展示创建计划；不会创建 Git worktree。")
+            return None
+
+        confirmation = (
+            input(
+                "\n确认该基线已在生产核实，并创建这些隔离 worktree？[y/b/N；b 返回基线]："
+            )
+            .strip()
+            .lower()
+        )
+        if confirmation in {"b", "back", "返回"}:
+            step = 3
+            continue
+        if confirmation not in {"y", "yes"}:
+            print("已取消；没有修改任何 Git 工作区。")
+            return None
+        try:
+            line = create_line(
+                config,
+                line_id=issue_id,
+                branch=branch,
+                base=base_selection.base,
+                repositories=repositories,
+                repository_bases=base_selection.overrides(),
+                kind="hotfix",
+            )
+        except (DyroError, ValidationError, OSError) as exc:
+            print(danger(f"创建 Hotfix 失败：{exc}"))
+            print(warning("没有完整创建 Hotfix；请重新运行 dyro 后重试。"))
+            return None
+        print(
+            success("已创建 Hotfix：")
+            + value(line.id)
+            + "。接下来选择编码工具并打开隔离工作区。"
+        )
+        return line
 
 
 def _run_config_home(
     config: Config, record: WorkspaceRecord | None, dry_run: bool
 ) -> None:
-    print(f"\n项目：{config.name}")
-    print(f"位置：{config.root}")
+    print("\n" + title(f"━━ {config.name} ━━"))
+    print(f"工作区  {value(config.root)}")
     failures = [finding for finding in doctor(config) if finding.startswith("FAIL")]
     if failures:
         print(
@@ -1049,11 +1966,15 @@ def _run_config_home(
         _switch_workspace(dry_run)
         return
     if kind == "new-line":
-        _print_new_line_guidance(config)
-        return
+        line = _create_line_from_home(config, dry_run)
+        if line is None:
+            return
+        kind, target_id = line.kind, line.id
     if kind == "new-hotfix":
-        _print_new_hotfix_guidance()
-        return
+        line = _create_hotfix_from_home(config, dry_run)
+        if line is None:
+            return
+        kind, target_id = line.kind, line.id
     if kind == "task":
         task = load_task(config, target_id)
         target_workspace = existing_task_workspace(config, task)
@@ -1077,9 +1998,12 @@ def _run_config_home(
 
 
 def run_home(*, root: str | None, workspace: str | None, dry_run: bool) -> None:
-    resolved = resolve_home_config(root=root, workspace=workspace, dry_run=dry_run)
-    if resolved is None:
-        _first_use(dry_run)
-        return
-    config, record = resolved
-    _run_config_home(config, record, dry_run)
+    try:
+        resolved = resolve_home_config(root=root, workspace=workspace, dry_run=dry_run)
+        if resolved is None:
+            _first_use(dry_run)
+            return
+        config, record = resolved
+        _run_config_home(config, record, dry_run)
+    except (KeyboardInterrupt, EOFError):
+        print("\n已中断当前引导；没有执行后续步骤。")

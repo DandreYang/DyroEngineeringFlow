@@ -175,6 +175,14 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_CURSOR_INVALID"):
             self.service.page(cursor=cursor, limit=1)
 
+    def test_empty_attention_recommends_the_guided_home_not_task_next(self) -> None:
+        recommendation = self.service._recommendation("alpha", [])
+
+        self.assertEqual(
+            recommendation,
+            {"reason": "HOME_GUIDANCE", "command": "dyro --workspace alpha"},
+        )
+
     def test_registry_failure_is_stable_and_path_free(self) -> None:
         service = ConsoleOverviewService(
             registry_loader=lambda: (_ for _ in ()).throw(

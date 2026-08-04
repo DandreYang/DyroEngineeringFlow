@@ -343,7 +343,10 @@ class ConsoleOverviewService:
         self, alias: str, attention: object
     ) -> dict[str, str] | None:
         if not isinstance(attention, list) or not attention:
-            return {"reason": "NO_ATTENTION", "command": f"dyro --workspace {alias} task next"}
+            return {
+                "reason": "HOME_GUIDANCE",
+                "command": f"dyro --workspace {alias}",
+            }
         item = attention[0]
         if not isinstance(item, dict):
             return None

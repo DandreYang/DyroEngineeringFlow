@@ -36,7 +36,7 @@ from dyro.tooling import (
     save_tool_preferences,
 )
 from dyro.tasks import task_template
-from dyro.workspace import create_line
+from dyro.workspace import create_line, get_line
 
 from .support import WorkspaceCase, shell
 
@@ -222,41 +222,508 @@ class HubCliTests(WorkspaceCase):
         self.assertIn("开启新的功能开发线", output.getvalue())
         self.assertIn("处理新的线上问题 / Hotfix", output.getvalue())
 
-    def test_home_new_feature_entrypoint_only_prints_next_step(self) -> None:
-        add_workspace(self.root, name="demo", make_default=True)
-        before_config = self.root.joinpath("dyro.toml").read_bytes()
-        before_registry = load_registry()
+    def test_home_uses_semantic_color_when_explicitly_enabled(self) -> None:
+        output = StringIO()
+        with (
+            patch.dict(os.environ, {"DYRO_COLOR": "always"}, clear=True),
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", return_value="q"),
+            redirect_stdout(output),
+        ):
+            self.assertIsNone(_choose_action([], can_switch=False))
+
+        rendered = output.getvalue()
+        self.assertIn("\033[1;35m━━ 今天做什么 ━━\033[0m", rendered)
+        self.assertIn("\033[2;37m查看与管理\033[0m", rendered)
+
+    def test_home_action_retries_invalid_input_and_recommends_new_feature_when_empty(
+        self,
+    ) -> None:
+        answers = iter(["not-a-number", "99", ""])
+        prompts: list[str] = []
         output = StringIO()
         with (
             patch("dyro.home.interactive_terminal", return_value=True),
-            patch("builtins.input", return_value="3"),
+            patch(
+                "builtins.input",
+                side_effect=lambda prompt: prompts.append(prompt) or next(answers),
+            ),
+            redirect_stdout(output),
+        ):
+            action = _choose_action([], can_switch=False)
+
+        self.assertEqual(action, ("new-line", ""))
+        rendered = output.getvalue()
+        self.assertIn("请输入菜单编号", rendered)
+        self.assertIn("该编号不在当前菜单中", rendered)
+        self.assertTrue(any("回车=3" in prompt for prompt in prompts))
+
+    def test_home_exits_cleanly_when_terminal_input_is_interrupted(self) -> None:
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=KeyboardInterrupt),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        self.assertIn("已中断当前引导；没有执行后续步骤", output.getvalue())
+
+    def test_first_use_registers_an_existing_workspace_then_enters_home(self) -> None:
+        answers = iter(["3", str(self.root), "q"])
+        output = StringIO()
+        with (
+            patch("dyro.home.Path.cwd", return_value=self.root.parent),
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            redirect_stdout(output),
+        ):
+            main([])
+
+        rendered = output.getvalue()
+        self.assertIn("已登记工作区：test-workspace。接下来选择要做什么", rendered)
+        self.assertIn("━━ 今天做什么 ━━", rendered)
+        self.assertEqual(get_workspace("test-workspace").root, self.root.resolve())
+
+    def test_first_use_retries_an_unreadable_workspace_path(self) -> None:
+        answers = iter(["3", str(self.root.parent / "missing"), "q"])
+        output = StringIO()
+        with (
+            patch("dyro.home.Path.cwd", return_value=self.root.parent),
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            redirect_stdout(output),
+        ):
+            main([])
+
+        self.assertIn("无法登记该路径", output.getvalue())
+        self.assertFalse(self.hub_home.exists())
+
+    def test_home_new_feature_entrypoint_creates_confirmed_isolated_worktree(
+        self,
+    ) -> None:
+        add_workspace(self.root, name="demo", make_default=True)
+        answers = iter(["3", "FEATURE-20260804", "", "yes"])
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            patch("dyro.home._choose_tool", return_value=None),
             redirect_stdout(output),
         ):
             main(["--root", str(self.root)])
 
         rendered = output.getvalue()
         self.assertIn("新功能开发线会创建隔离 Git worktree", rendered)
-        self.assertIn("dyro line create <ID> --base main --yes", rendered)
-        self.assertEqual(self.root.joinpath("dyro.toml").read_bytes(), before_config)
-        self.assertEqual(load_registry(), before_registry)
+        self.assertIn("━━ 开启功能开发线 ━━", rendered)
+        self.assertIn("步骤：功能 ID → 参与仓库 → 开发基线 → 创建确认", rendered)
+        self.assertIn("[2/3] 参与仓库", rendered)
+        self.assertIn("main（工作区默认基线）（推荐）", rendered)
+        self.assertIn("━━ 创建前确认 ━━", rendered)
+        self.assertIn("已创建功能开发线：FEATURE-20260804", rendered)
+        line = get_line(load(self.root), "FEATURE-20260804", "line")
+        self.assertEqual(line.base, "main")
+        self.assertTrue(self.root.joinpath("versions", "FEATURE-20260804").is_dir())
 
-    def test_home_hotfix_entrypoint_only_prints_next_step(self) -> None:
+    def test_home_new_feature_entrypoint_cancels_without_creating_worktree(
+        self,
+    ) -> None:
         add_workspace(self.root, name="demo", make_default=True)
-        before_config = self.root.joinpath("dyro.toml").read_bytes()
         before_registry = load_registry()
+        answers = iter(["3", "FEATURE-20260804", "q"])
         output = StringIO()
         with (
             patch("dyro.home.interactive_terminal", return_value=True),
-            patch("builtins.input", return_value="4"),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        self.assertIn("已取消；没有修改任何 Git 工作区", output.getvalue())
+        self.assertFalse(
+            self.root.joinpath(".dyro", "lines", "FEATURE-20260804.toml").exists()
+        )
+        self.assertEqual(load_registry(), before_registry)
+
+    def test_home_new_feature_can_return_to_edit_a_previous_step(self) -> None:
+        add_workspace(self.root, name="demo", make_default=True)
+        answers = iter(
+            [
+                "3",
+                "FEATURE-BACK",
+                "b",
+                "FEATURE-BACK",
+                "",
+                "b",
+                "",
+                "yes",
+            ]
+        )
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            patch("dyro.home._choose_tool", return_value=None),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        rendered = output.getvalue()
+        self.assertIn("b) 返回上一步", rendered)
+        self.assertEqual(rendered.count("━━ 创建前确认 ━━"), 2)
+        self.assertTrue(self.root.joinpath("versions", "FEATURE-BACK").is_dir())
+
+    def test_home_new_feature_rechecks_manual_base_before_confirmation(self) -> None:
+        add_workspace(self.root, name="demo", make_default=True)
+        answers = iter(["3", "FEATURE-BAD-BASE", "2", "missing-release", "q"])
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        rendered = output.getvalue()
+        self.assertIn("api 无法解析 missing-release", rendered)
+        self.assertIn("请为这个仓库单独选择已核实的基线", rendered)
+        self.assertNotIn("将创建隔离功能开发线", rendered)
+        self.assertFalse(
+            self.root.joinpath(".dyro", "lines", "FEATURE-BAD-BASE.toml").exists()
+        )
+
+    def test_home_new_feature_preflights_dirty_repository_before_confirmation(
+        self,
+    ) -> None:
+        add_workspace(self.root, name="demo", make_default=True)
+        self.anchor.joinpath("dirty.txt").write_text(
+            "not committed\n", encoding="utf-8"
+        )
+        answers = iter(["3", "FEATURE-DIRTY", "", "", "q"])
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        rendered = output.getvalue()
+        self.assertIn("创建功能开发线前检查未通过", rendered)
+        self.assertIn("仓库不干净", rendered)
+        self.assertNotIn("确认以上范围与基线", rendered)
+        self.assertFalse(
+            self.root.joinpath(".dyro", "lines", "FEATURE-DIRTY.toml").exists()
+        )
+
+    def test_home_new_feature_normalizes_release_per_repository(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8")
+            + """
+[repositories.web]
+path = "repositories/web"
+mount = "web"
+""",
+            encoding="utf-8",
+        )
+        web = self.root / "repositories/web"
+        web.mkdir(parents=True)
+        shell("git", "init", "-b", "main", cwd=web)
+        shell("git", "config", "user.name", "Test User", cwd=web)
+        shell("git", "config", "user.email", "test@example.com", cwd=web)
+        (web / "README.md").write_text("web\n", encoding="utf-8")
+        shell("git", "add", "README.md", cwd=web)
+        shell("git", "commit", "-m", "chore: initial", cwd=web)
+        shell(
+            "git", "update-ref", "refs/remotes/origin/release", "HEAD", cwd=self.anchor
+        )
+
+        add_workspace(self.root, name="demo", make_default=True)
+        answers = iter(["3", "FEATURE-RELEASE", "", "2", "release", "", "", "yes"])
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            patch("dyro.home._choose_tool", return_value=None),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        rendered = output.getvalue()
+        self.assertIn("当前仓库基线：", rendered)
+        self.assertIn("api  origin/release  [默认]", rendered)
+        self.assertIn("web  main  [覆盖]", rendered)
+        line = get_line(load(self.root), "FEATURE-RELEASE", "line")
+        self.assertEqual(line.base, "origin/release")
+        self.assertEqual(line.repository_bases, {"web": "main"})
+
+    def test_home_new_feature_limits_base_adjustment_to_selected_repositories(
+        self,
+    ) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8")
+            + """
+[repositories.web]
+path = "repositories/web"
+mount = "web"
+""",
+            encoding="utf-8",
+        )
+        web = self.root / "repositories/web"
+        web.mkdir(parents=True)
+        shell("git", "init", "-b", "main", cwd=web)
+        shell("git", "config", "user.name", "Test User", cwd=web)
+        shell("git", "config", "user.email", "test@example.com", cwd=web)
+        web.joinpath("README.md").write_text("web\n", encoding="utf-8")
+        shell("git", "add", "README.md", cwd=web)
+        shell("git", "commit", "-m", "chore: initial", cwd=web)
+        shell("git", "checkout", "-b", "release", cwd=web)
+
+        add_workspace(self.root, name="demo", make_default=True)
+        answers = iter(["3", "FEATURE-WEB", "2", "web", "2", "release", "yes"])
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            patch("dyro.home._choose_tool", return_value=None),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        rendered = output.getvalue()
+        self.assertIn("可选仓库：", rendered)
+        self.assertNotIn("当前仓库基线：", rendered)
+        line = get_line(load(self.root), "FEATURE-WEB", "line")
+        self.assertEqual(line.repositories, ("web",))
+        self.assertEqual(line.base, "release")
+
+    def test_home_hotfix_limits_baseline_scope_to_selected_repositories(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8")
+            + """
+[repositories.web]
+path = "repositories/web"
+mount = "web"
+""",
+            encoding="utf-8",
+        )
+        web = self.root / "repositories/web"
+        web.mkdir(parents=True)
+        shell("git", "init", "-b", "main", cwd=web)
+        shell("git", "config", "user.name", "Test User", cwd=web)
+        shell("git", "config", "user.email", "test@example.com", cwd=web)
+        web.joinpath("README.md").write_text("web\n", encoding="utf-8")
+        shell("git", "add", "README.md", cwd=web)
+        shell("git", "commit", "-m", "chore: initial", cwd=web)
+        shell("git", "checkout", "-b", "release", cwd=web)
+
+        add_workspace(self.root, name="demo", make_default=True)
+        answers = iter(["4", "INC-WEB", "2", "web", "", "yes"])
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            patch("dyro.home._choose_tool", return_value=None),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        rendered = output.getvalue()
+        self.assertIn("步骤：问题 ID → 参与仓库 → 生产基线 → 创建确认", rendered)
+        self.assertIn("发布分支 release", rendered)
+        line = get_line(load(self.root), "INC-WEB", "hotfix")
+        self.assertEqual(line.repositories, ("web",))
+        self.assertEqual(line.base, "release")
+
+    def test_home_hotfix_entrypoint_creates_confirmed_isolated_worktree(self) -> None:
+        add_workspace(self.root, name="demo", make_default=True)
+        shell("git", "tag", "v2026.08.04", cwd=self.anchor)
+        answers = iter(["4", "INC-20260804", "", "yes"])
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            patch("dyro.home._choose_tool", return_value=None),
             redirect_stdout(output),
         ):
             main(["--root", str(self.root)])
 
         rendered = output.getvalue()
         self.assertIn("Hotfix 需要已核实的生产 release 分支、tag 或部署 SHA", rendered)
-        self.assertIn("dyro hotfix create <问题ID> --base", rendered)
-        self.assertEqual(self.root.joinpath("dyro.toml").read_bytes(), before_config)
+        self.assertIn("共同 Git 基线", rendered)
+        self.assertIn(
+            "发布 tag v2026.08.04（所有已配置仓库均可解析）（推荐）", rendered
+        )
+        self.assertIn("━━ 创建前确认 ━━", rendered)
+        self.assertIn("已创建 Hotfix：INC-20260804", rendered)
+        line = get_line(load(self.root), "INC-20260804", "hotfix")
+        self.assertEqual(line.base, "v2026.08.04")
+        self.assertTrue(self.root.joinpath("hotfixes", "INC-20260804").is_dir())
+
+    def test_home_hotfix_entrypoint_cancels_without_creating_worktree(self) -> None:
+        add_workspace(self.root, name="demo", make_default=True)
+        before_registry = load_registry()
+        answers = iter(["4", "INC-20260804", "1", "main", "no"])
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        self.assertIn("已取消；没有修改任何 Git 工作区", output.getvalue())
+        self.assertFalse(
+            self.root.joinpath(".dyro", "hotfixes", "INC-20260804.toml").exists()
+        )
         self.assertEqual(load_registry(), before_registry)
+
+    def test_home_hotfix_can_return_to_edit_the_verified_baseline(self) -> None:
+        add_workspace(self.root, name="demo", make_default=True)
+        answers = iter(["4", "INC-BACK", "1", "main", "b", "1", "main", "yes"])
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            patch("dyro.home._choose_tool", return_value=None),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        rendered = output.getvalue()
+        self.assertIn("b) 返回上一步", rendered)
+        self.assertEqual(rendered.count("━━ 创建前确认 ━━"), 2)
+        self.assertTrue(self.root.joinpath("hotfixes", "INC-BACK").is_dir())
+
+    def test_home_hotfix_recommends_per_repository_release_refs(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8")
+            + """
+[repositories.web]
+path = "repositories/web"
+mount = "web"
+""",
+            encoding="utf-8",
+        )
+        web = self.root / "repositories/web"
+        web.mkdir(parents=True)
+        shell("git", "init", "-b", "main", cwd=web)
+        shell("git", "config", "user.name", "Test User", cwd=web)
+        shell("git", "config", "user.email", "test@example.com", cwd=web)
+        (web / "README.md").write_text("web\n", encoding="utf-8")
+        shell("git", "add", "README.md", cwd=web)
+        shell("git", "commit", "-m", "chore: initial", cwd=web)
+        shell("git", "checkout", "-b", "release", cwd=web)
+        shell(
+            "git", "update-ref", "refs/remotes/origin/release", "HEAD", cwd=self.anchor
+        )
+
+        add_workspace(self.root, name="demo", make_default=True)
+        answers = iter(["4", "INC-RELEASE", "", "", "", "yes"])
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            patch("dyro.home._choose_tool", return_value=None),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        rendered = output.getvalue()
+        self.assertIn("发布分支 release（所有已配置仓库均可解析）（推荐）", rendered)
+        self.assertIn("api  origin/release  [默认]", rendered)
+        self.assertIn("web  release  [覆盖]", rendered)
+        line = get_line(load(self.root), "INC-RELEASE", "hotfix")
+        self.assertEqual(line.base, "origin/release")
+        self.assertEqual(line.repository_bases, {"web": "release"})
+
+    def test_home_hotfix_can_override_one_repository_base(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8")
+            + """
+[repositories.web]
+path = "repositories/web"
+mount = "web"
+""",
+            encoding="utf-8",
+        )
+        web = self.root / "repositories/web"
+        web.mkdir(parents=True)
+        shell("git", "init", "-b", "main", cwd=web)
+        shell("git", "config", "user.name", "Test User", cwd=web)
+        shell("git", "config", "user.email", "test@example.com", cwd=web)
+        (web / "README.md").write_text("web\n", encoding="utf-8")
+        shell("git", "add", "README.md", cwd=web)
+        shell("git", "commit", "-m", "chore: initial", cwd=web)
+        shell("git", "checkout", "-b", "release", cwd=web)
+        shell(
+            "git", "update-ref", "refs/remotes/origin/release", "HEAD", cwd=self.anchor
+        )
+
+        add_workspace(self.root, name="demo", make_default=True)
+        answers = iter(["4", "INC-OVERRIDE", "", "", "2", "2", "2", "", "yes"])
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            patch("dyro.home._choose_tool", return_value=None),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        rendered = output.getvalue()
+        self.assertIn("按仓库单独调整基线", rendered)
+        self.assertIn("api  origin/release  [默认]", rendered)
+        self.assertIn("web  main  [覆盖]", rendered)
+        line = get_line(load(self.root), "INC-OVERRIDE", "hotfix")
+        self.assertEqual(line.base, "origin/release")
+        self.assertEqual(line.repository_bases, {"web": "main"})
+
+    def test_home_hotfix_rechecks_manual_base_before_confirmation(self) -> None:
+        add_workspace(self.root, name="demo", make_default=True)
+        answers = iter(["4", "INC-BAD-BASE", "1", "missing-release", "", "q"])
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        rendered = output.getvalue()
+        self.assertIn("api 无法解析 missing-release", rendered)
+        self.assertIn("请为这个仓库单独选择已核实的基线", rendered)
+        self.assertNotIn("将创建隔离 Hotfix worktree", rendered)
+        self.assertFalse(
+            self.root.joinpath(".dyro", "hotfixes", "INC-BAD-BASE.toml").exists()
+        )
+
+    def test_home_hotfix_preflights_dirty_repository_before_confirmation(self) -> None:
+        add_workspace(self.root, name="demo", make_default=True)
+        self.anchor.joinpath("dirty.txt").write_text(
+            "not committed\n", encoding="utf-8"
+        )
+        answers = iter(["4", "INC-DIRTY", "1", "main", "", "q"])
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+
+        rendered = output.getvalue()
+        self.assertIn("创建Hotfix前检查未通过", rendered)
+        self.assertIn("仓库不干净", rendered)
+        self.assertNotIn("确认该基线已在生产核实", rendered)
+        self.assertFalse(
+            self.root.joinpath(".dyro", "hotfixes", "INC-DIRTY.toml").exists()
+        )
 
     def test_home_can_open_a_detected_tool_without_granting_adapter_capabilities(
         self,
@@ -385,7 +852,9 @@ class HubCliTests(WorkspaceCase):
         with (
             patch(
                 "dyro.home.shutil.which",
-                side_effect=lambda name: f"/fake/{name}" if name in discovered else None,
+                side_effect=lambda name: (
+                    f"/fake/{name}" if name in discovered else None
+                ),
             ),
             patch("builtins.input", side_effect=lambda _: next(answers)),
             redirect_stdout(output),
@@ -419,6 +888,41 @@ class HubCliTests(WorkspaceCase):
         self.assertEqual(tool, installable)
         self.assertIn("Qoder CLI", output.getvalue())
         self.assertIn("未安装，可引导安装", output.getvalue())
+
+    def test_home_tool_picker_retries_invalid_choice(self) -> None:
+        ready = HomeTool("codex", "Codex", "launcher", ("codex",), (), ToolState.READY)
+        answers = iter(["missing-tool", "1"])
+        output = StringIO()
+        with (
+            patch("dyro.home.home_tools", return_value=[ready]),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            redirect_stdout(output),
+        ):
+            tool = _choose_tool(
+                load(self.root), None, workspace=self.root, dry_run=True
+            )
+
+        self.assertEqual(tool, ready)
+        self.assertIn("未找到该编码工具", output.getvalue())
+
+    def test_home_tool_picker_keeps_user_in_the_menu_for_unavailable_tool(self) -> None:
+        unavailable = HomeTool(
+            "grok", "Grok", "launcher", ("grok",), (), ToolState.UNAVAILABLE
+        )
+        ready = HomeTool("codex", "Codex", "launcher", ("codex",), (), ToolState.READY)
+        answers = iter(["grok", "1"])
+        output = StringIO()
+        with (
+            patch("dyro.home.home_tools", return_value=[unavailable, ready]),
+            patch("builtins.input", side_effect=lambda _: next(answers)),
+            redirect_stdout(output),
+        ):
+            tool = _choose_tool(
+                load(self.root), None, workspace=self.root, dry_run=True
+            )
+
+        self.assertEqual(tool, ready)
+        self.assertIn("Grok 当前不可用", output.getvalue())
 
     def test_home_detects_cursor_desktop_separately_from_cursor_cli(self) -> None:
         def detected(name: str) -> str | None:

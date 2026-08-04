@@ -206,7 +206,7 @@ def _rollback_line_creations(config: Config, line: Line, created: list[str]) -> 
     return failures
 
 
-def create_line(
+def _build_line(
     config: Config,
     *,
     line_id: str,
@@ -216,9 +216,8 @@ def create_line(
     repository_bases: Mapping[str, str] | None = None,
     storage_modes: Mapping[str, str] | None = None,
     kind: str = "line",
-    dry_run: bool = False,
 ) -> Line:
-    """Create isolated linked worktrees from configured repository anchors."""
+    """Validate line arguments and turn them into one immutable creation plan."""
     validate_id(line_id, "开发线 ID")
     if not branch or not base:
         raise ValidationError("branch 与 base 都必须明确指定")
@@ -244,14 +243,20 @@ def create_line(
     for repo_id, storage_mode in storage_overrides.items():
         if storage_mode not in STORAGE_MODES:
             raise ValidationError(f"{repo_id} 的存储方式必须是：{', '.join(sorted(STORAGE_MODES))}")
-    line = Line(line_id, kind, branch, base, selected, base_overrides, storage_overrides)
+    return Line(line_id, kind, branch, base, selected, base_overrides, storage_overrides)
+
+
+def _plan_line_creation(
+    config: Config, line: Line
+) -> list[tuple[str, Path, tuple[str, ...]]]:
+    """Validate every Git-side prerequisite without creating a worktree."""
     target_root = line_root(config, line)
     if target_root.exists() and any(target_root.iterdir()):
         raise DyroError(f"目标工作区已存在且非空：{target_root}")
 
     # Validate every repository before mutating any worktree so partial creates are rare.
     planned: list[tuple[str, Path, tuple[str, ...]]] = []
-    for repo_id in selected:
+    for repo_id in line.repositories:
         anchor = repository_path(config, repo_id)
         destination = line_repository_path(config, line, repo_id)
         if not _is_git_repo(anchor):
@@ -261,22 +266,91 @@ def create_line(
         require_ok(git(anchor, "rev-parse", "--verify", f"{repo_base}^{{commit}}"), f"校验 {repo_id} 基线 {repo_base}")
         if destination.exists() or destination.is_symlink():
             raise DyroError(f"worktree 目标已存在：{destination}")
-        branch_check = git(anchor, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
+        branch_check = git(
+            anchor, "show-ref", "--verify", "--quiet", f"refs/heads/{line.branch}"
+        )
         if branch_check.code == 0:
-            ancestry = git(anchor, "merge-base", "--is-ancestor", repo_base, branch)
+            ancestry = git(
+                anchor, "merge-base", "--is-ancestor", repo_base, line.branch
+            )
             if ancestry.code != 0:
-                raise DyroError(f"{repo_id} 既有分支 {branch} 不包含声明的基线 {repo_base}")
+                raise DyroError(
+                    f"{repo_id} 既有分支 {line.branch} 不包含声明的基线 {repo_base}"
+                )
         if line.storage_for(repo_id) == "anchor-reference":
             anchor_branch = require_ok(git(anchor, "branch", "--show-current"), f"读取 {repo_id} anchor 分支").stdout.strip()
-            if anchor_branch != branch:
-                raise DyroError(f"{repo_id} 的 anchor-reference 要求 anchor 正位于 {branch}，当前为 {anchor_branch or 'DETACHED'}")
+            if anchor_branch != line.branch:
+                raise DyroError(
+                    f"{repo_id} 的 anchor-reference 要求 anchor 正位于 {line.branch}，"
+                    f"当前为 {anchor_branch or 'DETACHED'}"
+                )
             planned.append((repo_id, destination, ()))
             continue
         command = ("worktree", "add")
         if branch_check.code != 0:
-            command += ("-b", branch)
-        command += (str(destination), branch if branch_check.code == 0 else repo_base)
+            command += ("-b", line.branch)
+        command += (
+            str(destination), line.branch if branch_check.code == 0 else repo_base
+        )
         planned.append((repo_id, destination, command))
+    return planned
+
+
+def preflight_line(
+    config: Config,
+    *,
+    line_id: str,
+    branch: str,
+    base: str,
+    repositories: Iterable[str] | None = None,
+    repository_bases: Mapping[str, str] | None = None,
+    storage_modes: Mapping[str, str] | None = None,
+    kind: str = "line",
+) -> Line:
+    """Verify that a line can be created without changing Git state.
+
+    The home wizard uses this before asking for confirmation. ``create_line``
+    repeats the check immediately before mutation because repositories can
+    change between the preview and the user's confirmation.
+    """
+    line = _build_line(
+        config,
+        line_id=line_id,
+        branch=branch,
+        base=base,
+        repositories=repositories,
+        repository_bases=repository_bases,
+        storage_modes=storage_modes,
+        kind=kind,
+    )
+    _plan_line_creation(config, line)
+    return line
+
+
+def create_line(
+    config: Config,
+    *,
+    line_id: str,
+    branch: str,
+    base: str,
+    repositories: Iterable[str] | None = None,
+    repository_bases: Mapping[str, str] | None = None,
+    storage_modes: Mapping[str, str] | None = None,
+    kind: str = "line",
+    dry_run: bool = False,
+) -> Line:
+    """Create isolated linked worktrees from configured repository anchors."""
+    line = _build_line(
+        config,
+        line_id=line_id,
+        branch=branch,
+        base=base,
+        repositories=repositories,
+        repository_bases=repository_bases,
+        storage_modes=storage_modes,
+        kind=kind,
+    )
+    planned = _plan_line_creation(config, line)
 
     created: list[str] = []
     try:
