@@ -15,6 +15,7 @@ from dyro.home import (
     HomeTool,
     _choose_action,
     _choose_tool,
+    _macos_app_name,
     _openclaw_needs_setup,
     home_tools,
     sort_home_tools,
@@ -316,6 +317,66 @@ class HubCliTests(WorkspaceCase):
             self.assertEqual(by_id[tool_id].kind, "launcher")
             self.assertEqual(by_id[tool_id].state, ToolState.READY)
             self.assertNotIn(tool_id, load(self.root).adapters)
+
+    def test_home_detects_codex_and_claude_desktops_as_launch_only_tools(
+        self,
+    ) -> None:
+        def detected(name: str) -> str | None:
+            return "/fake/" + name if name in {"codex", "open"} else None
+
+        with (
+            patch("dyro.home.sys.platform", "darwin"),
+            patch("dyro.home.Path.is_dir", return_value=True),
+            patch("dyro.home.shutil.which", side_effect=detected),
+        ):
+            tools = home_tools(load(self.root), workspace=self.root)
+
+        by_id = {tool.id: tool for tool in tools}
+        self.assertEqual(
+            by_id["codex-desktop"].argv,
+            ("codex", "app", str(self.root)),
+        )
+        claude_argv = by_id["claude-desktop"].argv
+        self.assertEqual(claude_argv[0], "open")
+        self.assertTrue(claude_argv[1].startswith("claude://code/new?folder="))
+        for tool_id in ("codex-desktop", "claude-desktop"):
+            self.assertEqual(by_id[tool_id].kind, "launcher")
+            self.assertEqual(by_id[tool_id].state, ToolState.READY)
+            self.assertNotIn(tool_id, load(self.root).adapters)
+
+    def test_macos_desktop_detection_accepts_codex_and_claude_app_variants(
+        self,
+    ) -> None:
+        with (
+            patch("dyro.home.sys.platform", "darwin"),
+            patch(
+                "dyro.home.Path.is_dir",
+                side_effect=(False, False, True, False, False, True),
+            ),
+        ):
+            self.assertEqual(_macos_app_name("Codex", "ChatGPT"), "ChatGPT")
+            self.assertEqual(
+                _macos_app_name("Claude", "Claude Code URL Handler"),
+                "Claude Code URL Handler",
+            )
+
+    def test_agent_discovery_lists_detected_codex_and_claude_desktops(self) -> None:
+        def detected(name: str) -> str | None:
+            return "/fake/" + name if name in {"codex", "open"} else None
+
+        output = StringIO()
+        with (
+            patch("dyro.home.sys.platform", "darwin"),
+            patch("dyro.home.Path.is_dir", return_value=True),
+            patch("dyro.home.shutil.which", side_effect=detected),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root), "agent", "discover"])
+
+        rendered = output.getvalue()
+        self.assertIn("codex-desktop", rendered)
+        self.assertIn("claude-desktop", rendered)
+        self.assertIn("尚未集成", rendered)
 
     def test_home_tool_picker_shows_common_choices_before_full_catalog(self) -> None:
         discovered = {"agy", "claude", "kimi", "qodercli", "zcode"}
