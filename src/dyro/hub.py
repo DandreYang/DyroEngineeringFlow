@@ -32,6 +32,16 @@ class WorkspaceRegistry:
     workspaces: tuple[WorkspaceRecord, ...] = ()
 
 
+@dataclass(frozen=True)
+class WorkspaceRegistrationPlan:
+    """A read-only preview of adding one workspace to the global entry list."""
+
+    name: str
+    root: Path
+    already_registered: bool
+    becomes_default: bool
+
+
 def registry_home() -> Path:
     override = os.environ.get("DYRO_HOME", "").strip()
     if override:
@@ -166,6 +176,32 @@ def _profile_root(path: str | Path) -> Config:
         raise DyroError(
             f"这里不是可用的 Dyro 工作区：{candidate}；请确认其中存在有效 dyro.toml"
         ) from exc
+
+
+def preview_workspace_registration(
+    path: str | Path, *, name: str, make_default: bool = False
+) -> WorkspaceRegistrationPlan:
+    """Validate and describe a future global workspace registration without writing."""
+
+    root = Path(path).expanduser().absolute().resolve()
+    alias = validate_id(name, "工作区别名")
+    registry = load_registry()
+    same_name = next(
+        (item for item in registry.workspaces if item.name == alias), None
+    )
+    same_root = next(
+        (item for item in registry.workspaces if item.root == root), None
+    )
+    if same_name is not None and same_name.root != root:
+        raise DyroError(f"工作区别名 {alias} 已指向 {same_name.root}")
+    if same_root is not None and same_root.name != alias:
+        raise DyroError(f"工作区路径已经登记为 {same_root.name}：{root}")
+    return WorkspaceRegistrationPlan(
+        name=alias,
+        root=root,
+        already_registered=same_name is not None or same_root is not None,
+        becomes_default=make_default or not registry.default,
+    )
 
 
 def add_workspace(

@@ -79,9 +79,12 @@ from .home import (
     sort_home_tools,
 )
 from .hub import (
+    WorkspaceRecord,
+    WorkspaceRegistrationPlan,
     add_workspace,
     get_workspace,
     load_registry,
+    preview_workspace_registration,
     remove_workspace,
     set_default_workspace,
 )
@@ -381,16 +384,73 @@ def _setup_provider_preset() -> str | None:
     return None
 
 
-def _render_interactive_setup_plan(plan: SetupPlan) -> None:
+def _setup_registration_plan(
+    root: Path, name: str, args: argparse.Namespace
+) -> WorkspaceRegistrationPlan | None:
+    if args.no_register:
+        return None
+    return preview_workspace_registration(
+        root, name=name, make_default=args.make_default
+    )
+
+
+def _render_setup_registration_plan(
+    registration: WorkspaceRegistrationPlan | None,
+) -> None:
+    if registration is None:
+        print("  - Console：不登记全局入口（--no-register）")
+        return
+    name = registration.name
+    root = registration.root
+    action = "已登记，保持现有入口" if registration.already_registered else "将登记全局入口"
+    default = "；设为默认项目" if registration.becomes_default else "；不改变默认项目"
+    print(f"  - Console：{action} {name} → {root}{default}")
+
+
+def _register_setup_workspace(
+    config: Config, *, register: bool, make_default: bool
+) -> WorkspaceRecord | None:
+    if not register:
+        return None
+    record = add_workspace(
+        config.root, name=config.name, make_default=make_default
+    )
+    default = "（默认项目）" if load_registry().default == record.name else ""
+    print(f"已登记全局入口：{record.name}{default}")
+    return record
+
+
+def _print_setup_completion(
+    config: Config, registration: WorkspaceRecord | None
+) -> None:
+    print("\n设置完成：")
+    print(f"  - Profile：{config.name}")
+    if registration is None:
+        print("  - Console：未登记（--no-register）")
+    else:
+        print(f"  - Console：{registration.name} 已可在 dyro console 中查看")
+    print("下一步：dyro start")
+
+
+def _render_interactive_setup_plan(
+    plan: SetupPlan, registration: WorkspaceRegistrationPlan | None
+) -> None:
     print("\n设置计划（尚未修改任何文件）：")
     for item in render_setup_plan(plan):
         print("  - " + item)
+    _render_setup_registration_plan(registration)
     if plan.needs_bootstrap:
         print("  - 将仅 clone 缺失且已明确提供 remote 的仓库")
     print("  - 不会移动、覆盖或清理现有 Git 仓库")
 
 
-def _apply_setup_plan(plan: SetupPlan, *, dry_run: bool) -> None:
+def _apply_setup_plan(
+    plan: SetupPlan,
+    *,
+    dry_run: bool,
+    register: bool,
+    make_default: bool,
+) -> None:
     if dry_run:
         print("DRY RUN: 上述计划不会写入文件、执行 clone 或创建 Git worktree")
         return
@@ -410,6 +470,9 @@ def _apply_setup_plan(plan: SetupPlan, *, dry_run: bool) -> None:
     )
     config = load(plan.root)
     _ensure_state_directories(config.root)
+    registration = _register_setup_workspace(
+        config, register=register, make_default=make_default
+    )
     if plan.needs_bootstrap:
         for message in bootstrap(config, branch=plan.default_base):
             print(message)
@@ -427,7 +490,7 @@ def _apply_setup_plan(plan: SetupPlan, *, dry_run: bool) -> None:
         print(finding)
     if any(finding.startswith("FAIL") for finding in findings):
         raise DyroError("设置已保存，但 doctor 发现问题；请修复后运行 dyro next")
-    print("\n设置完成。下一步：dyro next")
+    _print_setup_completion(config, registration)
 
 
 def _interactive_setup(args: argparse.Namespace) -> None:
@@ -437,10 +500,21 @@ def _interactive_setup(args: argparse.Namespace) -> None:
     print("Dyro 首次设置。先检查环境，确认前不会修改文件。")
     if config_file.exists():
         config = load(root)
+        registration = _setup_registration_plan(config.root, config.name, args)
         print(f"已发现 Profile：{config_file}（{len(config.repositories)} 个仓库）")
+        _render_setup_registration_plan(registration)
         for finding in doctor(config):
             print(finding)
-        print("下一步：dyro next")
+        if args.dry_run or registration is None:
+            print("下一步：dyro next")
+            return
+        if not args.yes and not _ask_yes_no("将此 Profile 登记到全局 Console", default=False):
+            print("已取消；没有修改全局入口。")
+            return
+        record = _register_setup_workspace(
+            config, register=True, make_default=args.make_default
+        )
+        _print_setup_completion(config, record)
         return
 
     repositories = discover_repositories(root) if root.exists() and not is_git_repository(root) else []
@@ -484,14 +558,25 @@ def _interactive_setup(args: argparse.Namespace) -> None:
         branch=f"feat/{line_id}" if line_id else None,
         provider_preset=provider,
     )
-    _render_interactive_setup_plan(plan)
+    registration = _setup_registration_plan(plan.root, plan.name, args)
+    _render_interactive_setup_plan(plan, registration)
     if args.dry_run:
-        _apply_setup_plan(plan, dry_run=True)
+        _apply_setup_plan(
+            plan,
+            dry_run=True,
+            register=not args.no_register,
+            make_default=args.make_default,
+        )
         return
     if not args.yes and not _ask_yes_no("应用此设置计划", default=False):
         print("已取消；没有修改任何文件。")
         return
-    _apply_setup_plan(plan, dry_run=False)
+    _apply_setup_plan(
+        plan,
+        dry_run=False,
+        register=not args.no_register,
+        make_default=args.make_default,
+    )
 
 
 def _setup_quick(args: argparse.Namespace) -> None:
@@ -511,14 +596,17 @@ def _non_interactive_setup(args: argparse.Namespace) -> None:
     if config_file.exists():
         config = load(root)
         print(f"复用已有 Profile：{config_file}")
+        registration = _setup_registration_plan(config.root, config.name, args)
     else:
         repositories = discover_repositories(root)
         if not repositories:
             raise DyroError("未发现 Git 仓库；请先 clone 仓库到工作区，或使用 dyro init --wizard")
         name = args.name or _default_workspace_name(root)
         validate_id(name, "workspace 名称")
+        registration = _setup_registration_plan(root, name, args)
         if args.dry_run:
             print(f"DRY RUN: 将创建 {config_file}，自动登记 {len(repositories)} 个 Git 仓库")
+            _render_setup_registration_plan(registration)
             if not args.no_line:
                 print(f"DRY RUN: 将创建开发线 {args.line}（分支 {args.branch or f'feat/{args.line}'}）")
             return
@@ -527,8 +615,17 @@ def _non_interactive_setup(args: argparse.Namespace) -> None:
         config = load(root)
         created = True
         print(f"已创建 Profile，并自动登记 {len(repositories)} 个 Git 仓库")
+    if config_file.exists() or not args.dry_run:
+        _render_setup_registration_plan(registration)
     if not args.dry_run:
         _ensure_state_directories(config.root)
+        registered = _register_setup_workspace(
+            config,
+            register=not args.no_register,
+            make_default=args.make_default,
+        )
+    else:
+        registered = None
     if not args.no_line:
         _require_yes(args, "setup 创建开发线")
         try:
@@ -551,8 +648,8 @@ def _non_interactive_setup(args: argparse.Namespace) -> None:
         print(finding)
     if any(finding.startswith("FAIL") for finding in findings):
         raise DyroError("setup 已完成基础配置，但 doctor 仍发现结构错误")
-    if created:
-        print("下一步：dyro next")
+    if created or registered is not None:
+        _print_setup_completion(config, registered)
 
 
 def _uses_interactive_setup(args: argparse.Namespace) -> bool:
@@ -2114,7 +2211,23 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--line", default="dev", help="首条功能开发线 ID；默认 dev")
     setup.add_argument("--branch", help="首条开发线分支；默认 feat/<line>")
     setup.add_argument("--no-line", action="store_true", help="仅建立 Profile，不创建 Git worktree 开发线")
-    setup.add_argument("--yes", action="store_true", help="确认创建首条 Git worktree 开发线")
+    setup.add_argument(
+        "--yes",
+        action="store_true",
+        help="确认需要确认的 setup 计划步骤，包括首条 Git worktree 与全局入口登记",
+    )
+    setup_registration = setup.add_mutually_exclusive_group()
+    setup_registration.add_argument(
+        "--no-register",
+        action="store_true",
+        help="不加入 Console 的全局工作区列表；适合 CI 与临时环境",
+    )
+    setup_registration.add_argument(
+        "--default",
+        dest="make_default",
+        action="store_true",
+        help="登记后设为裸 dyro 的默认项目",
+    )
     setup_mode = setup.add_mutually_exclusive_group()
     setup_mode.add_argument("--interactive", action="store_true", help="强制运行交互式首次设置")
     setup_mode.add_argument("--non-interactive", action="store_true", help="禁用交互提示；适合脚本与 CI")
