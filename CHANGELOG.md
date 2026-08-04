@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.0 - 2026-08-04
+
+- Add the native, local-first Continuation engine: versioned Objectives have
+  explicit ownership, deterministic planning, bounded scheduling waves,
+  budgets, triggers, attention projection, action journals, and supervised
+  execution. It remains opt-in and explicitly confirmed, uses the existing
+  Task execution and review APIs, and never bypasses the established review,
+  sign-off, merge, or push boundaries.
+- Add `dyro console`, a read-only local Web Console for registered workspaces.
+  It binds only to loopback, exchanges a one-time browser fragment secret for a
+  tab-scoped session, and shows health, attention, Task status, active
+  Objectives, and safe next CLI commands without browser-initiated Core or
+  project mutations and without external service access.
+- Package the Console's fixed static resources in both wheel and sdist,
+  validate their digest manifest before listening, and verify those resources
+  from clean installed artifacts in CI and the release workflow.
+- Harden execution identity, terminology policy scanning, signed evidence, and
+  control-state handling for the new supervised surfaces.
+
 ## 0.5.6 - 2026-08-03
 
 - Check the official PyPI endpoint at most once per local day on interactive
