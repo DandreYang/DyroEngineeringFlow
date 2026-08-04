@@ -25,6 +25,17 @@ dyro update enable
 dyro update disable
 ```
 
+## First-run choice
+
+Interactive `dyro setup` presents these controls as a small, recommendation-led
+choice before its final confirmation. Daily detection is recommended on;
+patch-only automatic updates are recommended off. The preview states the exact
+choice and the final confirmation writes it to the user-level state directory.
+Cancelling setup leaves both project files and update preferences untouched.
+
+`dyro setup --non-interactive` leaves existing update preferences unchanged,
+which keeps scripts and CI free of user-level side effects.
+
 Set `DYRO_NO_UPDATE_CHECK=1` for a process-level opt-out without changing the
 saved preference.
 

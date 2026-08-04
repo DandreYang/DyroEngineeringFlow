@@ -298,7 +298,7 @@ def _zcode_desktop_argv(workspace: Path) -> tuple[tuple[str, ...], bool]:
 
 
 def _launcher_tool(
-    definition: ToolDefinition, *, config: Config, workspace: Path
+    definition: ToolDefinition, *, root: Path, workspace: Path
 ) -> HomeTool:
     if definition.id == "cursor-desktop":
         argv, installed = _cursor_desktop_argv(workspace)
@@ -312,7 +312,7 @@ def _launcher_tool(
         argv = expand_argv(
             definition.launch,
             workspace=workspace,
-            root=config.root,
+            root=root,
             task="",
             line="",
             prompt="",
@@ -323,7 +323,7 @@ def _launcher_tool(
             key,
             value.format(
                 workspace=workspace,
-                root=config.root,
+                root=root,
                 task="",
                 line="",
                 prompt="",
@@ -359,6 +359,15 @@ def _launcher_tool(
     )
 
 
+def launcher_tools(workspace: Path) -> list[HomeTool]:
+    """Detect supported launch-only tools without requiring a saved Profile."""
+
+    return [
+        _launcher_tool(definition, root=workspace, workspace=workspace)
+        for definition in TOOL_DEFINITIONS
+    ]
+
+
 def home_tools(config: Config, *, workspace: Path) -> list[HomeTool]:
     tools: list[HomeTool] = []
     configured_commands: set[str] = set()
@@ -391,7 +400,7 @@ def home_tools(config: Config, *, workspace: Path) -> list[HomeTool]:
             or definition.command in configured_commands
         ):
             continue
-        tools.append(_launcher_tool(definition, config=config, workspace=workspace))
+        tools.append(_launcher_tool(definition, root=config.root, workspace=workspace))
 
     shell_argv = _shell_argv()
     if (
@@ -503,7 +512,9 @@ def print_agent_discovery(config: Config) -> None:
     for definition in TOOL_DEFINITIONS:
         if definition.interface != "desktop":
             continue
-        desktop_tool = _launcher_tool(definition, config=config, workspace=config.root)
+        desktop_tool = _launcher_tool(
+            definition, root=config.root, workspace=config.root
+        )
         installed = desktop_tool.available
         desktop_state = "已检测" if installed else "-"
         desktop_note = (
