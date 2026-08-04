@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -9,6 +10,7 @@ from unittest.mock import patch
 from dyro.cli import _route_experiment_surface, _setup_provider_preset, main
 from dyro.changesets import get_changeset
 from dyro.config import load
+from dyro.hub import load_registry
 from dyro.tasks import load_task, status, task_template
 from dyro.workspace import create_line, get_line
 
@@ -16,6 +18,17 @@ from .support import WorkspaceCase
 
 
 class CliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.registry_tmp = tempfile.TemporaryDirectory(prefix="dyro-registry-")
+        self.registry_environment = patch.dict(
+            os.environ, {"DYRO_HOME": self.registry_tmp.name}, clear=False
+        )
+        self.registry_environment.start()
+
+    def tearDown(self) -> None:
+        self.registry_environment.stop()
+        self.registry_tmp.cleanup()
+
     def test_runtime_is_not_an_experiment_surface(self) -> None:
         routed = _route_experiment_surface(
             [
@@ -98,6 +111,111 @@ class CliTests(unittest.TestCase):
             self.assertTrue((root / ".dyro/tasks").is_dir())
             self.assertEqual(get_line(config, "dev").branch, "feat/dev")
             self.assertTrue((root / "versions/dev/api").is_dir())
+
+            registry = load_registry()
+            self.assertEqual(registry.default, "demo")
+            self.assertEqual(
+                [(record.name, record.root) for record in registry.workspaces],
+                [("demo", root.resolve())],
+            )
+
+    def test_setup_keeps_an_existing_default_workspace(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            root = Path(tmp) / "workspace"
+            repository = root / "repositories/api"
+            repository.mkdir(parents=True)
+            from .support import shell
+
+            shell("git", "init", "-b", "main", cwd=repository)
+            shell("git", "config", "user.name", "Test User", cwd=repository)
+            shell("git", "config", "user.email", "test@example.com", cwd=repository)
+            repository.joinpath("README.md").write_text("anchor\n", encoding="utf-8")
+            shell("git", "add", "README.md", cwd=repository)
+            shell("git", "commit", "-m", "chore: initial", cwd=repository)
+
+            existing = Path(tmp) / "existing"
+            main(["init", str(existing), "--name", "existing"])
+            main(["workspace", "add", str(existing), "--default"])
+
+            main(["setup", str(root), "--name", "demo", "--no-line"])
+
+            registry = load_registry()
+            self.assertEqual(registry.default, "existing")
+            self.assertEqual(
+                {record.name for record in registry.workspaces}, {"demo", "existing"}
+            )
+
+    def test_setup_can_explicitly_set_the_default_workspace(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            root = Path(tmp) / "workspace"
+            repository = root / "repositories/api"
+            repository.mkdir(parents=True)
+            from .support import shell
+
+            shell("git", "init", "-b", "main", cwd=repository)
+
+            existing = Path(tmp) / "existing"
+            main(["init", str(existing), "--name", "existing"])
+            main(["workspace", "add", str(existing), "--default"])
+
+            main(
+                [
+                    "setup",
+                    str(root),
+                    "--name",
+                    "demo",
+                    "--no-line",
+                    "--default",
+                ]
+            )
+
+            self.assertEqual(load_registry().default, "demo")
+
+    def test_setup_can_skip_global_workspace_registration(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            root = Path(tmp) / "workspace"
+            repository = root / "repositories/api"
+            repository.mkdir(parents=True)
+            from .support import shell
+
+            shell("git", "init", "-b", "main", cwd=repository)
+
+            main(
+                [
+                    "setup",
+                    str(root),
+                    "--name",
+                    "demo",
+                    "--no-line",
+                    "--no-register",
+                ]
+            )
+
+            self.assertEqual(load_registry().workspaces, ())
+
+    def test_setup_rejects_an_alias_conflict_before_writing_a_profile(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            existing = Path(tmp) / "existing"
+            main(["init", str(existing), "--name", "demo"])
+            main(["workspace", "add", str(existing)])
+
+            root = Path(tmp) / "workspace"
+            repository = root / "repositories/api"
+            repository.mkdir(parents=True)
+            from .support import shell
+
+            shell("git", "init", "-b", "main", cwd=repository)
+
+            stderr = StringIO()
+            with (
+                redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main(["setup", str(root), "--name", "demo", "--no-line"])
+
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn("工作区别名 demo 已指向", stderr.getvalue())
+            self.assertFalse((root / "dyro.toml").exists())
 
     def test_setup_accepts_dry_run_after_the_command_without_writing(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:

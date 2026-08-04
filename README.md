@@ -384,7 +384,7 @@ dyro bootstrap --yes
 dyro doctor
 ```
 
-After setup, run `dyro`. The first run inside a project registers it in a reversible global home. From then on, the same command can resume a recent development line, hotfix, or existing task worktree from any directory—without remembering `--root`:
+`dyro setup` registers the completed Profile in the reversible global home by default, so it is visible in Console immediately. The first registered workspace becomes the default; later setup runs keep the existing default unless you pass `--default`. Use `--no-register` for CI or temporary workspaces. From then on, bare `dyro` can resume a recent development line, hotfix, or existing task worktree from any directory—without remembering `--root`:
 
 ```bash
 dyro
