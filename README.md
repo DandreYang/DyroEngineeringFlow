@@ -390,6 +390,17 @@ dyro doctor
 dyro
 ```
 
+Interactive setup also collects a short set of global, reversible personal
+preferences before its final confirmation: daily update detection (recommended
+on), patch-only automatic updates (recommended off), and a default locally
+available coding tool. When Console already has a default project, setup asks
+whether to keep it or make the new project the target of bare `dyro`. These
+preferences never modify a Git repository, do not install a tool, and can be
+changed later with `dyro update …`, `dyro tool default …`, or `dyro workspace
+add … --default`. To keep first-run selection readable, setup shows at most
+three detected tools initially; enter `m` to expand the full list or type a
+tool ID directly.
+
 Interactive home always asks which coding tool to use before launching one,
 even when only a single Profile adapter is configured. Configured adapters
 remain eligible for Dyro execution contracts; supported commands detected only
