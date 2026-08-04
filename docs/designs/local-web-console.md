@@ -254,6 +254,23 @@ C05 提供前台入口 `dyro console [--no-open] [--port PORT]`，但不增加�
 - bare `dyro` Home 新增“查看全部项目控制台”。它复用当前已登记工作区作为初始焦点，且 Home 的
   dry-run 会保留零副作用；需要不登记某个 Profile 时，应显式使用 `dyro --root PATH console`。
 
+### 4.6 C06 已落地的离线总览界面
+
+C06 将已认证的总览接口接入无框架浏览器界面，优先让使用者在一页内识别需要处理的工程：
+
+- `index.html`、`app.js` 和 `styles.css` 是 wheel 内的固定资源；每个启动都通过 SHA-256 与大小
+  manifest 验证，缺失、漂移或未知 asset 使 listener fail closed，绝不从 cwd 或 source tree 回退；
+- 页面先将 fragment 中的一次性 bootstrap secret 读入局部变量并立即清除 URL，再交换为只存在
+  当前 tab `sessionStorage` 的 bearer。它不用 cookie、`localStorage`、外部资源、inline script、
+  `innerHTML` 或服务端 mutation；
+- 全局页显示 attention、Task 状态分布、active Objective、健康与 freshness、推荐命令。所有
+  workspace 文本通过 DOM `textContent` 写入；复制只在浏览器内进行；
+- 可点击卡片查看当前 C04 summary，支持条件 ETag 刷新。页面在后台时暂停轮询，恢复可见时只恢复
+  单一轮询定时器；会话过期或本地读取失败显示一条恢复说明，不猜测数据或修改项目。
+
+C06 仅消费已发布的 overview/workspace 只读 DTO；Objective、Task 证据链、图和活动的深度 API
+仍须在对应 Core 投影准备完成后通过单独的只读扩展交付，不能由浏览器自行推导。
+
 ## 5. 模块设计
 
 建议模块边界：

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Dyro Console</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+    <script type="module" src="/assets/app.js"></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div>
+        <p class="eyebrow">LOCAL · READ ONLY</p>
+        <h1>Dyro Console</h1>
+      </div>
+      <p id="session-status" class="session-status" role="status" aria-live="polite">正在建立安全本地会话…</p>
+    </header>
+    <main id="console-main" tabindex="-1">
+      <section class="hero" aria-labelledby="overview-heading">
+        <div>
+          <p class="eyebrow">项目总览</p>
+          <h2 id="overview-heading">优先处理需要关注的工程</h2>
+          <p id="overview-summary">正在读取本地工作区状态。</p>
+        </div>
+        <button id="refresh" type="button" class="secondary">刷新</button>
+      </section>
+      <section aria-label="全局计数" class="counts" id="attention-counts"></section>
+      <section aria-labelledby="workspace-heading">
+        <div class="section-heading">
+          <h2 id="workspace-heading">工作区</h2>
+          <p id="captured-at"></p>
+        </div>
+        <div id="workspace-list" class="workspace-list" aria-live="polite"></div>
+      </section>
+      <section id="workspace-detail" class="workspace-detail" hidden aria-labelledby="detail-heading">
+        <div class="section-heading">
+          <h2 id="detail-heading">工作区摘要</h2>
+          <button id="detail-close" type="button" class="secondary">关闭</button>
+        </div>
+        <div id="detail-content"></div>
+      </section>
+    </main>
+    <footer>Dyro Console 仅展示本地权威状态；执行、复核、签收、合并和推送仍须通过 CLI。</footer>
+  </body>
+</html>
