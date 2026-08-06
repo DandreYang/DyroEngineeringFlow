@@ -32,9 +32,9 @@ Risk vocabulary follows ADR 0006: `R0`, `PLAN`, `R1`, `R2`, and `R3`.
 
 | Operation | Class | Status | Current source starting point | Required Core work and proof |
 | --- | --- | --- | --- | --- |
-| `bridge.hello` | R0 | declared | New | Return only protocol/Core/Bridge version and availability; no update or host probing |
-| `bridge.capabilities.compact` | R0 | declared | New Exposure Catalog | IDs, risk, availability, schemas and digest only; no full schemas |
-| `bridge.operation.schema` | R0 | declared | New schema store | Fetch exactly one allowlisted schema; reject unknown/unavailable operation |
+| `bridge.hello` | R0 | implemented_testable | `bridge/transport.py` | Return only protocol/Core/Bridge version; no update or host probing |
+| `bridge.capabilities.compact` | R0 | implemented_testable | `bridge/catalog.py`, `bridge/transport.py` | IDs, risk, availability, versions and digest only; no full schemas |
+| `bridge.operation.schema` | R0 | implemented_testable | `bridge/schemas.py`, `bridge/transport.py` | Fetch exactly one allowlisted callable schema; reject unknown/unavailable operation |
 | `workspace.resolve` | R0 | implemented_testable | `bridge/observations.py`, `continuation/resolution.py` | Typed result with `resolution_source`; structured fail-closed errors; no recent-state write |
 | `workspace.list` | R0 | implemented_testable | `bridge/observations.py`, `hub.py` | DTO without absolute paths by default; partial stale/unreadable status; no registry mutation |
 | `workspace.observe` | R0 | implemented_testable | `bridge/observations.py` | Bounded per-record partial results; mark integration `not_inspected`; never infer final readiness |
@@ -67,6 +67,11 @@ unavailable rather than being interpreted with incomplete config.
 
 Declared status is not implementation approval. Each row must acquire a source
 call graph and pass the acceptance matrix before it becomes public-available.
+
+The S4 one-shot transport is installed and tested, but its production context
+does not contain an availability override. All `implemented_testable` services,
+including discovery, therefore continue to return `OPERATION_UNAVAILABLE` from
+the installed process until the S5 evidence gate changes the catalog itself.
 
 ### Mandatory Core Surface
 

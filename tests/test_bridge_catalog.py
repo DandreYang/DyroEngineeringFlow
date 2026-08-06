@@ -78,6 +78,9 @@ class BridgeCatalogTests(unittest.TestCase):
         self.assertEqual(
             implemented,
             {
+                "bridge.capabilities.compact",
+                "bridge.hello",
+                "bridge.operation.schema",
                 "objective.attention",
                 "objective.explain",
                 "objective.graph",

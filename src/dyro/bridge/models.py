@@ -12,6 +12,7 @@ import re
 from ..canonical import canonical_json_bytes
 from ..config import validate_id
 from ..errors import ValidationError
+from .constants import MAX_PROTOCOL_COMPONENT
 
 
 MAX_PROFILE_BYTES = 1024 * 1024
@@ -53,6 +54,7 @@ class ErrorCode(str, Enum):
     INVALID_JSON = "INVALID_JSON"
     REQUEST_TOO_LARGE = "REQUEST_TOO_LARGE"
     PROTOCOL_MAJOR_UNSUPPORTED = "PROTOCOL_MAJOR_UNSUPPORTED"
+    PROTOCOL_MINOR_UNSUPPORTED = "PROTOCOL_MINOR_UNSUPPORTED"
     SCHEMA_VALIDATION_FAILED = "SCHEMA_VALIDATION_FAILED"
     OPERATION_UNKNOWN = "OPERATION_UNKNOWN"
     OPERATION_UNAVAILABLE = "OPERATION_UNAVAILABLE"
@@ -103,15 +105,15 @@ class ProtocolVersion:
         if (
             not isinstance(self.major, int)
             or isinstance(self.major, bool)
-            or self.major < 0
+            or not 0 <= self.major <= MAX_PROTOCOL_COMPONENT
         ):
-            raise ValidationError("protocol major 必须是非负整数")
+            raise ValidationError("protocol major 必须是 RFC 8785 safe integer")
         if (
             not isinstance(self.minor, int)
             or isinstance(self.minor, bool)
-            or self.minor < 0
+            or not 0 <= self.minor <= MAX_PROTOCOL_COMPONENT
         ):
-            raise ValidationError("protocol minor 必须是非负整数")
+            raise ValidationError("protocol minor 必须是 RFC 8785 safe integer")
 
     def as_dict(self) -> dict[str, int]:
         return {"major": self.major, "minor": self.minor}

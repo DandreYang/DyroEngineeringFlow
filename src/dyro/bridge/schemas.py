@@ -13,12 +13,63 @@ from jsonschema.exceptions import SchemaError
 
 from ..canonical import canonical_json_bytes, canonical_json_text
 from ..errors import ValidationError
-from .constants import PLAN_OPERATION_REVISIONS
+from .constants import MAX_PROTOCOL_COMPONENT, PLAN_OPERATION_REVISIONS
 
 
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 SAFE_ID_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$"
 OPERATION_ID_PATTERN = r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$"
+
+REQUEST_ENVELOPE_SCHEMA: dict[str, object] = {
+    "$schema": JSON_SCHEMA_DIALECT,
+    "$id": "urn:dyro:bridge:request-envelope.v1",
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "protocol": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "major": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": MAX_PROTOCOL_COMPONENT,
+                },
+                "minor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": MAX_PROTOCOL_COMPONENT,
+                },
+            },
+            "required": ["major", "minor"],
+        },
+        "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "client": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "name": {"type": "string", "minLength": 1, "maxLength": 128},
+                "version": {"type": "string", "minLength": 1, "maxLength": 128},
+            },
+            "required": ["name", "version"],
+        },
+        "operation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": OPERATION_ID_PATTERN,
+        },
+        "input": {"type": "object"},
+    },
+    "required": ["protocol", "client", "operation", "input"],
+}
+
+Draft202012Validator.check_schema(REQUEST_ENVELOPE_SCHEMA)
+
+
+def get_request_envelope_schema() -> dict[str, object]:
+    """Return a detached copy of the strict protocol-major-1 envelope schema."""
+    return json.loads(canonical_json_text(REQUEST_ENVELOPE_SCHEMA))
 
 
 @dataclass(frozen=True)

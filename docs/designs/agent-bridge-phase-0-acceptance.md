@@ -159,7 +159,8 @@ The shared corpus covers:
   other public-available operation;
 - `declared` and `implemented_testable` operations remain unavailable through
   the public process;
-- unknown protocol major/minor behavior;
+- unknown protocol major and future-minor behavior, including explicit
+  `PROTOCOL_MINOR_UNSUPPORTED` without silent downgrade;
 - unknown, unavailable, and excluded operation IDs;
 - missing, extra, wrong-type, oversized, duplicate, and deeply nested fields;
 - invalid UTF-8, two concatenated JSON values, and trailing bytes;

@@ -47,6 +47,7 @@ _ERROR_PRESENTATION = {
     ErrorCode.INVALID_JSON: "The request is not valid JSON.",
     ErrorCode.REQUEST_TOO_LARGE: "The request exceeds the transport limit.",
     ErrorCode.PROTOCOL_MAJOR_UNSUPPORTED: "The protocol major is unsupported.",
+    ErrorCode.PROTOCOL_MINOR_UNSUPPORTED: "The protocol minor is unsupported.",
     ErrorCode.SCHEMA_VALIDATION_FAILED: "The observation input is invalid.",
     ErrorCode.OPERATION_UNKNOWN: "The requested operation is unknown.",
     ErrorCode.OPERATION_UNAVAILABLE: "The requested operation is unavailable.",
@@ -371,10 +372,6 @@ def _bridge_error(code: ErrorCode) -> BridgeObservationError:
     }:
         actions = (
             BridgeNextAction(NextActionKind.INSPECT_INPUT, "Inspect the request input"),
-        )
-    elif code is ErrorCode.PROTOCOL_MAJOR_UNSUPPORTED:
-        actions = (
-            BridgeNextAction(NextActionKind.UPGRADE_CLIENT, "Upgrade the client"),
         )
     elif code in {ErrorCode.OPERATION_UNAVAILABLE, ErrorCode.OBSERVATION_PARTIAL}:
         actions = (BridgeNextAction(NextActionKind.RETRY, "Retry the operation"),)

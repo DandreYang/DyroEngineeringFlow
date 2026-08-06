@@ -57,6 +57,9 @@ _DECLARED_PLATFORMS = (
 )
 
 _IMPLEMENTED_TESTABLE_SERVICES = {
+    "bridge.capabilities.compact": "dyro.bridge.transport.bridge_capabilities",
+    "bridge.hello": "dyro.bridge.transport.bridge_hello",
+    "bridge.operation.schema": "dyro.bridge.transport.bridge_operation_schema",
     "objective.attention": "dyro.bridge.plans.attention_objective",
     "objective.explain": "dyro.bridge.plans.explain_objective",
     "objective.graph": "dyro.bridge.plans.graph_objective",

@@ -18,7 +18,7 @@ changing a field, copying a digest, adding `--yes`, or claiming an actor.
 
 ## 2. Process contract
 
-The installed entry point is planned as:
+The packaged console entry point is:
 
 ```text
 dyro-bridge
@@ -26,7 +26,9 @@ dyro-bridge
 
 The process contract is:
 
-1. read exactly one UTF-8 JSON object from stdin, up to 256 KiB;
+1. read exactly one UTF-8 JSON object from stdin, up to 256 KiB; EOF is the
+   one-shot frame delimiter, so a client MUST close its stdin write end after
+   the request bytes and MUST NOT wait for a response before doing so;
 2. reject trailing non-whitespace bytes and duplicate JSON keys;
 3. while stdout is writable, emit exactly one compact UTF-8 JSON object followed
    by one newline on stdout;
@@ -39,6 +41,16 @@ The process contract is:
    dependency, and `5` when stdout closes before a complete response. Exit 5
    performs no retry and emits no traceback; it cannot promise a JSON response
    because the output channel is unavailable.
+
+Each invocation is a dedicated single-request, single-thread process. The
+descriptor-level stdout/stderr isolation around Core materialization is
+process-global and is not a supported in-process concurrency primitive.
+
+Before JSON decoding, the implementation also rejects nesting deeper than 64,
+more than 10,000 decoded value nodes, and numeric tokens longer than 128 bytes.
+Escaped surrogate code points are rejected rather than transported across
+different Unicode implementations. These limits are protocol-major-1
+invariants, not caller-tunable settings.
 
 The transport MUST impose response limits. Phase 0 defaults are 1 MiB for a
 response, 100 collection items unless the operation defines a smaller maximum,
@@ -83,8 +95,12 @@ Rules:
 
 - `protocol.major`, `client.name`, `client.version`, `operation`, and `input`
   are required.
-- `request_id` is optional, bounded correlation text. It is not an idempotency
-  key, identity, or authorization credential.
+- `request_id` is optional, bounded correlation text. It is echoed only when it
+  matches `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` and does not match a secret, URL
+  credential, or absolute-path pattern; otherwise it becomes `null` with a
+  fixed `REQUEST_ID_REDACTED` warning on a successful response. Error responses
+  omit warnings and retain `request_id=null`. It is not an idempotency key,
+  identity, or authorization credential.
 - `start` never performs shell or home-directory expansion. Values beginning
   with `~` are invalid; relative values are resolved only against the server's
   explicit working-directory context.
@@ -167,6 +183,11 @@ Error `message` is a bounded presentation string, not a raw exception. Details
 use operation-specific allowlisted fields. `next_actions` are semantic actions,
 not shell commands.
 
+Typed operation schemas and DTOs are the primary output allowlist. Boundary
+pattern detection is defense in depth for known credential, URI, argv and path
+forms; an unexpected value that would require changing a PLAN fails closed
+rather than changing or re-hashing that plan.
+
 ### Transport-error metadata
 
 Failures before a valid envelope exists use the same top-level `ok/meta/error`
@@ -210,6 +231,7 @@ Required common codes include:
 | `INVALID_JSON` | Input is not one valid JSON object |
 | `REQUEST_TOO_LARGE` | Input exceeded the transport limit |
 | `PROTOCOL_MAJOR_UNSUPPORTED` | Client major is incompatible |
+| `PROTOCOL_MINOR_UNSUPPORTED` | Client minor is newer than this server minor |
 | `SCHEMA_VALIDATION_FAILED` | Envelope or operation input is invalid |
 | `OPERATION_UNKNOWN` | Operation ID is not in this Core catalog |
 | `OPERATION_UNAVAILABLE` | Known operation is disabled or dependency is absent |
@@ -225,6 +247,12 @@ Required common codes include:
 | `OBSERVATION_DEADLINE_EXCEEDED` | The bounded Core observation deadline elapsed |
 | `RECORD_INVALID` | One bounded workspace record is invalid; healthy siblings may remain |
 | `INTERNAL_ERROR` | Redacted unexpected failure; never includes raw exception text |
+
+For one protocol major, a client minor less than or equal to the server minor is
+accepted. A future client minor fails explicitly; the Bridge never silently
+downgrades it. Each version component is a non-negative RFC 8785 safe integer
+(`0..9007199254740991`); values outside that domain fail envelope validation and
+are never reflected into response metadata.
 
 ## 6. Compact capability discovery
 

@@ -1,7 +1,4 @@
-"""Machine-readable, inspect-and-plan-only Dyro Bridge contracts.
-
-Phase 0 intentionally contains no transport and no mutation entry point.
-"""
+"""Machine-readable, inspect-and-plan-only Dyro Agent Bridge."""
 
 from .catalog import (
     capabilities_digest,

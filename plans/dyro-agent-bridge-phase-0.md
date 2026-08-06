@@ -260,6 +260,12 @@ remains intact.
 
 ## 6. Step S4 — One-shot JSON transport
 
+Implementation status (2026-08-07): complete in the source tree and retained at
+`implemented_testable`. The declared package entry point, bounded parser, static
+router, fixed error surface, fail-closed PLAN handling, and broken-pipe behavior
+have focused tests. Production requests remain unavailable until S5 supplies
+the Linux zero-effect, artifact and restricted-host evidence.
+
 ### Context brief
 
 The machine boundary must own parsing and errors before human argparse and
@@ -287,6 +293,11 @@ while stdout remains writable; a broken pipe follows the explicit exit-5 rule.
    exactly-one-JSON applies only while stdout is writable.
 7. Add the real `dyro-bridge` console entry point.
 8. Keep MCP dependencies and host integration files out of this step.
+
+The frozen parser limits are 256 KiB request bytes, depth 64, 10,000 decoded
+nodes, and 128-byte numeric tokens. Protocol major 1 accepts only client minor
+versions at or below the server minor. Request IDs use a narrow correlation-ID
+alphabet and are not echoed when boundary redaction rejects them.
 
 ### Verification
 
