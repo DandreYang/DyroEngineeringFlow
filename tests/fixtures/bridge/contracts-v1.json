@@ -1,0 +1,58 @@
+{
+  "capabilities": {
+    "digest": "sha256:3a008d6baa65db697eb44a9a910c4791eb0a96f58fcd361784341c4140ab2bd7",
+    "platform": "linux-ubuntu-24.04"
+  },
+  "config_revisions": [
+    {
+      "bytes_hex": "736368656d615f76657273696f6e203d20310a",
+      "value": "sha256:ac7602bc8dba02721e752c61c3f7016db7c0c8cd52d54fc15aca3e1184c3ea0f"
+    },
+    {
+      "bytes_hex": "610a",
+      "value": "sha256:f5d964d92bd53f7cb5d7f2c33808524f881a4e1a0f6174e7c144887bd9c260ba"
+    },
+    {
+      "bytes_hex": "610d0a",
+      "value": "sha256:1f2e51ec228b3abfd0d44ccd37002a1de8f81e4387e3b52791579515648fffea"
+    }
+  ],
+  "schema_digests": {
+    "bridge.capabilities.compact": "sha256:03d62638856888149eddbfb7ce8d18232680cada55fbc9684ba4c1f8f6422e78",
+    "bridge.hello": "sha256:962c2d821892a3feb772ec9cd46a907b5eedaab0fc85bc03fc651f8262341225",
+    "bridge.operation.schema": "sha256:203ae1baeaeafddace4f6ab7580a5c90e40dba340ca8ef367c085d020be0560e",
+    "line.list": "sha256:fffe4807e5b61c22fa18cae1ad26720e36e32d78154e306c62b83ab5e224b5c3",
+    "objective.attention": "sha256:1a331322e604624e919c6ce7a1647d13c7f9312d8ab8fb04e2236ed7cce34b91",
+    "objective.explain": "sha256:3854a4fc38b3d315abcce4017a44658facf2db5883471ff96889c84bf4ddc646",
+    "objective.graph": "sha256:279e4a277fd9d58f689d6f18e2d92691dfea7caad2f958651d61617f0a420da9",
+    "objective.list": "sha256:cd0c157b18d6db1ed523ed047b36d1d3725180813af894859261a8a0daaf4276",
+    "objective.plan": "sha256:66efab05e54558b9cd72fecf9b96e0849bbba4f1c0d88a14ae72979c7c7302bc",
+    "objective.status": "sha256:835b43e36829faac98f5d0925032ee3904e26538d9bce43bc9178c19852dd97d",
+    "objective.tick": "sha256:710efcf867d73f24444132697cfd2f7e3c1dbf1205485ea1791c035ef36296fd",
+    "task.explain": "sha256:d6d744ff39f4b3a0de8a405e61b56f5411e824035eed7f2a3ea270e975c31289",
+    "task.gate_definitions.get": "sha256:7318f6b7512eef85828cf4b3b6a3338efdd923727f6b45b49ede6fe7854a99e5",
+    "task.graph": "sha256:787b48af1d4e607353360a998d8c7b1755e0644338d55e277182beb33f1b1ef3",
+    "task.list": "sha256:fdba7bf9dc5cc09c91de98cd91b2d3ad94607a20e81aaa7734bb1a83ce77ee8e",
+    "workspace.list": "sha256:ecb77721e7123ba172025b58cdc3ab154be49737340bbb73eb97562fa5f666c6",
+    "workspace.observe": "sha256:2701fcdc0ed948c3567f7b0cf44dea7c65fae695c750e58345cf60be06d3662d",
+    "workspace.resolve": "sha256:e86c75ffef9f01b735d5cec36518264f1a2bc124058113b13a262f86c45edeb9"
+  },
+  "version": 1,
+  "workspace_identities": [
+    {
+      "canonical_root": "/work/acme",
+      "profile_name": "acme",
+      "value": "workspace:81f25d770817dafa167c00a0b2506e703a85a7978ce53404709fd8b8af25eb01"
+    },
+    {
+      "canonical_root": "/work/acme-moved",
+      "profile_name": "acme",
+      "value": "workspace:7f0779a1d4dee0475ead633ea9f390f9173d2083f2658879c38069c79f151b30"
+    },
+    {
+      "canonical_root": "/work/acme",
+      "profile_name": "acme-renamed",
+      "value": "workspace:df0ee53c9760eeb0e471de4727b383c66a69ffdc074c5471fa338e102108285e"
+    }
+  ]
+}

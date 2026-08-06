@@ -9,6 +9,7 @@ from typing import Iterable, Mapping
 from .config import Config, external_security_errors, validate_id
 from .errors import DyroError, ValidationError
 from .process import git, require_ok
+from .read_limits import ReadBudget
 from .state import atomic_write_text
 
 
@@ -75,12 +76,12 @@ def _write_line(config: Config, line: Line, *, dry_run: bool = False) -> None:
     atomic_write_text(path, "\n".join(chunks))
 
 
-def _parse_line(path: Path) -> Line:
+def _parse_line_content(path: Path, content: bytes) -> Line:
     import tomllib
 
     try:
-        raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as exc:
+        raw = tomllib.loads(content.decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
         raise ValidationError(f"开发线清单格式错误：{path}: {exc}") from exc
     if raw.get("schema_version") not in (1, 2):
         raise ValidationError(f"不支持的开发线清单版本：{path}")
@@ -112,6 +113,24 @@ def _parse_line(path: Path) -> Line:
             raise ValidationError(f"开发线清单存储方式无效：{repo_id}={value!r}")
         storage_modes[str(repo_id)] = value
     return Line(line_id, kind, branch, base, repositories, repository_bases, storage_modes)
+
+
+def _parse_line(path: Path) -> Line:
+    return _parse_line_content(path, path.read_bytes())
+
+
+def load_line_bounded(path: Path, budget: ReadBudget, *, workspace_root: Path) -> Line:
+    content = budget.read_regular_bytes_at(
+        root=workspace_root,
+        directory=path.parent,
+        name=path.name,
+        maximum_bytes=budget.limits.line_manifest_bytes,
+        label="line manifest",
+    )
+    line = _parse_line_content(path, content)
+    if path.stem != line.id:
+        raise ValidationError(f"开发线文件名与清单 ID 不一致：{path.stem} != {line.id}")
+    return line
 
 
 def list_lines(config: Config, kind: str | None = None) -> list[Line]:
