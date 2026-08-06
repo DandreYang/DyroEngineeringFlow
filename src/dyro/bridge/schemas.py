@@ -13,6 +13,7 @@ from jsonschema.exceptions import SchemaError
 
 from ..canonical import canonical_json_bytes, canonical_json_text
 from ..errors import ValidationError
+from .constants import PLAN_OPERATION_REVISIONS
 
 
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
@@ -315,29 +316,104 @@ _WORKSPACE_OBSERVE_OUTPUT = _object(
     ),
 )
 
-_PLAN_ACTION = _strict_object(
+_ACTION_KINDS = [
+    "ask_user",
+    "complete",
+    "execute_task",
+    "merge_task",
+    "pause",
+    "probe_trigger",
+    "repair_required",
+    "review_task",
+    "wait",
+]
+
+_REASON_CODES = [
+    "ACTION_UNCERTAIN",
+    "ACTIVATION_REQUIRED",
+    "ANSWER_REQUIRED",
+    "BUDGET_EXHAUSTED",
+    "CONFLICT_GROUP_ACTIVE",
+    "CONTRACT_DRIFT",
+    "DECISION_OPEN",
+    "DEPENDENCY_PENDING",
+    "EXTERNAL_CLAIM_ACTIVE",
+    "NO_PROGRESS",
+    "OBJECTIVE_PAUSED",
+    "OBJECTIVE_SCOPE_CONFLICT",
+    "POLICY_DISALLOWS_OPERATION",
+    "TARGETS_INTEGRATED",
+    "TASK_FAILED",
+    "TASK_INTEGRATION_PENDING",
+    "TASK_READY",
+    "TASK_REVIEW_READY",
+    "TRIGGER_NOT_DUE",
+]
+
+_TASK_STATUSES = [
+    "assigned",
+    "backlog",
+    "done",
+    "failed",
+    "in_progress",
+    "review",
+    "review_pending_signoff",
+    "waiting_answer",
+]
+
+_ACTION_PREDICATES = _strict_object(
     {
-        "kind": _string(maximum=128),
-        "subject_id": _string(maximum=128),
-        "reason": _string(maximum=128),
-    },
-    required=("kind", "subject_id", "reason"),
+        "action_kind": {"enum": [*_ACTION_KINDS, None]},
+        "active_parallel": {"type": "integer", "minimum": 0},
+        "available_parallel": {"type": "integer", "minimum": 0},
+        "has_active_claim": {"type": "boolean"},
+        "has_conflict": {"type": "boolean"},
+        "has_open_decision": {"type": "boolean"},
+        "has_pending_dependency": {"type": "boolean"},
+        "max_parallel": {"type": "integer", "minimum": 1},
+        "observed_status": {"enum": _TASK_STATUSES},
+        "operation": {"enum": ["execute", "merge", "review"]},
+        "operator_state": {"enum": ["active", "paused", "stopped"]},
+        "related_subject_ids": {
+            "type": "array",
+            "maxItems": 100,
+            "items": _safe_id(),
+        },
+        "requested_mode": {"enum": ["automatic", "observe", "supervised"]},
+        "resource_class": {"enum": ["agent", "conflict", "line", "task"]},
+        "selected_subject_id": _safe_id(),
+    }
 )
 
-_PLAN_EFFECT = _strict_object(
+_PLAN_ACTION = _strict_object(
     {
-        "kind": _string(maximum=128),
-        "subject_id": _string(maximum=128),
+        "kind": {"enum": _ACTION_KINDS},
+        "subject_id": _safe_id(),
+        "reason": {"enum": _REASON_CODES},
+        "predicates": _ACTION_PREDICATES,
     },
-    required=("kind", "subject_id"),
+    required=("kind", "subject_id", "reason", "predicates"),
+)
+
+_ATTENTION_ITEM = _strict_object(
+    {
+        "id": _safe_id(),
+        "kind": {
+            "enum": ["needs_user", "paused", "ready", "repair_required", "waiting"]
+        },
+        "subject_id": _safe_id(),
+        "reason": {"enum": _REASON_CODES},
+        "priority": {"type": "integer", "minimum": 0, "maximum": 4},
+        "predicates": _ACTION_PREDICATES,
+    },
+    required=("id", "kind", "subject_id", "reason", "priority", "predicates"),
 )
 
 _WARNING = _strict_object(
     {
-        "code": _string(maximum=128),
-        "message": _string(maximum=4096),
+        "code": {"enum": ["PLAN_EXPIRES_AT_OBJECTIVE_DEADLINE"]},
     },
-    required=("code", "message"),
+    required=("code",),
 )
 
 _OBJECTIVE_PLAN_INPUT = _object(
@@ -347,78 +423,6 @@ _OBJECTIVE_PLAN_INPUT = _object(
         "objective_id": _safe_id(),
     },
     required=("objective_id",),
-)
-
-_OBJECTIVE_PLAN_OUTPUT = _object(
-    "objective.plan.output.v1",
-    {
-        "executable": {"const": False},
-        "authorization": {"const": "none"},
-        "operation": {"const": "objective.plan"},
-        "operation_schema_version": {"const": 1},
-        "planner_revision": {"const": "objective-plan/1"},
-        "workspace": _strict_object(
-            {
-                "id": _string(pattern=r"^workspace:[0-9a-f]{64}$"),
-                "config_sha256": _string(pattern=r"^sha256:[0-9a-f]{64}$"),
-            },
-            required=("id", "config_sha256"),
-        ),
-        "normalized_input": _strict_object(
-            {"objective_id": _safe_id()}, required=("objective_id",)
-        ),
-        "read_set": _strict_object(
-            {
-                "objective_revision": {"type": "integer", "minimum": 1},
-                "contract_sha256": _string(pattern=r"^sha256:[0-9a-f]{64}$"),
-                "scope_sha256": _string(pattern=r"^sha256:[0-9a-f]{64}$"),
-                "event_sha256": _string(pattern=r"^sha256:[0-9a-f]{64}$"),
-                "integration_inspection": {"const": "complete"},
-            },
-            required=(
-                "objective_revision",
-                "contract_sha256",
-                "scope_sha256",
-                "event_sha256",
-                "integration_inspection",
-            ),
-        ),
-        "projection": _strict_object(
-            {
-                "selected_actions": {
-                    "type": "array",
-                    "maxItems": 100,
-                    "items": _PLAN_ACTION,
-                },
-                "blocked": {"type": "array", "maxItems": 100, "items": _PLAN_ACTION},
-                "attention": {"type": "array", "maxItems": 100, "items": _PLAN_ACTION},
-            },
-            required=("selected_actions", "blocked", "attention"),
-        ),
-        "effects": {"type": "array", "maxItems": 100, "items": _PLAN_EFFECT},
-        "warnings": {"type": "array", "maxItems": 64, "items": _WARNING},
-        "maximum_risk": {"const": "PLAN"},
-        "effective_risk": {"const": "PLAN"},
-        "expires_at": _string(maximum=64),
-        "plan_sha256": _string(pattern=r"^sha256:[0-9a-f]{64}$"),
-    },
-    required=(
-        "executable",
-        "authorization",
-        "operation",
-        "operation_schema_version",
-        "planner_revision",
-        "workspace",
-        "normalized_input",
-        "read_set",
-        "projection",
-        "effects",
-        "warnings",
-        "maximum_risk",
-        "effective_risk",
-        "expires_at",
-        "plan_sha256",
-    ),
 )
 
 
@@ -508,44 +512,232 @@ def _graph_output(operation: str) -> dict[str, object]:
     )
 
 
-def _objective_read_set() -> dict[str, object]:
-    return _strict_object(
-        {
-            "objective_revision": {"type": "integer", "minimum": 1},
-            "contract_sha256": _string(pattern=r"^sha256:[0-9a-f]{64}$"),
-            "scope_sha256": _string(pattern=r"^sha256:[0-9a-f]{64}$"),
-            "event_sha256": _string(pattern=r"^sha256:[0-9a-f]{64}$"),
-            "integration_inspection": {"const": "complete"},
+_UTC_TIMESTAMP = (
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$"
+)
+_SHA256 = _string(pattern=r"^sha256:[0-9a-f]{64}$")
+
+_BUDGET_FACTS = _strict_object(
+    {
+        "deadline": _nullable_string(maximum=64, pattern=_UTC_TIMESTAMP),
+        "max_actions": {"type": "integer", "minimum": 1},
+        "max_attempts_per_task": {"type": "integer", "minimum": 1},
+        "max_failures": {"type": "integer", "minimum": 1},
+        "max_no_progress_cycles": {"type": "integer", "minimum": 1},
+        "max_parallel": {"type": "integer", "minimum": 1},
+    },
+    required=(
+        "deadline",
+        "max_actions",
+        "max_attempts_per_task",
+        "max_failures",
+        "max_no_progress_cycles",
+        "max_parallel",
+    ),
+)
+
+_OBJECTIVE_FACTS = _strict_object(
+    {
+        "id": _safe_id(),
+        "revision": {"type": "integer", "minimum": 1},
+        "event_sequence": {"type": "integer", "minimum": 1},
+        "contract_sha256": _SHA256,
+        "scope_sha256": _SHA256,
+        "event_sha256": _SHA256,
+        "operator_state": {"enum": ["active", "paused", "stopped"]},
+        "completion_rule": {"const": "all_targets_integrated"},
+        "requested_mode": {"enum": ["automatic", "observe", "supervised"]},
+        "operations": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {"enum": ["execute", "merge", "review"]},
         },
-        required=(
-            "objective_revision",
-            "contract_sha256",
-            "scope_sha256",
-            "event_sha256",
-            "integration_inspection",
-        ),
-    )
+        "scope": {"type": "array", "maxItems": 100, "items": _safe_id()},
+        "targets": {"type": "array", "maxItems": 100, "items": _safe_id()},
+        "budget": _BUDGET_FACTS,
+    },
+    required=(
+        "id",
+        "revision",
+        "event_sequence",
+        "contract_sha256",
+        "scope_sha256",
+        "event_sha256",
+        "operator_state",
+        "completion_rule",
+        "requested_mode",
+        "operations",
+        "scope",
+        "targets",
+        "budget",
+    ),
+)
+
+_RESOURCE_TOKEN = _nullable_string(
+    maximum=64,
+    pattern=r"^(?:agent|conflict|line)-slot:[0-9]+$",
+)
+
+_INTEGRATION_CHECK = _strict_object(
+    {
+        "repository_id": _safe_id(),
+        "task_head_sha256": _SHA256,
+        "destination_head_sha256": _SHA256,
+        "is_ancestor": {"type": "boolean"},
+    },
+    required=(
+        "repository_id",
+        "task_head_sha256",
+        "destination_head_sha256",
+        "is_ancestor",
+    ),
+)
+
+_PLANNING_TASK_FACTS = _strict_object(
+    {
+        "id": _safe_id(),
+        "line_id": _safe_id(),
+        "contract_sha256": _SHA256,
+        "status": {"enum": _TASK_STATUSES},
+        "depends_on": {"type": "array", "maxItems": 100, "items": _safe_id()},
+        "blocked_on": {"type": "array", "maxItems": 100, "items": _safe_id()},
+        "external_claim_active": {"type": "boolean"},
+        "integration_state": {"enum": ["integrated", "not_required", "pending"]},
+        "integration_checks": {
+            "type": "array",
+            "maxItems": 100,
+            "items": _INTEGRATION_CHECK,
+        },
+        "active_conflict_task_ids": {
+            "type": "array",
+            "maxItems": 100,
+            "items": _safe_id(),
+        },
+        "conflict_slot": _RESOURCE_TOKEN,
+        "execution_slot": _RESOURCE_TOKEN,
+        "review_slot": _RESOURCE_TOKEN,
+        "merge_slot": _RESOURCE_TOKEN,
+    },
+    required=(
+        "id",
+        "line_id",
+        "contract_sha256",
+        "status",
+        "depends_on",
+        "blocked_on",
+        "external_claim_active",
+        "integration_state",
+        "integration_checks",
+        "active_conflict_task_ids",
+        "conflict_slot",
+        "execution_slot",
+        "review_slot",
+        "merge_slot",
+    ),
+)
+
+_DECISION_FACTS = _strict_object(
+    {"id": _safe_id(), "status": {"enum": ["open", "resolved"]}},
+    required=("id", "status"),
+)
+
+
+def _plan_read_set(operation: str) -> dict[str, object]:
+    properties: dict[str, object] = {
+        "observed_at": _string(maximum=64, pattern=_UTC_TIMESTAMP),
+        "integration_inspection": {"const": "complete"},
+        "execution_mode": {"enum": ["external", "local"]},
+        "objective": _OBJECTIVE_FACTS,
+        "tasks": {
+            "type": "array",
+            "maxItems": 100,
+            "items": _PLANNING_TASK_FACTS,
+        },
+        "decisions": {
+            "type": "array",
+            "maxItems": 100,
+            "items": _DECISION_FACTS,
+        },
+    }
+    required = [
+        "observed_at",
+        "integration_inspection",
+        "execution_mode",
+        "objective",
+        "tasks",
+        "decisions",
+    ]
+    if operation == "objective.tick":
+        properties["capacity"] = _strict_object(
+            {
+                "active_parallel": {"type": "integer", "minimum": 0},
+                "available_parallel": {"type": "integer", "minimum": 0},
+                "max_parallel": {"type": "integer", "minimum": 1},
+            },
+            required=("active_parallel", "available_parallel", "max_parallel"),
+        )
+        required.append("capacity")
+    if operation == "objective.attention":
+        properties["next_wake_at"] = _nullable_string(
+            maximum=64, pattern=_UTC_TIMESTAMP
+        )
+        required.append("next_wake_at")
+    # Build a fresh strict schema for each operation; there is no public generic
+    # read-set contract even when some typed fields intentionally overlap.
+    return _strict_object(properties, required=tuple(required))
 
 
 _OBJECTIVE_EXPLAIN_PROJECTION = _strict_object(
     {
-        "summary": _string(maximum=4096),
+        "summary_code": {"enum": ["complete", "incomplete", "repair_required"]},
         "reasons": {
             "type": "array",
             "maxItems": 100,
-            "items": _string(maximum=512),
+            "items": {"enum": _REASON_CODES},
         },
         "selected_actions": {"type": "array", "maxItems": 100, "items": _PLAN_ACTION},
         "blocked": {"type": "array", "maxItems": 100, "items": _PLAN_ACTION},
-        "attention": {"type": "array", "maxItems": 100, "items": _PLAN_ACTION},
+        "attention": {"type": "array", "maxItems": 100, "items": _ATTENTION_ITEM},
     },
-    required=("summary", "reasons", "selected_actions", "blocked", "attention"),
+    required=("summary_code", "reasons", "selected_actions", "blocked", "attention"),
+)
+
+_OBJECTIVE_PLAN_PROJECTION = _strict_object(
+    {
+        "completion": {"enum": ["complete", "incomplete", "repair_required"]},
+        "selected_actions": {"type": "array", "maxItems": 100, "items": _PLAN_ACTION},
+        "blocked": {"type": "array", "maxItems": 100, "items": _PLAN_ACTION},
+        "attention": {"type": "array", "maxItems": 100, "items": _ATTENTION_ITEM},
+    },
+    required=("completion", "selected_actions", "blocked", "attention"),
 )
 
 _OBJECTIVE_GRAPH_PROJECTION = _strict_object(
     {
-        "nodes": {"type": "array", "maxItems": 100, "items": _GRAPH_NODE},
-        "edges": {"type": "array", "maxItems": 100, "items": _GRAPH_EDGE},
+        "nodes": {
+            "type": "array",
+            "maxItems": 100,
+            "items": _strict_object(
+                {
+                    "id": _safe_id(),
+                    "kind": {"enum": ["action", "decision", "objective", "task"]},
+                    "status": _string(maximum=128),
+                },
+                required=("id", "kind", "status"),
+            ),
+        },
+        "edges": {
+            "type": "array",
+            "maxItems": 100,
+            "items": _strict_object(
+                {
+                    "source": _safe_id(),
+                    "target": _safe_id(),
+                    "kind": {"enum": ["acts_on", "blocks", "requires"]},
+                },
+                required=("source", "target", "kind"),
+            ),
+        },
         "issues": {"type": "array", "maxItems": 100, "items": _GRAPH_ISSUE},
     },
     required=("nodes", "edges", "issues"),
@@ -555,17 +747,42 @@ _OBJECTIVE_TICK_PROJECTION = _strict_object(
     {
         "selected_actions": {"type": "array", "maxItems": 100, "items": _PLAN_ACTION},
         "blocked": {"type": "array", "maxItems": 100, "items": _PLAN_ACTION},
-        "attention": {"type": "array", "maxItems": 100, "items": _PLAN_ACTION},
+        "attention": {"type": "array", "maxItems": 100, "items": _ATTENTION_ITEM},
         "tick_wave": {"type": "array", "maxItems": 100, "items": _PLAN_ACTION},
+        "deferred": {
+            "type": "array",
+            "maxItems": 100,
+            "items": _strict_object(
+                {
+                    "action": _PLAN_ACTION,
+                    "reason": {"enum": ["PARALLEL_CAPACITY", "RESOURCE_CONFLICT"]},
+                    "predicates": _ACTION_PREDICATES,
+                },
+                required=("action", "reason", "predicates"),
+            ),
+        },
+        "non_mutating_actions": {
+            "type": "array",
+            "maxItems": 100,
+            "items": _PLAN_ACTION,
+        },
     },
-    required=("selected_actions", "blocked", "attention", "tick_wave"),
+    required=(
+        "selected_actions",
+        "blocked",
+        "attention",
+        "tick_wave",
+        "deferred",
+        "non_mutating_actions",
+    ),
 )
 
 _OBJECTIVE_ATTENTION_PROJECTION = _strict_object(
     {
-        "attention": {"type": "array", "maxItems": 100, "items": _PLAN_ACTION},
+        "attention": {"type": "array", "maxItems": 100, "items": _ATTENTION_ITEM},
+        "next_wake_at": _nullable_string(maximum=64, pattern=_UTC_TIMESTAMP),
     },
-    required=("attention",),
+    required=("attention", "next_wake_at"),
 )
 
 
@@ -579,6 +796,7 @@ def _plan_envelope_output(
         {
             "executable": {"const": False},
             "authorization": {"const": "none"},
+            "protocol_major": {"const": 1},
             "operation": {"const": operation},
             "operation_schema_version": {"const": 1},
             "planner_revision": {"const": planner_revision},
@@ -592,18 +810,19 @@ def _plan_envelope_output(
             "normalized_input": _strict_object(
                 {"objective_id": _safe_id()}, required=("objective_id",)
             ),
-            "read_set": _objective_read_set(),
+            "read_set": _plan_read_set(operation),
             "projection": projection,
-            "effects": {"type": "array", "maxItems": 100, "items": _PLAN_EFFECT},
+            "effects": {"type": "array", "maxItems": 0},
             "warnings": {"type": "array", "maxItems": 64, "items": _WARNING},
             "maximum_risk": {"const": "PLAN"},
             "effective_risk": {"const": "PLAN"},
-            "expires_at": _string(maximum=64),
+            "expires_at": _string(maximum=64, pattern=_UTC_TIMESTAMP),
             "plan_sha256": _string(pattern=r"^sha256:[0-9a-f]{64}$"),
         },
         required=(
             "executable",
             "authorization",
+            "protocol_major",
             "operation",
             "operation_schema_version",
             "planner_revision",
@@ -788,7 +1007,14 @@ _SCHEMAS = tuple(
                 _explanation_output("objective.status", "objective_id"),
             ),
             _operation_schema(
-                "objective.plan", 1, _OBJECTIVE_PLAN_INPUT, _OBJECTIVE_PLAN_OUTPUT
+                "objective.plan",
+                1,
+                _OBJECTIVE_PLAN_INPUT,
+                _plan_envelope_output(
+                    "objective.plan",
+                    PLAN_OPERATION_REVISIONS["objective.plan"],
+                    _OBJECTIVE_PLAN_PROJECTION,
+                ),
             ),
             _operation_schema(
                 "objective.explain",
@@ -796,7 +1022,7 @@ _SCHEMAS = tuple(
                 _identified_input("objective.explain", "objective_id"),
                 _plan_envelope_output(
                     "objective.explain",
-                    "objective-explain/1",
+                    PLAN_OPERATION_REVISIONS["objective.explain"],
                     _OBJECTIVE_EXPLAIN_PROJECTION,
                 ),
             ),
@@ -806,7 +1032,7 @@ _SCHEMAS = tuple(
                 _identified_input("objective.graph", "objective_id"),
                 _plan_envelope_output(
                     "objective.graph",
-                    "objective-graph/1",
+                    PLAN_OPERATION_REVISIONS["objective.graph"],
                     _OBJECTIVE_GRAPH_PROJECTION,
                 ),
             ),
@@ -816,7 +1042,7 @@ _SCHEMAS = tuple(
                 _identified_input("objective.tick", "objective_id"),
                 _plan_envelope_output(
                     "objective.tick",
-                    "objective-tick/1",
+                    PLAN_OPERATION_REVISIONS["objective.tick"],
                     _OBJECTIVE_TICK_PROJECTION,
                 ),
             ),
@@ -826,7 +1052,7 @@ _SCHEMAS = tuple(
                 _identified_input("objective.attention", "objective_id"),
                 _plan_envelope_output(
                     "objective.attention",
-                    "objective-attention/1",
+                    PLAN_OPERATION_REVISIONS["objective.attention"],
                     _OBJECTIVE_ATTENTION_PROJECTION,
                 ),
             ),

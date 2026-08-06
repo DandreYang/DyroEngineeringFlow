@@ -40,7 +40,9 @@ class TaskReadiness:
 
 
 def _facts(**values: object) -> tuple[tuple[str, str], ...]:
-    return tuple(sorted((key, str(value)) for key, value in values.items() if value != ""))
+    return tuple(
+        sorted((key, str(value)) for key, value in values.items() if value != "")
+    )
 
 
 def _action(
@@ -49,7 +51,9 @@ def _action(
     reason: ReasonCode,
     **facts: object,
 ) -> PlannedAction:
-    return PlannedAction(kind=kind, subject_id=subject_id, reason=reason, facts=_facts(**facts))
+    return PlannedAction(
+        kind=kind, subject_id=subject_id, reason=reason, facts=_facts(**facts)
+    )
 
 
 def _active_conflicts(snapshot: SchedulerSnapshot) -> dict[str, tuple[str, ...]]:
@@ -74,7 +78,9 @@ def build_task_readiness(
 ) -> TaskReadiness:
     """Classify task execution/review eligibility without reading workspace state."""
     by_id = snapshot.tasks_by_id
-    requested = tuple(sorted(snapshot.candidate_ids if candidate_ids is None else candidate_ids))
+    requested = tuple(
+        sorted(snapshot.candidate_ids if candidate_ids is None else candidate_ids)
+    )
     unknown = sorted(set(requested) - set(by_id))
     if unknown:
         raise ValidationError(f"调度候选不在快照中：{', '.join(unknown)}")
@@ -103,7 +109,11 @@ def build_task_readiness(
                 )
             )
             continue
-        unresolved = tuple(sorted(key for key in task.blocked_on if decision_states.get(key) != "resolved"))
+        unresolved = tuple(
+            sorted(
+                key for key in task.blocked_on if decision_states.get(key) != "resolved"
+            )
+        )
         if unresolved:
             blocked.append(
                 _action(
@@ -206,7 +216,9 @@ def continuation_plan_payload(plan: ContinuationPlan) -> dict[str, object]:
         "selected_actions": [_action_payload(item) for item in plan.selected_actions],
         "blocked": [_action_payload(item) for item in plan.blocked],
         "attention": [_attention_payload(item) for item in plan.attention],
-        "next_wake_at": None if plan.next_wake_at is None else plan.next_wake_at.isoformat(),
+        "next_wake_at": None
+        if plan.next_wake_at is None
+        else plan.next_wake_at.isoformat(),
         "facts": dict(plan.facts),
     }
 
@@ -219,8 +231,12 @@ def _build_plan(
     attention: Iterable[AttentionItem] = (),
     **facts: object,
 ) -> ContinuationPlan:
-    selected_actions = tuple(sorted(selected, key=lambda item: (item.kind.value, item.subject_id)))
-    blocked_actions = tuple(sorted(blocked, key=lambda item: (item.kind.value, item.subject_id)))
+    selected_actions = tuple(
+        sorted(selected, key=lambda item: (item.kind.value, item.subject_id))
+    )
+    blocked_actions = tuple(
+        sorted(blocked, key=lambda item: (item.kind.value, item.subject_id))
+    )
     attention_items = tuple(sorted(attention, key=lambda item: item.id))
     payload = {
         "schema_version": 1,
@@ -250,16 +266,22 @@ def build_continuation_plan(snapshot: SchedulerSnapshot) -> ContinuationPlan:
     if not snapshot.objective_id or snapshot.objective_revision < 1:
         raise ValidationError("Objective 计划必须使用带 revision 的调度快照")
     if snapshot.objective_drifted:
-        action = _action(ActionKind.REPAIR_REQUIRED, snapshot.objective_id, ReasonCode.CONTRACT_DRIFT)
+        action = _action(
+            ActionKind.REPAIR_REQUIRED, snapshot.objective_id, ReasonCode.CONTRACT_DRIFT
+        )
         attention = AttentionItem(
             id=f"repair:{snapshot.objective_id}",
             kind=AttentionKind.REPAIR_REQUIRED,
             subject_id=snapshot.objective_id,
             reason=ReasonCode.CONTRACT_DRIFT,
         )
-        return _build_plan(snapshot, PlanCompletion.REPAIR_REQUIRED, (action,), attention=(attention,))
+        return _build_plan(
+            snapshot, PlanCompletion.REPAIR_REQUIRED, (action,), attention=(attention,)
+        )
     if snapshot.objective_state != "active":
-        action = _action(ActionKind.PAUSE, snapshot.objective_id, ReasonCode.OBJECTIVE_PAUSED)
+        action = _action(
+            ActionKind.PAUSE, snapshot.objective_id, ReasonCode.OBJECTIVE_PAUSED
+        )
         attention = AttentionItem(
             id=f"paused:{snapshot.objective_id}",
             kind=AttentionKind.PAUSED,
@@ -267,7 +289,9 @@ def build_continuation_plan(snapshot: SchedulerSnapshot) -> ContinuationPlan:
             reason=ReasonCode.OBJECTIVE_PAUSED,
             facts=_facts(operator_state=snapshot.objective_state),
         )
-        return _build_plan(snapshot, PlanCompletion.INCOMPLETE, (action,), attention=(attention,))
+        return _build_plan(
+            snapshot, PlanCompletion.INCOMPLETE, (action,), attention=(attention,)
+        )
     by_id = snapshot.tasks_by_id
     target_complete = all(
         target in by_id
@@ -276,7 +300,9 @@ def build_continuation_plan(snapshot: SchedulerSnapshot) -> ContinuationPlan:
         for target in snapshot.objective_targets
     )
     if target_complete:
-        action = _action(ActionKind.COMPLETE, snapshot.objective_id, ReasonCode.TARGETS_INTEGRATED)
+        action = _action(
+            ActionKind.COMPLETE, snapshot.objective_id, ReasonCode.TARGETS_INTEGRATED
+        )
         return _build_plan(snapshot, PlanCompletion.COMPLETE, (action,))
     scope = tuple(sorted(set(snapshot.objective_scope) & set(snapshot.candidate_ids)))
     readiness = build_task_readiness(snapshot, candidate_ids=scope)
@@ -289,7 +315,9 @@ def build_continuation_plan(snapshot: SchedulerSnapshot) -> ContinuationPlan:
     )
     for task in readiness.ready:
         if execute_allowed:
-            selected.append(_action(ActionKind.EXECUTE_TASK, task.id, ReasonCode.TASK_READY))
+            selected.append(
+                _action(ActionKind.EXECUTE_TASK, task.id, ReasonCode.TASK_READY)
+            )
         else:
             blocked.append(
                 _action(
@@ -306,7 +334,9 @@ def build_continuation_plan(snapshot: SchedulerSnapshot) -> ContinuationPlan:
     )
     for task in readiness.review:
         if review_allowed:
-            selected.append(_action(ActionKind.REVIEW_TASK, task.id, ReasonCode.TASK_REVIEW_READY))
+            selected.append(
+                _action(ActionKind.REVIEW_TASK, task.id, ReasonCode.TASK_REVIEW_READY)
+            )
         else:
             blocked.append(
                 _action(
@@ -320,7 +350,9 @@ def build_continuation_plan(snapshot: SchedulerSnapshot) -> ContinuationPlan:
     for task_id in scope:
         item = by_id[task_id]
         if item.status == "waiting_answer":
-            selected.append(_action(ActionKind.ASK_USER, task_id, ReasonCode.ANSWER_REQUIRED))
+            selected.append(
+                _action(ActionKind.ASK_USER, task_id, ReasonCode.ANSWER_REQUIRED)
+            )
             attention.append(
                 AttentionItem(
                     id=f"answer:{task_id}",
@@ -349,7 +381,9 @@ def build_continuation_plan(snapshot: SchedulerSnapshot) -> ContinuationPlan:
                 )
             )
     if not selected and not blocked and not attention:
-        selected.append(_action(ActionKind.WAIT, snapshot.objective_id, ReasonCode.NO_PROGRESS))
+        selected.append(
+            _action(ActionKind.WAIT, snapshot.objective_id, ReasonCode.NO_PROGRESS)
+        )
     return _build_plan(
         snapshot,
         PlanCompletion.INCOMPLETE,
@@ -367,12 +401,17 @@ def build_scheduler_projection(
     """Build the single path-free graph payload consumed by all presentation layers."""
     if plan.objective_id != snapshot.objective_id:
         raise ValidationError("计划与快照 Objective 不匹配")
+    if plan.snapshot_sha256 != snapshot.snapshot_sha256:
+        raise ValidationError("计划与快照摘要不匹配")
     nodes: list[SchedulerNode] = [
         SchedulerNode(
             id=f"objective:{snapshot.objective_id}",
             kind="objective",
             state=plan.completion.value,
-            facts=_facts(revision=snapshot.objective_revision, operator_state=snapshot.objective_state),
+            facts=_facts(
+                revision=snapshot.objective_revision,
+                operator_state=snapshot.objective_state,
+            ),
         )
     ]
     edges: list[SchedulerEdge] = []
@@ -387,7 +426,9 @@ def build_scheduler_projection(
             )
         )
         for dependency in sorted(task.depends_on):
-            edges.append(SchedulerEdge(f"task:{dependency}", f"task:{task.id}", "requires"))
+            edges.append(
+                SchedulerEdge(f"task:{dependency}", f"task:{task.id}", "requires")
+            )
         for decision in sorted(task.blocked_on):
             decision_id = f"decision:{decision}"
             nodes.append(
@@ -408,7 +449,11 @@ def build_scheduler_projection(
                 facts=action.facts,
             )
         )
-        target = f"objective:{snapshot.objective_id}" if action.subject_id == snapshot.objective_id else f"task:{action.subject_id}"
+        target = (
+            f"objective:{snapshot.objective_id}"
+            if action.subject_id == snapshot.objective_id
+            else f"task:{action.subject_id}"
+        )
         edges.append(SchedulerEdge(action_id, target, "acts_on"))
     unique_nodes = {node.id: node for node in nodes}
     constraints = tuple(
@@ -427,7 +472,9 @@ def build_scheduler_projection(
         blocked=plan.blocked,
         attention=plan.attention,
         nodes=tuple(unique_nodes[key] for key in sorted(unique_nodes)),
-        edges=tuple(sorted(set(edges), key=lambda edge: (edge.source, edge.target, edge.kind))),
+        edges=tuple(
+            sorted(set(edges), key=lambda edge: (edge.source, edge.target, edge.kind))
+        ),
         constraints=tuple(sorted(constraints)),
         facts=plan.facts,
     )
@@ -441,11 +488,18 @@ def projection_payload(projection: SchedulerReadProjection) -> dict[str, object]
         "snapshot_sha256": projection.snapshot_sha256,
         "plan_sha256": projection.plan_sha256,
         "completion": projection.completion.value,
-        "selected_actions": [_action_payload(item) for item in projection.selected_actions],
+        "selected_actions": [
+            _action_payload(item) for item in projection.selected_actions
+        ],
         "blocked": [_action_payload(item) for item in projection.blocked],
         "attention": [_attention_payload(item) for item in projection.attention],
         "nodes": [
-            {"id": node.id, "kind": node.kind, "state": node.state, "facts": dict(node.facts)}
+            {
+                "id": node.id,
+                "kind": node.kind,
+                "state": node.state,
+                "facts": dict(node.facts),
+            }
             for node in projection.nodes
         ],
         "edges": [
@@ -467,16 +521,25 @@ def render_plan_text(plan: ContinuationPlan) -> str:
         f"Snapshot SHA-256: {plan.snapshot_sha256}",
         f"Plan SHA-256: {plan.plan_sha256}",
     ]
-    for label, actions in (("Selected", plan.selected_actions), ("Blocked", plan.blocked)):
+    for label, actions in (
+        ("Selected", plan.selected_actions),
+        ("Blocked", plan.blocked),
+    ):
         for action in actions:
-            lines.append(f"{label}: {action.kind.value} {action.subject_id} ({action.reason.value})")
+            lines.append(
+                f"{label}: {action.kind.value} {action.subject_id} ({action.reason.value})"
+            )
     for item in plan.attention:
-        lines.append(f"Attention: {item.kind.value} {item.subject_id} ({item.reason.value})")
+        lines.append(
+            f"Attention: {item.kind.value} {item.subject_id} ({item.reason.value})"
+        )
     return "\n".join(lines)
 
 
 def render_projection_json(projection: SchedulerReadProjection) -> str:
-    return json.dumps(projection_payload(projection), ensure_ascii=False, sort_keys=True, indent=2)
+    return json.dumps(
+        projection_payload(projection), ensure_ascii=False, sort_keys=True, indent=2
+    )
 
 
 def render_projection_mermaid(projection: SchedulerReadProjection) -> str:
@@ -487,5 +550,7 @@ def render_projection_mermaid(projection: SchedulerReadProjection) -> str:
         lines.append(f'  {node_ids[node.id]}["{label}"]')
     for edge in projection.edges:
         if edge.source in node_ids and edge.target in node_ids:
-            lines.append(f"  {node_ids[edge.source]} -->|{edge.kind}| {node_ids[edge.target]}")
+            lines.append(
+                f"  {node_ids[edge.source]} -->|{edge.kind}| {node_ids[edge.target]}"
+            )
     return "\n".join(lines)

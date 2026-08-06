@@ -10,8 +10,11 @@ import tomllib
 import unittest
 
 from dyro.bridge import catalog as catalog_module
+from dyro.bridge import constants as constants_module
+from dyro.bridge import git_read as git_read_module
 from dyro.bridge import models as models_module
 from dyro.bridge import observations as observations_module
+from dyro.bridge import plans as plans_module
 from dyro.bridge import schemas as schemas_module
 from dyro.bridge.catalog import (
     MANDATORY_OPERATION_IDS,
@@ -40,7 +43,7 @@ class BridgeCatalogTests(unittest.TestCase):
         project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertIn("dyro.bridge", project["tool"]["setuptools"]["packages"])
 
-    def test_catalog_tracks_s2_internal_implementations_and_remains_deny_by_default(
+    def test_catalog_tracks_s3_internal_implementations_and_remains_deny_by_default(
         self,
     ) -> None:
         operations = list_operations()
@@ -75,6 +78,11 @@ class BridgeCatalogTests(unittest.TestCase):
         self.assertEqual(
             implemented,
             {
+                "objective.attention",
+                "objective.explain",
+                "objective.graph",
+                "objective.plan",
+                "objective.tick",
                 "task.gate_definitions.get",
                 "workspace.list",
                 "workspace.observe",
@@ -246,8 +254,14 @@ class BridgeCatalogTests(unittest.TestCase):
 
     def test_plan_operations_have_complete_operation_specific_envelopes(self) -> None:
         expected_projection_fields = {
+            "objective.plan": {
+                "completion",
+                "selected_actions",
+                "blocked",
+                "attention",
+            },
             "objective.explain": {
-                "summary",
+                "summary_code",
                 "reasons",
                 "selected_actions",
                 "blocked",
@@ -259,8 +273,10 @@ class BridgeCatalogTests(unittest.TestCase):
                 "blocked",
                 "attention",
                 "tick_wave",
+                "deferred",
+                "non_mutating_actions",
             },
-            "objective.attention": {"attention"},
+            "objective.attention": {"attention", "next_wake_at"},
         }
         for operation, projection_fields in expected_projection_fields.items():
             with self.subTest(operation=operation):
@@ -269,6 +285,7 @@ class BridgeCatalogTests(unittest.TestCase):
                 self.assertTrue(
                     {
                         "workspace",
+                        "protocol_major",
                         "normalized_input",
                         "read_set",
                         "projection",
@@ -291,7 +308,10 @@ class BridgeCatalogTests(unittest.TestCase):
             models_module,
             schemas_module,
             catalog_module,
+            constants_module,
+            git_read_module,
             observations_module,
+            plans_module,
         ):
             tree = ast.parse(inspect.getsource(module))
             imports = []

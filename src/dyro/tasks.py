@@ -329,6 +329,40 @@ def load_task_observation_bounded(
 ) -> tuple[Task, str]:
     """Load one Task manifest and status from the same stable directory FD."""
 
+    task, current, _content = _load_task_observation_details_bounded(
+        config,
+        task_id,
+        budget,
+        known_line_ids=known_line_ids,
+    )
+    return task, current
+
+
+def load_task_planning_bounded(
+    config: Config,
+    task_id: str,
+    budget: ReadBudget,
+    *,
+    known_line_ids: frozenset[str],
+) -> tuple[Task, str, str]:
+    """Load one Task/status pair and bind its exact manifest digest."""
+
+    task, current, content = _load_task_observation_details_bounded(
+        config,
+        task_id,
+        budget,
+        known_line_ids=known_line_ids,
+    )
+    return task, current, hashlib.sha256(content).hexdigest()
+
+
+def _load_task_observation_details_bounded(
+    config: Config,
+    task_id: str,
+    budget: ReadBudget,
+    *,
+    known_line_ids: frozenset[str],
+) -> tuple[Task, str, bytes]:
     validate_id(task_id, "任务 ID")
     directory = config.task_specs_dir / task_id
     try:
@@ -364,7 +398,7 @@ def load_task_observation_bounded(
         raise ValidationError(f"任务 {task.id} 状态不是 UTF-8") from exc
     if current not in STATUSES:
         raise ValidationError(f"任务 {task.id} 状态非法")
-    return task, current
+    return task, current, content
 
 
 def list_tasks(config: Config) -> list[Task]:

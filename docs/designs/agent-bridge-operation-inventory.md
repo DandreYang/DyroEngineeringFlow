@@ -45,11 +45,23 @@ Risk vocabulary follows ADR 0006: `R0`, `PLAN`, `R1`, `R2`, and `R3`.
 | `task.gate_definitions.get` | R0 | implemented_testable | `bridge/observations.py`, bounded Task loader | Return gate names and redacted metadata only; must never call `run_gates` |
 | `objective.list` | R0 | declared | `continuation/store.py:425` | New wrapper must call `list_objectives(..., recover=False)` |
 | `objective.status` | R0 | declared | scheduler snapshot | Final ready/blocked result requires reviewed Git inspection; summary reports `not_inspected` |
-| `objective.plan` | PLAN | declared | `continuation/supervision.py`, planner | Typed projection/read set, reviewed Git inspection, planner revision, non-executable digest |
-| `objective.explain` | PLAN | declared | Existing pure planner/renderers | Return typed projection/reasons; unknown integration cannot become pending or ready |
-| `objective.graph` | PLAN | declared | Existing scheduler projection | Typed projection only; no mutation or recovery |
-| `objective.tick` | PLAN | declared | `cli.py:2404` call graph | Preview typed wave only; `executable=false`, no lease/intent/action creation |
-| `objective.attention` | PLAN | declared | Existing attention projection | Typed attention projection; never writes presentation state |
+| `objective.plan` | PLAN | implemented_testable | `bridge/plans.py`, pure continuation planner | Typed projection/read set, bounded metadata-validated Git inspection, planner revision, non-executable Bridge digest |
+| `objective.explain` | PLAN | implemented_testable | `bridge/plans.py`, pure continuation planner | Code-only summary/reasons; incomplete integration fails closed |
+| `objective.graph` | PLAN | implemented_testable | `bridge/plans.py`, scheduler projection | Opaque typed nodes/edges only; no mutation or recovery |
+| `objective.tick` | PLAN | implemented_testable | `bridge/plans.py`, pure scheduler tick | Typed wave/deferrals/non-mutating actions; no lease, intent, reservation, or execution |
+| `objective.attention` | PLAN | implemented_testable | `bridge/plans.py`, pure attention projection | Typed priority/kind/reason/action-kind; never writes presentation state |
+
+The S3 Git boundary ignores caller `PATH`, uses only validated system Git and
+system Python binder executables, disables lazy fetch and replace objects,
+rejects config includes and object alternates, requires Git metadata to remain
+inside the workspace, and caps one plan at 100 Git process starts. The Linux
+implementation binds worktree, Git directory, common directory, and object
+store descriptors through `/proc/self/fd`, ignores repository config, and
+applies a Landlock read-only filesystem boundary before Git starts. Hosts
+without the descriptor namespace and Landlock ABI 3 support fail closed for
+authoritative Git-dependent plans. S3 accepts only SHA-1 object-format
+repositories; SHA-256, reftable, and other repository extensions remain
+unavailable rather than being interpreted with incomplete config.
 
 Declared status is not implementation approval. Each row must acquire a source
 call graph and pass the acceptance matrix before it becomes public-available.

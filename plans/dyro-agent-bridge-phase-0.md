@@ -184,6 +184,13 @@ their own tests and do not alter human CLI semantics.
 
 ## 5. Step S3 — Typed deterministic plans
 
+Implementation status (2026-08-07): the platform-gated source-tree Core and all
+five Objective PLAN services are `implemented_testable`. Authoritative Git facts
+are enabled only through a Linux `/proc/self/fd` boundary that binds the
+worktree, Git directory, common directory, and object store. Other hosts fail
+closed. The services remain unavailable to public Bridge callers until S4 and
+the Linux S5 zero-effect/artifact/real-host gates pass.
+
 ### Context brief
 
 Existing Objective plan/tick/attention paths are mostly pure, but Bridge plans
@@ -193,7 +200,10 @@ and language that cannot be mistaken for authorization.
 ### Ownership
 
 - `src/dyro/bridge/plans.py`
+- `src/dyro/bridge/git_read.py`
+- `src/dyro/bridge/constants.py`
 - focused Core plan payload additions under `src/dyro/continuation/`
+- focused bounded Task/read-budget additions under `src/dyro/`
 - `tests/test_bridge_plans.py`
 - canonical vectors under `tests/fixtures/bridge/`
 
@@ -222,6 +232,22 @@ uv run ruff check src/dyro/bridge/plans.py tests/test_bridge_plans.py
 ### Exit criteria
 
 - D05 passes for every plan operation.
+- The real Git fixture uses only the fixed `rev-parse --verify HEAD^{commit}` and
+  `merge-base --is-ancestor <task-head> <observed-head>` adapter,
+  binds both OIDs as domain-separated digests in the typed read set,
+  disables optional locks and leaves watched repository metadata unchanged.
+- The descriptor-bound Linux launcher uses an exact isolated binder argv,
+  retains only the four reviewed directory descriptors plus a close-on-exec
+  error channel, applies a Landlock read-only filesystem ruleset, ignores local
+  repository config through `GIT_CONFIG=/dev/null`, then executes only the
+  documented Git argv through `/proc/self/fd`; host integrations invoke it only
+  through the one-shot transport. Platforms without the descriptor namespace
+  and Landlock ABI 3 support return `OPERATION_UNAVAILABLE` for authoritative
+  Git-dependent plans. Phase 0 accepts only SHA-1 object-format repositories;
+  extended repository formats fail closed before Git starts.
+- Caller `PATH`, lazy fetch, replace objects, config includes, external Git
+  metadata/object alternates and requests exceeding 100 Git process starts all
+  fail closed before the first affected Git read.
 - Search confirms no Bridge plan is consumed by a mutation path.
 
 ### Rollback

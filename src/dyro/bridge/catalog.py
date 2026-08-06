@@ -15,6 +15,7 @@ from .models import (
     PlatformState,
     RiskClass,
 )
+from .constants import PLAN_OPERATION_REVISIONS
 from .schemas import get_operation_schema
 
 
@@ -56,6 +57,11 @@ _DECLARED_PLATFORMS = (
 )
 
 _IMPLEMENTED_TESTABLE_SERVICES = {
+    "objective.attention": "dyro.bridge.plans.attention_objective",
+    "objective.explain": "dyro.bridge.plans.explain_objective",
+    "objective.graph": "dyro.bridge.plans.graph_objective",
+    "objective.plan": "dyro.bridge.plans.plan_objective",
+    "objective.tick": "dyro.bridge.plans.tick_objective",
     "task.gate_definitions.get": "dyro.bridge.observations.get_gate_definitions_observation",
     "workspace.list": "dyro.bridge.observations.list_workspace_observations",
     "workspace.observe": "dyro.bridge.observations.observe_workspace",
@@ -207,29 +213,29 @@ _OPERATIONS = tuple(
             _declared(
                 "objective.attention",
                 kind=OperationKind.PLAN,
-                planner_revision="objective-attention/1",
+                planner_revision=PLAN_OPERATION_REVISIONS["objective.attention"],
             ),
             _declared(
                 "objective.explain",
                 kind=OperationKind.PLAN,
-                planner_revision="objective-explain/1",
+                planner_revision=PLAN_OPERATION_REVISIONS["objective.explain"],
             ),
             _declared(
                 "objective.graph",
                 kind=OperationKind.PLAN,
-                planner_revision="objective-graph/1",
+                planner_revision=PLAN_OPERATION_REVISIONS["objective.graph"],
             ),
             _declared("objective.list", kind=OperationKind.INSPECT),
             _declared(
                 "objective.plan",
                 kind=OperationKind.PLAN,
-                planner_revision="objective-plan/1",
+                planner_revision=PLAN_OPERATION_REVISIONS["objective.plan"],
             ),
             _declared("objective.status", kind=OperationKind.INSPECT),
             _declared(
                 "objective.tick",
                 kind=OperationKind.PLAN,
-                planner_revision="objective-tick/1",
+                planner_revision=PLAN_OPERATION_REVISIONS["objective.tick"],
             ),
             _declared("task.explain", kind=OperationKind.INSPECT),
             _declared("task.gate_definitions.get", kind=OperationKind.INSPECT),

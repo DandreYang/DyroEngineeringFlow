@@ -272,6 +272,24 @@ class ReadBudget:
                 "Core observation deadline exceeded",
             )
 
+    def remaining_seconds(self) -> float:
+        """Return the bounded wall budget available to an allowed subprocess."""
+        current = self.monotonic()
+        if (
+            isinstance(current, bool)
+            or not isinstance(current, (int, float))
+            or not math.isfinite(current)
+            or current < self._started_at
+        ):
+            raise ValidationError("read budget monotonic 返回了无效数值")
+        remaining = self.limits.deadline_seconds - (current - self._started_at)
+        if remaining <= 0:
+            raise ReadLimitError(
+                ReadLimitCode.DEADLINE_EXCEEDED,
+                "Core observation deadline exceeded",
+            )
+        return remaining
+
     def _charge(self, size: int) -> None:
         if self._bytes_read + size > self.limits.aggregate_bytes:
             raise ReadLimitError(

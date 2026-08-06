@@ -293,6 +293,28 @@ report stored status and dependency facts but MUST omit final
 `dispatchable=true|false`, `ready=true|false`, and integration-blocked claims.
 Authoritative `task.explain`, `objective.status`, and plans require the reviewed
 optional-lock-disabled Git adapter; they remain unavailable before B05 passes.
+The Phase 0 Core service is reached through the single-request transport. Its
+descriptor-bound Git adapter starts one exact isolated Python binder process,
+retains only the reviewed worktree, Git directory, common directory, and object
+store descriptors plus a close-on-exec error channel, applies a Landlock
+read-only filesystem ruleset, ignores repository config through
+`GIT_CONFIG=/dev/null`, and then executes an allowlisted system Git read. Host
+integrations must spawn the one-shot transport rather than import and invoke
+planning services in process. On Linux, repository discovery is pinned to
+those descriptors through `/proc/self/fd`. A host without both the verified
+descriptor namespace and Landlock ABI 3 support returns
+`OPERATION_UNAVAILABLE` for authoritative Git-dependent plans. Phase 0 accepts
+only SHA-1 object-format repositories; extended formats return a stable
+fail-closed error before Git starts. Object alternates outside the approved
+directory objects, lazy fetch, replace objects, and more than 100 Git process
+starts per request fail closed.
+
+This is a bounded cooperative-state observation, not a filesystem attestation.
+As defined by ADR 0006, an actively malicious process with the same operating-
+system identity can still replace a ref or object during the read and restore
+it afterward; defending that case requires an immutable filesystem snapshot or
+external broker and is outside Phase 0. Plan digests do not upgrade this trust
+model.
 
 The semantic revision excludes the observation clock so identical facts can
 share a digest. A DTO never serializes an internal dataclass recursively; every
@@ -304,6 +326,7 @@ field is explicitly copied through the operation schema.
 {
   "executable": false,
   "authorization": "none",
+  "protocol_major": 1,
   "operation": "objective.tick",
   "operation_schema_version": 1,
   "planner_revision": "objective-tick/1",
@@ -313,18 +336,70 @@ field is explicitly copied through the operation schema.
   },
   "normalized_input": {"objective_id": "release-readiness"},
   "read_set": {
-    "objective_revision": 4,
-    "contract_sha256": "sha256:<hex>",
-    "scope_sha256": "sha256:<hex>",
-    "event_sha256": "sha256:<hex>"
+    "observed_at": "2026-08-06T12:00:00Z",
+    "integration_inspection": "complete",
+    "execution_mode": "local",
+    "objective": {
+      "id": "release-readiness",
+      "revision": 4,
+      "event_sequence": 4,
+      "contract_sha256": "sha256:<hex>",
+      "scope_sha256": "sha256:<hex>",
+      "event_sha256": "sha256:<hex>",
+      "operator_state": "active",
+      "completion_rule": "all_targets_integrated",
+      "requested_mode": "supervised",
+      "operations": ["execute", "review"],
+      "scope": ["TASK-42"],
+      "targets": ["TASK-42"],
+      "budget": {"max_actions": 10, "max_attempts_per_task": 2, "max_failures": 2, "max_no_progress_cycles": 2, "max_parallel": 1, "deadline": null}
+    },
+    "tasks": [
+      {
+        "id": "TASK-41",
+        "line_id": "release",
+        "contract_sha256": "sha256:<hex>",
+        "status": "pending",
+        "depends_on": [],
+        "blocked_on": [],
+        "external_claim_active": false,
+        "integration_state": "not_required",
+        "integration_checks": [],
+        "active_conflict_task_ids": [],
+        "conflict_slot": null,
+        "execution_slot": "agent-slot:1",
+        "review_slot": "agent-slot:2",
+        "merge_slot": "line-slot:1"
+      },
+      {
+        "id": "TASK-42",
+        "line_id": "release",
+        "contract_sha256": "sha256:<hex>",
+        "status": "pending",
+        "depends_on": ["TASK-41"],
+        "blocked_on": [],
+        "external_claim_active": false,
+        "integration_state": "not_required",
+        "integration_checks": [],
+        "active_conflict_task_ids": [],
+        "conflict_slot": null,
+        "execution_slot": "agent-slot:1",
+        "review_slot": "agent-slot:2",
+        "merge_slot": "line-slot:1"
+      }
+    ],
+    "decisions": [],
+    "capacity": {"max_parallel": 1, "active_parallel": 0, "available_parallel": 1}
   },
   "projection": {
     "selected_actions": [],
     "blocked": [
-      {"kind": "execute", "subject_id": "TASK-42", "reason": "dependency_pending"}
+      {"kind": "execute_task", "subject_id": "TASK-42", "reason": "DEPENDENCY_PENDING", "predicates": {"has_pending_dependency": true, "related_subject_ids": ["TASK-41"]}}
     ],
     "attention": [],
-    "tick_wave": []
+    "tick_wave": [],
+    "deferred": [],
+    "non_mutating_actions": []
   },
   "effects": [],
   "warnings": [],
@@ -339,6 +414,12 @@ The shown `read_set` and `projection` are illustrative; each plan operation owns
 its exact typed schemas. `projection` carries the operation's selected,
 blocked, graph, attention, or wave result rather than forcing those facts into a
 generic effect list.
+
+Sensitive executor, reviewer and conflict-group values never cross the
+boundary. When their equality affects planning, the read set uses deterministic
+snapshot-local equivalence tokens such as `agent-slot:1` or `conflict-slot:2`;
+renaming a hidden raw value without changing the relation therefore does not
+leak or perturb the visible plan.
 
 All request-derived and Core-derived fields first pass the operation allowlist,
 size limits, and deterministic redaction. `plan_sha256` is then computed from

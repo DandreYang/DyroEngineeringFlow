@@ -44,7 +44,12 @@ IntegrationInspection = Literal["complete", "not_inspected", "partial"]
 
 
 _ERROR_PRESENTATION = {
+    ErrorCode.INVALID_JSON: "The request is not valid JSON.",
+    ErrorCode.REQUEST_TOO_LARGE: "The request exceeds the transport limit.",
+    ErrorCode.PROTOCOL_MAJOR_UNSUPPORTED: "The protocol major is unsupported.",
     ErrorCode.SCHEMA_VALIDATION_FAILED: "The observation input is invalid.",
+    ErrorCode.OPERATION_UNKNOWN: "The requested operation is unknown.",
+    ErrorCode.OPERATION_UNAVAILABLE: "The requested operation is unavailable.",
     ErrorCode.LOCAL_PROFILE_INVALID: "The local Dyro Profile is invalid.",
     ErrorCode.REGISTRY_INVALID: "The workspace registry is invalid.",
     ErrorCode.WORKSPACE_NOT_REGISTERED: "The selected workspace is not registered.",
@@ -359,6 +364,20 @@ def _bridge_error(code: ErrorCode) -> BridgeObservationError:
         actions = (
             BridgeNextAction(NextActionKind.GRANT_HOST_READ, "Grant host read access"),
         )
+    elif code in {
+        ErrorCode.INVALID_JSON,
+        ErrorCode.REQUEST_TOO_LARGE,
+        ErrorCode.SCHEMA_VALIDATION_FAILED,
+    }:
+        actions = (
+            BridgeNextAction(NextActionKind.INSPECT_INPUT, "Inspect the request input"),
+        )
+    elif code is ErrorCode.PROTOCOL_MAJOR_UNSUPPORTED:
+        actions = (
+            BridgeNextAction(NextActionKind.UPGRADE_CLIENT, "Upgrade the client"),
+        )
+    elif code in {ErrorCode.OPERATION_UNAVAILABLE, ErrorCode.OBSERVATION_PARTIAL}:
+        actions = (BridgeNextAction(NextActionKind.RETRY, "Retry the operation"),)
     return BridgeObservationError(
         BridgeError(code=code, message=_ERROR_PRESENTATION[code], next_actions=actions)
     )
@@ -422,6 +441,27 @@ def _resolve(
         raise _bridge_error(ErrorCode.HOST_READ_PERMISSION_REQUIRED) from None
     except OSError:
         raise _bridge_error(ErrorCode.INTERNAL_ERROR) from None
+
+
+def bridge_error(code: ErrorCode) -> BridgeObservationError:
+    """Return the shared redacted Bridge error for another Core service."""
+    return _bridge_error(code)
+
+
+def map_limit_error(error: ReadLimitError) -> BridgeObservationError:
+    """Map an internal bounded-read failure without transporting its message."""
+    return _map_limit_error(error)
+
+
+def resolve_bounded_workspace(
+    *,
+    workspace: str | None,
+    start: str | Path | None,
+    cwd: Path,
+    budget: ReadBudget,
+) -> ResolvedWorkspace:
+    """Resolve one workspace through the shared fail-closed machine boundary."""
+    return _resolve(workspace=workspace, start=start, cwd=cwd, budget=budget)
 
 
 def resolve_workspace_observation(
@@ -711,6 +751,35 @@ def _read_lines(
         remaining -= len(scan.names)
     frozen = tuple(sorted(items, key=lambda item: item.id))
     return frozen, frozenset(known_line_ids), tuple(failures), truncated
+
+
+def scan_bounded_records(
+    parent: Path,
+    *,
+    workspace_root: Path,
+    maximum: int,
+    directories: bool,
+    suffix: str = "",
+    budget: ReadBudget,
+) -> _EntryScan:
+    """Expose the stable-FD record scan to sibling Bridge services."""
+    return _scan_records(
+        parent,
+        workspace_root=workspace_root,
+        maximum=maximum,
+        directories=directories,
+        suffix=suffix,
+        budget=budget,
+    )
+
+
+def read_bounded_line_facts(
+    config: Config, budget: ReadBudget
+) -> tuple[
+    tuple[ObservedItem, ...], frozenset[str], tuple[ObservationFailure, ...], bool
+]:
+    """Expose one bounded line capture without presentation or mutation."""
+    return _read_lines(config, budget)
 
 
 def _read_tasks(

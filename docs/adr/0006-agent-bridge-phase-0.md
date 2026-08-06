@@ -92,6 +92,14 @@ cannot sign off, merge, or push” would require every mutation entry point to
 pass through a common broker or externally signed policy boundary that the
 model cannot forge or read.
 
+The same boundary applies to local observation authenticity: Phase 0 detects
+bounded path and stable-state drift, but it does not claim an immutable
+filesystem snapshot against an actively malicious same-identity process that
+can replace Git refs or objects during a read and restore them afterward.
+“Authoritative Git inspection” means authoritative for cooperative local state,
+not cryptographic attestation of a hostile host. Snapshot-backed or brokered
+attestation is future work and cannot be inferred from a plan digest.
+
 If a future host supplies approval, the host capability must be model-invisible,
 short-lived, single-use, and bound to the operation, canonical input, plan
 digest, workspace identity, effects, host session, expiry, and a random nonce.

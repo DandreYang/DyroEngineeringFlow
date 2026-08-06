@@ -36,7 +36,7 @@ The gate records:
 | B01 | Zero write | Read-only HOME, XDG, `DYRO_HOME`, workspace and temp audit show no new path or write-open | Any file/dir/lock/cache/temp/mtime/ledger mutation |
 | B02 | No recovery | Injected pending Objective transaction remains byte-identical after every R0/PLAN call | Recovery, repair, lock, or state transition occurs |
 | B03 | No network | Socket/DNS/connect traps see zero attempts | Any external or loopback connection attempt |
-| B04 | Process boundary | Process trap sees no subprocess except a per-operation documented Git read allowlist | Agent, gate, host tool, shell, or unknown process starts |
+| B04 | Process boundary | Process trap sees only the documented descriptor-binder argv followed by the per-operation Git read allowlist | Agent, gate, host tool, shell, or unknown process starts |
 | B05 | Git read | Git observations disable optional locks; index and repository metadata remain stable on supported OSes | Index refresh, lock creation, fetch, hook, or remote access |
 | B06 | Workspace bounds | File/count/aggregate-byte/deadline limits and per-record isolation pass for Profile, tasks and Objectives | Unbounded read, request-wide erasure from one bad record, or missing partial/truncated marker |
 | C01 | Resolver | Explicit/local/default/unique precedence passes; malformed local never falls back | Wrong project selected or recent state written |
@@ -90,14 +90,26 @@ writable temporary directory does not satisfy B01.
 Linux Ubuntu 24.04 is the reference process-level audit: pinned CI tooling uses
 `strace -ff` to capture file mutation syscalls, socket/connect/DNS paths, and
 `execve`, plus before/after Git metadata snapshots. The report includes the
-exact trace filter and known blind spots.
+exact trace filter and known blind spots. The authoritative Git adapter must
+also prove that worktree, Git directory, common directory, and object store are
+opened before launch and passed only as `/proc/self/fd` references, repository
+config is ignored, and the binder's Landlock policy denies writes and reads
+outside the approved directory objects before Git executes.
+
+The Linux gate requires Landlock ABI 3 or newer and a real test whose Git
+executable reaches the denied write syscall. SHA-1 repositories are the Phase 0
+surface; SHA-256 object format and other repository extensions must fail closed
+before Git starts. Consistent with ADR 0006, these gates do not claim an
+immutable snapshot against an actively malicious same-identity process.
 
 macOS 15 combines in-process traps, read-only roots, before/after filesystem and
 Git metadata snapshots, fake-PATH process recording, and a real managed Codex
 sandbox run. A platform-level network/process observer not available to the
 test account is recorded as `须人工核`; mocks or fake PATH alone cannot close that
-gate. Windows is import/fail-closed only in Phase 0 and does not count as a
-supported Objective operation platform.
+gate. Authoritative Git-dependent plans return `OPERATION_UNAVAILABLE` on macOS
+until an equivalent descriptor or OS-snapshot proof exists. Windows is
+import/fail-closed only in Phase 0 and does not count as a supported Objective
+operation platform.
 
 ### Layer 3: artifact
 
