@@ -34,6 +34,7 @@ from dyro.bridge.observations import BridgeObservationError, ObservationFailure
 from dyro.bridge.plans import (
     PLAN_OPERATIONS,
     BridgePlan,
+    _validate_local_git_config,
     build_objective_bridge_plan,
     compute_plan_sha256,
 )
@@ -951,6 +952,63 @@ max_parallel = 2
 
 
 class BridgeGitReadTests(unittest.TestCase):
+    def test_git_config_guard_matches_real_git_for_bom_tabs_and_subsections(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            included = root / "included.config"
+            included.write_text("[safe]\nvalue = true\n", encoding="utf-8")
+            cases = (
+                (
+                    "bom-include",
+                    b"\xef\xbb\xbf[include]\npath = " + os.fsencode(included) + b"\n",
+                    "safe.value",
+                    "true",
+                ),
+                (
+                    "bom-extensions",
+                    b"\xef\xbb\xbf[extensions]\nobjectFormat = sha256\n",
+                    "extensions.objectformat",
+                    "sha256",
+                ),
+                (
+                    "tab-format",
+                    b"[core]\nrepositoryFormatVersion\t=\t1\n",
+                    "core.repositoryformatversion",
+                    "1",
+                ),
+            )
+            for name, content, key, expected in cases:
+                with self.subTest(name=name):
+                    path = root / f"{name}.config"
+                    path.write_bytes(content)
+                    parsed = subprocess.run(
+                        (
+                            "git",
+                            "config",
+                            "--includes",
+                            "--file",
+                            str(path),
+                            "--get",
+                            key,
+                        ),
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout.strip()
+                    self.assertEqual(parsed, expected)
+                    with self.assertRaises(ValidationError):
+                        _validate_local_git_config(content)
+
+            _validate_local_git_config(
+                b'# comment\n[remote "origin"] ; comment\nurl = local\n'
+            )
+            with self.assertRaises(ValidationError):
+                _validate_local_git_config(
+                    b'[includeIf "gitdir:/tmp/**"]\npath = /tmp/extra\n'
+                )
+
     def test_default_git_ignores_caller_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -986,10 +1044,13 @@ class BridgeGitReadTests(unittest.TestCase):
                 os.close(descriptor)
 
         self.assertEqual(invocation.argv[-3:], ("--is-ancestor", "a" * 40, "b" * 40))
+        self.assertIn("core.hooksPath=/dev/null", invocation.argv)
+        self.assertIn("credential.helper=", invocation.argv)
+        self.assertIn("core.commitGraph=false", invocation.argv)
         self.assertEqual(dict(invocation.environment), git_read_environment(root))
         self.assertEqual(dict(invocation.environment)["GIT_OPTIONAL_LOCKS"], "0")
         self.assertEqual(dict(invocation.environment)["GIT_NO_LAZY_FETCH"], "1")
-        self.assertEqual(dict(invocation.environment)["GIT_CONFIG"], os.devnull)
+        self.assertNotIn("GIT_CONFIG", dict(invocation.environment))
         self.assertNotIn("PATH", dict(invocation.environment))
         for candidate in (head_invocation, invocation):
             self.assertTrue(

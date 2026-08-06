@@ -56,8 +56,10 @@ system Python binder executables, disables lazy fetch and replace objects,
 rejects config includes and object alternates, requires Git metadata to remain
 inside the workspace, and caps one plan at 100 Git process starts. The Linux
 implementation binds worktree, Git directory, common directory, and object
-store descriptors through `/proc/self/fd`, ignores repository config, and
-applies a Landlock read-only filesystem boundary before Git starts. Hosts
+store descriptors through `/proc/self/fd`, rejects config includes and
+extensions, overrides hooks, credentials and commit-graph use, and applies a
+Landlock read-only filesystem boundary before Git starts. Repository config is
+an inspected local input; it is not claimed to be globally ignored. Hosts
 without the descriptor namespace and Landlock ABI 3 support fail closed for
 authoritative Git-dependent plans. S3 accepts only SHA-1 object-format
 repositories; SHA-256, reftable, and other repository extensions remain

@@ -92,9 +92,12 @@ Linux Ubuntu 24.04 is the reference process-level audit: pinned CI tooling uses
 `execve`, plus before/after Git metadata snapshots. The report includes the
 exact trace filter and known blind spots. The authoritative Git adapter must
 also prove that worktree, Git directory, common directory, and object store are
-opened before launch and passed only as `/proc/self/fd` references, repository
-config is ignored, and the binder's Landlock policy denies writes and reads
-outside the approved directory objects before Git executes.
+opened before launch and passed only as `/proc/self/fd` references, config
+includes/extensions are rejected, hooks/credentials/commit-graph use are
+overridden, and the binder's Landlock policy denies writes and reads outside
+the approved directory objects before Git executes. Linux `strace` evidence
+must confirm that remaining validated repository config cannot widen process,
+network, or filesystem effects.
 
 The Linux gate requires Landlock ABI 3 or newer and a real test whose Git
 executable reaches the denied write syscall. SHA-1 repositories are the Phase 0

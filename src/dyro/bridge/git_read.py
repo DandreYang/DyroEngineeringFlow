@@ -25,6 +25,8 @@ _GIT_PREFIX = (
     "core.hooksPath=/dev/null",
     "-c",
     "credential.helper=",
+    "-c",
+    "core.commitGraph=false",
 )
 _RESOLVE_ARGUMENTS = (*_GIT_PREFIX, "rev-parse", "--verify", "HEAD^{commit}")
 _ANCESTRY_ARGUMENTS = (*_GIT_PREFIX, "merge-base", "--is-ancestor")
@@ -283,7 +285,6 @@ def git_read_environment(
     """Return the complete minimal environment inherited by Bridge Git reads."""
     environment = {
         "GIT_ATTR_NOSYSTEM": "1",
-        "GIT_CONFIG": os.devnull,
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_SYSTEM": os.devnull,

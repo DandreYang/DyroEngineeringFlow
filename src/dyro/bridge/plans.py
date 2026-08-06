@@ -307,24 +307,42 @@ def _metadata_line(content: bytes, label: str) -> str:
 
 
 def _validate_local_git_config(content: bytes) -> None:
+    if content.startswith(b"\xef\xbb\xbf") or b"\x00" in content:
+        raise ValidationError("Git config encoding is unavailable to Bridge")
     try:
         lines = content.decode("utf-8").splitlines()
     except UnicodeError as exc:
         raise ValidationError("Git config is invalid") from exc
     section = ""
     for line in lines:
-        normalized = line.strip().lower().replace(" ", "")
+        stripped = line.strip(" \t\v\f\r")
+        normalized = "".join(
+            character for character in stripped.lower() if character not in " \t\v\f\r"
+        )
+        if not normalized or normalized.startswith(("#", ";")):
+            continue
+        if stripped.endswith("\\"):
+            raise ValidationError("Git config continuations are unavailable to Bridge")
         if normalized.startswith("[include") or normalized.startswith("include.path="):
             raise ValidationError("Git config includes are unavailable to Bridge")
-        if normalized.startswith("[") and normalized.endswith("]"):
-            section = normalized[1:-1].split('"', 1)[0]
+        if normalized.startswith("["):
+            closing = normalized.find("]")
+            if closing < 0:
+                raise ValidationError("Git config section is invalid")
+            tail = normalized[closing + 1 :]
+            if tail and not tail.startswith(("#", ";")):
+                raise ValidationError("Git config section is invalid")
+            section = normalized[1:closing].split('"', 1)[0]
             if section == "extensions":
                 raise ValidationError(
                     "Git repository extensions are unavailable to Bridge"
                 )
             continue
-        if section == "core" and normalized.startswith("repositoryformatversion="):
-            if normalized.split("=", 1)[1] != "0":
+        if section == "core" and normalized.startswith("repositoryformatversion"):
+            if normalized not in {
+                "repositoryformatversion=0",
+                "repositoryformatversion0",
+            }:
                 raise ValidationError("Git repository format is unavailable to Bridge")
 
 

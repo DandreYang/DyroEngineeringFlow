@@ -297,11 +297,13 @@ The Phase 0 Core service is reached through the single-request transport. Its
 descriptor-bound Git adapter starts one exact isolated Python binder process,
 retains only the reviewed worktree, Git directory, common directory, and object
 store descriptors plus a close-on-exec error channel, applies a Landlock
-read-only filesystem ruleset, ignores repository config through
-`GIT_CONFIG=/dev/null`, and then executes an allowlisted system Git read. Host
-integrations must spawn the one-shot transport rather than import and invoke
-planning services in process. On Linux, repository discovery is pinned to
-those descriptors through `/proc/self/fd`. A host without both the verified
+read-only filesystem ruleset, rejects config includes and extensions, overrides
+hooks, credentials and commit-graph use, and then executes an allowlisted system
+Git read. Repository config remains a validated local input; the protocol does
+not claim that `rev-parse` or `merge-base` ignores it. Host integrations must
+spawn the one-shot transport rather than import and invoke planning services in
+process. On Linux, repository discovery is pinned to those descriptors through
+`/proc/self/fd`. A host without both the verified
 descriptor namespace and Landlock ABI 3 support returns
 `OPERATION_UNAVAILABLE` for authoritative Git-dependent plans. Phase 0 accepts
 only SHA-1 object-format repositories; extended formats return a stable

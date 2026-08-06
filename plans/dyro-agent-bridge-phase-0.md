@@ -238,13 +238,16 @@ uv run ruff check src/dyro/bridge/plans.py tests/test_bridge_plans.py
   disables optional locks and leaves watched repository metadata unchanged.
 - The descriptor-bound Linux launcher uses an exact isolated binder argv,
   retains only the four reviewed directory descriptors plus a close-on-exec
-  error channel, applies a Landlock read-only filesystem ruleset, ignores local
-  repository config through `GIT_CONFIG=/dev/null`, then executes only the
-  documented Git argv through `/proc/self/fd`; host integrations invoke it only
-  through the one-shot transport. Platforms without the descriptor namespace
-  and Landlock ABI 3 support return `OPERATION_UNAVAILABLE` for authoritative
-  Git-dependent plans. Phase 0 accepts only SHA-1 object-format repositories;
-  extended repository formats fail closed before Git starts.
+  error channel, applies a Landlock read-only filesystem ruleset, rejects local
+  config includes and extensions, and overrides hooks, credentials and
+  commit-graph use before executing only the documented Git argv through
+  `/proc/self/fd`. Repository config remains an inspected local input rather
+  than being falsely described as ignored. Host integrations invoke the
+  launcher only through the one-shot transport. Platforms without the
+  descriptor namespace and Landlock ABI 3 support return
+  `OPERATION_UNAVAILABLE` for authoritative Git-dependent plans. Phase 0 accepts
+  only SHA-1 object-format repositories; extended repository formats fail
+  closed before Git starts.
 - Caller `PATH`, lazy fetch, replace objects, config includes, external Git
   metadata/object alternates and requests exceeding 100 Git process starts all
   fail closed before the first affected Git read.
