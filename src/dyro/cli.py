@@ -101,6 +101,11 @@ from .hub import (
     remove_workspace,
     set_default_workspace,
 )
+from .integrations import (
+    install_integration,
+    integration_status,
+    uninstall_integration,
+)
 from .onboarding import (
     SetupPlan,
     append_repository,
@@ -472,11 +477,7 @@ def _setup_default_tool(root: Path, provider_preset: str | None) -> str | None:
         return None
     current = load_tool_preferences().default_tool
     recommended = next(
-        (
-            tool.id
-            for tool in available
-            if tool.id == provider_preset
-        ),
+        (tool.id for tool in available if tool.id == provider_preset),
         "",
     )
     if not recommended and current in {tool.id for tool in available}:
@@ -501,7 +502,11 @@ def _setup_default_tool(root: Path, provider_preset: str | None) -> str | None:
             choices.append(("m", "查看全部已检测工具"))
             aliases["more"] = "m"
         default = next(
-            (str(index) for index, tool in enumerate(candidates, start=1) if tool.id == recommended),
+            (
+                str(index)
+                for index, tool in enumerate(candidates, start=1)
+                if tool.id == recommended
+            ),
             "0",
         )
         return _ask_setup_choice(
@@ -571,13 +576,15 @@ def _render_setup_personal_preferences(
     preferences: SetupPersonalPreferences,
 ) -> None:
     update_summary = (
-        "每日检测；补丁自动更新"
-        if preferences.auto_patch
-        else "每日检测；补丁保持手动更新"
-    ) if preferences.check_enabled else "关闭每日检测与补丁自动更新"
-    print(
-        "  - 更新：" + update_summary
+        (
+            "每日检测；补丁自动更新"
+            if preferences.auto_patch
+            else "每日检测；补丁保持手动更新"
+        )
+        if preferences.check_enabled
+        else "关闭每日检测与补丁自动更新"
     )
+    print("  - 更新：" + update_summary)
     if preferences.default_tool is None:
         print("  - 编码工具：" + muted("保持当前个人偏好"))
     elif preferences.default_tool:
@@ -1444,6 +1451,35 @@ def cmd_tool_pin(args: argparse.Namespace) -> None:
     print(
         "已清除工具置顶顺序" if not tool_ids else "工具置顶顺序：" + ", ".join(tool_ids)
     )
+
+
+def cmd_integration_status(args: argparse.Namespace) -> None:
+    status = integration_status(args.id)
+    print(f"{status.integration}\t{status.state.value}\t{status.target}")
+    print(status.detail)
+
+
+def _print_integration_plan(plan, *, dry_run: bool) -> None:
+    prefix = "DRY RUN: " if dry_run else ""
+    print(f"{prefix}{plan.action} {plan.status.integration}: {plan.status.state.value}")
+    for change in plan.changes:
+        print(f"  - {change}")
+
+
+def cmd_integration_install(args: argparse.Namespace) -> None:
+    preview = args.dry_run or not args.yes
+    plan = install_integration(args.id, yes=args.yes, dry_run=preview)
+    _print_integration_plan(plan, dry_run=preview)
+    if not args.yes and not args.dry_run:
+        print("确认计划后，重新运行并添加 --yes 执行。")
+
+
+def cmd_integration_uninstall(args: argparse.Namespace) -> None:
+    preview = args.dry_run or not args.yes
+    plan = uninstall_integration(args.id, yes=args.yes, dry_run=preview)
+    _print_integration_plan(plan, dry_run=preview)
+    if not args.yes and not args.dry_run:
+        print("确认计划后，重新运行并添加 --yes 执行。")
 
 
 def _print_update_result(result) -> None:
@@ -2973,6 +3009,45 @@ def build_parser() -> argparse.ArgumentParser:
     tool_pin.add_argument("ids", nargs="*")
     tool_pin.add_argument("--clear", action="store_true")
     tool_pin.set_defaults(func=cmd_tool_pin)
+    integration = sub.add_parser(
+        "integration", help="管理 Dyro 拥有的可选编码智能体集成"
+    )
+    integration_sub = integration.add_subparsers(
+        dest="integration_command", required=True
+    )
+    integration_status_parser = integration_sub.add_parser(
+        "status", help="只读检查集成状态"
+    )
+    integration_status_parser.add_argument("id", choices=("codex",))
+    integration_status_parser.set_defaults(func=cmd_integration_status)
+    integration_install_parser = integration_sub.add_parser(
+        "install", help="预览或安装 Dyro 自有集成资产"
+    )
+    integration_install_parser.add_argument("id", choices=("codex",))
+    integration_install_parser.add_argument(
+        "--yes", action="store_true", help="确认执行已预览的安装或升级"
+    )
+    integration_install_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="仅预览安装计划；也兼容全局 --dry-run 放在命令前",
+    )
+    integration_install_parser.set_defaults(func=cmd_integration_install)
+    integration_uninstall_parser = integration_sub.add_parser(
+        "uninstall", help="仅卸载仍匹配 ownership manifest 的资产"
+    )
+    integration_uninstall_parser.add_argument("id", choices=("codex",))
+    integration_uninstall_parser.add_argument(
+        "--yes", action="store_true", help="确认卸载仍完整的自有资产"
+    )
+    integration_uninstall_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="仅预览卸载计划；也兼容全局 --dry-run 放在命令前",
+    )
+    integration_uninstall_parser.set_defaults(func=cmd_integration_uninstall)
     update = sub.add_parser("update", help="检测并安全更新 Dyro")
     update_sub = update.add_subparsers(dest="update_command", required=True)
     update_sub.add_parser(

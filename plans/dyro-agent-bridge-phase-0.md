@@ -50,9 +50,10 @@ other steps are serial gates.
 
 ## 3. Step S1 — Core contracts and Exposure Catalog
 
-Implementation status: Complete on 2026-08-06 for the source-tree unit gates
-only. All operations remain deny-by-default and unavailable; this does not
-satisfy the S5 public-availability, installed-artifact, or release gates.
+Implementation status: Complete on 2026-08-06 for the source-tree unit gates.
+At that milestone all operations remained deny-by-default; S5 has since
+promoted only the seven Linux Mandatory Core Surface records after adding the
+installed-artifact gate.
 
 ### Context brief
 
@@ -260,11 +261,11 @@ remains intact.
 
 ## 6. Step S4 — One-shot JSON transport
 
-Implementation status (2026-08-07): complete in the source tree and retained at
-`implemented_testable`. The declared package entry point, bounded parser, static
-router, fixed error surface, fail-closed PLAN handling, and broken-pipe behavior
-have focused tests. Production requests remain unavailable until S5 supplies
-the Linux zero-effect, artifact and restricted-host evidence.
+Implementation status (2026-08-07): complete in the source tree. The package
+entry point, bounded parser, static router, fixed error surface, fail-closed
+PLAN handling, and broken-pipe behavior have focused tests. S5 has since made
+the seven Linux Mandatory Core Surface operations publicly available; all
+other operations and platforms remain fail-closed.
 
 ### Context brief
 
@@ -319,6 +320,12 @@ Remove the console entry point and isolated transport package. Core Observation
 and Plan services remain available to the Console/CLI if independently useful.
 
 ## 7. Step S5 — Zero-effect, artifact, and real-sandbox gates
+
+Implementation status (2026-08-07): the catalog promotes exactly the seven
+Mandatory Core Surface operations on Linux Ubuntu 24.04 and retains fail-closed
+macOS/Windows metadata. The required CI gate runs the same 43-case corpus
+against the internal candidate and installed public process from source, wheel,
+and sdist; the exact-commit Docker evidence remains authoritative for Go.
 
 ### Context brief
 

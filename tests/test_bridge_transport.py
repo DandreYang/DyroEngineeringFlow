@@ -50,7 +50,7 @@ def _request(
 
 def _context(**kwargs: object) -> TransportContext:
     values: dict[str, object] = {
-        "platform": "macos-15",
+        "platform": "linux-ubuntu-24.04",
         "cwd": Path("."),
         "allow_test_services": True,
         "event_id_factory": lambda: "evt_test",
@@ -107,8 +107,27 @@ class BridgeTransportTests(unittest.TestCase):
         self.assertEqual(response["error"]["code"], expected.value)
         return response
 
-    def test_production_catalog_remains_deny_by_default_in_s4(self) -> None:
-        context = replace(_context(), allow_test_services=False)
+    def test_production_catalog_exposes_linux_mandatory_and_denies_other_hosts(
+        self,
+    ) -> None:
+        linux = replace(
+            _context(), platform="linux-ubuntu-24.04", allow_test_services=False
+        )
+        response, exit_code = handle_request_bytes(_request(), linux)
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(response["ok"])
+        self.assert_error(
+            _request("objective.explain", {"objective_id": "OBJ-1"}),
+            ErrorCode.OPERATION_UNAVAILABLE,
+            4,
+            context=linux,
+        )
+
+        context = replace(_context(), platform="macos-15", allow_test_services=False)
+        self.assert_error(
+            _request(), ErrorCode.OPERATION_UNAVAILABLE, 4, context=context
+        )
+        context = replace(_context(), platform="windows", allow_test_services=False)
         self.assert_error(
             _request(), ErrorCode.OPERATION_UNAVAILABLE, 4, context=context
         )
@@ -390,7 +409,7 @@ def noisy(_request, _context):
     os.write(2, secret.encode())
     return NoisyResult()
 context = TransportContext(
-    platform="macos-15",
+    platform="linux-ubuntu-24.04",
     cwd=Path("."),
     allow_test_services=True,
     handlers={service_id: noisy},

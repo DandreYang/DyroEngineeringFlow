@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "dyro-readonly": {
+      "title": "Dyro Readonly",
+      "description": "Beta inspect-and-plan server available for validation; plans are non-executable and carry no authorization.",
+      "command": "dyro-mcp",
+      "args": []
+    }
+  }
+}

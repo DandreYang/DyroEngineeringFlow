@@ -1,0 +1,22 @@
+{
+  "name": "dyro-readonly",
+  "version": "0.1.0",
+  "description": "Beta Dyro inspection and non-executable planning integration.",
+  "author": {
+    "name": "DandreYang"
+  },
+  "interface": {
+    "displayName": "Dyro Readonly",
+    "shortDescription": "Beta Dyro inspect-and-plan integration.",
+    "longDescription": "Available for validation: inspect bounded Dyro control-plane state and produce plans that are explicitly non-executable and unauthorized.",
+    "developerName": "DandreYang",
+    "category": "Productivity",
+    "capabilities": ["Read-only inspection", "Non-executable planning"],
+    "defaultPrompt": [
+      "Resolve the current Dyro workspace.",
+      "Inspect the current Dyro workspace state.",
+      "Build a non-executable plan for a Dyro objective."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

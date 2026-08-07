@@ -224,13 +224,17 @@ string for automatic execution. Resolution does not mark a workspace recent.
 
 ## Platform scope
 
-Phase 0 targets Linux Ubuntu 24.04 and macOS 15 for Core/JSON acceptance. Codex
-host integration is initially targeted on macOS 15. Windows receives only an
+Phase 0 public Core/JSON availability initially targets Linux Ubuntu 24.04.
+macOS 15 remains a declared validation target, and the Codex host integration
+is initially developed there, but the public Bridge fails closed until an
+equivalent system-level zero-effect proof exists. Windows receives only an
 import and fail-closed discovery smoke in Phase 0 because current Objective
-storage does not provide the same directory-fd guarantees there; Objective and
-other unsupported operations report `OPERATION_UNAVAILABLE`.
+storage does not provide the same directory-fd guarantees there; all operations
+report `OPERATION_UNAVAILABLE` on macOS 15 and Windows.
 
-Availability is per operation and per platform. Linux acceptance combines
+Availability is per operation and per platform. Exactly the seven Mandatory
+Core Surface operations are public on Linux; the other eleven catalog entries
+remain unavailable. Linux acceptance combines
 in-process denial traps with `strace` file/network/process evidence and Git
 metadata snapshots. macOS acceptance combines in-process traps, read-only
 roots, before/after metadata snapshots, process shims, and the real managed

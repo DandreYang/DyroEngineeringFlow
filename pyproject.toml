@@ -36,9 +36,11 @@ Changelog = "https://github.com/DandreYang/DyroEngineeringFlow/blob/main/CHANGEL
 [project.scripts]
 dyro = "dyro.cli:main"
 dyro-bridge = "dyro.bridge.transport:main"
+dyro-mcp = "dyro.bridge.mcp:main"
 
 [project.optional-dependencies]
 dev = ["build==1.3.0", "ruff==0.15.2", "twine==6.2.0"]
+mcp = ["mcp>=2,<3"]
 
 # Core lives under src/; the optional local dispatch harness ships as an
 # importable package and via `dyro dispatch`.
@@ -53,6 +55,8 @@ packages = [
   "dyro.console",
   "dyro.console.assets",
   "dyro.continuation",
+  "dyro.integrations",
+  "dyro.integrations.assets",
   "experiments",
   "experiments.local_agent_dispatch",
   "experiments.local_agent_dispatch.adapters",
@@ -60,6 +64,13 @@ packages = [
 
 [tool.setuptools.package-data]
 "dyro.console" = ["assets/*"]
+"dyro.integrations" = [
+  "assets/dyro-control-plane/SKILL.md",
+  "assets/dyro-control-plane/agents/openai.yaml",
+  "assets/dyro-readonly/.codex-plugin/plugin.json",
+  "assets/dyro-readonly/.mcp.json",
+  "assets/dyro-readonly/compatibility.json",
+]
 
 [tool.unittest]
 start-directory = "tests"

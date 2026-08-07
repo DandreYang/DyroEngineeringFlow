@@ -56,6 +56,12 @@ _DECLARED_PLATFORMS = (
     PlatformAvailability("windows", PlatformState.UNAVAILABLE),
 )
 
+_LINUX_PUBLIC_PLATFORMS = (
+    PlatformAvailability("linux-ubuntu-24.04", PlatformState.AVAILABLE),
+    PlatformAvailability("macos-15", PlatformState.DECLARED),
+    PlatformAvailability("windows", PlatformState.UNAVAILABLE),
+)
+
 _IMPLEMENTED_TESTABLE_SERVICES = {
     "bridge.capabilities.compact": "dyro.bridge.transport.bridge_capabilities",
     "bridge.hello": "dyro.bridge.transport.bridge_hello",
@@ -80,6 +86,7 @@ def _declared(
 ) -> OperationSpec:
     schema = get_operation_schema(operation_id)
     service_id = _IMPLEMENTED_TESTABLE_SERVICES.get(operation_id)
+    public_available = operation_id in MANDATORY_OPERATION_IDS
     return OperationSpec(
         operation_id=operation_id,
         kind=kind,
@@ -90,12 +97,16 @@ def _declared(
         output_schema_id=schema.output_schema_id,
         must_be_available=operation_id in MANDATORY_OPERATION_IDS,
         availability_state=(
-            AvailabilityState.IMPLEMENTED_TESTABLE
-            if service_id is not None
-            else AvailabilityState.DECLARED
+            AvailabilityState.PUBLIC_AVAILABLE
+            if public_available
+            else (
+                AvailabilityState.IMPLEMENTED_TESTABLE
+                if service_id is not None
+                else AvailabilityState.DECLARED
+            )
         ),
         service_id=service_id,
-        platforms=_DECLARED_PLATFORMS,
+        platforms=_LINUX_PUBLIC_PLATFORMS if public_available else _DECLARED_PLATFORMS,
     )
 
 

@@ -11,6 +11,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -43,6 +44,59 @@ jobs:
         run: |
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           python tools/verify_release_source.py --release-tag "$RELEASE_TAG" --trusted-ref origin/main
+
+      - name: Require successful exact-SHA Agent Bridge gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_sha="$(git rev-parse HEAD)"
+          for attempt in $(seq 1 30); do
+            row="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+              -f "head_sha=${release_sha}" -f event=push -f per_page=100 \
+              --jq '.workflow_runs | sort_by(.created_at) | last | if . == null then ["missing","missing","missing","missing","missing"] else [.status, (.conclusion // "pending"), .head_sha, (.id | tostring), .html_url] end | @tsv')"
+            IFS=$'\t' read -r status conclusion observed_sha run_id run_url <<<"${row}"
+            if [[ "${observed_sha}" != "missing" && "${observed_sha}" != "${release_sha}" ]]; then
+              echo "CI run SHA mismatch: expected ${release_sha}, got ${observed_sha}" >&2
+              exit 1
+            fi
+            if [[ "${status}" == "completed" ]]; then
+              if [[ "${conclusion}" != "success" ]]; then
+                echo "Exact-SHA CI did not succeed: ${conclusion} ${run_url}" >&2
+                exit 1
+              fi
+              job_row="$(gh api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs" \
+                -f filter=latest -f per_page=100 \
+                --jq '[.jobs[] | select(.name == "Agent Bridge source/wheel/sdist gate (Ubuntu 24.04)")] | if length != 1 then ["missing","missing","missing","missing"] else [.[0].status, (.[0].conclusion // "pending"), (.[0].id | tostring), .[0].html_url] end | @tsv')"
+              IFS=$'\t' read -r job_status job_conclusion job_id job_url <<<"${job_row}"
+              if [[ "${job_status}" != "completed" || "${job_conclusion}" != "success" ]]; then
+                echo "Exact-SHA Agent Bridge Docker job missing or unsuccessful: ${job_status}/${job_conclusion}" >&2
+                exit 1
+              fi
+              artifact_row="$(gh api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" \
+                -f per_page=100 \
+                --jq '[.artifacts[] | select(.name == "dyro-bridge-zero-effect-evidence" and .expired == false)] | sort_by(.created_at) | last | if . == null then ["missing","missing"] else [(.id | tostring), .archive_download_url] end | @tsv')"
+              IFS=$'\t' read -r artifact_id artifact_url <<<"${artifact_row}"
+              if [[ "${artifact_id}" == "missing" ]]; then
+                echo "Exact-SHA Agent Bridge evidence artifact is missing or expired" >&2
+                exit 1
+              fi
+              printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "${release_sha}" "${run_id}" "${run_url}" \
+                "${job_id}" "${job_url}" "${artifact_id}:${artifact_url}" \
+                > bridge-gate-run.tsv
+              break
+            fi
+            if [[ "${attempt}" -eq 30 ]]; then
+              echo "No completed successful ci.yml push run for ${release_sha}" >&2
+              exit 1
+            fi
+            sleep 10
+          done
 
       - name: Verify locked release environment
         run: |
@@ -82,12 +136,14 @@ jobs:
           "$smoke_root/wheel-venv/bin/pip" install "$GITHUB_WORKSPACE"/dist/dyro-*.whl
           "$smoke_root/wheel-venv/bin/python" -c "import experiments.local_agent_dispatch"
           "$smoke_root/wheel-venv/bin/python" -I -c "from dyro.console.assets import validate_assets; validate_assets()"
+          "$smoke_root/wheel-venv/bin/python" -I -c "from dyro.bridge.catalog import CATALOG, MANDATORY_OPERATION_IDS; assert {item.operation_id for item in CATALOG.operations if item.available_on('linux-ubuntu-24.04')} == set(MANDATORY_OPERATION_IDS); assert not any(item.available_on('macos-15') or item.available_on('windows') for item in CATALOG.operations)"
           DYRO_LOCAL_AGENT_DISPATCH_HOME="$smoke_root/wheel-dispatch-home" "$smoke_root/wheel-venv/bin/dyro" dispatch doctor >"$smoke_root/wheel-doctor.json"
           uv run python -c "import json; json.load(open('$smoke_root/wheel-doctor.json'))"
           uv run python -m venv "$smoke_root/sdist-venv"
           "$smoke_root/sdist-venv/bin/pip" install "$GITHUB_WORKSPACE"/dist/dyro-*.tar.gz
           "$smoke_root/sdist-venv/bin/python" -c "import experiments.local_agent_dispatch"
           "$smoke_root/sdist-venv/bin/python" -I -c "from dyro.console.assets import validate_assets; validate_assets()"
+          "$smoke_root/sdist-venv/bin/python" -I -c "from dyro.bridge.catalog import CATALOG, MANDATORY_OPERATION_IDS; assert {item.operation_id for item in CATALOG.operations if item.available_on('linux-ubuntu-24.04')} == set(MANDATORY_OPERATION_IDS); assert not any(item.available_on('macos-15') or item.available_on('windows') for item in CATALOG.operations)"
           DYRO_LOCAL_AGENT_DISPATCH_HOME="$smoke_root/sdist-dispatch-home" "$smoke_root/sdist-venv/bin/dyro" dispatch doctor >"$smoke_root/sdist-doctor.json"
           uv run python -c "import json; json.load(open('$smoke_root/sdist-doctor.json'))"
 
@@ -115,6 +171,7 @@ jobs:
           path: |
             release-build-requirements.txt
             distribution-sha256sums.txt
+            bridge-gate-run.tsv
           retention-days: 90
 
   publish-to-pypi:

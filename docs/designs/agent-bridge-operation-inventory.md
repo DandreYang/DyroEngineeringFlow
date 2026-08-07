@@ -1,6 +1,6 @@
 # Dyro Agent Bridge Operation Inventory
 
-Status: Proposed Phase 0 baseline
+Status: Linux Ubuntu 24.04 Mandatory Core Surface promoted at S5
 
 Decision source: [ADR 0006](../adr/0006-agent-bridge-phase-0.md)
 
@@ -32,12 +32,12 @@ Risk vocabulary follows ADR 0006: `R0`, `PLAN`, `R1`, `R2`, and `R3`.
 
 | Operation | Class | Status | Current source starting point | Required Core work and proof |
 | --- | --- | --- | --- | --- |
-| `bridge.hello` | R0 | implemented_testable | `bridge/transport.py` | Return only protocol/Core/Bridge version; no update or host probing |
-| `bridge.capabilities.compact` | R0 | implemented_testable | `bridge/catalog.py`, `bridge/transport.py` | IDs, risk, availability, versions and digest only; no full schemas |
-| `bridge.operation.schema` | R0 | implemented_testable | `bridge/schemas.py`, `bridge/transport.py` | Fetch exactly one allowlisted callable schema; reject unknown/unavailable operation |
-| `workspace.resolve` | R0 | implemented_testable | `bridge/observations.py`, `continuation/resolution.py` | Typed result with `resolution_source`; structured fail-closed errors; no recent-state write |
-| `workspace.list` | R0 | implemented_testable | `bridge/observations.py`, `hub.py` | DTO without absolute paths by default; partial stale/unreadable status; no registry mutation |
-| `workspace.observe` | R0 | implemented_testable | `bridge/observations.py` | Bounded per-record partial results; mark integration `not_inspected`; never infer final readiness |
+| `bridge.hello` | R0 | public_available (Linux) | `bridge/transport.py` | Return only protocol/Core/Bridge version; no update or host probing |
+| `bridge.capabilities.compact` | R0 | public_available (Linux) | `bridge/catalog.py`, `bridge/transport.py` | IDs, risk, availability, versions and digest only; no full schemas |
+| `bridge.operation.schema` | R0 | public_available (Linux) | `bridge/schemas.py`, `bridge/transport.py` | Fetch exactly one allowlisted callable schema; reject unknown/unavailable operation |
+| `workspace.resolve` | R0 | public_available (Linux) | `bridge/observations.py`, `continuation/resolution.py` | Typed result with `resolution_source`; structured fail-closed errors; no recent-state write |
+| `workspace.list` | R0 | public_available (Linux) | `bridge/observations.py`, `hub.py` | DTO without absolute paths by default; partial stale/unreadable status; no registry mutation |
+| `workspace.observe` | R0 | public_available (Linux) | `bridge/observations.py` | Bounded per-record partial results; mark integration `not_inspected`; never infer final readiness |
 | `line.list` | R0 | declared | `workspace.py:117` | Typed projection; no CLI formatting; path fields excluded |
 | `task.list` | R0 | declared | `tasks.py:212` | Summary only unless Git inspection is complete; no final dispatchability from status text |
 | `task.explain` | R0 | declared | `graph.py`, scheduler snapshot | Authoritative explanation requires reviewed Git-read adapter and B05; otherwise unavailable |
@@ -45,7 +45,7 @@ Risk vocabulary follows ADR 0006: `R0`, `PLAN`, `R1`, `R2`, and `R3`.
 | `task.gate_definitions.get` | R0 | implemented_testable | `bridge/observations.py`, bounded Task loader | Return gate names and redacted metadata only; must never call `run_gates` |
 | `objective.list` | R0 | declared | `continuation/store.py:425` | New wrapper must call `list_objectives(..., recover=False)` |
 | `objective.status` | R0 | declared | scheduler snapshot | Final ready/blocked result requires reviewed Git inspection; summary reports `not_inspected` |
-| `objective.plan` | PLAN | implemented_testable | `bridge/plans.py`, pure continuation planner | Typed projection/read set, bounded metadata-validated Git inspection, planner revision, non-executable Bridge digest |
+| `objective.plan` | PLAN | public_available (Linux) | `bridge/plans.py`, pure continuation planner | Typed projection/read set, bounded metadata-validated Git inspection, planner revision, non-executable Bridge digest |
 | `objective.explain` | PLAN | implemented_testable | `bridge/plans.py`, pure continuation planner | Code-only summary/reasons; incomplete integration fails closed |
 | `objective.graph` | PLAN | implemented_testable | `bridge/plans.py`, scheduler projection | Opaque typed nodes/edges only; no mutation or recovery |
 | `objective.tick` | PLAN | implemented_testable | `bridge/plans.py`, pure scheduler tick | Typed wave/deferrals/non-mutating actions; no lease, intent, reservation, or execution |
@@ -68,10 +68,11 @@ unavailable rather than being interpreted with incomplete config.
 Declared status is not implementation approval. Each row must acquire a source
 call graph and pass the acceptance matrix before it becomes public-available.
 
-The S4 one-shot transport is installed and tested, but its production context
-does not contain an availability override. All `implemented_testable` services,
-including discovery, therefore continue to return `OPERATION_UNAVAILABLE` from
-the installed process until the S5 evidence gate changes the catalog itself.
+S5 promotes exactly the seven Mandatory Core Surface operations on Linux Ubuntu
+24.04. The other five implemented services and all six declared services remain
+unavailable through the installed transport. macOS 15 remains declared and
+Windows unavailable, so neither host receives an implicit availability
+override from this promotion.
 
 ### Mandatory Core Surface
 
@@ -181,12 +182,12 @@ negative_tests:
   network: pass-source-unit
   subprocess: pass-source-unit
   traceback_ansi_secrets: pass-source-unit
-installed_artifact_test: module-import-pass-public-call-pending-S5
+installed_artifact_test: source-wheel-sdist-public-corpus-required
 real_codex_test: pending
 must_be_available: true
-availability_state: implemented_testable
+availability_state: public_available
 platform_availability:
-  linux-ubuntu-24.04: declared
+  linux-ubuntu-24.04: available
   macos-15: declared
   windows: unavailable
 ```

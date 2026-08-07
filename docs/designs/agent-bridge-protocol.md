@@ -262,7 +262,7 @@ are never reflected into response metadata.
 
 ```json
 {
-  "operation": "task.explain",
+  "operation": "workspace.resolve",
   "kind": "inspect",
   "maximum_risk": "R0",
   "available": true,
@@ -275,6 +275,14 @@ The compact response MUST NOT embed full JSON schemas. The canonical compact
 list is hashed into `capabilities_digest`. A client may cache a schema only by
 `protocol major + operation ID + operation schema version + capabilities
 digest`.
+
+At the S5 boundary, Linux Ubuntu 24.04 reports exactly the seven Mandatory Core
+Surface operations as available. The Linux compact digest is
+`sha256:426aaee45de4da518fcad5c89ab85ce129662e6af2faff37c705b717a4311e8a`.
+macOS 15 and Windows report no available Phase 0 operations and retain the
+fail-closed digest
+`sha256:3a008d6baa65db697eb44a9a910c4791eb0a96f58fcd361784341c4140ab2bd7`.
+These values are protocol fixtures, not a host-side override.
 
 `bridge.operation.schema` accepts one operation ID and returns its request and
 response schemas. It rejects unavailable, excluded, and mutation operations.

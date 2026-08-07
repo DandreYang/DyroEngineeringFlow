@@ -1,6 +1,6 @@
 # Dyro Agent Bridge Phase 0 Acceptance Matrix
 
-Status: Proposed release gate
+Status: Enforced Linux source/wheel/sdist release gate
 
 Authority: [ADR 0006](../adr/0006-agent-bridge-phase-0.md)
 
@@ -122,6 +122,13 @@ entry points, packaged schemas, `-I` imports, every Mandatory Core Surface
 operation, and Core protocol/schema/planner compatibility. Missing MCP optional
 dependencies and integration version skew belong to E03-Integration at S7, not
 the Phase 0 Core gate.
+
+The S5 corpus contains 43 cases. Both the internal candidate and installed
+public process must return full semantic success for all seven mandatory
+operations and `OPERATION_UNAVAILABLE` for exactly the other eleven catalog
+operations. Source archive, wheel, and sdist reports must have identical
+contract digests; the public `objective.plan` trace must include the same
+descriptor binder and successful Landlock evidence as the candidate trace.
 
 ### Layer 4: real host
 

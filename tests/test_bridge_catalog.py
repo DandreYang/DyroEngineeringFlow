@@ -43,7 +43,7 @@ class BridgeCatalogTests(unittest.TestCase):
         project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertIn("dyro.bridge", project["tool"]["setuptools"]["packages"])
 
-    def test_catalog_tracks_s3_internal_implementations_and_remains_deny_by_default(
+    def test_catalog_exposes_only_mandatory_surface_on_linux(
         self,
     ) -> None:
         operations = list_operations()
@@ -78,28 +78,27 @@ class BridgeCatalogTests(unittest.TestCase):
         self.assertEqual(
             implemented,
             {
-                "bridge.capabilities.compact",
-                "bridge.hello",
-                "bridge.operation.schema",
                 "objective.attention",
                 "objective.explain",
                 "objective.graph",
-                "objective.plan",
                 "objective.tick",
                 "task.gate_definitions.get",
-                "workspace.list",
-                "workspace.observe",
-                "workspace.resolve",
             },
         )
+        public = {item.operation_id for item in operations if item.public_available}
+        self.assertEqual(public, set(MANDATORY_OPERATION_IDS))
         self.assertTrue(
             all(
                 item.availability_state is AvailabilityState.DECLARED
                 for item in operations
-                if item.operation_id not in implemented
+                if item.operation_id not in implemented | public
             )
         )
-        self.assertFalse(any(item.public_available for item in operations))
+        for operation_id in MANDATORY_OPERATION_IDS:
+            operation = get_operation(operation_id)
+            self.assertTrue(operation.available_on("linux-ubuntu-24.04"))
+            self.assertFalse(operation.available_on("macos-15"))
+            self.assertFalse(operation.available_on("windows"))
         self.assertEqual(
             get_operation("task.explain").availability_state, AvailabilityState.DECLARED
         )
@@ -125,11 +124,16 @@ class BridgeCatalogTests(unittest.TestCase):
                     "planner_revision",
                 },
             )
-            self.assertFalse(item["available"])
+            self.assertEqual(
+                item["available"], item["operation"] in MANDATORY_OPERATION_IDS
+            )
         digest = capabilities_digest("linux-ubuntu-24.04")
         self.assertEqual(digest, self._vectors()["capabilities"]["digest"])
         self.assertEqual(digest, capabilities_digest("linux-ubuntu-24.04"))
-        self.assertEqual(digest, capabilities_digest("windows"))
+        self.assertNotEqual(digest, capabilities_digest("windows"))
+        self.assertEqual(
+            capabilities_digest("macos-15"), capabilities_digest("windows")
+        )
 
     def test_every_catalog_operation_has_strict_fresh_schemas(self) -> None:
         for operation in list_operations():
@@ -202,6 +206,7 @@ class BridgeCatalogTests(unittest.TestCase):
         catalog = ExposureCatalog(
             list_operations(), mandatory_ids=MANDATORY_OPERATION_IDS
         )
+        catalog.validate_release(("linux-ubuntu-24.04",))
         with self.assertRaises(ValidationError):
             catalog.validate_release(("linux-ubuntu-24.04", "macos-15"))
         with self.assertRaises(ValidationError):
@@ -328,11 +333,15 @@ class BridgeCatalogTests(unittest.TestCase):
                 f"{module.__name__} imports CLI: {imports}",
             )
 
-    def test_every_implemented_service_id_resolves_to_a_callable(self) -> None:
+    def test_every_callable_service_id_resolves_to_a_callable(self) -> None:
         implemented = (
             item
             for item in list_operations()
-            if item.availability_state is AvailabilityState.IMPLEMENTED_TESTABLE
+            if item.availability_state
+            in {
+                AvailabilityState.IMPLEMENTED_TESTABLE,
+                AvailabilityState.PUBLIC_AVAILABLE,
+            }
         )
         for operation in implemented:
             assert operation.service_id is not None
