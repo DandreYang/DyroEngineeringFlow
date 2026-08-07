@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dyro 功能总览 · 可视化</title>
+<style>
+  :root {
+    --bg: #0b1220;
+    --panel: #121a2b;
+    --panel-2: #182338;
+    --line: #2a3a55;
+    --text: #e8eef9;
+    --muted: #9aabc6;
+    --accent: #5b8cff;
+    --accent-2: #3dd6c6;
+    --warn: #f0b429;
+    --danger: #f07178;
+    --ok: #7fd99a;
+    --purple: #b794f6;
+    --radius: 14px;
+    --shadow: 0 10px 40px rgba(0,0,0,.35);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+    background:
+      radial-gradient(1200px 600px at 10% -10%, #1a2a4a 0%, transparent 55%),
+      radial-gradient(900px 500px at 100% 0%, #14353a 0%, transparent 50%),
+      var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 40px 24px 80px; }
+  header { margin-bottom: 36px; }
+  .badge {
+    display: inline-block;
+    font-size: 12px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--accent-2);
+    border: 1px solid rgba(61,214,198,.35);
+    background: rgba(61,214,198,.08);
+    padding: 4px 10px;
+    border-radius: 999px;
+    margin-bottom: 12px;
+  }
+  h1 { font-size: 32px; margin: 0 0 8px; letter-spacing: -.02em; }
+  .lead { color: var(--muted); font-size: 16px; max-width: 720px; margin: 0; }
+  section {
+    background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 24px;
+    margin-bottom: 22px;
+    box-shadow: var(--shadow);
+  }
+  h2 {
+    font-size: 15px;
+    margin: 0 0 16px;
+    color: var(--muted);
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  h3 { margin: 0 0 6px; font-size: 15px; }
+  p.note { margin: 12px 0 0; color: var(--muted); font-size: 13px; }
+
+  /* Architecture layers */
+  .layers { display: grid; gap: 12px; }
+  .layer {
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    padding: 16px 18px;
+    display: grid;
+    grid-template-columns: 140px 1fr;
+    gap: 16px;
+    align-items: start;
+  }
+  .layer .tag {
+    font-size: 12px;
+    font-weight: 700;
+    padding: 6px 10px;
+    border-radius: 8px;
+    text-align: center;
+    align-self: center;
+  }
+  .layer.profile { background: rgba(91,140,255,.08); }
+  .layer.profile .tag { background: rgba(91,140,255,.2); color: #a8c4ff; }
+  .layer.core { background: rgba(61,214,198,.07); }
+  .layer.core .tag { background: rgba(61,214,198,.18); color: #8eefe4; }
+  .layer.runtime { background: rgba(183,148,246,.07); }
+  .layer.runtime .tag { background: rgba(183,148,246,.18); color: #d4bfff; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    font-size: 12px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    background: rgba(255,255,255,.05);
+    border: 1px solid var(--line);
+    color: var(--text);
+  }
+
+  /* Flow */
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .step {
+    background: rgba(255,255,255,.04);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 14px;
+    min-width: 108px;
+    flex: 1 1 108px;
+    text-align: center;
+  }
+  .step .n {
+    display: block;
+    font-size: 11px;
+    color: var(--accent-2);
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .step strong { font-size: 13px; display: block; }
+  .step span { font-size: 11px; color: var(--muted); }
+  .arrow {
+    color: var(--accent);
+    font-size: 18px;
+    flex: 0 0 auto;
+    opacity: .8;
+  }
+
+  /* State machine */
+  .states {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }
+  .state {
+    border-radius: 999px;
+    padding: 8px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid var(--line);
+    background: rgba(255,255,255,.04);
+  }
+  .state.backlog { color: var(--muted); }
+  .state.assigned { color: #a8c4ff; border-color: rgba(91,140,255,.4); }
+  .state.progress { color: var(--accent-2); border-color: rgba(61,214,198,.4); }
+  .state.review { color: var(--warn); border-color: rgba(240,180,41,.45); }
+  .state.done { color: var(--ok); border-color: rgba(127,217,154,.45); }
+  .state.fail { color: var(--danger); border-color: rgba(240,113,120,.4); }
+  .state.answer { color: var(--purple); border-color: rgba(183,148,246,.4); }
+  .arr { color: var(--muted); font-size: 14px; }
+
+  /* Feature grid */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+  }
+  .card {
+    background: rgba(255,255,255,.03);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .card .icon {
+    width: 28px; height: 28px;
+    border-radius: 8px;
+    display: grid; place-items: center;
+    font-size: 14px;
+    margin-bottom: 10px;
+    background: rgba(91,140,255,.15);
+  }
+  .card p { margin: 0; font-size: 12px; color: var(--muted); }
+
+  /* Compare */
+  .compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  @media (max-width: 720px) {
+    .layer { grid-template-columns: 1fr; }
+    .compare { grid-template-columns: 1fr; }
+    .arrow { display: none; }
+  }
+  .mode {
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    padding: 16px;
+    background: rgba(255,255,255,.03);
+  }
+  .mode.local { border-color: rgba(61,214,198,.35); }
+  .mode.external { border-color: rgba(240,180,41,.35); }
+  .mode ul { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  .mode li { margin: 4px 0; }
+
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 8px;
+  }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    background: rgba(255,255,255,.06);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="badge">DyroEngineeringFlow · dyro CLI</div>
+      <h1>功能总览 · 可视化</h1>
+      <p class="lead">
+        本地优先的多仓交付控制面：开发线 · worktree · Agent 启动 · 门禁 · 独立复核 · 合并审计。
+        Agent 只负责干活，证据与放行权在 Dyro。
+      </p>
+    </header>
+
+    <section>
+      <h2>01 · 分层架构</h2>
+      <div class="layers">
+        <div class="layer profile">
+          <div class="tag">Profile<br/>团队配置</div>
+          <div>
+            <h3>策略层 · <code>dyro.toml</code></h3>
+            <div class="chips">
+              <span class="chip">repositories</span>
+              <span class="chip">layout / bases</span>
+              <span class="chip">Agent adapter argv</span>
+              <span class="chip">gates / 回执模板</span>
+              <span class="chip">policy</span>
+            </div>
+          </div>
+        </div>
+        <div class="layer core">
+          <div class="tag">Core<br/>机制</div>
+          <div>
+            <h3>Dyro CLI · 不绑业务与模型</h3>
+            <div class="chips">
+              <span class="chip">workspace / lines</span>
+              <span class="chip">launch</span>
+              <span class="chip">dispatch · DAG</span>
+              <span class="chip">verify · gates</span>
+              <span class="chip">merge · push 策略</span>
+              <span class="chip">home / console</span>
+            </div>
+          </div>
+        </div>
+        <div class="layer runtime">
+          <div class="tag">Runtime<br/>.dyro/</div>
+          <div>
+            <h3>运行态 · 可审计</h3>
+            <div class="chips">
+              <span class="chip">tasks / lines</span>
+              <span class="chip">evidence · receipt</span>
+              <span class="chip">review · signoff</span>
+              <span class="chip">ledger.jsonl</span>
+              <span class="chip">changesets</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="note">Core 只提供机制；业务规则、模型成本、发布实践始终留在 Profile。</p>
+    </section>
+
+    <section>
+      <h2>02 · 本地交付链路</h2>
+      <div class="flow">
+        <div class="step"><span class="n">1</span><strong>setup / join</strong><span>工作区就绪</span></div>
+        <div class="arrow">→</div>
+        <div class="step"><span class="n">2</span><strong>line create</strong><span>开发线</span></div>
+        <div class="arrow">→</div>
+        <div class="step"><span class="n">3</span><strong>task create</strong><span>worktree</span></div>
+        <div class="arrow">→</div>
+        <div class="step"><span class="n">4</span><strong>run + gates</strong><span>编排器验证</span></div>
+        <div class="arrow">→</div>
+        <div class="step"><span class="n">5</span><strong>review</strong><span>绑定 HEAD</span></div>
+        <div class="arrow">→</div>
+        <div class="step"><span class="n">6</span><strong>merge</strong><span>合入开发线</span></div>
+      </div>
+      <p class="note">门禁由 Dyro 实际执行；Agent 自报不算证据。复核绑定 receipt 与各仓精确 task HEAD。</p>
+    </section>
+
+    <section>
+      <h2>03 · 任务状态机</h2>
+      <div class="states">
+        <span class="state backlog">backlog</span>
+        <span class="arr">→</span>
+        <span class="state assigned">assigned</span>
+        <span class="arr">→</span>
+        <span class="state progress">in_progress</span>
+        <span class="arr">→</span>
+        <span class="state review">review</span>
+        <span class="arr">→</span>
+        <span class="state done">done</span>
+      </div>
+      <div class="states" style="margin-top:14px">
+        <span class="state answer">waiting_answer</span>
+        <span class="arr">↔ in_progress</span>
+        <span class="state fail">failed</span>
+        <span class="arr">→ re-claim</span>
+        <span class="state review">review_pending_signoff</span>
+        <span class="arr">→ done</span>
+      </div>
+      <p class="note">非法跳转被拒绝；<code>done</code> 只能由已验证证据 + 独立复核（+ 可选签收）写入，不能靠 force 硬推。</p>
+    </section>
+
+    <section>
+      <h2>04 · 八大能力</h2>
+      <div class="grid">
+        <div class="card">
+          <div class="icon">📁</div>
+          <h3>多仓工作区</h3>
+          <p>anchors、开发线、Hotfix、逐仓 base 与隔离 worktree。</p>
+        </div>
+        <div class="card">
+          <div class="icon">🕸️</div>
+          <h3>任务图调度</h3>
+          <p>depends_on、blocked_on、conflict_group；next / loop / daemon。</p>
+        </div>
+        <div class="card">
+          <div class="icon">✅</div>
+          <h3>门禁与证据</h3>
+          <p>编排器跑 gates；attempt / receipt / task-heads 可追溯。</p>
+        </div>
+        <div class="card">
+          <div class="icon">🔍</div>
+          <h3>独立复核</h3>
+          <p>复核绑定回执与 HEAD；漂移即失效；可选外部签收。</p>
+        </div>
+        <div class="card">
+          <div class="icon">📦</div>
+          <h3>外部执行包</h3>
+          <p>claim 租约 + evidence ZIP；控制面只校验不代跑。</p>
+        </div>
+        <div class="card">
+          <div class="icon">🔐</div>
+          <h3>签名与 Witness</h3>
+          <p>Ed25519 信任库、用途分离、远程不可变审计回执。</p>
+        </div>
+        <div class="card">
+          <div class="icon">🏠</div>
+          <h3>Home / Console</h3>
+          <p>任意目录入口；只读本地仪表盘，无网络写操作。</p>
+        </div>
+        <div class="card">
+          <div class="icon">🧩</div>
+          <h3>Dispatch 实验</h3>
+          <p>本地多 Agent 派发仅作建议，不替代 gates / merge。</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>05 · 执行模式对比</h2>
+      <div class="compare">
+        <div class="mode local">
+          <h3>local · 本机闭环</h3>
+          <ul>
+            <li>本机 adapter 启动 Agent</li>
+            <li>本机执行 gates / review / merge</li>
+            <li>适合个人与小团队日常交付</li>
+          </ul>
+        </div>
+        <div class="mode external">
+          <h3>external · 隔离 runner</h3>
+          <ul>
+            <li>控制机仅 claim / 导入证据</li>
+            <li>runner 打包 receipt + heads</li>
+            <li>可强制签名执行 / 复核 / 签收</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      打开方式：浏览器打开本文件 · 仓库内路径
+      <code>docs/assets/dyro-feature-overview.html</code>
+    </footer>
+  </div>
+</body>
+</html>

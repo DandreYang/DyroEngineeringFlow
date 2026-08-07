@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Dyro 功能介绍</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 1600px;
+    height: 1480px;
+    overflow: hidden;
+    font-family: "PingFang SC", "SF Pro Text", "Helvetica Neue", sans-serif;
+    background: #070b14;
+    color: #e8eef9;
+  }
+  .poster {
+    width: 1600px;
+    height: 1480px;
+    padding: 40px 52px 32px;
+    background:
+      radial-gradient(900px 480px at 12% 0%, rgba(40,80,160,.35), transparent 60%),
+      radial-gradient(700px 420px at 100% 8%, rgba(20,90,90,.28), transparent 55%),
+      linear-gradient(180deg, #0a1020 0%, #070b14 100%);
+    position: relative;
+  }
+  .poster::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(91,140,255,.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(91,140,255,.04) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+  }
+  .content { position: relative; z-index: 1; height: 100%; display: flex; flex-direction: column; gap: 18px; }
+
+  /* Header */
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    padding-bottom: 16px;
+    border-bottom: 1px solid rgba(91,140,255,.25);
+  }
+  .brand { display: flex; align-items: center; gap: 16px; }
+  .logo {
+    width: 60px; height: 60px;
+    border-radius: 14px;
+    background: radial-gradient(circle at 30% 30%, #1a2a4a, #0b1220);
+    border: 1px solid rgba(91,140,255,.4);
+    display: grid; place-items: center;
+    overflow: hidden;
+  }
+  .logo img { width: 48px; height: 48px; object-fit: contain; }
+  .title-block h1 {
+    font-size: 42px;
+    font-weight: 800;
+    letter-spacing: .04em;
+    line-height: 1;
+  }
+  .title-block .sub {
+    margin-top: 8px;
+    font-size: 18px;
+    color: #5b8cff;
+    font-weight: 600;
+    letter-spacing: .02em;
+  }
+  .tagline {
+    text-align: right;
+    max-width: 520px;
+    font-size: 16px;
+    line-height: 1.5;
+    color: #9aabc6;
+  }
+  .tagline strong { color: #3dd6c6; font-weight: 600; }
+
+  /* Section label */
+  .sec-label {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .14em;
+    color: #3dd6c6;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+
+  /* Architecture */
+  .arch { display: grid; gap: 8px; }
+  .layer {
+    display: grid;
+    grid-template-columns: 140px 1fr;
+    border-radius: 12px;
+    border: 1px solid rgba(42,58,85,.9);
+    overflow: hidden;
+    min-height: 76px;
+  }
+  .layer .side {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 2px;
+    font-weight: 800;
+    font-size: 14px;
+    letter-spacing: .04em;
+  }
+  .layer .side small { font-size: 11px; font-weight: 600; opacity: .85; }
+  .layer .body {
+    padding: 12px 18px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
+    background: rgba(255,255,255,.02);
+  }
+  .layer .body h3 { font-size: 16px; font-weight: 700; }
+  .layer .body p { font-size: 13px; color: #9aabc6; line-height: 1.35; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    font-size: 13px;
+    padding: 5px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.1);
+    background: rgba(255,255,255,.04);
+  }
+  .l1 .side { background: rgba(91,140,255,.18); color: #a8c4ff; }
+  .l1 { border-color: rgba(91,140,255,.35); }
+  .l2 .side { background: rgba(61,214,198,.16); color: #8eefe4; }
+  .l2 { border-color: rgba(61,214,198,.35); }
+  .l3 .side { background: rgba(183,148,246,.16); color: #d4bfff; }
+  .l3 { border-color: rgba(183,148,246,.35); }
+
+  /* Flow */
+  .flow-row {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 12px;
+    position: relative;
+  }
+  .step {
+    background: rgba(255,255,255,.03);
+    border: 1px solid rgba(42,58,85,.95);
+    border-radius: 12px;
+    padding: 12px 10px;
+    text-align: center;
+    position: relative;
+  }
+  .step .num {
+    width: 24px; height: 24px;
+    margin: 0 auto 8px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #5b8cff, #3dd6c6);
+    color: #061018;
+    font-weight: 800;
+    font-size: 12px;
+    display: grid; place-items: center;
+  }
+  .step h4 { font-size: 15px; margin-bottom: 4px; }
+  .step p { font-size: 11px; color: #9aabc6; line-height: 1.35; }
+
+  /* Features 2x4 */
+  .features {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+  }
+  .card {
+    background: rgba(255,255,255,.03);
+    border: 1px solid rgba(42,58,85,.95);
+    border-radius: 12px;
+    padding: 14px 14px 12px;
+    min-height: 120px;
+  }
+  .card .icon {
+    width: 30px; height: 30px;
+    border-radius: 8px;
+    display: grid; place-items: center;
+    font-size: 15px;
+    margin-bottom: 8px;
+    background: rgba(91,140,255,.15);
+    border: 1px solid rgba(91,140,255,.25);
+  }
+  .card h4 { font-size: 15px; margin-bottom: 6px; }
+  .card p { font-size: 12px; color: #9aabc6; line-height: 1.4; }
+
+  /* Modes */
+  .modes {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .mode {
+    border-radius: 12px;
+    padding: 14px 18px;
+    border: 1px solid rgba(42,58,85,.95);
+    background: rgba(255,255,255,.03);
+  }
+  .mode.local { border-color: rgba(61,214,198,.4); }
+  .mode.ext { border-color: rgba(240,180,41,.4); }
+  .mode h4 {
+    font-size: 16px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .mode h4 span {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 6px;
+  }
+  .mode.local h4 span { background: rgba(61,214,198,.18); color: #8eefe4; }
+  .mode.ext h4 span { background: rgba(240,180,41,.18); color: #f0b429; }
+  .mode ul { list-style: none; }
+  .mode li {
+    font-size: 13px;
+    color: #9aabc6;
+    padding: 4px 0 4px 18px;
+    position: relative;
+    line-height: 1.35;
+  }
+  .mode li::before {
+    content: "▸";
+    position: absolute;
+    left: 0;
+    color: #5b8cff;
+  }
+
+  /* Constraints strip */
+  .constraints {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+  }
+  .citem {
+    border-radius: 10px;
+    padding: 12px 14px;
+    background: rgba(91,140,255,.06);
+    border: 1px solid rgba(91,140,255,.22);
+  }
+  .citem h5 { font-size: 13px; color: #a8c4ff; margin-bottom: 4px; }
+  .citem p { font-size: 12px; color: #9aabc6; line-height: 1.35; }
+
+  /* Footer */
+  .footer {
+    margin-top: auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 12px;
+    border-top: 1px solid rgba(91,140,255,.2);
+    font-size: 12px;
+    color: #6b7c96;
+  }
+  .footer code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #3dd6c6;
+    background: rgba(61,214,198,.08);
+    padding: 2px 8px;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+  <div class="poster">
+    <div class="content">
+      <header class="header">
+        <div class="brand">
+          <div class="logo">
+            <img src="dyro-logo-v1.png" alt="Dyro" />
+          </div>
+          <div class="title-block">
+            <h1>DYRO</h1>
+            <div class="sub">功能介绍 · 多仓交付控制面</div>
+          </div>
+        </div>
+        <div class="tagline">
+          本地优先的工程自动化与交付控制平台<br/>
+          <strong>Agent 负责干活 · Dyro 负责证据与放行</strong>
+        </div>
+      </header>
+
+      <section>
+        <div class="sec-label">01 · 分层架构</div>
+        <div class="arch">
+          <div class="layer l1">
+            <div class="side">Profile<small>团队配置</small></div>
+            <div class="body">
+              <h3>策略层 · dyro.toml</h3>
+              <p>业务规则、仓库清单、门禁命令与发布策略由团队自行定义，不写死在 Core。</p>
+              <div class="chips">
+                <span class="chip">repositories / layout</span>
+                <span class="chip">Agent adapter argv</span>
+                <span class="chip">gates / 回执模板</span>
+                <span class="chip">policy 策略</span>
+              </div>
+            </div>
+          </div>
+          <div class="layer l2">
+            <div class="side">Core<small>dyro CLI</small></div>
+            <div class="body">
+              <h3>机制层 · 不绑定 Codex / Claude / 业务域</h3>
+              <p>提供 workspace、launch、dispatch、verify、merge 与 home/console 能力。</p>
+              <div class="chips">
+                <span class="chip">开发线 / Hotfix</span>
+                <span class="chip">任务 DAG 调度</span>
+                <span class="chip">门禁执行</span>
+                <span class="chip">合并预检</span>
+                <span class="chip">只读 Console</span>
+              </div>
+            </div>
+          </div>
+          <div class="layer l3">
+            <div class="side">Runtime<small>.dyro/</small></div>
+            <div class="body">
+              <h3>运行态 · 可审计、可恢复</h3>
+              <p>任务契约、证据世代、复核裁决与追加式台账分离存放，原子写入防半截状态。</p>
+              <div class="chips">
+                <span class="chip">tasks / lines</span>
+                <span class="chip">evidence / receipt</span>
+                <span class="chip">review / signoff</span>
+                <span class="chip">ledger.jsonl</span>
+                <span class="chip">changesets</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="sec-label">02 · 交付链路</div>
+        <div class="flow-row">
+          <div class="step">
+            <div class="num">1</div>
+            <h4>初始化</h4>
+            <p>setup / join<br/>工作区与蓝图</p>
+          </div>
+          <div class="step">
+            <div class="num">2</div>
+            <h4>开发线</h4>
+            <p>line / hotfix<br/>逐仓基线</p>
+          </div>
+          <div class="step">
+            <div class="num">3</div>
+            <h4>任务</h4>
+            <p>create / claim<br/>独立 worktree</p>
+          </div>
+          <div class="step">
+            <div class="num">4</div>
+            <h4>执行+门禁</h4>
+            <p>run + gates<br/>编排器验证</p>
+          </div>
+          <div class="step">
+            <div class="num">5</div>
+            <h4>独立复核</h4>
+            <p>review / signoff<br/>绑定 HEAD</p>
+          </div>
+          <div class="step">
+            <div class="num">6</div>
+            <h4>合并交付</h4>
+            <p>merge<br/>changeset</p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="sec-label">03 · 八大能力</div>
+        <div class="features">
+          <div class="card">
+            <div class="icon">📁</div>
+            <h4>多仓工作区</h4>
+            <p>统一管理多 Git 仓；开发线与 Hotfix 隔离；任务在 task/&lt;id&gt; worktree 执行。</p>
+          </div>
+          <div class="card">
+            <div class="icon">🕸️</div>
+            <h4>任务图调度</h4>
+            <p>depends_on、决策点、冲突组；next / loop / daemon 共享同一调度快照。</p>
+          </div>
+          <div class="card">
+            <div class="icon">✅</div>
+            <h4>门禁与证据</h4>
+            <p>门禁由 Dyro 实际执行，不采信 Agent 口头回执；attempt / receipt 可追溯。</p>
+          </div>
+          <div class="card">
+            <div class="icon">🔍</div>
+            <h4>独立复核</h4>
+            <p>复核绑定回执与各仓精确 HEAD；源码漂移使复核失效；可选外部签收。</p>
+          </div>
+          <div class="card">
+            <div class="icon">📦</div>
+            <h4>外部执行包</h4>
+            <p>external 模式：claim 租约 + evidence ZIP；控制面校验，隔离 runner 执行。</p>
+          </div>
+          <div class="card">
+            <div class="icon">🔐</div>
+            <h4>签名与审计</h4>
+            <p>Ed25519 信任库、用途分离；ledger 台账；可选 Audit Witness 远程回执。</p>
+          </div>
+          <div class="card">
+            <div class="icon">🏠</div>
+            <h4>Home / Console</h4>
+            <p>任意目录进入工作区；只读本地仪表盘；不暴露网络写操作。</p>
+          </div>
+          <div class="card">
+            <div class="icon">🧩</div>
+            <h4>Dispatch 实验</h4>
+            <p>本地多 Agent 派发仅作建议；不能替代 gates、复核或 merge。</p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="sec-label">04 · 执行模式</div>
+        <div class="modes">
+          <div class="mode local">
+            <h4>local 本机闭环 <span>日常交付</span></h4>
+            <ul>
+              <li>本机 adapter 启动 Agent 进入 task worktree</li>
+              <li>本机执行 gates、复核与 merge</li>
+              <li>适合个人与小团队本地闭环</li>
+            </ul>
+          </div>
+          <div class="mode ext">
+            <h4>external 隔离 Runner <span>高保障</span></h4>
+            <ul>
+              <li>控制机仅领取、导入与校验证据包</li>
+              <li>runner 打包 receipt、日志与精确 HEAD</li>
+              <li>可强制签名执行 / 复核 / 签收</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="sec-label">05 · 核心约束</div>
+        <div class="constraints">
+          <div class="citem">
+            <h5>单任务单开发线</h5>
+            <p>功能线与 Hotfix 工作区不可混用。</p>
+          </div>
+          <div class="citem">
+            <h5>门禁非自报</h5>
+            <p>编排器实测 gates，Agent 回执不算证据。</p>
+          </div>
+          <div class="citem">
+            <h5>复核绑 HEAD</h5>
+            <p>源码漂移立即作废复核结论。</p>
+          </div>
+          <div class="citem">
+            <h5>argv 安全配置</h5>
+            <p>可执行项用数组，不跑 TOML shell 串。</p>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div>DyroEngineeringFlow · 本地优先 · MIT License · PyPI <code>dyro</code></div>
+        <div>Agent 干活 · Dyro 放行 · 证据可审计</div>
+      </footer>
+    </div>
+  </div>
+</body>
+</html>
