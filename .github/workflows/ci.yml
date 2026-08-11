@@ -120,7 +120,7 @@ jobs:
               --network=none --read-only --cap-drop=ALL --cap-add=SYS_PTRACE \
               --security-opt no-new-privileges=true \
               --cpus=2 --memory=1g --pids-limit=256 \
-              --mount "type=bind,src=${evidence},dst=/audit/run,rw" \
+              --mount "type=bind,src=${evidence},dst=/audit/run" \
               --env "DYRO_AUDIT_COMMIT=${commit_sha}" \
               --env DYRO_AUDIT_DIRTY=clean \
               "${image}" > "${evidence}/container.stdout" 2> "${evidence}/container.stderr"

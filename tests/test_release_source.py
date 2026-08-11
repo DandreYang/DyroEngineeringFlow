@@ -122,3 +122,14 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
             'git archive --format=tar.gz --output="${audit_root}/dist/source.tar.gz" HEAD',
             workflow,
         )
+
+    def test_ci_bind_mounts_evidence_without_bare_rw_mount_flag(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            '--mount "type=bind,src=${evidence},dst=/audit/run"',
+            workflow,
+        )
+        self.assertNotIn("dst=/audit/run,rw", workflow)

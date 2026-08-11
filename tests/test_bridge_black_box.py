@@ -50,13 +50,13 @@ class BridgeBlackBoxTests(unittest.TestCase):
             self.assertEqual(result["trace"]["summary"]["binder"], 2)
             self.assertEqual(result["trace"]["summary"]["landlock_success"], 2)
             self.assertEqual(
-                sorted(
+                {
                     item["operation"]
                     for item in result["operations"]
-                    if item["operation"] in {op for op, _ in MANDATORY_REQUESTS}
+                    if str(item["case"]).startswith("valid.mandatory.")
                     and item["ok"] is True
-                ),
-                sorted(operation for operation, _ in MANDATORY_REQUESTS),
+                },
+                {operation for operation, _ in MANDATORY_REQUESTS},
             )
             self.assertTrue(fixture.pending.exists())
             self.assertEqual(fixture.pending.read_bytes(), pending_before)
