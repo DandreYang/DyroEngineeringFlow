@@ -1,0 +1,26 @@
+{
+  "gate": "F04",
+  "time_utc": "2026-08-11T10:25:43.251009+00:00",
+  "measurements": {
+    "skill_md_bytes": 2351,
+    "skill_md_token_approx": 588,
+    "compatibility_json_bytes": 954,
+    "mcp_json_bytes": 265,
+    "plugin_json_bytes": 821,
+    "bridge_hello_schema_bytes": 136,
+    "request_envelope_schema_bytes": 863,
+    "capabilities_compact_bytes": 2602,
+    "capabilities_compact_token_approx": 651
+  },
+  "content_guards": {
+    "skill_mentions_on_demand_schema": true,
+    "skill_forbids_dispatch": true,
+    "compact_is_list_metadata_not_full_schemas": true
+  },
+  "checks": {
+    "skill_under_8kib": true,
+    "compact_under_64kib": true,
+    "single_schema_under_64kib": true
+  },
+  "verdict": "PASS"
+}
