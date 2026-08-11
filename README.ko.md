@@ -269,6 +269,10 @@ dyro --version
 python3 -m pip install --user --upgrade dyro
 ```
 
+선택 사항: 업그레이드 후 감지된 에이전트 홈에 Dyro 제어면 Skill을 연결하려면
+`dyro integration install skill --dry-run`으로 미리보기한 뒤
+`dyro integration install skill --yes`를 실행하세요(별칭: `codex`).
+
 대화형 `dyro`, `dyro home`, `dyro start` 실행은 현지 날짜 기준 하루에 한 번만 공식 PyPI 엔드포인트를 확인합니다. 실패해도 작업 공간 진입을 막지 않으며 기본적으로 업데이트 전 확인을 요청합니다.
 
 ```bash

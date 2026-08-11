@@ -269,6 +269,10 @@ dyro --version
 python3 -m pip install --user --upgrade dyro
 ```
 
+По желанию: после обновления подключите Skill плоскости управления Dyro к
+обнаруженным каталогам агентов через `dyro integration install skill --dry-run`,
+затем `dyro integration install skill --yes` (алиас: `codex`).
+
 Интерактивные запуски `dyro`, `dyro home` и `dyro start` проверяют официальный PyPI не чаще одного раза за локальный день. Ошибка не блокирует вход в рабочую область, а по умолчанию обновление требует подтверждения:
 
 ```bash
