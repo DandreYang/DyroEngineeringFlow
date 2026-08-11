@@ -269,13 +269,16 @@ Zum Aktualisieren: `pipx upgrade dyro`. Nutzt das Team `pip`:
 python3 -m pip install --user --upgrade dyro
 ```
 
-Optional: Nach dem Upgrade kannst du das Dyro Control-Plane-Skill an erkannte
-Agent-Homes anbinden mit `dyro integration install skill --dry-run` und danach
+Interaktives `dyro setup` kann das Control-Plane-Skill installieren. Nach
+Paket-Updates synchronisieren sich bereits verwaltete Skills automatisch;
+interaktive Starts reparieren auch ein veraltetes managed Skill. Die
+Erstinstallation bleibt opt-in über Setup oder
 `dyro integration install skill --yes` (Alias: `codex`).
 
 Interaktive Starts mit `dyro`, `dyro home` oder `dyro start` prüfen höchstens einmal pro lokalem Tag den offiziellen PyPI-Endpunkt. Fehler blockieren den Arbeitsbereich nicht. Standardmäßig bleibt jede Aktualisierung bestätigt:
 
 ```bash
+dyro update              # entspricht dyro update check
 dyro update check
 dyro update now
 dyro update auto on      # automatische Patch-Updates aktivieren

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import subprocess
 import sys
 import time
 
@@ -102,8 +103,10 @@ from .hub import (
     set_default_workspace,
 )
 from .integrations import (
+    IntegrationState,
     install_integration,
     integration_status,
+    sync_managed_skill,
     uninstall_integration,
 )
 from .onboarding import (
@@ -445,6 +448,7 @@ class SetupPersonalPreferences:
     auto_patch: bool
     default_tool: str | None
     make_default_workspace: bool
+    install_skill: bool
 
 
 def _setup_update_preferences() -> tuple[bool, bool]:
@@ -554,6 +558,47 @@ def _setup_default_workspace(
     return selected == "2"
 
 
+def _setup_skill_preference() -> bool:
+    """Ask whether to install/sync the control-plane Skill during setup."""
+    status = integration_status("skill")
+    if status.state is IntegrationState.CURRENT:
+        print(muted("控制面 Skill 已是当前版本；无需在 setup 中重复安装。"))
+        return False
+    if status.state in {
+        IntegrationState.DRIFTED,
+        IntegrationState.UNOWNED_CONFLICT,
+        IntegrationState.STALE_MANIFEST,
+        IntegrationState.RECOVERY_REQUIRED,
+    }:
+        print(
+            warning(
+                f"控制面 Skill 状态为 {status.state.value}（{status.detail}）；"
+                "setup 不会自动改写，请先手动处理后再运行 "
+                "dyro integration install skill。"
+            )
+        )
+        return False
+    hosts = [row.host for row in status.avatars]
+    if hosts:
+        host_text = "、".join(hosts)
+        prompt = f"控制面 Skill（将挂接到已检测宿主：{host_text}）"
+        option_one = "安装 / 同步到已检测宿主（推荐）"
+        default = "1"
+    else:
+        prompt = "控制面 Skill（当前未检测到 Agent 宿主目录）"
+        option_one = "仍要尝试安装（当前无宿主，预期失败）"
+        default = "2"
+    selected = _ask_setup_choice(
+        prompt,
+        (
+            ("1", option_one),
+            ("2", "稍后手动安装（dyro integration install skill）"),
+        ),
+        default=default,
+    )
+    return selected == "1"
+
+
 def _setup_personal_preferences(
     *,
     root: Path,
@@ -564,11 +609,13 @@ def _setup_personal_preferences(
     check_enabled, auto_patch = _setup_update_preferences()
     default_tool = _setup_default_tool(root, provider_preset)
     make_default_workspace = _setup_default_workspace(registration, args)
+    install_skill = _setup_skill_preference()
     return SetupPersonalPreferences(
         check_enabled=check_enabled,
         auto_patch=auto_patch,
         default_tool=default_tool,
         make_default_workspace=make_default_workspace,
+        install_skill=install_skill,
     )
 
 
@@ -591,9 +638,28 @@ def _render_setup_personal_preferences(
         print("  - 编码工具：个人默认 " + terminal_value(preferences.default_tool))
     else:
         print("  - 编码工具：" + muted("不设置个人默认"))
+    if preferences.install_skill:
+        status = integration_status("skill")
+        if status.state is IntegrationState.ABSENT and not status.avatars:
+            print("  - Skill：无法安装：未检测到 Agent 宿主目录")
+            print(
+                "      · 确认后会 soft-fail；请安装宿主后运行 "
+                "dyro integration install skill"
+            )
+            return
+        plan = sync_managed_skill(yes=False, dry_run=True, allow_first_install=True)
+        if plan is None:
+            print("  - Skill：" + muted("已是当前版本"))
+        else:
+            print("  - Skill：安装 / 同步控制面 Skill（镜像 + 宿主分身）")
+            for change in plan.changes:
+                print("      · " + change)
+    else:
+        print("  - Skill：" + muted("稍后手动安装"))
 
 
-def _apply_setup_personal_preferences(preferences: SetupPersonalPreferences) -> None:
+def _apply_setup_personal_preferences(preferences: SetupPersonalPreferences) -> str:
+    """Apply personal preferences; return Skill outcome for setup completion."""
     if preferences.check_enabled:
         set_update_enabled(True)
         set_auto_patch(preferences.auto_patch)
@@ -601,6 +667,25 @@ def _apply_setup_personal_preferences(preferences: SetupPersonalPreferences) -> 
         set_update_enabled(False)
     if preferences.default_tool is not None:
         set_default_tool(preferences.default_tool)
+    if not preferences.install_skill:
+        return "skipped"
+    try:
+        plan = sync_managed_skill(yes=True, allow_first_install=True)
+    except DyroError as exc:
+        print(
+            warning(
+                f"控制面 Skill 未安装成功：{exc}；"
+                "可稍后运行 dyro integration install skill --dry-run 排查。"
+            )
+        )
+        return "failed"
+    if plan is None:
+        print(muted("控制面 Skill 已是当前版本。"))
+        return "current"
+    print(success("已安装 / 同步控制面 Skill。"))
+    for change in plan.changes:
+        print("  - " + change)
+    return "success"
 
 
 def _setup_provider_preset() -> str | None:
@@ -685,6 +770,8 @@ def _print_setup_completion(
     config: Config,
     registration: WorkspaceRecord | None,
     preferences: SetupPersonalPreferences | None = None,
+    *,
+    skill_outcome: str = "skipped",
 ) -> None:
     print("\n" + success("━━ 设置完成 ━━"))
     print(f"  - Profile：{terminal_value(config.name)}")
@@ -707,6 +794,19 @@ def _print_setup_completion(
         if preferences.default_tool is not None:
             tool = preferences.default_tool or "未设置"
             print(f"  - 编码工具：个人默认 {terminal_value(tool)}")
+        if skill_outcome == "success":
+            print("  - Skill：已安装 / 同步")
+        elif skill_outcome == "current":
+            print("  - Skill：" + muted("已是当前版本"))
+        elif skill_outcome == "failed":
+            print(
+                "  - Skill："
+                + warning(
+                    "安装未成功；可稍后运行 dyro integration install skill --dry-run"
+                )
+            )
+        else:
+            print("  - Skill：" + muted("未在 setup 中安装"))
     print("下一步：" + terminal_value("dyro start"))
 
 
@@ -788,8 +888,10 @@ def _apply_setup_plan(
         _print_doctor_finding(finding)
     if any(finding.startswith("FAIL") for finding in findings):
         raise DyroError("设置已保存，但 doctor 发现问题；请修复后运行 dyro next")
-    _apply_setup_personal_preferences(preferences)
-    _print_setup_completion(config, registration, preferences)
+    skill_outcome = _apply_setup_personal_preferences(preferences)
+    _print_setup_completion(
+        config, registration, preferences, skill_outcome=skill_outcome
+    )
 
 
 def _interactive_setup(args: argparse.Namespace) -> None:
@@ -833,8 +935,10 @@ def _interactive_setup(args: argparse.Namespace) -> None:
             register=registration is not None,
             make_default=preferences.make_default_workspace,
         )
-        _apply_setup_personal_preferences(preferences)
-        _print_setup_completion(config, record, preferences)
+        skill_outcome = _apply_setup_personal_preferences(preferences)
+        _print_setup_completion(
+            config, record, preferences, skill_outcome=skill_outcome
+        )
         return
 
     repositories = (
@@ -1478,6 +1582,22 @@ def cmd_integration_install(args: argparse.Namespace) -> None:
         print("确认计划后，重新运行并添加 --yes 执行。")
 
 
+def cmd_integration_sync(args: argparse.Namespace) -> None:
+    """Upgrade a managed Skill install; never performs a first-time install."""
+    preview = args.dry_run or not args.yes
+    plan = sync_managed_skill(
+        yes=args.yes,
+        dry_run=preview,
+        allow_first_install=False,
+    )
+    if plan is None:
+        print("无需同步；Skill 未安装或已是当前版本。")
+        return
+    _print_integration_plan(plan, dry_run=preview)
+    if not args.yes and not args.dry_run:
+        print("确认计划后，重新运行并添加 --yes 执行。")
+
+
 def cmd_integration_uninstall(args: argparse.Namespace) -> None:
     preview = args.dry_run or not args.yes
     plan = uninstall_integration(args.id, yes=args.yes, dry_run=preview)
@@ -1518,11 +1638,13 @@ def cmd_update_now(args: argparse.Namespace) -> None:
         raise DyroError(
             "非交互环境不会更新 Dyro；请在终端中运行，或审阅计划后显式添加 --yes"
         )
-    perform_update(
+    updated = perform_update(
         result.latest_version,
         yes=args.yes,
         dry_run=args.dry_run,
     )
+    if updated:
+        _refresh_skill_via_new_cli()
 
 
 def _explicit_update_check(*, persist: bool = True):
@@ -3042,6 +3164,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="仅预览安装计划；也兼容全局 --dry-run 放在命令前",
     )
     integration_install_parser.set_defaults(func=cmd_integration_install)
+    integration_sync_parser = integration_sub.add_parser(
+        "sync",
+        help="仅升级已托管的 Skill（不会首次安装）",
+    )
+    integration_sync_parser.add_argument(
+        "id",
+        choices=("skill", "codex"),
+        help="skill 为 canonical id；codex 为兼容别名",
+    )
+    integration_sync_parser.add_argument(
+        "--yes", action="store_true", help="确认执行已预览的同步或升级"
+    )
+    integration_sync_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="仅预览同步计划；也兼容全局 --dry-run 放在命令前",
+    )
+    integration_sync_parser.set_defaults(func=cmd_integration_sync)
     integration_uninstall_parser = integration_sub.add_parser(
         "uninstall", help="仅卸载仍匹配 ownership manifest 的资产"
     )
@@ -3056,10 +3197,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="仅预览卸载计划；也兼容全局 --dry-run 放在命令前",
     )
     integration_uninstall_parser.set_defaults(func=cmd_integration_uninstall)
-    update = sub.add_parser("update", help="检测并安全更新 Dyro")
-    update_sub = update.add_subparsers(dest="update_command", required=True)
+    update = sub.add_parser(
+        "update",
+        help="检测并安全更新 Dyro（无子命令时等价于 update check）",
+    )
+    update_sub = update.add_subparsers(dest="update_command", required=False)
+    update.set_defaults(func=cmd_update_check)
     update_sub.add_parser(
-        "check", help="立即检查官方 PyPI 的最新稳定版本"
+        "check", help="立即检查官方 PyPI 的最新稳定版本（等价于 dyro update）"
     ).set_defaults(func=cmd_update_check)
     update_now = update_sub.add_parser("now", help="显示计划并更新到最新稳定版本")
     update_now.add_argument(
@@ -3671,14 +3816,23 @@ def _should_run_daily_update(
     return interactive
 
 
-def _maybe_run_daily_update(*, install=perform_update) -> None:
+def _maybe_run_daily_update(*, install=None) -> bool:
+    """Run the daily update path.
+
+    Returns ``True`` when a successful package update already triggered a
+    best-effort Skill refresh in this process. Callers must then skip
+    in-process Skill sync so stale in-memory assets cannot overwrite the
+    fresh subprocess write.
+    """
+    if install is None:
+        install = perform_update
     try:
         result = check_for_update(__version__)
         if not result.checked or result.error or result.kind == UpdateKind.NONE:
-            return
+            return False
         state = load_update_state()
     except (DyroError, OSError):
-        return
+        return False
     print(f"\n发现 Dyro {result.latest_version}（当前 {result.current_version}）。")
     if state.auto_patch and result.kind == UpdateKind.PATCH:
         print("已开启补丁版本自动更新，正在安全更新……")
@@ -3691,11 +3845,79 @@ def _maybe_run_daily_update(*, install=perform_update) -> None:
         except (DyroError, OSError) as exc:
             print(f"自动更新失败：{exc}")
             print("本次启动继续使用当前版本；稍后可运行 dyro update now 重试。")
-            return
+            return False
         if updated:
             print("自动更新完成；本次启动继续运行，下次将使用新版本。")
-        return
+            _refresh_skill_via_new_cli()
+            return True
+        return False
     print("运行 dyro update now 可一键确认更新；今天不再重复提示。")
+    return False
+
+
+def _fresh_dyro_argv(*cli_args: str) -> list[str]:
+    """Build argv for a new Dyro process bound to this interpreter install."""
+    executable = Path(sys.executable)
+    for candidate in (
+        executable.with_name("dyro"),
+        executable.with_name("dyro.exe"),
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return [str(candidate), *cli_args]
+    return [sys.executable, "-m", "dyro", *cli_args]
+
+
+def _refresh_skill_via_new_cli() -> None:
+    """Best-effort Skill sync using the freshly installed ``dyro`` entry point."""
+    argv = _fresh_dyro_argv("integration", "sync", "skill", "--yes")
+    print("正在同步已托管的控制面 Skill……")
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(warning(f"Skill 同步未完成：{exc}；下次启动将重试。"))
+        return
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        message = "Skill 同步未完成"
+        if detail:
+            message += f"：{detail}"
+        print(warning(message + "；下次启动将重试。"))
+        return
+    output = (completed.stdout or "").strip()
+    if output:
+        print(output)
+
+
+def _maybe_sync_managed_skill() -> None:
+    """Auto-repair OUTDATED managed Skill installs on interactive launch."""
+    try:
+        status = integration_status("skill")
+    except (DyroError, OSError, ValidationError):
+        return
+    if status.state is not IntegrationState.OUTDATED:
+        return
+    print("\n检测到控制面 Skill 可升级，正在自动同步……")
+    try:
+        plan = sync_managed_skill(yes=True, allow_first_install=False)
+    except DyroError as exc:
+        print(
+            warning(
+                f"Skill 自动同步未完成：{exc}；"
+                "可运行 dyro integration sync skill --dry-run 查看详情。"
+            )
+        )
+        return
+    if plan is None:
+        return
+    print(success("控制面 Skill 已同步到当前 Dyro 包。"))
+    for change in plan.changes:
+        print("  - " + change)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -3712,7 +3934,10 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(dispatch_main(experiment[1]))
         args = parser.parse_args(argv)
         if _should_run_daily_update(args):
-            _maybe_run_daily_update()
+            # After a same-turn package update + Skill refresh, skip in-process
+            # sync so stale in-memory assets cannot overwrite the fresh write.
+            if not _maybe_run_daily_update():
+                _maybe_sync_managed_skill()
         if hasattr(args, "func"):
             args.func(args)
         else:

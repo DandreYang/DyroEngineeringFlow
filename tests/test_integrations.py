@@ -16,6 +16,7 @@ from dyro.integrations import (
     IntegrationState,
     install_integration,
     integration_status,
+    sync_managed_skill,
     uninstall_integration,
 )
 from dyro.integrations import manager
@@ -591,6 +592,24 @@ class IntegrationManagerTests(unittest.TestCase):
         )
         self.assertFalse(self.avatar.is_symlink())
 
+    def test_sync_managed_skill_skips_absent_without_first_install(self) -> None:
+        self.assertIsNone(sync_managed_skill(yes=True, allow_first_install=False))
+        self.assertEqual(integration_status("skill").state, IntegrationState.ABSENT)
+
+    def test_sync_managed_skill_upgrades_outdated(self) -> None:
+        install_integration("skill", yes=True)
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        manifest["asset_version"] = manifest["asset_version"] + 1
+        self.manifest.write_text(
+            json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(integration_status("skill").state, IntegrationState.OUTDATED)
+        plan = sync_managed_skill(yes=True, allow_first_install=False)
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.status.state, IntegrationState.CURRENT)
+
     def test_plan_surfaces_missing_host_blocker(self) -> None:
         with patch.dict(os.environ):
             for key in ("CODEX_HOME", "CLAUDE_HOME", "AGENTS_HOME", "CURSOR_HOME"):
@@ -602,6 +621,34 @@ class IntegrationManagerTests(unittest.TestCase):
             any("未检测到宿主目录" in change for change in plan.changes),
             msg=plan.changes,
         )
+        self.assertTrue(
+            any("不会创建孤立镜像" in change for change in plan.changes),
+            msg=plan.changes,
+        )
+
+    def test_cli_sync_is_upgrade_only_and_skips_absent(self) -> None:
+        output = StringIO()
+        before = self._tree_snapshot()
+        with redirect_stdout(output):
+            main(["integration", "sync", "skill"])
+            main(["integration", "sync", "skill", "--yes"])
+        self.assertIn("无需同步", output.getvalue())
+        self.assertEqual(self._tree_snapshot(), before)
+
+        install_integration("skill", yes=True)
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        manifest["asset_version"] = manifest["asset_version"] + 1
+        self.manifest.write_text(
+            json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        synced = StringIO()
+        with redirect_stdout(synced):
+            main(["integration", "sync", "skill", "--yes"])
+        text = synced.getvalue()
+        self.assertIn("install skill", text)
+        self.assertIn("current", text)
+        self.assertEqual(integration_status("skill").state, IntegrationState.CURRENT)
 
     def test_cli_status_dry_run_install_and_confirmation_gate(self) -> None:
         output = StringIO()

@@ -753,10 +753,9 @@ def plan_integration(
         elif status.state is IntegrationState.ABSENT:
             if not status.avatars:
                 changes = (
-                    "未检测到宿主目录；需先创建或设置 "
+                    "无法安装：未检测到宿主目录；需先创建或设置 "
                     "CODEX_HOME / CLAUDE_HOME / AGENTS_HOME / CURSOR_HOME",
-                    f"（预览）将创建镜像 {status.target}",
-                    f"（预览）将写入 {status.manifest}",
+                    "不会创建孤立镜像或分身",
                 )
             else:
                 changes = (
@@ -1006,6 +1005,42 @@ def _install_avatars(
             if backup.exists() and not original.exists() and not original.is_symlink():
                 os.replace(backup, original)
         raise
+
+
+def sync_managed_skill(
+    *,
+    yes: bool,
+    dry_run: bool = False,
+    allow_first_install: bool = False,
+    dyro_home: Path | None = None,
+    host_homes: Mapping[str, Path] | None = None,
+    codex_home: Path | None = None,
+) -> IntegrationPlan | None:
+    """Install or upgrade the Skill when the local state allows mutation.
+
+    - ``CURRENT``: no-op (``None``)
+    - ``OUTDATED``: upgrade / repair the managed install
+    - ``ABSENT``: first install only when ``allow_first_install`` is true
+    - conflict / recovery states: raise ``DyroError`` (callers may soft-fail)
+    """
+    status = integration_status(
+        CANONICAL_INTEGRATION_ID,
+        dyro_home=dyro_home,
+        host_homes=host_homes,
+        codex_home=codex_home,
+    )
+    if status.state is IntegrationState.CURRENT:
+        return None
+    if status.state is IntegrationState.ABSENT and not allow_first_install:
+        return None
+    return install_integration(
+        CANONICAL_INTEGRATION_ID,
+        yes=yes,
+        dry_run=dry_run,
+        dyro_home=dyro_home,
+        host_homes=host_homes,
+        codex_home=codex_home,
+    )
 
 
 def install_integration(
