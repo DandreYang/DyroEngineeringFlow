@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -517,12 +518,15 @@ class DailyCliIntegrationTests(unittest.TestCase):
                 "dyro.cli.load_update_state",
                 return_value=UpdateState(auto_patch=True),
             ),
+            patch("dyro.cli._refresh_skill_via_new_cli") as refresh_skill,
             redirect_stdout(output),
         ):
-            _maybe_run_daily_update(install=install)
+            refreshed = _maybe_run_daily_update(install=install)
         install.assert_called_once_with(
             "0.5.6", yes=True, dry_run=False
         )
+        refresh_skill.assert_called_once_with()
+        self.assertTrue(refreshed)
         self.assertIn("自动更新完成", output.getvalue())
 
         output = StringIO()
@@ -533,10 +537,13 @@ class DailyCliIntegrationTests(unittest.TestCase):
                 "dyro.cli.load_update_state",
                 return_value=UpdateState(auto_patch=True),
             ),
+            patch("dyro.cli._refresh_skill_via_new_cli") as refresh_skill,
             redirect_stdout(output),
         ):
-            _maybe_run_daily_update(install=install)
+            refreshed = _maybe_run_daily_update(install=install)
         install.assert_not_called()
+        refresh_skill.assert_not_called()
+        self.assertFalse(refreshed)
         self.assertIn("dyro update now", output.getvalue())
 
     def test_daily_check_failure_never_blocks_or_prints(self) -> None:
@@ -554,7 +561,7 @@ class DailyCliIntegrationTests(unittest.TestCase):
             ),
             redirect_stdout(output),
         ):
-            _maybe_run_daily_update()
+            self.assertFalse(_maybe_run_daily_update())
         self.assertEqual(output.getvalue(), "")
 
     def test_daily_state_io_failure_never_blocks_or_prints(self) -> None:
@@ -565,7 +572,7 @@ class DailyCliIntegrationTests(unittest.TestCase):
             patch("dyro.cli.check_for_update", side_effect=OSError("read-only")),
             redirect_stdout(output),
         ):
-            _maybe_run_daily_update()
+            self.assertFalse(_maybe_run_daily_update())
         self.assertEqual(output.getvalue(), "")
 
     def test_environment_opt_out_accepts_only_truthy_values(self) -> None:
@@ -576,6 +583,156 @@ class DailyCliIntegrationTests(unittest.TestCase):
             self.assertFalse(_should_run_daily_update(args, interactive=True))
         with patch.dict(os.environ, {"DYRO_NO_UPDATE_CHECK": "0"}):
             self.assertTrue(_should_run_daily_update(args, interactive=True))
+
+    def test_startup_syncs_outdated_managed_skill(self) -> None:
+        from dyro.cli import _maybe_sync_managed_skill
+        from dyro.integrations import IntegrationState, IntegrationStatus
+
+        status = IntegrationStatus(
+            "skill",
+            IntegrationState.OUTDATED,
+            Path("/tmp/mirror"),
+            Path("/tmp/manifest"),
+            "outdated",
+        )
+        plan = Mock()
+        plan.changes = ("升级镜像",)
+        output = StringIO()
+        with (
+            patch("dyro.cli.integration_status", return_value=status),
+            patch("dyro.cli.sync_managed_skill", return_value=plan) as sync,
+            redirect_stdout(output),
+        ):
+            _maybe_sync_managed_skill()
+        sync.assert_called_once_with(yes=True, allow_first_install=False)
+        self.assertIn("控制面 Skill 已同步", output.getvalue())
+
+    def test_auto_patch_refresh_skips_same_turn_inprocess_skill_sync(self) -> None:
+        """P0 regression: successful refresh must not be overwritten in-process."""
+        from dyro.cli import main
+
+        patch_result = UpdateResult(
+            checked=True,
+            current_version="0.5.5",
+            latest_version="0.5.6",
+            kind=UpdateKind.PATCH,
+        )
+        with (
+            patch("dyro.cli._should_run_daily_update", return_value=True),
+            patch("dyro.cli.check_for_update", return_value=patch_result),
+            patch(
+                "dyro.cli.load_update_state",
+                return_value=UpdateState(auto_patch=True),
+            ),
+            patch("dyro.cli.perform_update", return_value=True),
+            patch("dyro.cli._refresh_skill_via_new_cli") as refresh,
+            patch("dyro.cli._maybe_sync_managed_skill") as sync,
+            patch("dyro.cli.cmd_home"),
+            redirect_stdout(StringIO()),
+        ):
+            main([])
+        refresh.assert_called_once_with()
+        sync.assert_not_called()
+
+    def test_refresh_skill_uses_install_bound_argv(self) -> None:
+        from dyro.cli import _fresh_dyro_argv, _refresh_skill_via_new_cli
+
+        argv = _fresh_dyro_argv("integration", "sync", "skill", "--yes")
+        self.assertIn("integration", argv)
+        self.assertTrue(
+            Path(argv[0]).name in {"dyro", "dyro.exe"}
+            or argv[:3] == [sys.executable, "-m", "dyro"],
+            msg=argv,
+        )
+
+        completed = Mock(returncode=0, stdout="synced\n", stderr="")
+        output = StringIO()
+        with (
+            patch("dyro.cli._fresh_dyro_argv", return_value=["dyro", "integration", "sync", "skill", "--yes"]),
+            patch("dyro.cli.subprocess.run", return_value=completed) as run,
+            redirect_stdout(output),
+        ):
+            _refresh_skill_via_new_cli()
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.args[0],
+            ["dyro", "integration", "sync", "skill", "--yes"],
+        )
+        self.assertIn("synced", output.getvalue())
+
+    def test_refresh_skill_warns_on_nonzero_exit(self) -> None:
+        from dyro.cli import _refresh_skill_via_new_cli
+
+        completed = Mock(returncode=2, stdout="", stderr="boom")
+        output = StringIO()
+        with (
+            patch(
+                "dyro.cli._fresh_dyro_argv",
+                return_value=["dyro", "integration", "sync", "skill", "--yes"],
+            ),
+            patch("dyro.cli.subprocess.run", return_value=completed),
+            redirect_stdout(output),
+        ):
+            _refresh_skill_via_new_cli()
+        self.assertIn("Skill 同步未完成", output.getvalue())
+        self.assertIn("boom", output.getvalue())
+
+    def test_update_now_refreshes_skill_only_when_update_succeeds(self) -> None:
+        from dyro.cli import main
+
+        result = UpdateResult(
+            checked=True,
+            current_version="0.5.5",
+            latest_version="0.5.6",
+            kind=UpdateKind.PATCH,
+        )
+        with tempfile.TemporaryDirectory(prefix="dyro-update-now-refresh-") as tmp:
+            with (
+                patch.dict(os.environ, {"DYRO_HOME": tmp}),
+                patch("dyro.cli.check_for_update", return_value=result),
+                patch("dyro.cli.perform_update", return_value=True) as install,
+                patch("dyro.cli._refresh_skill_via_new_cli") as refresh,
+                redirect_stdout(StringIO()),
+            ):
+                main(["update", "now", "--yes"])
+            install.assert_called_once_with("0.5.6", yes=True, dry_run=False)
+            refresh.assert_called_once_with()
+
+            refresh.reset_mock()
+            with (
+                patch.dict(os.environ, {"DYRO_HOME": tmp}),
+                patch("dyro.cli.check_for_update", return_value=result),
+                patch("dyro.cli.perform_update", return_value=False),
+                patch("dyro.cli._refresh_skill_via_new_cli") as refresh_skip,
+                redirect_stdout(StringIO()),
+            ):
+                main(["update", "now", "--yes"])
+            refresh_skip.assert_not_called()
+
+    def test_bare_update_is_equivalent_to_update_check(self) -> None:
+        from dyro.cli import main
+
+        result = UpdateResult(
+            checked=True,
+            current_version="0.5.5",
+            latest_version="0.5.6",
+            kind=UpdateKind.PATCH,
+        )
+        with tempfile.TemporaryDirectory(prefix="dyro-update-bare-") as tmp:
+            for argv in (["update"], ["update", "check"]):
+                output = StringIO()
+                with (
+                    patch.dict(os.environ, {"DYRO_HOME": tmp}),
+                    patch("dyro.cli.check_for_update", return_value=result) as check,
+                    patch("dyro.cli.perform_update") as install,
+                    redirect_stdout(output),
+                ):
+                    main(argv)
+                check.assert_called_once()
+                install.assert_not_called()
+                text = output.getvalue()
+                self.assertIn("发现 Dyro 0.5.6", text)
+                self.assertIn("dyro update now", text)
 
     def test_update_commands_work_without_a_workspace(self) -> None:
         from dyro.cli import main

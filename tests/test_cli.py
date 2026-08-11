@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from dyro.cli import (
     _print_doctor_finding,
@@ -347,6 +347,7 @@ class CliTests(unittest.TestCase):
             with (
                 patch("dyro.cli._setup_provider_preset", return_value=None),
                 patch("dyro.cli.launcher_tools", return_value=[]),
+                patch("dyro.cli._setup_skill_preference", return_value=False),
                 patch("builtins.input", side_effect=lambda _: next(answers)),
             ):
                 main(["setup", str(root), "--interactive"])
@@ -372,6 +373,7 @@ class CliTests(unittest.TestCase):
             with (
                 patch("dyro.cli._setup_provider_preset", return_value=None),
                 patch("dyro.cli.launcher_tools", return_value=[]),
+                patch("dyro.cli._setup_skill_preference", return_value=False),
                 patch("builtins.input", side_effect=lambda _: next(answers)),
             ):
                 main(["setup", str(root), "--interactive"])
@@ -420,6 +422,7 @@ class CliTests(unittest.TestCase):
             with (
                 patch("dyro.cli._setup_provider_preset", return_value=None),
                 patch("dyro.cli.launcher_tools", return_value=[]),
+                patch("dyro.cli._setup_skill_preference", return_value=False),
                 patch("builtins.input", side_effect=lambda _: next(answers)),
             ):
                 main(["setup", str(repository), "--interactive"])
@@ -455,6 +458,7 @@ class CliTests(unittest.TestCase):
             with (
                 patch("dyro.cli._setup_provider_preset", return_value=None),
                 patch("dyro.cli.launcher_tools", return_value=[]),
+                patch("dyro.cli._setup_skill_preference", return_value=False),
                 patch("builtins.input", side_effect=lambda _: next(answers)),
             ):
                 main(["setup", str(repository), "--interactive"])
@@ -483,6 +487,7 @@ class CliTests(unittest.TestCase):
             with (
                 patch("dyro.cli._setup_provider_preset", return_value="codex"),
                 patch("dyro.cli.launcher_tools", return_value=tools),
+                patch("dyro.cli._setup_skill_preference", return_value=False),
                 patch("builtins.input", side_effect=lambda _: next(answers)),
             ):
                 main(["setup", str(root), "--interactive"])
@@ -534,6 +539,7 @@ class CliTests(unittest.TestCase):
             with (
                 patch("dyro.cli._setup_provider_preset", return_value=None),
                 patch("dyro.cli.launcher_tools", return_value=[]),
+                patch("dyro.cli._setup_skill_preference", return_value=False),
                 patch("builtins.input", side_effect=lambda _: next(answers)),
             ):
                 main(["setup", str(root), "--interactive"])
@@ -555,6 +561,7 @@ class CliTests(unittest.TestCase):
             answers = iter(["", ""])
             with (
                 patch("dyro.cli.launcher_tools", return_value=[]),
+                patch("dyro.cli._setup_skill_preference", return_value=False),
                 patch("builtins.input", side_effect=lambda _: next(answers)),
                 redirect_stdout(output),
             ):
@@ -562,6 +569,94 @@ class CliTests(unittest.TestCase):
 
             self.assertFalse((Path(self.registry_tmp.name) / "updates.json").exists())
             self.assertIn("DRY RUN: 上述个人偏好和全局入口不会写入。", output.getvalue())
+
+    def test_setup_skill_preference_defaults_to_install_when_hosts_exist(
+        self,
+    ) -> None:
+        from dyro.cli import _setup_skill_preference
+        from dyro.integrations import AvatarStatus, IntegrationState, IntegrationStatus
+
+        status = IntegrationStatus(
+            "skill",
+            IntegrationState.ABSENT,
+            Path("/tmp/mirror"),
+            Path("/tmp/manifest"),
+            "未安装",
+            avatars=(
+                AvatarStatus("codex", Path("/tmp/codex"), "missing", "missing"),
+            ),
+        )
+        with (
+            patch("dyro.cli.integration_status", return_value=status),
+            patch("builtins.input", return_value=""),
+        ):
+            self.assertTrue(_setup_skill_preference())
+
+    def test_setup_skill_preference_defaults_to_defer_without_hosts(self) -> None:
+        from dyro.cli import _setup_skill_preference
+        from dyro.integrations import IntegrationState, IntegrationStatus
+
+        status = IntegrationStatus(
+            "skill",
+            IntegrationState.ABSENT,
+            Path("/tmp/mirror"),
+            Path("/tmp/manifest"),
+            "未安装",
+        )
+        with (
+            patch("dyro.cli.integration_status", return_value=status),
+            patch("builtins.input", return_value=""),
+        ):
+            self.assertFalse(_setup_skill_preference())
+
+    def test_apply_setup_personal_preferences_installs_skill_when_requested(
+        self,
+    ) -> None:
+        from dyro.cli import SetupPersonalPreferences, _apply_setup_personal_preferences
+
+        preferences = SetupPersonalPreferences(
+            check_enabled=True,
+            auto_patch=False,
+            default_tool=None,
+            make_default_workspace=False,
+            install_skill=True,
+        )
+        plan = Mock()
+        plan.changes = ("创建镜像",)
+        with (
+            patch("dyro.cli.set_update_enabled") as set_enabled,
+            patch("dyro.cli.set_auto_patch") as set_auto,
+            patch("dyro.cli.sync_managed_skill", return_value=plan) as sync,
+        ):
+            outcome = _apply_setup_personal_preferences(preferences)
+        set_enabled.assert_called_once_with(True)
+        set_auto.assert_called_once_with(False)
+        sync.assert_called_once_with(yes=True, allow_first_install=True)
+        self.assertEqual(outcome, "success")
+
+    def test_print_setup_completion_reflects_skill_failure(self) -> None:
+        from dyro.cli import SetupPersonalPreferences, _print_setup_completion
+
+        preferences = SetupPersonalPreferences(
+            check_enabled=True,
+            auto_patch=False,
+            default_tool=None,
+            make_default_workspace=False,
+            install_skill=True,
+        )
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            root = Path(tmp) / "workspace"
+            main(["init", str(root), "--name", "demo"])
+            output = StringIO()
+            with redirect_stdout(output):
+                _print_setup_completion(
+                    load(root),
+                    None,
+                    preferences,
+                    skill_outcome="failed",
+                )
+            self.assertIn("安装未成功", output.getvalue())
+            self.assertNotIn("已请求安装", output.getvalue())
 
 
 class StartTests(WorkspaceCase):

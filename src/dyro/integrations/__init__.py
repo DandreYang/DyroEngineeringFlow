@@ -8,6 +8,7 @@ from .manager import (
     install_integration,
     integration_status,
     plan_integration,
+    sync_managed_skill,
     uninstall_integration,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "install_integration",
     "integration_status",
     "plan_integration",
+    "sync_managed_skill",
     "uninstall_integration",
 ]
