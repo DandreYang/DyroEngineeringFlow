@@ -269,9 +269,14 @@ dyro --version
 python3 -m pip install --user --upgrade dyro
 ```
 
+대화형 `dyro setup`에서 제어면 Skill을 설치할 수 있습니다. 패키지 업데이트 후에는
+이미 관리 중인 Skill이 자동 동기화되며, 대화형 실행 시 outdated Skill도 자동 복구됩니다.
+최초 설치는 setup에서 선택하거나 `dyro integration install skill --yes`(별칭: `codex`)로 합니다.
+
 대화형 `dyro`, `dyro home`, `dyro start` 실행은 현지 날짜 기준 하루에 한 번만 공식 PyPI 엔드포인트를 확인합니다. 실패해도 작업 공간 진입을 막지 않으며 기본적으로 업데이트 전 확인을 요청합니다.
 
 ```bash
+dyro update              # dyro update check 와 동일
 dyro update check
 dyro update now
 dyro update auto on      # 패치 버전 자동 업데이트 사용

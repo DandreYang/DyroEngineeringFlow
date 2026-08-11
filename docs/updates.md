@@ -20,6 +20,7 @@ automatic check.
 Use an explicit command to retry or to control the saved preference:
 
 ```bash
+dyro update          # same as: dyro update check
 dyro update check
 dyro update enable
 dyro update disable
@@ -37,7 +38,9 @@ Cancelling setup leaves both project files and update preferences untouched.
 which keeps scripts and CI free of user-level side effects.
 
 Set `DYRO_NO_UPDATE_CHECK=1` for a process-level opt-out without changing the
-saved preference.
+saved preference. The same gate currently also skips the interactive startup
+repair of an outdated managed Skill (they share the daily-update launch
+filter).
 
 ## Installing an update
 
@@ -51,15 +54,23 @@ instructions returned by the network. The requirement is pinned to the version
 that was checked and Dyro verifies the installed distribution version after the
 command succeeds.
 
-After upgrading, optionally attach the control-plane Skill to agent homes:
+## Control-plane Skill
+
+Interactive `dyro setup` can install the Skill during personal preferences
+(preview in the plan, applied only after confirmation). After a successful
+`dyro update now` (or patch auto-update), Dyro best-effort syncs an **already
+managed** Skill via the fresh `dyro` entry point. On interactive
+`dyro` / `dyro home` / `dyro start` launches, an **outdated** managed Skill is
+repaired automatically. First-time install is never forced on upgrade or
+startup; use setup or:
 
 ```bash
 dyro integration install skill --dry-run
 dyro integration install skill --yes
+dyro integration sync skill --yes   # upgrade-only; skips absent installs
 ```
 
-(`codex` is an alias for `skill`.) Preview first; install only writes with
-`--yes`.
+(`codex` is an alias for `skill`.)
 
 Editable source installations are deliberately rejected. Update those through
 their Git checkout so a convenience command cannot replace a development

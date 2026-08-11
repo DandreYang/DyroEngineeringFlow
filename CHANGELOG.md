@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Guide control-plane Skill install during interactive `dyro setup` (preview in
+  the plan; apply only after confirmation; soft-fail if no host is ready).
+- After a successful package update (`dyro update now` or patch auto-update),
+  best-effort sync an already-managed Skill through the fresh `dyro` entry
+  point (`dyro integration sync skill --yes`).
+- On interactive `dyro` / `home` / `start` launches, automatically repair an
+  outdated managed Skill; never first-install on startup.
+- Make bare `dyro update` equivalent to `dyro update check` (common CLI
+  ergonomics; `check` remains as an explicit alias).
+- After a same-turn package auto-update Skill refresh, skip in-process startup
+  Skill sync so stale in-memory assets cannot overwrite the fresh write.
+- Pin post-update Skill sync to this install (`bin/dyro` beside the interpreter,
+  else `python -m dyro`) instead of bare `PATH` lookup.
+- Make setup Skill UX honest when no agent host is present (defer by default;
+  completion reports install outcome).
+
 ## 0.6.3 - 2026-08-12
 
 - Keep the shipping surface as CLI + Skill only. PyPI releases through 0.6.2

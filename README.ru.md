@@ -269,9 +269,16 @@ dyro --version
 python3 -m pip install --user --upgrade dyro
 ```
 
+Интерактивный `dyro setup` может установить Skill плоскости управления. После
+обновления пакета уже управляемые Skill синхронизируются автоматически;
+интерактивный запуск также чинит устаревший managed Skill. Первая установка
+остаётся opt-in через setup или `dyro integration install skill --yes`
+(алиас: `codex`).
+
 Интерактивные запуски `dyro`, `dyro home` и `dyro start` проверяют официальный PyPI не чаще одного раза за локальный день. Ошибка не блокирует вход в рабочую область, а по умолчанию обновление требует подтверждения:
 
 ```bash
+dyro update              # то же, что dyro update check
 dyro update check
 dyro update now
 dyro update auto on      # включить автообновление patch-версий
