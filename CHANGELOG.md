@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.6.2 - 2026-08-05
+
+- Extend interactive `dyro setup` and Profile onboarding with a single,
+  preview-first personal-preferences step: update checks, optional patch-only
+  auto-updates, a locally detected coding-tool default, and Console project
+  selection can be saved together, while cancel and dry-run remain read-only.
+- Make coding-tool choice easier to scan by showing a short detected list
+  first, exposing the full catalog on demand, and accepting a supported tool
+  identifier directly even when it is not in the initial shortlist.
+
+## 0.6.1 - 2026-08-04
+
+- Make the global Dyro home, first-run setup, line creation, and Hotfix
+  creation genuinely guided: show safe previews, offer meaningful defaults,
+  support retry/back/cancel, and preflight every selected repository before
+  any Git worktree mutation.
+- Register setup Profiles with the global Console by default while preserving
+  an existing default workspace, and make workspace, repository, Agent, and
+  coding-tool management more readable and actionable.
+- Expand the coding-tool catalog across CLI and desktop launchers, including
+  Codex, Claude, Antigravity, ZCode, and Qoder-family tooling; unavailable
+  tools remain informative rather than blocking a workspace launch.
+- Refresh the read-only Console into a compact Signal Room command center and
+  align terminal output with semantic colors, clear status grouping, and
+  graceful interruption recovery.
+
 ## 0.6.0 - 2026-08-04
 
 - Add the native, local-first Continuation engine: versioned Objectives have
