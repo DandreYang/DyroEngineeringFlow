@@ -1,6 +1,7 @@
 """Host integration installation surfaces."""
 
 from .manager import (
+    AvatarStatus,
     IntegrationPlan,
     IntegrationState,
     IntegrationStatus,
@@ -11,6 +12,7 @@ from .manager import (
 )
 
 __all__ = [
+    "AvatarStatus",
     "IntegrationPlan",
     "IntegrationState",
     "IntegrationStatus",

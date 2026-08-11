@@ -1457,6 +1457,10 @@ def cmd_integration_status(args: argparse.Namespace) -> None:
     status = integration_status(args.id)
     print(f"{status.integration}\t{status.state.value}\t{status.target}")
     print(status.detail)
+    for avatar in status.avatars:
+        print(
+            f"avatar\t{avatar.host}\t{avatar.state}\t{avatar.path}\t{avatar.detail}"
+        )
 
 
 def _print_integration_plan(plan, *, dry_run: bool) -> None:
@@ -3018,12 +3022,16 @@ def build_parser() -> argparse.ArgumentParser:
     integration_status_parser = integration_sub.add_parser(
         "status", help="只读检查集成状态"
     )
-    integration_status_parser.add_argument("id", choices=("codex",))
+    integration_status_parser.add_argument("id", choices=("skill", "codex"))
     integration_status_parser.set_defaults(func=cmd_integration_status)
     integration_install_parser = integration_sub.add_parser(
-        "install", help="预览或安装 Dyro 自有集成资产"
+        "install", help="预览或安装 Dyro 自有集成资产（镜像+分身）"
     )
-    integration_install_parser.add_argument("id", choices=("codex",))
+    integration_install_parser.add_argument(
+        "id",
+        choices=("skill", "codex"),
+        help="skill 为 canonical id；codex 为兼容别名",
+    )
     integration_install_parser.add_argument(
         "--yes", action="store_true", help="确认执行已预览的安装或升级"
     )
@@ -3037,7 +3045,7 @@ def build_parser() -> argparse.ArgumentParser:
     integration_uninstall_parser = integration_sub.add_parser(
         "uninstall", help="仅卸载仍匹配 ownership manifest 的资产"
     )
-    integration_uninstall_parser.add_argument("id", choices=("codex",))
+    integration_uninstall_parser.add_argument("id", choices=("skill", "codex"))
     integration_uninstall_parser.add_argument(
         "--yes", action="store_true", help="确认卸载仍完整的自有资产"
     )

@@ -6,10 +6,14 @@
   (`dyro-mcp`) shipping surface, including the zero-effect Docker CI gate and
   the optional `[mcp]` extra. Historical ADR/design/evidence docs remain as
   archive only.
-- Keep the cross-platform Codex Skill path: `dyro integration install codex`
-  still installs `dyro-control-plane`, rewritten to use read-only `dyro` CLI
-  commands (`workspace list` / `status`, `objective list|status|plan`) instead
-  of Bridge JSON or MCP tools.
+- Keep the cross-platform Skill path as a Dyro-owned **mirror** under
+  `DYRO_HOME/skills/dyro-control-plane`, with per-host **avatars** (symlinks /
+  Windows junctions) for detected agent homes (Codex, Claude, Agents, Cursor).
+  Use `dyro integration install skill` (or the `codex` alias). The Skill itself
+  uses read-only `dyro` CLI commands (`workspace list` / `status`,
+  `objective list|status|plan`) instead of Bridge JSON or MCP tools.
+- Migrate legacy whole-directory Codex Skill installs to mirror+avatar on the
+  next owned install.
 
 ## 0.6.2 - 2026-08-05
 
