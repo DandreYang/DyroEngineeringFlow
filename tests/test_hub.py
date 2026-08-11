@@ -67,6 +67,16 @@ class RepositorySelectionParsingTests(unittest.TestCase):
         self.assertIsNone(selected)
         self.assertIn("未配置的仓库", error or "")
 
+    def test_numeric_repository_id_wins_over_index(self) -> None:
+        repositories = ("api", "1", "svc")
+        selected, error = _parse_repository_selection("1", repositories)
+        self.assertIsNone(error)
+        self.assertEqual(selected, ("1",))
+
+        selected, error = _parse_repository_selection("3", repositories)
+        self.assertIsNone(error)
+        self.assertEqual(selected, ("svc",))
+
 
 class RegistryTests(unittest.TestCase):
     def setUp(self) -> None:

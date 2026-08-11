@@ -51,6 +51,16 @@ instructions returned by the network. The requirement is pinned to the version
 that was checked and Dyro verifies the installed distribution version after the
 command succeeds.
 
+After upgrading, optionally attach the control-plane Skill to agent homes:
+
+```bash
+dyro integration install skill --dry-run
+dyro integration install skill --yes
+```
+
+(`codex` is an alias for `skill`.) Preview first; install only writes with
+`--yes`.
+
 Editable source installations are deliberately rejected. Update those through
 their Git checkout so a convenience command cannot replace a development
 environment with a published wheel.

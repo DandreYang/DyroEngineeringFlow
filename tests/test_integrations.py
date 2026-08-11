@@ -543,6 +543,66 @@ class IntegrationManagerTests(unittest.TestCase):
         )
         self.assertFalse(actual.joinpath("new-codex-home").exists())
 
+    def _write_legacy_manifest(self, target: Path, files: dict[str, str]) -> None:
+        self.legacy_manifest.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": 1,
+            "integration": "codex",
+            "asset_version": manager.ASSET_VERSION,
+            "asset_digest": manager._asset_digest(files),
+            "target": str(target),
+            "files": files,
+        }
+        self.legacy_manifest.write_text(
+            json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_unbound_legacy_target_is_not_deleted_on_uninstall(self) -> None:
+        victim = self.root / "victim_dir"
+        victim.mkdir()
+        files = manager._asset_inventory()
+        for relative in files:
+            destination = victim / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes((manager._asset_root() / relative).read_bytes())
+        self._write_legacy_manifest(victim, files)
+
+        status = integration_status("skill")
+        self.assertEqual(status.state, IntegrationState.ABSENT)
+        plan = uninstall_integration("skill", yes=True)
+        self.assertEqual(plan.status.state, IntegrationState.ABSENT)
+        self.assertTrue(victim.exists())
+        self.assertTrue((victim / "SKILL.md").is_file())
+
+    def test_forged_legacy_over_foreign_avatar_is_refused(self) -> None:
+        self.avatar.mkdir(parents=True)
+        (self.avatar / "SKILL.md").write_text("FOREIGN_SKILL_CONTENT\n", encoding="utf-8")
+        foreign_files = manager._inventory(self.avatar)
+        self._write_legacy_manifest(self.avatar, foreign_files)
+
+        status = integration_status("skill")
+        self.assertEqual(status.state, IntegrationState.UNOWNED_CONFLICT)
+        with self.assertRaisesRegex(DyroError, "拒绝覆盖|unowned_conflict"):
+            install_integration("skill", yes=True)
+        self.assertEqual(
+            (self.avatar / "SKILL.md").read_text(encoding="utf-8"),
+            "FOREIGN_SKILL_CONTENT\n",
+        )
+        self.assertFalse(self.avatar.is_symlink())
+
+    def test_plan_surfaces_missing_host_blocker(self) -> None:
+        with patch.dict(os.environ):
+            for key in ("CODEX_HOME", "CLAUDE_HOME", "AGENTS_HOME", "CURSOR_HOME"):
+                os.environ.pop(key, None)
+            plan = install_integration("skill", yes=False, dry_run=True)
+        self.assertEqual(plan.status.state, IntegrationState.ABSENT)
+        self.assertFalse(plan.status.avatars)
+        self.assertTrue(
+            any("未检测到宿主目录" in change for change in plan.changes),
+            msg=plan.changes,
+        )
+
     def test_cli_status_dry_run_install_and_confirmation_gate(self) -> None:
         output = StringIO()
         before = self._tree_snapshot()

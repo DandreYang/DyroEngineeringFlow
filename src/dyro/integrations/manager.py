@@ -443,8 +443,19 @@ def _inspect_avatar(
     return AvatarStatus(host, avatar, "unowned", "分身路径被非目录占用")
 
 
+def _allowed_legacy_targets(
+    detected: list[tuple[HostSpec, Path]],
+) -> set[Path]:
+    """Legacy whole-directory installs may only live on detected host avatars."""
+    return {_avatar_path(home) for _spec, home in detected}
+
+
 def _legacy_owned_copy(
-    legacy_manifest_path: Path, *, expected_target: Path | None = None
+    legacy_manifest_path: Path,
+    *,
+    expected_target: Path | None = None,
+    allowed_targets: set[Path] | None = None,
+    require_current_assets: bool = True,
 ) -> tuple[dict[str, object], Path] | None:
     if not legacy_manifest_path.is_file() or legacy_manifest_path.is_symlink():
         return None
@@ -455,10 +466,15 @@ def _legacy_owned_copy(
     target = Path(str(manifest["target"]))
     if expected_target is not None and target != expected_target:
         return None
+    if allowed_targets is not None and target not in allowed_targets:
+        return None
     if target.is_symlink() or not target.is_dir():
         return None
     try:
-        if _inventory(target) != manifest["files"]:
+        inventory = _inventory(target)
+        if inventory != manifest["files"]:
+            return None
+        if require_current_assets and inventory != _asset_inventory():
             return None
     except ValidationError:
         return None
@@ -522,7 +538,11 @@ def integration_status(
 
     manifest_exists = manifest_path.exists() or manifest_path.is_symlink()
     mirror_exists = mirror.exists() or mirror.is_symlink()
-    legacy = _legacy_owned_copy(legacy_manifest_path)
+    legacy = _legacy_owned_copy(
+        legacy_manifest_path,
+        allowed_targets=_allowed_legacy_targets(detected),
+        require_current_assets=True,
+    )
     blocking_avatars: list[AvatarStatus] = []
     for row in avatar_rows:
         if row.state in {"missing", "current"}:
@@ -731,11 +751,23 @@ def plan_integration(
         if status.state is IntegrationState.CURRENT:
             changes = ("无需写入；Integration 已是当前版本",)
         elif status.state is IntegrationState.ABSENT:
-            changes = (
-                f"创建镜像 {status.target}",
-                f"写入 {status.manifest}",
-                *(f"创建分身 {row.path}" for row in status.avatars if row.state == "missing"),
-            )
+            if not status.avatars:
+                changes = (
+                    "未检测到宿主目录；需先创建或设置 "
+                    "CODEX_HOME / CLAUDE_HOME / AGENTS_HOME / CURSOR_HOME",
+                    f"（预览）将创建镜像 {status.target}",
+                    f"（预览）将写入 {status.manifest}",
+                )
+            else:
+                changes = (
+                    f"创建镜像 {status.target}",
+                    f"写入 {status.manifest}",
+                    *(
+                        f"创建分身 {row.path}"
+                        for row in status.avatars
+                        if row.state == "missing"
+                    ),
+                )
         elif status.state is IntegrationState.OUTDATED:
             changes = (
                 f"原子升级镜像 {status.target}",
@@ -909,9 +941,17 @@ def _install_avatars(
     detected: list[tuple[HostSpec, Path]],
     legacy_target: Path | None,
     overrides: Mapping[str, Path] | None,
-) -> dict[str, dict[str, str]]:
+) -> tuple[dict[str, dict[str, str]], list[tuple[Path, Path]]]:
+    """Create host avatars.
+
+    Returns ``(avatars, legacy_backups)`` where each legacy backup is
+    ``(original_avatar_path, backup_path)``. Callers must delete backups only
+    after the install transaction commits, and restore them on rollback.
+    """
     avatars: dict[str, dict[str, str]] = {}
     created: list[Path] = []
+    legacy_backups: list[tuple[Path, Path]] = []
+    allowed = _allowed_legacy_targets(detected)
     try:
         for spec, home in detected:
             avatar = _avatar_path(home)
@@ -930,10 +970,20 @@ def _install_avatars(
                 if (
                     legacy_target is not None
                     and avatar == legacy_target
+                    and avatar in allowed
                     and avatar.is_dir()
                     and not avatar.is_symlink()
                 ):
-                    _remove_tree(avatar)
+                    if _inventory(avatar) != _asset_inventory():
+                        raise DyroError(f"拒绝删除非 Dyro 资产目录：{avatar}")
+                    backup = Path(
+                        tempfile.mkdtemp(
+                            prefix=f".{SKILL_NAME}.legacy-", dir=avatar.parent
+                        )
+                    )
+                    backup.rmdir()
+                    os.replace(avatar, backup)
+                    legacy_backups.append((avatar, backup))
                 elif _host_is_explicit(spec, overrides):
                     raise DyroError(f"拒绝覆盖非 Dyro 分身路径：{avatar}")
                 else:
@@ -947,11 +997,14 @@ def _install_avatars(
             avatars[spec.host_id] = {"path": str(avatar), "kind": kind}
         if not avatars:
             raise DyroError("没有可挂接的宿主分身；拒绝只安装孤立镜像")
-        return avatars
+        return avatars, legacy_backups
     except Exception:
         for avatar in created:
             if _is_link(avatar) and _resolves_to(avatar, mirror):
                 _remove_avatar_link(avatar)
+        for original, backup in legacy_backups:
+            if backup.exists() and not original.exists() and not original.is_symlink():
+                os.replace(backup, original)
         raise
 
 
@@ -1007,7 +1060,11 @@ def install_integration(
                 host_homes=overrides,
             )
 
-        legacy = _legacy_owned_copy(legacy_manifest_path)
+        legacy = _legacy_owned_copy(
+            legacy_manifest_path,
+            allowed_targets=_allowed_legacy_targets(detected),
+            require_current_assets=True,
+        )
         legacy_target = legacy[1] if legacy is not None else None
 
         stage = Path(
@@ -1018,6 +1075,7 @@ def install_integration(
         committed = False
         restored = False
         created_avatars: list[Path] = []
+        legacy_backups: list[tuple[Path, Path]] = []
         old_manifest_text = (
             manifest_path.read_text(encoding="utf-8")
             if manifest_path.exists()
@@ -1045,7 +1103,7 @@ def install_integration(
             os.replace(stage, mirror)
             activated = True
             desired = _asset_inventory()
-            avatars = _install_avatars(
+            avatars, legacy_backups = _install_avatars(
                 mirror=mirror,
                 detected=detected,
                 legacy_target=legacy_target,
@@ -1081,6 +1139,9 @@ def install_integration(
             committed = True
             if backup is not None:
                 _remove_tree(backup)
+            for _original, legacy_backup in legacy_backups:
+                if legacy_backup.exists():
+                    _remove_tree(legacy_backup)
             _complete_transaction(transaction_path, transaction_payload)
         except Exception:
             if committed:
@@ -1092,6 +1153,13 @@ def install_integration(
                 for avatar in created_avatars:
                     if _is_link(avatar) and _resolves_to(avatar, mirror):
                         _remove_avatar_link(avatar)
+                for original, legacy_backup in legacy_backups:
+                    if (
+                        legacy_backup.exists()
+                        and not original.exists()
+                        and not original.is_symlink()
+                    ):
+                        os.replace(legacy_backup, original)
                 if activated and mirror.exists():
                     _remove_tree(mirror)
                 if backup is not None and backup.exists():
@@ -1172,7 +1240,12 @@ def uninstall_integration(
                 host_homes=overrides,
             )
 
-        legacy = _legacy_owned_copy(legacy_manifest_path)
+        detected = _detected_hosts(overrides)
+        legacy = _legacy_owned_copy(
+            legacy_manifest_path,
+            allowed_targets=_allowed_legacy_targets(detected),
+            require_current_assets=True,
+        )
         manifest_text = (
             manifest_path.read_text(encoding="utf-8")
             if manifest_path.exists()

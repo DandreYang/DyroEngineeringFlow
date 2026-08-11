@@ -1226,6 +1226,9 @@ def _parse_repository_selection(
 ) -> tuple[tuple[str, ...] | None, str | None]:
     """Resolve comma-separated indices and/or repository IDs.
 
+    Exact repository ID matches win over 1-based indices so pure-numeric IDs
+    are not silently reinterpreted as list positions.
+
     Returns ``(selected_ids, None)`` on success, or ``(None, error_message)``.
     """
     tokens = [
@@ -1238,6 +1241,11 @@ def _parse_repository_selection(
     selected: list[str] = []
     unknown: list[str] = []
     for token in tokens:
+        # Prefer exact repository ID matches so pure-numeric IDs are not
+        # silently reinterpreted as 1-based list indices.
+        if token in repositories:
+            selected.append(token)
+            continue
         if token.isdigit():
             index = int(token)
             if 1 <= index <= len(repositories):
@@ -1248,10 +1256,7 @@ def _parse_repository_selection(
                     f"序号超出范围：{token}（有效 1–{len(repositories)}）。请重新选择。",
                 )
             continue
-        if token in repositories:
-            selected.append(token)
-        else:
-            unknown.append(token)
+        unknown.append(token)
     if unknown:
         return None, f"未配置的仓库：{'、'.join(unknown)}。请重新选择。"
     return tuple(dict.fromkeys(selected)), None
