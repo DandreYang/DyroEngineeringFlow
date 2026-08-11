@@ -49,145 +49,6 @@ jobs:
       - name: Compile source
         run: uv run python -m compileall -q src tests experiments
 
-  bridge-zero-effects:
-    name: Agent Bridge source/wheel/sdist gate (Ubuntu 24.04)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - name: Check out source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.12"
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-
-      - name: Build exact artifacts and offline wheelhouse
-        shell: bash
-        run: |
-          set -euo pipefail
-          audit_root="${RUNNER_TEMP}/dyro-bridge-audit"
-          context="${audit_root}/context"
-          mkdir -p "${context}/dist" "${context}/wheelhouse" "${audit_root}/dist" \
-            "${audit_root}/evidence"
-          uv sync --locked --all-extras --dev
-          uv export --locked --no-dev --no-emit-project --format requirements-txt \
-            --output-file "${context}/requirements.txt"
-          python -m pip download --dest "${context}/wheelhouse" \
-            --requirement "${context}/requirements.txt"
-          python -m pip download --dest "${context}/wheelhouse" \
-            "setuptools>=77.0.3" wheel
-          git archive --format=tar.gz --output="${audit_root}/dist/source.tar.gz" HEAD
-          uv run python -m build -o "${context}/dist"
-          mv "${audit_root}/dist/source.tar.gz" "${context}/dist/source.tar.gz"
-          cp tests/fixtures/bridge/Dockerfile.audit "${context}/Dockerfile.audit"
-          mkdir -p "${context}/tools" "${context}/tests/fixtures/bridge"
-          cp tools/verify_bridge_zero_effects.py tools/audit_bridge_strace.py "${context}/tools/"
-          cp tests/fixtures/bridge/internal_candidate_runner.py \
-            tests/fixtures/bridge/protocol-v1.json "${context}/tests/fixtures/bridge/"
-
-      - name: Build and run all three isolated Docker targets
-        shell: bash
-        run: |
-          set -euo pipefail
-          audit_root="${RUNNER_TEMP}/dyro-bridge-audit"
-          commit_sha="$(git rev-parse HEAD)"
-          docker pull ubuntu:24.04
-          base_digest="$(docker image inspect ubuntu:24.04 --format '{{.Id}}')"
-          printf '%s\n' "${base_digest}" > "${audit_root}/evidence/base-image.digest"
-          for kind in source wheel sdist; do
-            image="dyro-bridge-audit:${kind}-${commit_sha}"
-            evidence="${audit_root}/evidence/${kind}"
-            mkdir -p "${evidence}"
-            docker build \
-              --file "${audit_root}/context/Dockerfile.audit" \
-              --build-arg "AUDIT_TARGET=${kind}" \
-              --build-arg "AUDIT_COMMIT=${commit_sha}" \
-              --tag "${image}" "${audit_root}/context"
-            docker image inspect "${image}" --format '{{.Id}}' > "${evidence}/image.digest"
-            touch "${evidence}/container.stdout" "${evidence}/container.stderr"
-            sudo chmod 0777 "${evidence}"
-            set +e
-            timeout 8m docker run --rm \
-              --network=none --read-only --cap-drop=ALL --cap-add=SYS_PTRACE \
-              --security-opt no-new-privileges=true \
-              --cpus=2 --memory=1g --pids-limit=256 \
-              --mount "type=bind,src=${evidence},dst=/audit/run" \
-              --env "DYRO_AUDIT_COMMIT=${commit_sha}" \
-              --env DYRO_AUDIT_DIRTY=clean \
-              "${image}" > "${evidence}/container.stdout" 2> "${evidence}/container.stderr"
-            container_status="$?"
-            set -e
-            sudo chown -R "$(id -u):$(id -g)" "${evidence}"
-            test "$(wc -c < "${evidence}/container.stdout")" -le 1048576
-            test "$(wc -c < "${evidence}/container.stderr")" -le 1048576
-            test "${container_status}" -eq 0
-          done
-
-      - name: Compare artifact/runtime and protocol contracts
-        shell: bash
-        run: |
-          set -euo pipefail
-          audit_root="${RUNNER_TEMP}/dyro-bridge-audit"
-          python - "${audit_root}" <<'PY'
-          import json
-          from pathlib import Path
-          import sys
-
-          root = Path(sys.argv[1])
-          reports = {}
-          for kind in ("source", "wheel", "sdist"):
-              for mode in ("candidate", "public"):
-                  path = root / "evidence" / kind / f"{mode}-report.json"
-                  report = json.loads(path.read_text())
-                  assert report["passed"] is True, (path, report["errors"])
-                  assert len(report["operations"]) == 43, path
-                  assert report["trace"]["ok"] is True, path
-                  unavailable = {
-                      item["operation"]
-                      for item in report["operations"]
-                      if str(item["case"]).startswith("unavailable-")
-                      and item["exit_code"] == 4
-                      and item["ok"] is False
-                  }
-                  assert len(unavailable) == 11, (path, unavailable)
-                  reports[kind, mode] = report
-              assert reports[kind, "public"]["trace"]["summary"]["binder"] == 2
-              assert reports[kind, "public"]["trace"]["summary"]["landlock_success"] == 2
-          package = {
-              report["evidence"]["artifact"]["package_manifest_sha256"]
-              for report in reports.values()
-          }
-          candidate_contract = {
-              reports[kind, "candidate"]["contract_digest"]
-              for kind in ("source", "wheel", "sdist")
-          }
-          public_contract = {
-              reports[kind, "public"]["contract_digest"]
-              for kind in ("source", "wheel", "sdist")
-          }
-          assert len(package) == len(candidate_contract) == len(public_contract) == 1
-          assert candidate_contract == public_contract
-          PY
-
-      - name: Upload exact artifacts, reports, traces, and digests
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: dyro-bridge-zero-effect-evidence
-          path: |
-            ${{ runner.temp }}/dyro-bridge-audit/context/dist
-            ${{ runner.temp }}/dyro-bridge-audit/evidence
-          if-no-files-found: error
-
   wheel-smoke:
     name: Wheel/sdist install smoke (dispatch)
     runs-on: ubuntu-latest
@@ -219,22 +80,24 @@ jobs:
           cd "$smoke_root"
           uv run python -m venv "$smoke_root/wheel-venv"
           wheel_artifact="$(find /tmp/dyro-dist -maxdepth 1 -name 'dyro-*.whl' -print -quit)"
-          "$smoke_root/wheel-venv/bin/pip" install "${wheel_artifact}[mcp]"
+          "$smoke_root/wheel-venv/bin/pip" install "${wheel_artifact}"
           "$smoke_root/wheel-venv/bin/python" -c "import experiments.local_agent_dispatch"
           "$smoke_root/wheel-venv/bin/python" -I -c "import dyro.continuation"
           "$smoke_root/wheel-venv/bin/python" -I -c "from dyro.console.assets import validate_assets; validate_assets()"
-          "$smoke_root/wheel-venv/bin/python" -I -c "from importlib.resources import files; root=files('dyro.integrations').joinpath('assets'); assert root.joinpath('dyro-control-plane','SKILL.md').is_file(); assert root.joinpath('dyro-control-plane','agents','openai.yaml').is_file(); assert root.joinpath('dyro-readonly','.codex-plugin','plugin.json').is_file(); assert root.joinpath('dyro-readonly','.mcp.json').is_file(); assert root.joinpath('dyro-readonly','compatibility.json').is_file()"
-          "$smoke_root/wheel-venv/bin/python" -I -c "from mcp.server import MCPServer; from dyro.bridge.mcp import create_server"
-          test -x "$smoke_root/wheel-venv/bin/dyro-mcp"
+          "$smoke_root/wheel-venv/bin/python" -I -c "from importlib.resources import files; root=files('dyro.integrations').joinpath('assets'); assert root.joinpath('dyro-control-plane','SKILL.md').is_file(); assert root.joinpath('dyro-control-plane','agents','openai.yaml').is_file(); assert not root.joinpath('dyro-readonly').is_dir()"
+          test -x "$smoke_root/wheel-venv/bin/dyro"
+          test ! -e "$smoke_root/wheel-venv/bin/dyro-bridge"
+          test ! -e "$smoke_root/wheel-venv/bin/dyro-mcp"
           DYRO_LOCAL_AGENT_DISPATCH_HOME="$smoke_root/wheel-dispatch-home" "$smoke_root/wheel-venv/bin/dyro" dispatch doctor >"$smoke_root/dispatch-doctor.json"
           uv run python -m venv "$smoke_root/sdist-venv"
           sdist_artifact="$(find /tmp/dyro-dist -maxdepth 1 -name 'dyro-*.tar.gz' -print -quit)"
-          "$smoke_root/sdist-venv/bin/pip" install "${sdist_artifact}[mcp]"
+          "$smoke_root/sdist-venv/bin/pip" install "${sdist_artifact}"
           "$smoke_root/sdist-venv/bin/python" -I -c "import dyro.continuation"
           "$smoke_root/sdist-venv/bin/python" -I -c "from dyro.console.assets import validate_assets; validate_assets()"
-          "$smoke_root/sdist-venv/bin/python" -I -c "from importlib.resources import files; root=files('dyro.integrations').joinpath('assets'); assert root.joinpath('dyro-control-plane','SKILL.md').is_file(); assert root.joinpath('dyro-control-plane','agents','openai.yaml').is_file(); assert root.joinpath('dyro-readonly','.codex-plugin','plugin.json').is_file(); assert root.joinpath('dyro-readonly','.mcp.json').is_file(); assert root.joinpath('dyro-readonly','compatibility.json').is_file()"
-          "$smoke_root/sdist-venv/bin/python" -I -c "from mcp.server import MCPServer; from dyro.bridge.mcp import create_server"
-          test -x "$smoke_root/sdist-venv/bin/dyro-mcp"
+          "$smoke_root/sdist-venv/bin/python" -I -c "from importlib.resources import files; root=files('dyro.integrations').joinpath('assets'); assert root.joinpath('dyro-control-plane','SKILL.md').is_file(); assert root.joinpath('dyro-control-plane','agents','openai.yaml').is_file(); assert not root.joinpath('dyro-readonly').is_dir()"
+          test -x "$smoke_root/sdist-venv/bin/dyro"
+          test ! -e "$smoke_root/sdist-venv/bin/dyro-bridge"
+          test ! -e "$smoke_root/sdist-venv/bin/dyro-mcp"
 
   windows-dispatch-import:
     name: Windows dispatch import / fail-closed smoke

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Remove the Ubuntu-gated Agent Bridge (`dyro-bridge`) and read-only MCP
+  (`dyro-mcp`) shipping surface, including the zero-effect Docker CI gate and
+  the optional `[mcp]` extra. Historical ADR/design/evidence docs remain as
+  archive only.
+- Keep the cross-platform Codex Skill path: `dyro integration install codex`
+  still installs `dyro-control-plane`, rewritten to use read-only `dyro` CLI
+  commands (`workspace list` / `status`, `objective list|status|plan`) instead
+  of Bridge JSON or MCP tools.
+
 ## 0.6.2 - 2026-08-05
 
 - Extend interactive `dyro setup` and Profile onboarding with a single,

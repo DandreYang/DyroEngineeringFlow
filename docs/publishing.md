@@ -44,19 +44,13 @@ PyPI Trusted Publishing 将 GitHub Actions 的 OIDC 身份绑定到这个仓库�
    uv run python -m twine check --strict dist/dyro-*.whl dist/dyro-*.tar.gz
    ```
 
-   发布提交还必须通过 Ubuntu 24.04 Agent Bridge 制品门禁：从精确提交构建的
-   source archive、wheel 与 sdist 都要运行同一份 43-case corpus，公开进程仅
-   允许七项 Mandatory Core Surface，另外十一项保持
-   `OPERATION_UNAVAILABLE`，且候选/公开进程的契约摘要一致。发布工作流会再次
-   从 wheel 与 sdist 检查 Linux 精确可用集合及 macOS/Windows fail-closed
-   元数据；不得以源码树 import 替代制品验证。Release 工作流还会通过 GitHub
-   Actions API 查询 `ci.yml`，严格要求当前 tag SHA 对应的 main push run 已
-   `completed + success`，且该 run 内精确命名的 Agent Bridge Docker job 成功、
-   `dyro-bridge-zero-effect-evidence` 证据制品存在且未过期；缺失、仍在运行、
-   失败、取消、制品过期或 SHA 不匹配都会阻止发布。
+   Release 工作流还会通过 GitHub Actions API 查询 `ci.yml`，严格要求当前
+   tag SHA 对应的 main push run 已 `completed + success`；缺失、仍在运行、
+   失败、取消或 SHA 不匹配都会阻止发布。制品冒烟会确认 wheel/sdist 含
+   Codex Skill 资产，且不再提供 `dyro-bridge` / `dyro-mcp` 入口。
 
 4. 提交并推送版本变更，创建与版本严格匹配的 tag，例如 `vX.Y.Z`。
-5. 在 GitHub 基于该 tag 创建并发布 Release。工作流会验证 checkout 恰为该 tag、tag commit 是 `origin/main` 的祖先、同一 SHA 的完整 CI（含 Agent Bridge Docker 门禁）成功、`uv.lock` 未漂移，再测试、构建、检查 metadata；通过 `pypi` Environment 的人工批准后才上传 PyPI。
+5. 在 GitHub 基于该 tag 创建并发布 Release。工作流会验证 checkout 恰为该 tag、tag commit 是 `origin/main` 的祖先、同一 SHA 的完整 CI 成功、`uv.lock` 未漂移，再测试、构建、检查 metadata；通过 `pypi` Environment 的人工批准后才上传 PyPI。
 6. 发布完成后验证：
 
    ```bash

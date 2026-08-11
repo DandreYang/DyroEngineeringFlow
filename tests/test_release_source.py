@@ -87,49 +87,19 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
         self.assertIn("-f event=push", workflow)
         self.assertIn('"${status}" == "completed"', workflow)
         self.assertIn('"${conclusion}" != "success"', workflow)
-        self.assertIn('actions/runs/${run_id}/jobs', workflow)
-        self.assertIn(
+        self.assertIn("ci-gate-run.tsv", workflow)
+        self.assertNotIn("dyro-bridge-zero-effect-evidence", workflow)
+        self.assertNotIn(
             "Agent Bridge source/wheel/sdist gate (Ubuntu 24.04)", workflow
         )
-        self.assertIn('actions/runs/${run_id}/artifacts', workflow)
-        self.assertIn("dyro-bridge-zero-effect-evidence", workflow)
-        self.assertIn(".expired == false", workflow)
-        self.assertIn("bridge-gate-run.tsv", workflow)
+        self.assertNotIn("bridge-gate-run.tsv", workflow)
 
-    def test_ci_downloads_hash_locked_runtime_and_build_tools_separately(self) -> None:
+    def test_ci_no_longer_ships_agent_bridge_zero_effect_gate(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
 
-        runtime_download = (
-            'python -m pip download --dest "${context}/wheelhouse" \\\n'
-            '            --requirement "${context}/requirements.txt"'
-        )
-        build_download = (
-            'python -m pip download --dest "${context}/wheelhouse" \\\n'
-            '            "setuptools>=77.0.3" wheel'
-        )
-        self.assertIn(runtime_download, workflow)
-        self.assertIn(build_download, workflow)
-
-    def test_ci_creates_audit_root_dist_before_git_archive(self) -> None:
-        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn('mkdir -p "${context}/dist" "${context}/wheelhouse" "${audit_root}/dist"', workflow)
-        self.assertIn(
-            'git archive --format=tar.gz --output="${audit_root}/dist/source.tar.gz" HEAD',
-            workflow,
-        )
-
-    def test_ci_bind_mounts_evidence_without_bare_rw_mount_flag(self) -> None:
-        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn(
-            '--mount "type=bind,src=${evidence},dst=/audit/run"',
-            workflow,
-        )
-        self.assertNotIn("dst=/audit/run,rw", workflow)
+        self.assertNotIn("bridge-zero-effects", workflow)
+        self.assertNotIn("dyro-bridge-zero-effect-evidence", workflow)
+        self.assertNotIn("verify_bridge_zero_effects.py", workflow)
+        self.assertNotIn("Agent Bridge source/wheel/sdist gate", workflow)
