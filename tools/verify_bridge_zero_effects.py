@@ -175,7 +175,7 @@ verify = [["git", "diff", "--check"]]
     dyro_root = workspace / ".dyro"
     (dyro_root / "lines").mkdir(parents=True)
     (dyro_root / "lines/alpha.toml").write_text(
-        'schema_version = 2\nid = "alpha"\nkind = "line"\nbranch = "feat/alpha"\nbase = "main"\nrepositories = ["api"]\n',
+        'schema_version = 2\nid = "alpha"\nkind = "line"\nbranch = "feat/alpha"\nbase = "main"\nrepositories = ["api"]\n\n[storage_modes]\napi = "anchor-reference"\n',
         encoding="utf-8",
     )
     task_body = """schema_version = 1

@@ -81,7 +81,9 @@ jobs:
           uv export --locked --no-dev --no-emit-project --format requirements-txt \
             --output-file "${context}/requirements.txt"
           python -m pip download --dest "${context}/wheelhouse" \
-            --requirement "${context}/requirements.txt" "setuptools>=77.0.3" wheel
+            --requirement "${context}/requirements.txt"
+          python -m pip download --dest "${context}/wheelhouse" \
+            "setuptools>=77.0.3" wheel
           git archive --format=tar.gz --output="${audit_root}/dist/source.tar.gz" HEAD
           uv run python -m build -o "${context}/dist"
           mv "${audit_root}/dist/source.tar.gz" "${context}/dist/source.tar.gz"

@@ -15,8 +15,14 @@ from dyro.bridge.git_read import _HELPER_SCRIPT
 from dyro.bridge.models import ErrorCode
 from dyro.bridge.schemas import get_operation_schema, get_request_envelope_schema
 from dyro.bridge.transport import TransportContext, handle_request_bytes
+from dyro.config import load
+from dyro.workspace import get_line
 from tools.audit_bridge_strace import audit_trace_files, main
-from tools.verify_bridge_zero_effects import VerificationError, load_protocol_corpus
+from tools.verify_bridge_zero_effects import (
+    VerificationError,
+    load_protocol_corpus,
+    prepare_fixture,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +120,13 @@ class BridgeProtocolCorpusTests(unittest.TestCase):
             set(PHASE0_DECLARED_OPERATION_IDS) - set(MANDATORY_OPERATION_IDS),
         )
 
+    def test_objective_plan_fixture_uses_the_existing_anchor_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = prepare_fixture(Path(temporary) / "fixture")
+            line = get_line(load(fixture.workspace), "alpha")
+
+        self.assertEqual(line.storage_for("api"), "anchor-reference")
+
     def test_corpus_covers_required_fail_closed_wire_cases(self) -> None:
         corpus = self._corpus()
         classes = {case["class"] for case in corpus["cases"]}
@@ -188,6 +201,9 @@ class BridgeProtocolCorpusTests(unittest.TestCase):
     def test_audit_container_has_three_exact_targets_and_non_root_runtime(self) -> None:
         dockerfile = (FIXTURE_ROOT / "Dockerfile.audit").read_text()
         self.assertIn("FROM ubuntu:24.04 AS builder", dockerfile.splitlines()[:5])
+        runtime_stage = dockerfile.split("FROM ubuntu:24.04 AS runtime", 1)[1]
+        self.assertIn("/usr/sbin/groupadd --gid 10001 audit", runtime_stage)
+        self.assertIn("/usr/sbin/useradd --uid 10001 --gid 10001", runtime_stage)
         for tool in (
             "python3.12",
             "python3.12-venv",

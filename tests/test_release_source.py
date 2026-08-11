@@ -95,3 +95,19 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
         self.assertIn("dyro-bridge-zero-effect-evidence", workflow)
         self.assertIn(".expired == false", workflow)
         self.assertIn("bridge-gate-run.tsv", workflow)
+
+    def test_ci_downloads_hash_locked_runtime_and_build_tools_separately(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        runtime_download = (
+            'python -m pip download --dest "${context}/wheelhouse" \\\n'
+            '            --requirement "${context}/requirements.txt"'
+        )
+        build_download = (
+            'python -m pip download --dest "${context}/wheelhouse" \\\n'
+            '            "setuptools>=77.0.3" wheel'
+        )
+        self.assertIn(runtime_download, workflow)
+        self.assertIn(build_download, workflow)
