@@ -17,6 +17,7 @@ from dyro.home import (
     _choose_tool,
     _macos_app_name,
     _openclaw_needs_setup,
+    _parse_repository_selection,
     home_tools,
     sort_home_tools,
 )
@@ -39,6 +40,32 @@ from dyro.tasks import task_template
 from dyro.workspace import create_line, get_line
 
 from .support import WorkspaceCase, shell
+
+
+class RepositorySelectionParsingTests(unittest.TestCase):
+    def test_accepts_indices_ids_and_mixed_tokens(self) -> None:
+        repositories = ("miniapp", "pc-web", "common-msv", "ai-agent", "video-engine")
+        selected, error = _parse_repository_selection("1,3", repositories)
+        self.assertIsNone(error)
+        self.assertEqual(selected, ("miniapp", "common-msv"))
+
+        selected, error = _parse_repository_selection("pc-web，video-engine", repositories)
+        self.assertIsNone(error)
+        self.assertEqual(selected, ("pc-web", "video-engine"))
+
+        selected, error = _parse_repository_selection("2, ai-agent, 2", repositories)
+        self.assertIsNone(error)
+        self.assertEqual(selected, ("pc-web", "ai-agent"))
+
+    def test_rejects_out_of_range_and_unknown_tokens(self) -> None:
+        repositories = ("miniapp", "pc-web")
+        selected, error = _parse_repository_selection("3", repositories)
+        self.assertIsNone(selected)
+        self.assertIn("序号超出范围", error or "")
+
+        selected, error = _parse_repository_selection("missing", repositories)
+        self.assertIsNone(selected)
+        self.assertIn("未配置的仓库", error or "")
 
 
 class RegistryTests(unittest.TestCase):
@@ -482,7 +509,7 @@ mount = "web"
         shell("git", "checkout", "-b", "release", cwd=web)
 
         add_workspace(self.root, name="demo", make_default=True)
-        answers = iter(["3", "FEATURE-WEB", "2", "web", "2", "release", "yes"])
+        answers = iter(["3", "FEATURE-WEB", "2", "2", "2", "release", "yes"])
         output = StringIO()
         with (
             patch("dyro.home.interactive_terminal", return_value=True),
@@ -494,6 +521,8 @@ mount = "web"
 
         rendered = output.getvalue()
         self.assertIn("可选仓库：", rendered)
+        self.assertIn("  1) api", rendered)
+        self.assertIn("  2) web", rendered)
         self.assertNotIn("当前仓库基线：", rendered)
         line = get_line(load(self.root), "FEATURE-WEB", "line")
         self.assertEqual(line.repositories, ("web",))
@@ -521,7 +550,8 @@ mount = "web"
         shell("git", "checkout", "-b", "release", cwd=web)
 
         add_workspace(self.root, name="demo", make_default=True)
-        answers = iter(["4", "INC-WEB", "2", "web", "", "yes"])
+        # Custom repo pick: "2" is the index of web (api=1, web=2).
+        answers = iter(["4", "INC-WEB", "2", "2", "", "yes"])
         output = StringIO()
         with (
             patch("dyro.home.interactive_terminal", return_value=True),
@@ -533,6 +563,8 @@ mount = "web"
 
         rendered = output.getvalue()
         self.assertIn("步骤：问题 ID → 参与仓库 → 生产基线 → 创建确认", rendered)
+        self.assertIn("  1) api", rendered)
+        self.assertIn("  2) web", rendered)
         self.assertIn("发布分支 release", rendered)
         line = get_line(load(self.root), "INC-WEB", "hotfix")
         self.assertEqual(line.repositories, ("web",))

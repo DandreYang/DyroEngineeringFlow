@@ -1203,28 +1203,58 @@ def _ask_line_repositories(config: Config) -> tuple[str, ...] | object | None:
     if choice is not custom_choice:
         return repositories
     print("\n可选仓库：")
-    for repo_id in repositories:
-        print(f"  - {repo_id}")
+    for index, repo_id in enumerate(repositories, start=1):
+        print(f"  {index}) {repo_id}")
     while True:
-        raw = input("输入受影响的仓库 ID（逗号分隔；b 上一步，q 取消）：").strip()
+        raw = input(
+            "输入受影响的仓库序号或 ID（逗号分隔，如 1,3 或 miniapp；b 上一步，q 取消）："
+        ).strip()
         if raw.lower() in {"q", "quit"}:
             print("已取消；没有修改任何 Git 工作区。")
             return None
         if raw.lower() in {"b", "back", "返回"}:
             return _BACK
-        selected = tuple(
-            dict.fromkeys(item.strip() for item in raw.split(",") if item.strip())
-        )
-        if not selected:
-            print("至少选择一个仓库，或输入 q 取消。")
-            continue
-        unknown = [
-            repo_id for repo_id in selected if repo_id not in config.repositories
-        ]
-        if unknown:
-            print(f"未配置的仓库：{'、'.join(unknown)}。请重新选择。")
+        selected, error = _parse_repository_selection(raw, repositories)
+        if error is not None:
+            print(error)
             continue
         return selected
+
+
+def _parse_repository_selection(
+    raw: str, repositories: tuple[str, ...]
+) -> tuple[tuple[str, ...] | None, str | None]:
+    """Resolve comma-separated indices and/or repository IDs.
+
+    Returns ``(selected_ids, None)`` on success, or ``(None, error_message)``.
+    """
+    tokens = [
+        item.strip()
+        for item in raw.replace("，", ",").split(",")
+        if item.strip()
+    ]
+    if not tokens:
+        return None, "至少选择一个仓库，或输入 q 取消。"
+    selected: list[str] = []
+    unknown: list[str] = []
+    for token in tokens:
+        if token.isdigit():
+            index = int(token)
+            if 1 <= index <= len(repositories):
+                selected.append(repositories[index - 1])
+            else:
+                return (
+                    None,
+                    f"序号超出范围：{token}（有效 1–{len(repositories)}）。请重新选择。",
+                )
+            continue
+        if token in repositories:
+            selected.append(token)
+        else:
+            unknown.append(token)
+    if unknown:
+        return None, f"未配置的仓库：{'、'.join(unknown)}。请重新选择。"
+    return tuple(dict.fromkeys(selected)), None
 
 
 def _ask_line_base(config: Config) -> str | object | None:
