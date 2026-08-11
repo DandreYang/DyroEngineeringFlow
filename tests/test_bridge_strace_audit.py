@@ -19,6 +19,7 @@ from dyro.config import load
 from dyro.workspace import get_line
 from tools.audit_bridge_strace import audit_trace_files, main
 from tools.verify_bridge_zero_effects import (
+    DYRO_VERSION,
     VerificationError,
     load_protocol_corpus,
     prepare_fixture,
@@ -126,6 +127,12 @@ class BridgeProtocolCorpusTests(unittest.TestCase):
             line = get_line(load(fixture.workspace), "alpha")
 
         self.assertEqual(line.storage_for("api"), "anchor-reference")
+
+    def test_zero_effect_verifier_tracks_installed_package_version(self) -> None:
+        from importlib.metadata import version
+
+        self.assertEqual(DYRO_VERSION, version("dyro"))
+        self.assertNotEqual(DYRO_VERSION, "0.0.0+dev")
 
     def test_corpus_covers_required_fail_closed_wire_cases(self) -> None:
         corpus = self._corpus()

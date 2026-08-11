@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import os
@@ -54,7 +55,18 @@ MANDATORY_REQUESTS: tuple[tuple[str, dict[str, object]], ...] = (
 MANDATORY_OPERATION_IDS = tuple(
     sorted(operation for operation, _ in MANDATORY_REQUESTS)
 )
-DYRO_VERSION = "0.6.0"
+def _installed_dyro_version() -> str:
+    """Expect the installed package version, not a frozen release string."""
+    try:
+        return importlib.metadata.version("dyro")
+    except importlib.metadata.PackageNotFoundError:
+        # Source-tree fallback used only when the distribution is not installed.
+        from dyro import __version__ as source_version
+
+        return source_version
+
+
+DYRO_VERSION = _installed_dyro_version()
 BRIDGE_VERSION = "1.0"
 PROTOCOL_MAJOR = 1
 PROTOCOL_MINOR = 0

@@ -111,3 +111,14 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
         )
         self.assertIn(runtime_download, workflow)
         self.assertIn(build_download, workflow)
+
+    def test_ci_creates_audit_root_dist_before_git_archive(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('mkdir -p "${context}/dist" "${context}/wheelhouse" "${audit_root}/dist"', workflow)
+        self.assertIn(
+            'git archive --format=tar.gz --output="${audit_root}/dist/source.tar.gz" HEAD',
+            workflow,
+        )

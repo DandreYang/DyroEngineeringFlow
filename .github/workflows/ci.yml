@@ -76,7 +76,8 @@ jobs:
           set -euo pipefail
           audit_root="${RUNNER_TEMP}/dyro-bridge-audit"
           context="${audit_root}/context"
-          mkdir -p "${context}/dist" "${context}/wheelhouse" "${audit_root}/evidence"
+          mkdir -p "${context}/dist" "${context}/wheelhouse" "${audit_root}/dist" \
+            "${audit_root}/evidence"
           uv sync --locked --all-extras --dev
           uv export --locked --no-dev --no-emit-project --format requirements-txt \
             --output-file "${context}/requirements.txt"
