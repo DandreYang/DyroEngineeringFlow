@@ -18,6 +18,7 @@ from typing import Iterable, Iterator
 from ..config import Config, validate_id
 from ..errors import DyroError, ValidationError
 from ..graph import build_task_graph, validate_task_graph
+from ..read_limits import ReadBudget
 from ..state import (
     ensure_safe_child_directory,
     exclusive_directory_lock,
@@ -42,8 +43,21 @@ from .actions import (
     start_action as _start_action,
     verify_owner_lease as _verify_owner_lease,
 )
-from .contracts import canonical_contract, contract_sha256, parse_contract, validate_objective_scope
-from .budgets import BudgetCaps, BudgetDecision, BudgetDecisionInput, BudgetRequest, BudgetReservation, BudgetUsage, decide_budget
+from .contracts import (
+    canonical_contract,
+    contract_sha256,
+    parse_contract,
+    validate_objective_scope,
+)
+from .budgets import (
+    BudgetCaps,
+    BudgetDecision,
+    BudgetDecisionInput,
+    BudgetRequest,
+    BudgetReservation,
+    BudgetUsage,
+    decide_budget,
+)
 from .models import ActionKind, Objective, Operation, RequestedMode
 from .objective_storage import (
     OBJECTIVE_STORE_SCHEMA_VERSION,
@@ -65,7 +79,9 @@ def _toml_string(value: str) -> str:
 
 def _objective_root(config: Config, *, create: bool = True) -> Path:
     if os.name == "nt":
-        raise DyroError("Windows 暂不支持安全的 Objective 持久化；拒绝访问以避免 reparse-point 路径逃逸")
+        raise DyroError(
+            "Windows 暂不支持安全的 Objective 持久化；拒绝访问以避免 reparse-point 路径逃逸"
+        )
     parent = config.root / ".dyro"
     if parent.is_symlink():
         raise ValidationError(f"Objective 状态父目录不能是符号链接：{parent}")
@@ -77,7 +93,9 @@ def _objective_root(config: Config, *, create: bool = True) -> Path:
         try:
             ensure_safe_child_directory(config.root, ".dyro")
         except DyroError as exc:
-            raise ValidationError(f"Objective 状态父目录必须是安全的普通目录：{parent}") from exc
+            raise ValidationError(
+                f"Objective 状态父目录必须是安全的普通目录：{parent}"
+            ) from exc
     root = config.objectives_dir
     if root.is_symlink() or (root.exists() and not root.is_dir()):
         raise ValidationError(f"Objective 状态目录必须是安全的普通目录：{root}")
@@ -85,7 +103,9 @@ def _objective_root(config: Config, *, create: bool = True) -> Path:
         try:
             ensure_safe_child_directory(parent, "objectives")
         except DyroError as exc:
-            raise ValidationError(f"Objective 状态目录必须是安全的普通目录：{root}") from exc
+            raise ValidationError(
+                f"Objective 状态目录必须是安全的普通目录：{root}"
+            ) from exc
     return root
 
 
@@ -193,7 +213,9 @@ def _task_contract_sha256(task: Task) -> str:
         raise ValidationError(f"无法读取任务 {task.id} contract：{manifest}") from exc
 
 
-def _scope_for(config: Config, objective: Objective) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+def _scope_for(
+    config: Config, objective: Objective
+) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
     graph = build_task_graph(config, line=objective.line)
     issues = validate_task_graph(graph)
     if issues:
@@ -216,12 +238,21 @@ def _scope_for(config: Config, objective: Objective) -> tuple[tuple[str, ...], t
         closure.add(task_id)
         pending.extend(task.depends_on)
     scope = tuple(sorted(closure))
-    contracts = tuple((task_id, _task_contract_sha256(known[task_id])) for task_id in scope)
+    contracts = tuple(
+        (task_id, _task_contract_sha256(known[task_id])) for task_id in scope
+    )
     return scope, contracts
 
 
-def _scope_sha256(scope: tuple[str, ...], contracts: tuple[tuple[str, str], ...]) -> str:
-    return _sha256({"scope": list(scope), "task_contract_sha256": [list(item) for item in contracts]})
+def _scope_sha256(
+    scope: tuple[str, ...], contracts: tuple[tuple[str, str], ...]
+) -> str:
+    return _sha256(
+        {
+            "scope": list(scope),
+            "task_contract_sha256": [list(item) for item in contracts],
+        }
+    )
 
 
 def _record_payload(record: StoredObjective) -> dict[str, object]:
@@ -256,7 +287,10 @@ def _record_from_payload(
         "contract_sha256",
     }:
         raise ValidationError(f"Objective 投影结构无效：{directory}")
-    if type(payload.get("schema_version")) is not int or payload.get("schema_version") != OBJECTIVE_STORE_SCHEMA_VERSION:
+    if (
+        type(payload.get("schema_version")) is not int
+        or payload.get("schema_version") != OBJECTIVE_STORE_SCHEMA_VERSION
+    ):
         raise ValidationError(f"Objective 投影版本无效：{directory}")
     raw_id = payload.get("id")
     if not isinstance(raw_id, str):
@@ -269,7 +303,11 @@ def _record_from_payload(
     if not isinstance(operator_state, str) or operator_state not in OPERATOR_STATES:
         raise ValidationError(f"Objective 操作者状态无效：{directory}")
     scope_raw = payload.get("scope")
-    if not isinstance(scope_raw, list) or not scope_raw or not all(isinstance(item, str) for item in scope_raw):
+    if (
+        not isinstance(scope_raw, list)
+        or not scope_raw
+        or not all(isinstance(item, str) for item in scope_raw)
+    ):
         raise ValidationError(f"Objective scope 无效：{directory}")
     scope = tuple(validate_id(item, "Objective scope task") for item in scope_raw)
     if scope != tuple(sorted(scope)) or len(set(scope)) != len(scope):
@@ -279,7 +317,11 @@ def _record_from_payload(
         raise ValidationError(f"Objective task contract 投影无效：{directory}")
     contracts: list[tuple[str, str]] = []
     for item in contracts_raw:
-        if not isinstance(item, list) or len(item) != 2 or not all(isinstance(part, str) for part in item):
+        if (
+            not isinstance(item, list)
+            or len(item) != 2
+            or not all(isinstance(part, str) for part in item)
+        ):
             raise ValidationError(f"Objective task contract 投影无效：{directory}")
         task_id = validate_id(item[0], "Objective scope task")
         digest = item[1]
@@ -290,17 +332,27 @@ def _record_from_payload(
     if tuple(task_id for task_id, _ in frozen_contracts) != scope:
         raise ValidationError(f"Objective scope 与 task contract 不一致：{directory}")
     scope_sha = payload.get("scope_sha256")
-    if not isinstance(scope_sha, str) or scope_sha != _scope_sha256(scope, frozen_contracts):
+    if not isinstance(scope_sha, str) or scope_sha != _scope_sha256(
+        scope, frozen_contracts
+    ):
         raise ValidationError(f"Objective scope 哈希无效：{directory}")
     contract_sha = payload.get("contract_sha256")
-    if not isinstance(contract_sha, str) or len(contract_sha) != 64 or any(char not in "0123456789abcdef" for char in contract_sha):
+    if (
+        not isinstance(contract_sha, str)
+        or len(contract_sha) != 64
+        or any(char not in "0123456789abcdef" for char in contract_sha)
+    ):
         raise ValidationError(f"Objective contract 哈希无效：{directory}")
     if contract_content is None:
-        contract_file = _safe_file(_contract_path(directory, revision), "Objective contract")
+        contract_file = _safe_file(
+            _contract_path(directory, revision), "Objective contract"
+        )
         try:
             contract_content = contract_file.read_bytes()
         except OSError as exc:
-            raise ValidationError(f"无法读取 Objective contract：{contract_file}") from exc
+            raise ValidationError(
+                f"无法读取 Objective contract：{contract_file}"
+            ) from exc
     objective = parse_contract(contract_content)
     if objective.id != objective_id or contract_sha256(objective) != contract_sha:
         raise ValidationError(f"Objective contract 与投影不匹配：{directory}")
@@ -353,7 +405,9 @@ def _assert_ownership_available(
         return
     requested = set(record.scope)
     for other in list_objectives(config, recover=recover):
-        if other.objective.id == exclude_id or not _retains_mutation_scope(config, other):
+        if other.objective.id == exclude_id or not _retains_mutation_scope(
+            config, other
+        ):
             continue
         overlap = sorted(requested & set(other.scope))
         if overlap:
@@ -367,13 +421,18 @@ def _assert_no_inflight_tasks(config: Config, record: StoredObjective) -> None:
     in_flight = [
         task_id
         for task_id in record.scope
-        if task_id in tasks and task_status(config, tasks[task_id]) in {"assigned", "in_progress"}
+        if task_id in tasks
+        and task_status(config, tasks[task_id]) in {"assigned", "in_progress"}
     ]
     if in_flight:
-        raise DyroError(f"存在 reserved/started/running Task，拒绝变更 Objective：{', '.join(in_flight)}")
+        raise DyroError(
+            f"存在 reserved/started/running Task，拒绝变更 Objective：{', '.join(in_flight)}"
+        )
 
 
-def create_objective(config: Config, content: str | bytes, *, dry_run: bool = False) -> StoredObjective:
+def create_objective(
+    config: Config, content: str | bytes, *, dry_run: bool = False
+) -> StoredObjective:
     """Accept one Objective contract and pin its TaskGraph-derived scope."""
     objective = parse_contract(content)
     if dry_run:
@@ -414,11 +473,15 @@ def create_objective(config: Config, content: str | bytes, *, dry_run: bool = Fa
             )
 
 
-def _list_objectives_unlocked(config: Config, *, recover: bool) -> list[StoredObjective]:
+def _list_objectives_unlocked(
+    config: Config, *, recover: bool
+) -> list[StoredObjective]:
     records: list[StoredObjective] = []
     for objective_id in list_objective_ids(config):
         with open_objective_directory(config, objective_id) as directory:
-            records.append(_read_stored(config, objective_id, recover=recover, directory=directory))
+            records.append(
+                _read_stored(config, objective_id, recover=recover, directory=directory)
+            )
     return records
 
 
@@ -432,19 +495,43 @@ def list_objectives(config: Config, *, recover: bool = True) -> list[StoredObjec
         return _list_objectives_unlocked(config, recover=True)
 
 
-def get_objective(config: Config, objective_id: str, *, recover: bool = True) -> StoredObjective:
+def get_objective(
+    config: Config,
+    objective_id: str,
+    *,
+    recover: bool = True,
+    read_budget: ReadBudget | None = None,
+) -> StoredObjective:
     if recover:
         with _objective_lock(config, create=False):
             with open_objective_directory(config, objective_id) as directory:
-                return _read_stored(config, objective_id, recover=True, directory=directory)
-    with open_objective_directory(config, objective_id) as directory:
-        return _read_stored(config, objective_id, recover=False, directory=directory)
+                return _read_stored(
+                    config,
+                    objective_id,
+                    recover=True,
+                    directory=directory,
+                    budget=read_budget,
+                )
+    with open_objective_directory(
+        config, objective_id, budget=read_budget
+    ) as directory:
+        return _read_stored(
+            config,
+            objective_id,
+            recover=False,
+            directory=directory,
+            budget=read_budget,
+        )
 
 
-def _require_actionable_objective(config: Config, objective_id: str, directory: ObjectiveDirectory) -> StoredObjective:
+def _require_actionable_objective(
+    config: Config, objective_id: str, directory: ObjectiveDirectory
+) -> StoredObjective:
     record = _read_stored(config, objective_id, directory=directory)
     if record.operator_state != "active":
-        raise DyroError("Objective 未处于 active 状态；拒绝取得或使用 Scheduler mutation authority")
+        raise DyroError(
+            "Objective 未处于 active 状态；拒绝取得或使用 Scheduler mutation authority"
+        )
     if not record.owns_mutation_scope:
         raise DyroError("observe Objective 不取得 Scheduler mutation authority")
     return record
@@ -459,7 +546,9 @@ def _assert_action_is_authorized(record: StoredObjective, intent: ActionIntent) 
         or intent.objective_event_sha256 != record.event_sha256
         or intent.scope_sha256 != record.scope_sha256
     ):
-        raise DyroError("Action intent 未绑定当前已接受的 Objective revision、事件或 scope")
+        raise DyroError(
+            "Action intent 未绑定当前已接受的 Objective revision、事件或 scope"
+        )
     if intent.subject_id not in record.scope:
         raise DyroError("Action subject 不在当前 Objective mutation scope 内")
     required_operation = {
@@ -467,23 +556,36 @@ def _assert_action_is_authorized(record: StoredObjective, intent: ActionIntent) 
         ActionKind.REVIEW_TASK: Operation.REVIEW,
         ActionKind.MERGE_TASK: Operation.MERGE,
     }.get(intent.operation)
-    if required_operation is None or required_operation not in record.objective.operations:
+    if (
+        required_operation is None
+        or required_operation not in record.objective.operations
+    ):
         raise DyroError("Action operation 未获当前 Objective contract 授权")
 
 
 def _unresolved_actions(directory: ObjectiveDirectory) -> tuple[ActionRecord, ...]:
-    return tuple(record for record in _list_actions(directory) if record.status is ActionStatus.UNCERTAIN)
+    return tuple(
+        record
+        for record in _list_actions(directory)
+        if record.status is ActionStatus.UNCERTAIN
+    )
 
 
-def _assert_no_unresolved_actions(directory: ObjectiveDirectory, *, operation: str) -> None:
+def _assert_no_unresolved_actions(
+    directory: ObjectiveDirectory, *, operation: str
+) -> None:
     unresolved = _unresolved_actions(directory)
     if unresolved:
         action_ids = ", ".join(record.intent.action_id for record in unresolved)
         raise DyroError(f"存在 uncertain Action，拒绝 {operation}：{action_ids}")
 
 
-def _prepared_reserved_action_cancellation(directory: ObjectiveDirectory, *, reason: str) -> dict[str, object] | None:
-    return _prepare_action_cancellation(directory, summary=reason, now=datetime.now(timezone.utc))
+def _prepared_reserved_action_cancellation(
+    directory: ObjectiveDirectory, *, reason: str
+) -> dict[str, object] | None:
+    return _prepare_action_cancellation(
+        directory, summary=reason, now=datetime.now(timezone.utc)
+    )
 
 
 def _retains_mutation_scope(config: Config, record: StoredObjective) -> bool:
@@ -533,7 +635,9 @@ def renew_objective_owner_lease(
     with _objective_lock(config):
         with open_objective_directory(config, objective_id) as directory:
             _require_actionable_objective(config, objective_id, directory)
-            return _renew_owner_lease(directory, grant=grant, now=now, ttl_seconds=ttl_seconds)
+            return _renew_owner_lease(
+                directory, grant=grant, now=now, ttl_seconds=ttl_seconds
+            )
 
 
 def release_objective_owner_lease(
@@ -564,11 +668,15 @@ def reserve_objective_action(
             _assert_no_unresolved_actions(directory, operation="创建下一 Action")
             lease = _verify_owner_lease(directory, grant=grant, now=now)
             if intent.owner_generation != lease.generation:
-                raise DyroError("Action intent owner_generation 与当前 Scheduler lease 不匹配")
+                raise DyroError(
+                    "Action intent owner_generation 与当前 Scheduler lease 不匹配"
+                )
             return _reserve_action(directory, intent)
 
 
-def _budget_usage(records: Iterable[ActionRecord], *, objective_id: str | None) -> BudgetUsage:
+def _budget_usage(
+    records: Iterable[ActionRecord], *, objective_id: str | None
+) -> BudgetUsage:
     """Derive conservative committed usage from durable Action records only.
 
     A start has crossed the durable side-effect barrier, so it is charged even
@@ -578,14 +686,17 @@ def _budget_usage(records: Iterable[ActionRecord], *, objective_id: str | None) 
     next Action look safer than it is.
     """
     selected = tuple(
-        record for record in records
+        record
+        for record in records
         if objective_id is None or record.intent.objective_id == objective_id
     )
     started = tuple(record for record in selected if record.start is not None)
     attempts: dict[str, int] = {}
     for record in started:
         reservation = record.intent.budget_reservation
-        attempts[reservation.task_id] = attempts.get(reservation.task_id, 0) + reservation.attempts
+        attempts[reservation.task_id] = (
+            attempts.get(reservation.task_id, 0) + reservation.attempts
+        )
     terminal = tuple(
         sorted(
             (record for record in started if record.receipt is not None),
@@ -595,11 +706,15 @@ def _budget_usage(records: Iterable[ActionRecord], *, objective_id: str | None) 
     failures = sum(
         record.intent.budget_reservation.failures
         for record in terminal
-        if record.receipt is not None and record.receipt.status in {ActionStatus.FAILED, ActionStatus.UNCERTAIN}
+        if record.receipt is not None
+        and record.receipt.status in {ActionStatus.FAILED, ActionStatus.UNCERTAIN}
     )
     consecutive = 0
     for record in terminal:
-        if record.receipt is not None and record.receipt.status in {ActionStatus.FAILED, ActionStatus.UNCERTAIN}:
+        if record.receipt is not None and record.receipt.status in {
+            ActionStatus.FAILED,
+            ActionStatus.UNCERTAIN,
+        }:
             consecutive += record.intent.budget_reservation.failures
         else:
             consecutive = 0
@@ -637,9 +752,13 @@ def _all_action_records_unlocked(config: Config) -> tuple[ActionRecord, ...]:
 def _budget_request(intent: ActionIntent) -> BudgetRequest:
     """Fix the conservative charge for each supported supervised operation."""
     if intent.operation is ActionKind.EXECUTE_TASK:
-        return BudgetRequest(intent.subject_id, actions=1, attempts=1, failures=1, parallel=1)
+        return BudgetRequest(
+            intent.subject_id, actions=1, attempts=1, failures=1, parallel=1
+        )
     if intent.operation is ActionKind.REVIEW_TASK:
-        return BudgetRequest(intent.subject_id, actions=1, attempts=0, failures=1, parallel=1)
+        return BudgetRequest(
+            intent.subject_id, actions=1, attempts=0, failures=1, parallel=1
+        )
     raise DyroError("受监督执行当前只支持 execute_task 与 review_task")
 
 
@@ -667,7 +786,9 @@ def reserve_supervised_objective_action(
             _assert_no_unresolved_actions(directory, operation="创建下一 Action")
             lease = _verify_owner_lease(directory, grant=grant, now=now)
             if intent.owner_generation != lease.generation:
-                raise DyroError("Action intent owner_generation 与当前 Scheduler lease 不匹配")
+                raise DyroError(
+                    "Action intent owner_generation 与当前 Scheduler lease 不匹配"
+                )
             request = _budget_request(intent)
             decision = decide_budget(
                 BudgetDecisionInput(
@@ -684,7 +805,9 @@ def reserve_supervised_objective_action(
                 )
             )
             if intent.budget_reservation != decision.reservation:
-                raise DyroError("Action intent budget_reservation 未使用受监督操作的固定保守预算")
+                raise DyroError(
+                    "Action intent budget_reservation 未使用受监督操作的固定保守预算"
+                )
             if not decision.allowed:
                 reasons = ", ".join(reason.value for reason in decision.reasons)
                 raise DyroError(f"Objective 预算拒绝此 Action：{reasons}")
@@ -703,7 +826,9 @@ def start_objective_action(
     with _objective_lock(config):
         with open_objective_directory(config, objective_id) as directory:
             record = _require_actionable_objective(config, objective_id, directory)
-            _assert_action_is_authorized(record, _read_action(directory, action_id).intent)
+            _assert_action_is_authorized(
+                record, _read_action(directory, action_id).intent
+            )
             return _start_action(directory, action_id=action_id, grant=grant, now=now)
 
 
@@ -721,13 +846,17 @@ def record_objective_action_receipt(
             return _record_action_receipt(directory, receipt, grant=grant, now=now)
 
 
-def list_objective_actions(config: Config, objective_id: str) -> tuple[ActionRecord, ...]:
+def list_objective_actions(
+    config: Config, objective_id: str
+) -> tuple[ActionRecord, ...]:
     with _objective_lock(config, create=False):
         with open_objective_directory(config, objective_id) as directory:
             return _list_actions(directory)
 
 
-def get_objective_action(config: Config, objective_id: str, action_id: str) -> ActionRecord:
+def get_objective_action(
+    config: Config, objective_id: str, action_id: str
+) -> ActionRecord:
     with _objective_lock(config, create=False):
         with open_objective_directory(config, objective_id) as directory:
             return _read_action(directory, action_id)
@@ -768,7 +897,9 @@ def _persist_revision(
     )
 
 
-def reconcile_objective(config: Config, objective_id: str, *, dry_run: bool = False) -> StoredObjective:
+def reconcile_objective(
+    config: Config, objective_id: str, *, dry_run: bool = False
+) -> StoredObjective:
     if dry_run:
         current = get_objective(config, objective_id, recover=False)
         if current.operator_state == "stopped":
@@ -783,14 +914,18 @@ def reconcile_objective(config: Config, objective_id: str, *, dry_run: bool = Fa
             event_seq=current.event_seq,
             event_sha256=current.event_sha256,
         )
-        _assert_ownership_available(config, candidate, exclude_id=current.objective.id, recover=False)
+        _assert_ownership_available(
+            config, candidate, exclude_id=current.objective.id, recover=False
+        )
         _assert_no_inflight_tasks(config, candidate)
         return candidate
     with _objective_mutation_lock(config):
         with open_objective_directory(config, objective_id) as directory:
             current = _read_stored(config, objective_id, directory=directory)
             if current.operator_state == "stopped":
-                raise DyroError("已停止的 Objective 不能 reconcile；请创建新的 Objective")
+                raise DyroError(
+                    "已停止的 Objective 不能 reconcile；请创建新的 Objective"
+                )
             return _persist_revision(
                 config,
                 current,
@@ -802,7 +937,9 @@ def reconcile_objective(config: Config, objective_id: str, *, dry_run: bool = Fa
 
 
 def _with_targets(objective: Objective, targets: Iterable[str]) -> Objective:
-    target_set = tuple(sorted({validate_id(target, "Objective target") for target in targets}))
+    target_set = tuple(
+        sorted({validate_id(target, "Objective target") for target in targets})
+    )
     if not target_set:
         raise ValidationError("Objective 必须至少保留一个 target")
     return Objective(
@@ -818,15 +955,29 @@ def _with_targets(objective: Objective, targets: Iterable[str]) -> Objective:
     )
 
 
-def add_objective_target(config: Config, objective_id: str, task_id: str, *, dry_run: bool = False) -> StoredObjective:
+def add_objective_target(
+    config: Config, objective_id: str, task_id: str, *, dry_run: bool = False
+) -> StoredObjective:
     if dry_run:
         current = get_objective(config, objective_id, recover=False)
         if current.operator_state == "stopped":
             raise DyroError("已停止的 Objective 不能调整 scope")
-        updated = _with_targets(current.objective, (*current.objective.targets, task_id))
+        updated = _with_targets(
+            current.objective, (*current.objective.targets, task_id)
+        )
         scope, contracts = _scope_for(config, updated)
-        candidate = _make_record(updated, revision=current.revision + 1, operator_state=current.operator_state, scope=scope, contracts=contracts, event_seq=current.event_seq, event_sha256=current.event_sha256)
-        _assert_ownership_available(config, candidate, exclude_id=current.objective.id, recover=False)
+        candidate = _make_record(
+            updated,
+            revision=current.revision + 1,
+            operator_state=current.operator_state,
+            scope=scope,
+            contracts=contracts,
+            event_seq=current.event_seq,
+            event_sha256=current.event_sha256,
+        )
+        _assert_ownership_available(
+            config, candidate, exclude_id=current.objective.id, recover=False
+        )
         _assert_no_inflight_tasks(config, candidate)
         return candidate
     with _objective_mutation_lock(config):
@@ -834,7 +985,9 @@ def add_objective_target(config: Config, objective_id: str, task_id: str, *, dry
             current = _read_stored(config, objective_id, directory=directory)
             if current.operator_state == "stopped":
                 raise DyroError("已停止的 Objective 不能调整 scope")
-            updated = _with_targets(current.objective, (*current.objective.targets, task_id))
+            updated = _with_targets(
+                current.objective, (*current.objective.targets, task_id)
+            )
             return _persist_revision(
                 config,
                 current,
@@ -845,17 +998,32 @@ def add_objective_target(config: Config, objective_id: str, task_id: str, *, dry
             )
 
 
-def remove_objective_target(config: Config, objective_id: str, task_id: str, *, dry_run: bool = False) -> StoredObjective:
+def remove_objective_target(
+    config: Config, objective_id: str, task_id: str, *, dry_run: bool = False
+) -> StoredObjective:
     if dry_run:
         current = get_objective(config, objective_id, recover=False)
         if current.operator_state == "stopped":
             raise DyroError("已停止的 Objective 不能调整 scope")
         if task_id not in current.objective.targets:
             raise DyroError(f"Objective target 不存在：{task_id}")
-        updated = _with_targets(current.objective, (item for item in current.objective.targets if item != task_id))
+        updated = _with_targets(
+            current.objective,
+            (item for item in current.objective.targets if item != task_id),
+        )
         scope, contracts = _scope_for(config, updated)
-        candidate = _make_record(updated, revision=current.revision + 1, operator_state=current.operator_state, scope=scope, contracts=contracts, event_seq=current.event_seq, event_sha256=current.event_sha256)
-        _assert_ownership_available(config, candidate, exclude_id=current.objective.id, recover=False)
+        candidate = _make_record(
+            updated,
+            revision=current.revision + 1,
+            operator_state=current.operator_state,
+            scope=scope,
+            contracts=contracts,
+            event_seq=current.event_seq,
+            event_sha256=current.event_sha256,
+        )
+        _assert_ownership_available(
+            config, candidate, exclude_id=current.objective.id, recover=False
+        )
         _assert_no_inflight_tasks(config, candidate)
         return candidate
     with _objective_mutation_lock(config):
@@ -865,7 +1033,10 @@ def remove_objective_target(config: Config, objective_id: str, task_id: str, *, 
                 raise DyroError("已停止的 Objective 不能调整 scope")
             if task_id not in current.objective.targets:
                 raise DyroError(f"Objective target 不存在：{task_id}")
-            updated = _with_targets(current.objective, (item for item in current.objective.targets if item != task_id))
+            updated = _with_targets(
+                current.objective,
+                (item for item in current.objective.targets if item != task_id),
+            )
             return _persist_revision(
                 config,
                 current,
@@ -876,13 +1047,17 @@ def remove_objective_target(config: Config, objective_id: str, task_id: str, *, 
             )
 
 
-def _transition_objective(config: Config, objective_id: str, next_state: str, *, dry_run: bool = False) -> StoredObjective:
+def _transition_objective(
+    config: Config, objective_id: str, next_state: str, *, dry_run: bool = False
+) -> StoredObjective:
     def transition(directory: ObjectiveDirectory) -> StoredObjective:
         current = _read_stored(config, objective_id, directory=directory)
         if next_state == "active" and current.operator_state == "stopped":
             raise DyroError("已停止的 Objective 不能恢复；请创建新的 Objective")
         if next_state == "active" and drifted_objective(config, current):
-            raise DyroError("Objective contract 或 scope 已漂移；请先运行 objective reconcile")
+            raise DyroError(
+                "Objective contract 或 scope 已漂移；请先运行 objective reconcile"
+            )
         if current.operator_state == next_state:
             return current
         candidate = _make_record(
@@ -895,7 +1070,9 @@ def _transition_objective(config: Config, objective_id: str, next_state: str, *,
             event_sha256=current.event_sha256,
         )
         if next_state == "active":
-            _assert_ownership_available(config, candidate, exclude_id=current.objective.id)
+            _assert_ownership_available(
+                config, candidate, exclude_id=current.objective.id
+            )
         _assert_no_inflight_tasks(config, candidate)
         cancellation = (
             _prepared_reserved_action_cancellation(
@@ -917,7 +1094,9 @@ def _transition_objective(config: Config, objective_id: str, next_state: str, *,
         if next_state == "active" and current.operator_state == "stopped":
             raise DyroError("已停止的 Objective 不能恢复；请创建新的 Objective")
         if next_state == "active" and drifted_objective(config, current):
-            raise DyroError("Objective contract 或 scope 已漂移；请先运行 objective reconcile")
+            raise DyroError(
+                "Objective contract 或 scope 已漂移；请先运行 objective reconcile"
+            )
         if current.operator_state == next_state:
             return current
         candidate = _make_record(
@@ -930,7 +1109,9 @@ def _transition_objective(config: Config, objective_id: str, next_state: str, *,
             event_sha256=current.event_sha256,
         )
         if next_state == "active":
-            _assert_ownership_available(config, candidate, exclude_id=current.objective.id, recover=False)
+            _assert_ownership_available(
+                config, candidate, exclude_id=current.objective.id, recover=False
+            )
         _assert_no_inflight_tasks(config, candidate)
         return candidate
     with _objective_mutation_lock(config):
@@ -938,15 +1119,21 @@ def _transition_objective(config: Config, objective_id: str, next_state: str, *,
             return transition(directory)
 
 
-def pause_objective(config: Config, objective_id: str, *, dry_run: bool = False) -> StoredObjective:
+def pause_objective(
+    config: Config, objective_id: str, *, dry_run: bool = False
+) -> StoredObjective:
     return _transition_objective(config, objective_id, "paused", dry_run=dry_run)
 
 
-def resume_objective(config: Config, objective_id: str, *, dry_run: bool = False) -> StoredObjective:
+def resume_objective(
+    config: Config, objective_id: str, *, dry_run: bool = False
+) -> StoredObjective:
     return _transition_objective(config, objective_id, "active", dry_run=dry_run)
 
 
-def stop_objective(config: Config, objective_id: str, *, dry_run: bool = False) -> StoredObjective:
+def stop_objective(
+    config: Config, objective_id: str, *, dry_run: bool = False
+) -> StoredObjective:
     return _transition_objective(config, objective_id, "stopped", dry_run=dry_run)
 
 
@@ -963,7 +1150,10 @@ def derive_objective_result(config: Config, record: StoredObjective) -> str:
     if drifted_objective(config, record):
         return "repair_required"
     tasks = {task.id: task for task in list_tasks(config)}
-    if all(task_status(config, tasks[target]) == "done" for target in record.objective.targets):
+    if all(
+        task_status(config, tasks[target]) == "done"
+        for target in record.objective.targets
+    ):
         from ..tasks import _assert_dependency_integrated
 
         try:
@@ -982,7 +1172,9 @@ def assert_legacy_scheduler_allowed(config: Config, task_ids: Iterable[str]) -> 
         return
     with _objective_lock(config, create=False):
         for record in _list_objectives_unlocked(config, recover=True):
-            if _retains_mutation_scope(config, record) and requested & set(record.scope):
+            if _retains_mutation_scope(config, record) and requested & set(
+                record.scope
+            ):
                 raise DyroError(
                     f"任务位于受保护 Objective {record.objective.id} 的 mutation scope；"
                     "请使用 plan-only Objective 命令，旧 task loop/daemon 不能绕过 ownership"
@@ -990,7 +1182,9 @@ def assert_legacy_scheduler_allowed(config: Config, task_ids: Iterable[str]) -> 
 
 
 @contextmanager
-def legacy_scheduler_reservation(config: Config, task_ids: Iterable[str]) -> Iterator[None]:
+def legacy_scheduler_reservation(
+    config: Config, task_ids: Iterable[str]
+) -> Iterator[None]:
     """Hold the Objective fence through one automated Task reservation.
 
     Manual ``task run`` remains an explicit operator action.  Old loop/daemon

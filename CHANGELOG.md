@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.6.3 - 2026-08-12
+
+- Keep the shipping surface as CLI + Skill only. PyPI releases through 0.6.2
+  never exposed `dyro-bridge` / `dyro-mcp` entry points or the optional `[mcp]`
+  extra; those remain out of the wheel. Historical ADR/design/evidence docs stay
+  in the repository as archive only. Upgraders from interim git builds that had
+  those entry points should expect them to be absent after upgrading.
+- Install the cross-platform Skill as a Dyro-owned **mirror** under
+  `DYRO_HOME/skills/dyro-control-plane`, with per-host **avatars** (symlinks /
+  Windows junctions) for detected agent homes (Codex, Claude, Agents, Cursor).
+  After upgrading, preview then install with
+  `dyro integration install skill --dry-run` / `dyro integration install skill --yes`
+  (or the `codex` alias). The Skill uses read-only `dyro` CLI commands
+  (`workspace list` / `status`, `objective list|status|plan`).
+- Migrate legacy whole-directory Codex Skill installs to mirror+avatar on the
+  next owned install, but only when the legacy target is a detected host avatar
+  whose content matches the packaged Skill assets (fail closed otherwise).
+- Let interactive line/hotfix repository picks accept list indices and/or
+  repository IDs; when a token matches a repository ID exactly (including
+  pure-numeric IDs), the ID wins over index interpretation.
+
 ## 0.6.2 - 2026-08-05
 
 - Extend interactive `dyro setup` and Profile onboarding with a single,

@@ -281,6 +281,9 @@ dyro --version
 python3 -m pip install --user --upgrade dyro
 ```
 
+可选：升级后用 `dyro integration install skill --dry-run` 预览，再执行
+`dyro integration install skill --yes`（别名 `codex`），把控制面 Skill 挂到已检测到的 Agent 宿主目录。
+
 交互运行 `dyro`、`dyro home` 或 `dyro start` 时，Dyro 每个本地自然日最多访问一次官方 PyPI；断网、超时或状态目录不可写都不会阻塞进入工作区。默认仍由用户确认更新：
 
 ```bash

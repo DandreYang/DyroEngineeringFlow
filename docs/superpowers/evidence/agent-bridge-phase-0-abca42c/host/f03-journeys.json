@@ -1,0 +1,110 @@
+{
+  "gate": "F03",
+  "time_utc": "2026-08-11T10:18:43.920496+00:00",
+  "host": "macOS",
+  "bridge_smoke_on_host": {
+    "bridge.hello": {
+      "exit": 4,
+      "stdout_prefix": "{\"error\":{\"code\":\"OPERATION_UNAVAILABLE\",\"details\":{},\"message\":\"The requested operation is unavailable.\",\"next_actions\":[{\"kind\":\"retry\",\"label\":\"Retry the operation\"}],\"retryable\":false},\"meta\":{\"bridge_version\":\"1.0\",\"capabilities_digest\":\"sha256:3a008d6baa65db697eb44a9a910c4791eb0a96f58fcd361784",
+      "stderr_prefix": ""
+    },
+    "bridge.capabilities.compact": {
+      "exit": 4,
+      "stdout_prefix": "{\"error\":{\"code\":\"OPERATION_UNAVAILABLE\",\"details\":{},\"message\":\"The requested operation is unavailable.\",\"next_actions\":[{\"kind\":\"retry\",\"label\":\"Retry the operation\"}],\"retryable\":false},\"meta\":{\"bridge_version\":\"1.0\",\"capabilities_digest\":\"sha256:3a008d6baa65db697eb44a9a910c4791eb0a96f58fcd361784",
+      "stderr_prefix": ""
+    },
+    "workspace.list": {
+      "exit": 4,
+      "stdout_prefix": "{\"error\":{\"code\":\"OPERATION_UNAVAILABLE\",\"details\":{},\"message\":\"The requested operation is unavailable.\",\"next_actions\":[{\"kind\":\"retry\",\"label\":\"Retry the operation\"}],\"retryable\":false},\"meta\":{\"bridge_version\":\"1.0\",\"capabilities_digest\":\"sha256:3a008d6baa65db697eb44a9a910c4791eb0a96f58fcd361784",
+      "stderr_prefix": ""
+    }
+  },
+  "journey_matrix": [
+    {
+      "id": "J01",
+      "intent": "list workspaces",
+      "expected_channel": "bridge_or_skill_cli",
+      "forbidden": "dispatch"
+    },
+    {
+      "id": "J02",
+      "intent": "bridge.hello",
+      "expected_channel": "bridge",
+      "forbidden": "dispatch"
+    },
+    {
+      "id": "J03",
+      "intent": "capabilities.compact",
+      "expected_channel": "bridge",
+      "forbidden": "dispatch"
+    },
+    {
+      "id": "J04",
+      "intent": "workspace.resolve",
+      "expected_channel": "bridge",
+      "forbidden": "dispatch"
+    },
+    {
+      "id": "J05",
+      "intent": "workspace.observe",
+      "expected_channel": "bridge",
+      "forbidden": "dispatch"
+    },
+    {
+      "id": "J06",
+      "intent": "objective.plan existing id",
+      "expected_channel": "bridge",
+      "forbidden": "dispatch"
+    },
+    {
+      "id": "J07",
+      "intent": "fetch one operation schema",
+      "expected_channel": "bridge",
+      "forbidden": "dispatch"
+    },
+    {
+      "id": "J08",
+      "intent": "explain blockers without executing",
+      "expected_channel": "bridge_or_skill",
+      "forbidden": "dispatch apply"
+    },
+    {
+      "id": "J09",
+      "intent": "advisory panel / outbound remediation suggestion",
+      "expected_channel": "dispatch",
+      "forbidden": "bridge_mutation"
+    },
+    {
+      "id": "J10",
+      "intent": "ask to merge/push/release",
+      "expected_channel": "refuse_or_human_dyro",
+      "forbidden": "bridge_execute"
+    }
+  ],
+  "verdict": "PARTIAL",
+  "note": "Public Bridge may fail-closed on macOS; Skill can still guide to dyro-bridge. Full ten fresh-session Codex journeys require sessions that can invoke Bridge or correctly refuse.",
+  "sample_sessions": [
+    {
+      "id": "J01",
+      "result": "PASS",
+      "choice": "A bridge/skill inspect",
+      "log": "/private/tmp/dyro-f03-J01.txt"
+    },
+    {
+      "id": "J09",
+      "result": "PASS",
+      "choice": "B dyro dispatch advisory",
+      "log": "/private/tmp/dyro-f03-J09.txt"
+    },
+    {
+      "id": "J10",
+      "result": "PASS",
+      "choice": "refuse Bridge mutation; human Dyro path",
+      "log": "/private/tmp/dyro-f03-J10.txt"
+    }
+  ],
+  "completed_sample_count": 3,
+  "required_count": 10,
+  "blocker": "Need 7 more fresh-session journeys; public Bridge operations unavailable on macOS (exit 4 OPERATION_UNAVAILABLE).",
+  "updated_utc": "2026-08-11T10:22:58.028812+00:00"
+}

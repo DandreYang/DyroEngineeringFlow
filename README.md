@@ -283,6 +283,10 @@ To upgrade later, run `pipx upgrade dyro`. If your team manages Python packages 
 python3 -m pip install --user --upgrade dyro
 ```
 
+Optional: after upgrading, attach the Dyro control-plane Skill to detected agent
+homes with `dyro integration install skill --dry-run`, then
+`dyro integration install skill --yes` (alias: `codex`).
+
 Interactive `dyro`, `dyro home`, and `dyro start` launches check the official
 PyPI endpoint at most once per local day. A failed or slow check never blocks
 workspace entry. Updates remain confirmation-first by default:

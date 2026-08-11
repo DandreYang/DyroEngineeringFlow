@@ -158,7 +158,9 @@ def _current_scope(
         pending.extend(task.depends_on)
     scope = tuple(sorted(closure))
     try:
-        contracts = tuple((task_id, contract_sha256_by_id[task_id]) for task_id in scope)
+        contracts = tuple(
+            (task_id, contract_sha256_by_id[task_id]) for task_id in scope
+        )
     except KeyError:
         return scope, (), True
     return scope, contracts, invalid
@@ -203,9 +205,12 @@ def build_scheduler_snapshot(
     observed_at = _utc(clock())
     known_tasks = tuple(sorted(graph.known_tasks, key=lambda item: item.id))
     known_by_id = {task.id: task for task in known_tasks}
-    candidate_ids = tuple(sorted(
-        task.id for task in (known_tasks if candidates is None else tuple(candidates))
-    ))
+    candidate_ids = tuple(
+        sorted(
+            task.id
+            for task in (known_tasks if candidates is None else tuple(candidates))
+        )
+    )
     unknown = sorted(set(candidate_ids) - set(known_by_id))
     if unknown:
         raise ValidationError(f"调度候选不在 TaskGraph 中：{', '.join(unknown)}")
@@ -244,7 +249,53 @@ def build_scheduler_snapshot(
         )
         for task in known_tasks
     )
-    decisions = tuple(sorted(graph.decisions.items()))
+    return build_scheduler_snapshot_from_facts(
+        tasks=tasks,
+        decisions=tuple(sorted(graph.decisions.items())),
+        execution_mode=graph.execution_mode,
+        candidate_ids=candidate_ids,
+        objective=objective,
+        observed_at=observed_at,
+    )
+
+
+def build_scheduler_snapshot_from_facts(
+    *,
+    tasks: Iterable[SchedulerTaskSnapshot],
+    decisions: Iterable[tuple[str, str]],
+    execution_mode: str,
+    candidate_ids: Iterable[str],
+    observed_at: datetime,
+    objective: StoredObjective | None = None,
+) -> SchedulerSnapshot:
+    """Build a scheduler snapshot from one caller-owned, already sampled fact set.
+
+    Machine-facing readers use this entry point after bounded filesystem and Git
+    observations.  It performs no I/O and therefore cannot silently fall back to
+    the legacy, presentation-oriented loaders.
+    """
+    observed_at = _utc(observed_at)
+    frozen_tasks = tuple(sorted(tasks, key=lambda item: item.task.id))
+    if len({item.task.id for item in frozen_tasks}) != len(frozen_tasks):
+        raise ValidationError("调度快照 Task ID 不能重复")
+    frozen_candidates = tuple(sorted(candidate_ids))
+    known_by_id = {item.task.id: item.task for item in frozen_tasks}
+    unknown = sorted(set(frozen_candidates) - set(known_by_id))
+    if unknown:
+        raise ValidationError(f"调度候选不在 Task facts 中：{', '.join(unknown)}")
+    if len(set(frozen_candidates)) != len(frozen_candidates):
+        raise ValidationError("调度候选不能重复")
+    frozen_decisions = tuple(sorted(decisions))
+    if len({key for key, _value in frozen_decisions}) != len(frozen_decisions):
+        raise ValidationError("调度快照 decision ID 不能重复")
+    if execution_mode not in {"local", "external"}:
+        raise ValidationError("调度快照 execution mode 无效")
+
+    contract_sha256_by_id = {
+        item.task.id: item.contract_sha256
+        for item in frozen_tasks
+        if item.contract_sha256
+    }
     task_contracts: tuple[tuple[str, str], ...] = ()
     objective_drifted = False
     if objective is not None:
@@ -262,10 +313,10 @@ def build_scheduler_snapshot(
         canonical_json_bytes(
             _payload(
                 observed_at=observed_at,
-                tasks=tasks,
-                decisions=decisions,
-                execution_mode=graph.execution_mode,
-                candidate_ids=candidate_ids,
+                tasks=frozen_tasks,
+                decisions=frozen_decisions,
+                execution_mode=execution_mode,
+                candidate_ids=frozen_candidates,
                 objective=objective,
                 task_contracts=task_contracts,
                 objective_drifted=objective_drifted,
@@ -274,17 +325,21 @@ def build_scheduler_snapshot(
     ).hexdigest()
     return SchedulerSnapshot(
         observed_at=observed_at,
-        tasks=tasks,
-        decisions=decisions,
-        execution_mode=graph.execution_mode,
-        candidate_ids=candidate_ids,
+        tasks=frozen_tasks,
+        decisions=frozen_decisions,
+        execution_mode=execution_mode,
+        candidate_ids=frozen_candidates,
         snapshot_sha256=digest,
         objective_id="" if objective is None else objective.objective.id,
         objective_revision=0 if objective is None else objective.revision,
         objective_state="" if objective is None else objective.operator_state,
         objective_scope=() if objective is None else objective.scope,
         objective_targets=() if objective is None else objective.objective.targets,
-        objective_requested_mode="" if objective is None else objective.objective.requested_mode.value,
-        objective_operations=() if objective is None else tuple(item.value for item in objective.objective.operations),
+        objective_requested_mode=""
+        if objective is None
+        else objective.objective.requested_mode.value,
+        objective_operations=()
+        if objective is None
+        else tuple(item.value for item in objective.objective.operations),
         objective_drifted=objective_drifted,
     )
