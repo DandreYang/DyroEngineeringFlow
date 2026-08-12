@@ -18,3 +18,7 @@ dist/
 # Optional local Mermaid→PNG exports (docs use GitHub Mermaid; do not commit)
 docs/images/diagrams/*.png
 docs/images/diagrams/zh/*.png
+
+# Local handoffs and point-in-time agent review/evidence exports
+plans/*-handoff-*.md
+docs/superpowers/

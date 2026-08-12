@@ -1,7 +1,0 @@
-{
-  "gate": "F02",
-  "verdict": "BLOCKED_ON_HOST",
-  "time_utc": "2026-08-11T10:18:37.458393+00:00",
-  "reason": "dyro-mcp returns CORE_HANDSHAKE_UNAVAILABLE on macOS; cannot exercise MCP/Bridge permission-boundary journeys on this host.",
-  "depends_on": "Ubuntu 24.04 Codex host with working public Bridge handshake"
-}
