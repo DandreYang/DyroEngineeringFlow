@@ -474,20 +474,37 @@ def create_objective(
 
 
 def _list_objectives_unlocked(
-    config: Config, *, recover: bool
+    config: Config, *, recover: bool, read_budget: ReadBudget | None = None
 ) -> list[StoredObjective]:
     records: list[StoredObjective] = []
-    for objective_id in list_objective_ids(config):
-        with open_objective_directory(config, objective_id) as directory:
+    for objective_id in list_objective_ids(config, budget=read_budget):
+        with open_objective_directory(
+            config, objective_id, budget=read_budget
+        ) as directory:
             records.append(
-                _read_stored(config, objective_id, recover=recover, directory=directory)
+                _read_stored(
+                    config,
+                    objective_id,
+                    recover=recover,
+                    directory=directory,
+                    budget=read_budget,
+                )
             )
     return records
 
 
-def list_objectives(config: Config, *, recover: bool = True) -> list[StoredObjective]:
+def list_objectives(
+    config: Config,
+    *,
+    recover: bool = True,
+    read_budget: ReadBudget | None = None,
+) -> list[StoredObjective]:
     if not recover:
-        return _list_objectives_unlocked(config, recover=recover)
+        return _list_objectives_unlocked(
+            config, recover=recover, read_budget=read_budget
+        )
+    if read_budget is not None:
+        raise ValidationError("bounded Objective read 不允许恢复未完成事务")
     # Recovery and normal reads share the writer's lock.  This prevents a
     # reader from observing a pending marker immediately after its initial
     # scan, then treating a live transaction as an abandoned one.

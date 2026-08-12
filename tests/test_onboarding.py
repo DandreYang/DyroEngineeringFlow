@@ -1,5 +1,5 @@
 from dyro.config import load
-from dyro.errors import ValidationError
+from dyro.errors import DyroError, ValidationError
 from dyro.onboarding import (
     RepositoryInput,
     SetupPlan,
@@ -33,6 +33,24 @@ class OnboardingTests(WorkspaceCase):
         messages = bootstrap(config)
         self.assertTrue(any(message.startswith("CLONE api") for message in messages))
         self.assertTrue((self.root / "repositories/cloned-api/.git").exists())
+
+    def test_bootstrap_rejects_a_symlinked_destination_parent(self) -> None:
+        outside = self.root.parent / f"{self.root.name}-outside"
+        outside.mkdir()
+        (self.root / "escape").symlink_to(outside, target_is_directory=True)
+        profile = (self.root / "dyro.toml").read_text(encoding="utf-8")
+        profile = profile.replace(
+            'path = "repositories/api"', 'path = "escape/api"'
+        ).replace(
+            'mount = "services/api"',
+            f'mount = "services/api"\nremote = "{self.anchor}"',
+        )
+        (self.root / "dyro.toml").write_text(profile, encoding="utf-8")
+
+        with self.assertRaisesRegex(DyroError, "符号链接"):
+            bootstrap(load(self.root))
+
+        self.assertFalse((outside / "api").exists())
 
     def test_discover_repositories_uses_workspace_relative_paths(self) -> None:
         from .support import shell

@@ -9,18 +9,25 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import tempfile
 from typing import Mapping
 
 from ..errors import DyroError, ValidationError
 from ..hub import registry_home
+from ..read_limits import (
+    ReadBudget,
+    ReadLimitCode,
+    ReadLimitError,
+    bounded_directory_names,
+)
 from ..state import atomic_write_text, exclusive_lock, fsync_directory
 
 
 CANONICAL_INTEGRATION_ID = "skill"
 LEGACY_INTEGRATION_ID = "codex"
 SKILL_NAME = "dyro-control-plane"
-ASSET_VERSION = 1
+ASSET_VERSION = 2
 MANIFEST_SCHEMA_VERSION = 2
 LEGACY_MANIFEST_SCHEMA_VERSION = 1
 _SHA256_PREFIX = "sha256:"
@@ -157,19 +164,92 @@ def _sha256(content: bytes) -> str:
     return _SHA256_PREFIX + hashlib.sha256(content).hexdigest()
 
 
-def _inventory(root: Path) -> dict[str, str]:
+def _inventory(
+    root: Path, *, read_budget: ReadBudget | None = None
+) -> dict[str, str]:
     if root.is_symlink() or not root.is_dir():
         raise ValidationError(f"Skill 镜像必须是普通目录：{root}")
+    if read_budget is None:
+        files: dict[str, str] = {}
+        for path in sorted(root.rglob("*")):
+            if path.is_symlink():
+                raise ValidationError(f"Skill 镜像禁止 symlink：{path}")
+            if path.is_dir():
+                continue
+            if not path.is_file():
+                raise ValidationError(f"Skill 资产必须是普通文件：{path}")
+            files[path.relative_to(root).as_posix()] = _sha256(path.read_bytes())
+        if not files:
+            raise ValidationError("Skill 资产不能为空")
+        return files
+
     files: dict[str, str] = {}
-    for path in sorted(root.rglob("*")):
-        if path.is_symlink():
-            raise ValidationError(f"Skill 镜像禁止 symlink：{path}")
-        if path.is_dir():
-            continue
-        if not path.is_file():
-            raise ValidationError(f"Skill 资产必须是普通文件：{path}")
-        relative = path.relative_to(root).as_posix()
-        files[relative] = _sha256(path.read_bytes())
+    records_seen = 0
+    directory_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise ReadLimitError(
+            ReadLimitCode.UNSAFE_FILE,
+            "Platform lacks safe Integration traversal support",
+        )
+
+    def walk(directory_fd: int, relative_parent: Path) -> None:
+        nonlocal records_seen
+        names = bounded_directory_names(
+            directory_fd,
+            read_budget,
+            maximum_records=read_budget.limits.integration_records - records_seen,
+            label="Integration asset",
+        )
+        records_seen += len(names)
+        for name in sorted(names):
+            relative = relative_parent / name
+            try:
+                info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise ReadLimitError(
+                    ReadLimitCode.UNSAFE_FILE,
+                    "Integration asset cannot be safely inspected",
+                ) from exc
+            if stat.S_ISLNK(info.st_mode):
+                raise ReadLimitError(
+                    ReadLimitCode.UNSAFE_FILE,
+                    "Integration asset cannot be a symlink",
+                )
+            if stat.S_ISDIR(info.st_mode):
+                child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+                try:
+                    opened = os.fstat(child_fd)
+                    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                        raise ReadLimitError(
+                            ReadLimitCode.UNSAFE_FILE,
+                            "Integration asset directory changed during safe open",
+                        )
+                    read_budget.bind_directory_identity(
+                        root / relative, (opened.st_dev, opened.st_ino)
+                    )
+                    walk(child_fd, relative)
+                finally:
+                    os.close(child_fd)
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise ReadLimitError(
+                    ReadLimitCode.UNSAFE_FILE,
+                    "Integration asset must be a regular file",
+                )
+            content = read_budget.read_regular_bytes_from_directory_fd(
+                directory_fd,
+                name=name,
+                maximum_bytes=read_budget.limits.integration_asset_bytes,
+                label="Integration asset",
+                identity_path=root / relative,
+            )
+            files[relative.as_posix()] = _sha256(content)
+
+    with read_budget.open_safe_directory_chain(root, root) as root_fd:
+        assert root_fd is not None
+        walk(root_fd, Path())
     if not files:
         raise ValidationError("Skill 资产不能为空")
     return files
@@ -334,9 +414,22 @@ def _validate_file_map(files: object) -> dict[str, str]:
     return validated
 
 
-def _parse_manifest(path: Path) -> dict[str, object]:
+def _parse_manifest(
+    path: Path, *, read_budget: ReadBudget | None = None
+) -> dict[str, object]:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        content = (
+            path.read_text(encoding="utf-8")
+            if read_budget is None
+            else read_budget.read_regular_text(
+                path,
+                maximum_bytes=read_budget.limits.integration_manifest_bytes,
+                label="Integration ownership manifest",
+            )
+        )
+        raw = json.loads(content)
+    except ReadLimitError:
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValidationError("Integration ownership manifest 无法读取") from exc
     if not isinstance(raw, dict):
@@ -381,9 +474,22 @@ def _parse_manifest(path: Path) -> dict[str, object]:
     return raw
 
 
-def _parse_legacy_manifest(path: Path) -> dict[str, object]:
+def _parse_legacy_manifest(
+    path: Path, *, read_budget: ReadBudget | None = None
+) -> dict[str, object]:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        content = (
+            path.read_text(encoding="utf-8")
+            if read_budget is None
+            else read_budget.read_regular_text(
+                path,
+                maximum_bytes=read_budget.limits.integration_manifest_bytes,
+                label="Legacy Integration ownership manifest",
+            )
+        )
+        raw = json.loads(content)
+    except ReadLimitError:
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValidationError("Legacy Integration ownership manifest 无法读取") from exc
     if not isinstance(raw, dict):
@@ -456,11 +562,16 @@ def _legacy_owned_copy(
     expected_target: Path | None = None,
     allowed_targets: set[Path] | None = None,
     require_current_assets: bool = True,
+    read_budget: ReadBudget | None = None,
 ) -> tuple[dict[str, object], Path] | None:
     if not legacy_manifest_path.is_file() or legacy_manifest_path.is_symlink():
         return None
     try:
-        manifest = _parse_legacy_manifest(legacy_manifest_path)
+        manifest = _parse_legacy_manifest(
+            legacy_manifest_path, read_budget=read_budget
+        )
+    except ReadLimitError:
+        raise
     except ValidationError:
         return None
     target = Path(str(manifest["target"]))
@@ -471,7 +582,7 @@ def _legacy_owned_copy(
     if target.is_symlink() or not target.is_dir():
         return None
     try:
-        inventory = _inventory(target)
+        inventory = _inventory(target, read_budget=read_budget)
         if inventory != manifest["files"]:
             return None
         if require_current_assets and inventory != _asset_inventory():
@@ -488,6 +599,7 @@ def integration_status(
     host_homes: Mapping[str, Path] | None = None,
     # Backward-compatible test/API alias for Codex home override.
     codex_home: Path | None = None,
+    read_budget: ReadBudget | None = None,
 ) -> IntegrationStatus:
     """Inspect Skill mirror/avatar ownership without creating files."""
     requested = integration
@@ -542,6 +654,7 @@ def integration_status(
         legacy_manifest_path,
         allowed_targets=_allowed_legacy_targets(detected),
         require_current_assets=True,
+        read_budget=read_budget,
     )
     blocking_avatars: list[AvatarStatus] = []
     for row in avatar_rows:
@@ -601,7 +714,9 @@ def integration_status(
         )
 
     try:
-        manifest = _parse_manifest(manifest_path)
+        manifest = _parse_manifest(manifest_path, read_budget=read_budget)
+    except ReadLimitError:
+        raise
     except ValidationError as exc:
         return IntegrationStatus(
             requested,
@@ -640,7 +755,13 @@ def integration_status(
             tuple(avatar_rows),
         )
     try:
-        installed = _inventory(mirror)
+        installed = (
+            _inventory(mirror)
+            if read_budget is None
+            else _inventory(mirror, read_budget=read_budget)
+        )
+    except ReadLimitError:
+        raise
     except ValidationError as exc:
         return IntegrationStatus(
             requested,

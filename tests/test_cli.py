@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -17,12 +18,14 @@ from dyro.cli import (
 )
 from dyro.changesets import get_changeset
 from dyro.config import load
+from dyro.continuation.store import pause_objective
+from dyro.evidence_store import publish_evidence_generation
 from dyro.home import HomeTool
 from dyro.hub import load_registry
 from dyro.tasks import load_task, status, task_template
 from dyro.tooling import ToolState, load_tool_preferences
 from dyro.updates import load_update_state
-from dyro.workspace import create_line, get_line
+from dyro.workspace import create_line, get_line, line_repository_path
 
 from .support import WorkspaceCase
 
@@ -108,6 +111,23 @@ class CliTests(unittest.TestCase):
             self.assertTrue((root / "dyro.toml").exists())
             self.assertTrue((root / ".dyro/tasks").is_dir())
             self.assertEqual(load(root).name, "demo")
+
+    def test_workspace_list_json_is_structured_and_identifies_the_default(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
+            root = Path(tmp) / "workspace"
+            main(["init", str(root), "--name", "demo"])
+            main(["workspace", "add", str(root), "--default"])
+
+            output = StringIO()
+            with redirect_stdout(output):
+                main(["workspace", "list", "--format", "json"])
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["schema_version"], 1)
+            self.assertEqual(payload["kind"], "workspace_list")
+            self.assertEqual(payload["default"], "demo")
+            self.assertEqual(payload["workspaces"][0]["name"], "demo")
+            self.assertTrue(payload["workspaces"][0]["available"])
 
     def test_setup_presentation_uses_semantic_color_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
@@ -852,6 +872,519 @@ class ObjectiveCliTests(WorkspaceCase):
             encoding="utf-8",
         )
         directory.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+
+    def _read_json(self, *argv: str) -> dict[str, object]:
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", str(self.root), *argv, "--format", "json"])
+        return json.loads(output.getvalue())
+
+    def _start_release_objective(self) -> None:
+        main(
+            [
+                "--root",
+                str(self.root),
+                "objective",
+                "start",
+                "--id",
+                "release",
+                "--title",
+                "Release",
+                "--line",
+                "alpha",
+                "--targets",
+                "TASK-A",
+                "--yes",
+            ]
+        )
+
+    def test_control_plane_workspace_views_have_stable_json_shapes(self) -> None:
+        doctor_payload = self._read_json("doctor")
+        self.assertEqual(doctor_payload["kind"], "doctor")
+        self.assertTrue(doctor_payload["passed"])
+        self.assertTrue(doctor_payload["findings"])
+
+        status_payload = self._read_json("status")
+        self.assertEqual(status_payload["kind"], "workspace_status")
+        self.assertEqual(status_payload["workspace"], "test-workspace")
+        self.assertEqual(status_payload["rows"][0]["scope"], "anchor")
+
+        next_payload = self._read_json("next")
+        self.assertEqual(next_payload["kind"], "next_step")
+        self.assertEqual(next_payload["state"], "ready")
+        self.assertEqual(
+            next_payload["commands"],
+            [f"dyro --root {self.root.resolve()} start --line alpha --agent noop"],
+        )
+
+        lines_payload = self._read_json("line", "list")
+        self.assertEqual(lines_payload["kind"], "line_list")
+        self.assertEqual(lines_payload["lines"][0]["id"], "alpha")
+        self.assertEqual(
+            lines_payload["lines"][0]["repositories"][0]["storage"],
+            "linked-worktree",
+        )
+
+    def test_control_plane_next_preserves_an_explicit_workspace_selector(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-registry-") as registry_home:
+            with patch.dict(os.environ, {"DYRO_HOME": registry_home}, clear=False):
+                main(
+                    [
+                        "workspace",
+                        "add",
+                        str(self.root),
+                        "--name",
+                        "selected",
+                        "--default",
+                    ]
+                )
+                output = StringIO()
+                with redirect_stdout(output):
+                    main(
+                        [
+                            "--workspace",
+                            "selected",
+                            "next",
+                            "--format",
+                            "json",
+                        ]
+                    )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(
+            payload["commands"],
+            ["dyro --workspace selected start --line alpha --agent noop"],
+        )
+
+    def test_control_plane_json_runtime_errors_use_one_stable_envelope(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-registry-") as registry_home:
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch.dict(os.environ, {"DYRO_HOME": registry_home}, clear=False),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main(
+                    [
+                        "--workspace",
+                        "missing",
+                        "status",
+                        "--format",
+                        "json",
+                    ]
+                )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(
+            json.loads(stderr.getvalue()),
+            {
+                "schema_version": 1,
+                "kind": "error",
+                "code": "WORKSPACE_NOT_REGISTERED",
+                "command": "status",
+                "retryable": False,
+            },
+        )
+
+        stdout = StringIO()
+        stderr = StringIO()
+        with tempfile.TemporaryDirectory(prefix="dyro-missing-") as missing_home:
+            missing_root = Path(missing_home) / "missing-workspace"
+            with (
+                patch.dict(os.environ, {"DYRO_HOME": missing_home}, clear=False),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main(
+                    [
+                        "--root",
+                        str(missing_root),
+                        "next",
+                        "--format",
+                        "json",
+                    ]
+                )
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(
+            json.loads(stderr.getvalue())["code"], "LOCAL_PROFILE_INVALID"
+        )
+
+    def test_control_plane_next_rejects_a_broken_local_profile(self) -> None:
+        (self.root / "dyro.toml").write_text("not valid toml = [", encoding="utf-8")
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            patch("dyro.cli.Path.cwd", return_value=self.root),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(["next", "--format", "json"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(
+            json.loads(stderr.getvalue())["code"], "LOCAL_PROFILE_INVALID"
+        )
+
+    def test_control_plane_doctor_failure_is_one_json_result(self) -> None:
+        self.anchor.rename(self.root / "api-missing")
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "doctor",
+                    "--format",
+                    "json",
+                ]
+            )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["kind"], "doctor")
+        self.assertFalse(payload["passed"])
+
+    def test_control_plane_json_interrupt_is_one_stable_envelope(self) -> None:
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            patch("dyro.cli.doctor", side_effect=KeyboardInterrupt),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "doctor",
+                    "--format",
+                    "json",
+                ]
+            )
+
+        self.assertEqual(raised.exception.code, 130)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(json.loads(stderr.getvalue())["code"], "INTERRUPTED")
+
+    def test_control_plane_next_only_offers_applicable_bootstrap(self) -> None:
+        (self.config.lines_state_dir / "alpha.toml").unlink()
+        self.anchor.rename(self.root / "api-missing")
+        unavailable = self._read_json("next")
+        self.assertFalse(unavailable["mutation_available"])
+        self.assertEqual(unavailable["commands"], [])
+        self.assertEqual(
+            unavailable["diagnostic_commands"],
+            [f"dyro --root {self.root.resolve()} doctor"],
+        )
+
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                'mount = "services/api"',
+                'mount = "services/api"\nremote = "https://example.invalid/api.git"',
+            ),
+            encoding="utf-8",
+        )
+        applicable = self._read_json("next")
+        self.assertTrue(applicable["mutation_available"])
+        self.assertEqual(
+            applicable["commands"],
+            [f"dyro --root {self.root.resolve()} bootstrap --yes"],
+        )
+
+    def test_control_plane_next_never_offers_bootstrap_through_symlink_parent(
+        self,
+    ) -> None:
+        (self.config.lines_state_dir / "alpha.toml").unlink()
+        self.anchor.rename(self.root / "api-missing")
+        outside = self.root.parent / f"{self.root.name}-outside"
+        outside.mkdir()
+        escape = self.root / "escape"
+        escape.symlink_to(outside, target_is_directory=True)
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8")
+            .replace('path = "repositories/api"', 'path = "escape/api"')
+            .replace(
+                'mount = "services/api"',
+                'mount = "services/api"\nremote = "https://example.invalid/api.git"',
+            ),
+            encoding="utf-8",
+        )
+
+        payload = self._read_json("next")
+
+        self.assertFalse(payload["mutation_available"])
+        self.assertEqual(payload["commands"], [])
+        self.assertFalse((outside / "api").exists())
+
+    def test_control_plane_rejects_symlinked_line_and_changeset_manifests(self) -> None:
+        line_path = self.config.lines_state_dir / "alpha.toml"
+        line_target = self.root / "outside-line.toml"
+        line_target.write_bytes(line_path.read_bytes())
+        line_path.unlink()
+        line_path.symlink_to(line_target)
+
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "line",
+                    "list",
+                    "--format",
+                    "json",
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(json.loads(stderr.getvalue())["code"], "UNSAFE_FILE")
+
+        line_path.unlink()
+        line_path.write_bytes(line_target.read_bytes())
+        main(
+            [
+                "--root",
+                str(self.root),
+                "changeset",
+                "create",
+                "release-candidate",
+                "--line",
+                "alpha",
+            ]
+        )
+        changeset_path = self.config.changesets_dir / "release-candidate.toml"
+        changeset_target = self.root / "outside-changeset.toml"
+        changeset_target.write_bytes(changeset_path.read_bytes())
+        changeset_path.unlink()
+        changeset_path.symlink_to(changeset_target)
+
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "changeset",
+                    "list",
+                    "--format",
+                    "json",
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(json.loads(stderr.getvalue())["code"], "UNSAFE_FILE")
+
+    def test_control_plane_rejects_a_symlinked_profile(self) -> None:
+        profile = self.root / "dyro.toml"
+        target = self.root / "outside-profile.toml"
+        target.write_bytes(profile.read_bytes())
+        profile.unlink()
+        profile.symlink_to(target)
+
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "status",
+                    "--format",
+                    "json",
+                ]
+            )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(
+            json.loads(stderr.getvalue())["code"], "LOCAL_PROFILE_INVALID"
+        )
+
+    def test_control_plane_objective_plan_rejects_a_symlinked_task(self) -> None:
+        self._start_release_objective()
+        task_directory = self.config.task_specs_dir / "TASK-A"
+        outside = self.root / "outside-task"
+        task_directory.rename(outside)
+        task_directory.symlink_to(outside, target_is_directory=True)
+
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "objective",
+                    "plan",
+                    "release",
+                    "--format",
+                    "json",
+                ]
+            )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(json.loads(stderr.getvalue())["code"], "UNSAFE_FILE")
+
+    def test_control_plane_changeset_views_have_stable_json_shapes(self) -> None:
+        main(
+            [
+                "--root",
+                str(self.root),
+                "changeset",
+                "create",
+                "release-candidate",
+                "--line",
+                "alpha",
+            ]
+        )
+
+        listed = self._read_json("changeset", "list")
+        self.assertEqual(listed["kind"], "changeset_list")
+        self.assertEqual(listed["changesets"][0]["id"], "release-candidate")
+        self.assertEqual(set(listed["changesets"][0]["heads"]), {"api"})
+
+        verified = self._read_json(
+            "changeset", "verify", "release-candidate"
+        )
+        self.assertEqual(verified["kind"], "changeset_verification")
+        self.assertTrue(verified["passed"])
+        self.assertEqual(verified["findings"][0]["status"], "PASS")
+
+    def test_objective_list_and_status_json_are_strictly_non_recovering(self) -> None:
+        self._start_release_objective()
+
+        listed = self._read_json("objective", "list")
+        self.assertEqual(listed["kind"], "objective_list")
+        self.assertEqual(listed["objectives"][0]["id"], "release")
+        detailed = self._read_json("objective", "status", "release")
+        self.assertEqual(detailed["kind"], "objective_status")
+        self.assertEqual(detailed["objective"]["derived_result"], "incomplete")
+
+        with patch(
+            "dyro.continuation.objective_storage.write_projection",
+            side_effect=OSError("simulated crash"),
+        ):
+            with self.assertRaisesRegex(OSError, "simulated crash"):
+                pause_objective(self.config, "release")
+
+        objective_dir = self.config.objectives_dir / "release"
+        before = {
+            path.relative_to(objective_dir): path.read_bytes()
+            for path in objective_dir.rglob("*")
+            if path.is_file()
+        }
+        self.assertIn(Path("pending.json"), before)
+
+        for argv in (
+            ("objective", "list", "--format", "json"),
+            ("objective", "status", "release", "--format", "json"),
+        ):
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main(["--root", str(self.root), *argv])
+            self.assertEqual(raised.exception.code, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            error = json.loads(stderr.getvalue())
+            self.assertEqual(error["kind"], "error")
+            self.assertEqual(error["code"], "OBJECTIVE_UNAVAILABLE")
+            after = {
+                path.relative_to(objective_dir): path.read_bytes()
+                for path in objective_dir.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(after, before)
+
+    def test_objective_json_reports_completed_integrated_target(self) -> None:
+        self._start_release_objective()
+        task_directory = self.config.task_specs_dir / "TASK-A"
+        task_directory.joinpath("status").write_text("done\n", encoding="utf-8")
+        line = get_line(self.config, "alpha")
+        target = line_repository_path(self.config, line, "api")
+        head = subprocess.run(
+            ["git", "-C", str(target), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        task_directory.joinpath("task-heads.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "task_id": "TASK-A",
+                    "line": "alpha",
+                    "branch": "task/TASK-A",
+                    "repositories": {"api": head},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        detailed = self._read_json("objective", "status", "release")
+
+        self.assertEqual(detailed["objective"]["derived_result"], "complete")
+
+    def test_objective_json_rejects_unmanifested_imported_task_heads(self) -> None:
+        self._start_release_objective()
+        task_directory = self.config.task_specs_dir / "TASK-A"
+        task_directory.joinpath("status").write_text("done\n", encoding="utf-8")
+        line = get_line(self.config, "alpha")
+        target = line_repository_path(self.config, line, "api")
+        head = subprocess.run(
+            ["git", "-C", str(target), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        generation = publish_evidence_generation(
+            task_directory,
+            "attempt-1",
+            {"receipt.md": b"result: DONE\n"},
+        )
+        generation.chmod(0o700)
+        generation.joinpath("task-heads.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "task_id": "TASK-A",
+                    "line": "alpha",
+                    "branch": "task/TASK-A",
+                    "repositories": {"api": head},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        detailed = self._read_json("objective", "status", "release")
+
+        self.assertEqual(detailed["objective"]["derived_result"], "incomplete")
 
     def test_objective_start_dry_run_has_zero_writes_and_lifecycle_commands_work(
         self,

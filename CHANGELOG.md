@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Expand the packaged `dyro-control-plane` Skill into a host-neutral,
+  intent-routed read-only control surface for workspace health, lines, Change
+  Sets, integrations, and Objective attention/graph/tick/plan observations.
+- Add stable JSON views for `workspace list`, `status`, `doctor`, `next`,
+  `line list`, `changeset list|verify`, `integration status`, and
+  `objective list|status` while preserving existing text output by default.
+- Make `objective list` and `objective status` strictly zero-write by refusing
+  to recover an interrupted Objective transaction during observation.
+- Run control-plane Git observations with `git --no-optional-locks` so status,
+  doctor, and Change Set verification cannot refresh Git index metadata.
+- Bind workspace-local `next --format json` handoffs to their resolved alias or
+  absolute root, and only offer bootstrap when every failure is an absent
+  repository with a configured remote.
+- Return one stable JSON error envelope for machine-facing runtime failures and
+  use deadline-, byte-, record-, and symlink-bounded reads for Profile, line,
+  Change Set, integration, Objective, Task, evidence, and Git observations.
+- Keep machine-facing Objective completion consistent with text views by
+  checking Task integration evidence and Git ancestry inside the same budget;
+  reject unsafe bootstrap targets before `next` can hand off a mutation.
+
 ## 0.6.4 - 2026-08-12
 
 - Guide control-plane Skill install during interactive `dyro setup` (preview in
