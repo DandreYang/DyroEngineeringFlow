@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.4 - 2026-08-12
+
 - Guide control-plane Skill install during interactive `dyro setup` (preview in
   the plan; apply only after confirmation; soft-fail if no host is ready).
 - After a successful package update (`dyro update now` or patch auto-update),
