@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.6 - 2026-08-13
+
 - Launch any installed coding tool from `dyro start` / `open`, not only a
   Codex Profile adapter; `agent add --preset` now covers the catalogued
   launchable tools.
