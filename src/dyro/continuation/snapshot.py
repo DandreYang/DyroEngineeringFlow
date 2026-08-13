@@ -21,7 +21,9 @@ from ..config import Config
 from ..errors import DyroError, ValidationError
 from .. import graph as task_graph
 from .. import tasks as task_module
+from ..read_limits import ReadBudget
 from ..tasks import Task
+from ..workspace import list_lines
 from .objective_storage import StoredObjective
 
 
@@ -253,6 +255,82 @@ def build_scheduler_snapshot(
         tasks=tasks,
         decisions=tuple(sorted(graph.decisions.items())),
         execution_mode=graph.execution_mode,
+        candidate_ids=candidate_ids,
+        objective=objective,
+        observed_at=observed_at,
+    )
+
+
+def build_scheduler_snapshot_bounded(
+    config: Config,
+    *,
+    objective: StoredObjective,
+    budget: ReadBudget,
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> SchedulerSnapshot:
+    """Sample planner facts through bounded, symlink-safe manifest reads."""
+
+    observed_at = _utc(clock())
+    known_line_ids = frozenset(
+        line.id for line in list_lines(config, read_budget=budget)
+    )
+    sampled = tuple(
+        task_module.load_task_planning_bounded(
+            config,
+            task_id,
+            budget,
+            known_line_ids=known_line_ids,
+        )
+        for task_id in task_module.list_task_ids_bounded(config, budget)
+    )
+    known_tasks = tuple(item[0] for item in sampled)
+    statuses = {task.id: current for task, current, _digest in sampled}
+    digests = {task.id: digest for task, _current, digest in sampled}
+    decisions = task_module.decisions_bounded(config, budget)
+    graph = task_graph.TaskGraph(
+        line=None,
+        tasks=known_tasks,
+        known_tasks=known_tasks,
+        decisions=decisions,
+        execution_mode=config.policy.execution_mode,
+    )
+    issues = task_graph.validate_task_graph(graph)
+    if issues:
+        details = "; ".join(issue.message for issue in issues[:5])
+        raise ValidationError(f"任务图结构无效：{details}")
+
+    integration_required_ids = {
+        dependency for task in known_tasks for dependency in task.depends_on
+    }
+    integration_required_ids.update(objective.objective.targets)
+    facts = tuple(
+        SchedulerTaskSnapshot(
+            task=task,
+            status=statuses[task.id],
+            external_claim_active=(
+                config.policy.execution_mode == "external"
+                and statuses[task.id] == "assigned"
+                and task_module.external_claim_active_bounded(
+                    config, task, budget, now=observed_at
+                )
+            ),
+            integration_state=(
+                task_module.dependency_integration_state_bounded(
+                    config, task, budget
+                )
+                if statuses[task.id] == "done"
+                and task.id in integration_required_ids
+                else "not_required"
+            ),
+            contract_sha256=digests[task.id],
+        )
+        for task in known_tasks
+    )
+    candidate_ids = tuple(task.id for task in known_tasks)
+    return build_scheduler_snapshot_from_facts(
+        tasks=facts,
+        decisions=tuple(sorted(decisions.items())),
+        execution_mode=config.policy.execution_mode,
         candidate_ids=candidate_ids,
         objective=objective,
         observed_at=observed_at,

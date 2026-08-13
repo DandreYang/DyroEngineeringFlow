@@ -4,8 +4,8 @@ Status: Linux Ubuntu 24.04 Mandatory Core Surface promoted at S5
 
 Decision source: [ADR 0006](../adr/0006-agent-bridge-phase-0.md)
 
-Review source:
-[2026-08-06 adversarial review board](../superpowers/reviews/2026-08-06-dyro-agent-bridge-design-adversarial-review-board.md)
+Review outcomes are incorporated into ADR 0006 and the Phase 0 acceptance
+matrix; point-in-time review exports are not part of the product documentation.
 
 ## 1. Purpose
 

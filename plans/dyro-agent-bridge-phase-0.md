@@ -11,8 +11,6 @@ Authority:
 - [Operation inventory](../docs/designs/agent-bridge-operation-inventory.md)
 - [Protocol](../docs/designs/agent-bridge-protocol.md)
 - [Acceptance matrix](../docs/designs/agent-bridge-phase-0-acceptance.md)
-- [Adversarial review board](../docs/superpowers/reviews/2026-08-06-dyro-agent-bridge-design-adversarial-review-board.md)
-- [Phase 0 design closure review](../docs/superpowers/reviews/2026-08-06-dyro-agent-bridge-phase-0-design-closure-review.md)
 
 This plan does not authorize commit, push, PR, merge, tag, release, publish, or
 integration installation. Those remain separate user decisions.

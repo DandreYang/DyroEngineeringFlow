@@ -28,7 +28,7 @@ from .changesets import (
     list_changesets,
     verify_changeset,
 )
-from .config import CONFIG_NAME, Config, load, validate_id
+from .config import CONFIG_NAME, Config, load, load_profile_exact, validate_id
 from .console.launcher import launch_console, render_console_plan
 from .continuation.attention import (
     build_attention_projection,
@@ -49,8 +49,19 @@ from .continuation.planner import (
     render_projection_json,
     render_projection_mermaid,
 )
-from .continuation.resolution import resolve_line, resolve_workspace
-from .continuation.snapshot import build_scheduler_snapshot
+from .continuation.resolution import (
+    ResolvedWorkspace,
+    WorkspaceResolutionError,
+    WorkspaceResolutionFailure,
+    WorkspaceResolutionSource,
+    resolve_line,
+    resolve_workspace,
+    resolve_workspace_readonly,
+)
+from .continuation.snapshot import (
+    build_scheduler_snapshot,
+    build_scheduler_snapshot_bounded,
+)
 from .continuation.store import (
     add_objective_target,
     create_objective,
@@ -98,6 +109,7 @@ from .hub import (
     add_workspace,
     get_workspace,
     load_registry,
+    load_registry_bounded,
     preview_workspace_registration,
     remove_workspace,
     set_default_workspace,
@@ -123,7 +135,9 @@ from .onboarding import (
     render_setup_plan,
     repository_input_from_path,
     sibling_workspace_for,
+    validate_bootstrap_destination,
 )
+from .read_limits import ObservationLimits, ReadBudget, ReadLimitCode, ReadLimitError
 from .profile import (
     append_adapter,
     command_adapter,
@@ -234,6 +248,42 @@ verify = [["npm", "test", "--", "--runInBand"]]
 def _config(args: argparse.Namespace) -> Config:
     root_arg = getattr(args, "root", None)
     workspace_arg = getattr(args, "workspace_alias", None)
+    if getattr(args, "format", None) == "json":
+        budget = _control_plane_budget(args)
+        if root_arg:
+            root = Path(root_arg).expanduser()
+            if not root.is_absolute():
+                root = Path.cwd() / root
+            try:
+                profile = load_profile_exact(root, budget)
+            except ReadLimitError as exc:
+                if exc.code is not ReadLimitCode.UNSAFE_FILE:
+                    raise
+                raise WorkspaceResolutionError(
+                    WorkspaceResolutionFailure.LOCAL_PROFILE_INVALID
+                ) from exc
+            except PermissionError as exc:
+                raise WorkspaceResolutionError(
+                    WorkspaceResolutionFailure.HOST_READ_PERMISSION_REQUIRED
+                ) from exc
+            except (OSError, ValidationError) as exc:
+                raise WorkspaceResolutionError(
+                    WorkspaceResolutionFailure.LOCAL_PROFILE_INVALID
+                ) from exc
+            resolved = ResolvedWorkspace(
+                profile,
+                WorkspaceResolutionSource.EXPLICIT,
+                None,
+            )
+        else:
+            resolved = resolve_workspace_readonly(
+                start=None,
+                workspace=workspace_arg,
+                cwd=Path.cwd().absolute(),
+                budget=budget,
+            )
+        setattr(args, "_control_plane_resolution", resolved)
+        return resolved.profile.config
     if root_arg:
         root = Path(root_arg).expanduser()
     elif workspace_arg:
@@ -248,6 +298,15 @@ def _config(args: argparse.Namespace) -> Config:
             else None,
         )
     return load(root)
+
+
+def _control_plane_budget(args: argparse.Namespace) -> ReadBudget:
+    existing = getattr(args, "_control_plane_read_budget", None)
+    if isinstance(existing, ReadBudget):
+        return existing
+    budget = ReadBudget(ObservationLimits())
+    setattr(args, "_control_plane_read_budget", budget)
+    return budget
 
 
 def _repositories(raw: str | None) -> list[str] | None:
@@ -342,6 +401,173 @@ def _print_objective(config: Config, record) -> None:
         f"{record.objective.id:28} {record.operator_state:8} {result:16} "
         f"r{record.revision:<3} {record.objective.line:20} {', '.join(record.objective.targets)}"
     )
+
+
+def _print_control_plane_json(
+    kind: str, *, stream=None, **payload: object
+) -> None:
+    print(
+        json.dumps(
+            {"schema_version": 1, "kind": kind, **payload},
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        ),
+        file=stream,
+    )
+
+
+def _finding_payload(finding: str) -> dict[str, str]:
+    status, separator, message = finding.partition(" ")
+    return {
+        "status": status if separator else "UNKNOWN",
+        "message": message if separator else finding,
+    }
+
+
+def _doctor_finding_payload(
+    finding: str, *, include_paths: bool
+) -> dict[str, str]:
+    payload = _finding_payload(finding)
+    if include_paths:
+        return payload
+    message = payload["message"]
+    if not message.startswith("repository "):
+        return payload
+    identity, separator, detail = message.partition(": ")
+    if not separator:
+        payload["message"] = "repository: unavailable"
+    elif payload["status"] == "PASS":
+        payload["message"] = f"{identity}: ready"
+    elif detail.startswith("missing or not Git:"):
+        payload["message"] = f"{identity}: missing or not Git"
+    else:
+        payload["message"] = f"{identity}: unavailable"
+    return payload
+
+
+def _status_payload(
+    config: Config, *, read_budget: ReadBudget | None = None
+) -> dict[str, object]:
+    return {
+        "workspace": config.name,
+        "rows": [
+            {
+                "scope": scope,
+                "repository": repository,
+                "branch": branch,
+                "head": head,
+                "upstream": upstream,
+                "dirty_count": dirty,
+            }
+            for scope, repository, branch, head, upstream, dirty in status_rows(
+                config, read_budget=read_budget
+            )
+        ],
+    }
+
+
+def _control_plane_command(args: argparse.Namespace) -> str:
+    parts: list[str] = []
+    for attribute in (
+        "command",
+        "workspace_command",
+        "integration_command",
+        "line_command",
+        "changeset_command",
+        "objective_command",
+        "objective_scope_command",
+    ):
+        value = getattr(args, attribute, None)
+        if isinstance(value, str) and value and value not in parts:
+            parts.append(value)
+    return " ".join(parts) or "dyro"
+
+
+def _control_plane_error_code(
+    args: argparse.Namespace, exc: BaseException
+) -> str:
+    code = getattr(exc, "code", None)
+    if hasattr(code, "value"):
+        return str(code.value)
+    if isinstance(code, str) and code:
+        return code
+    if isinstance(exc, ReadLimitError):
+        return exc.code.value
+    if isinstance(exc, ValidationError):
+        return "VALIDATION_ERROR"
+    if isinstance(exc, OSError):
+        return "IO_ERROR"
+    command = getattr(args, "command", "")
+    return {
+        "changeset": "CHANGESET_UNAVAILABLE",
+        "doctor": "WORKSPACE_UNHEALTHY",
+        "integration": "INTEGRATION_UNAVAILABLE",
+        "line": "LINE_UNAVAILABLE",
+        "next": "NEXT_STEP_UNAVAILABLE",
+        "objective": "OBJECTIVE_UNAVAILABLE",
+        "status": "WORKSPACE_OBSERVATION_FAILED",
+        "workspace": "WORKSPACE_REGISTRY_UNAVAILABLE",
+    }.get(command, "DYRO_ERROR")
+
+
+def _print_control_plane_error(
+    args: argparse.Namespace, exc: BaseException
+) -> None:
+    _print_control_plane_json(
+        "error",
+        stream=sys.stderr,
+        code=_control_plane_error_code(args, exc),
+        command=_control_plane_command(args),
+        retryable=False,
+    )
+
+
+def _workspace_selector_argv(
+    args: argparse.Namespace, config: Config
+) -> tuple[str, ...]:
+    alias = getattr(args, "workspace_alias", None)
+    if alias:
+        return ("dyro", "--workspace", alias)
+    return ("dyro", "--root", str(config.root))
+
+
+def _scoped_command(
+    args: argparse.Namespace, config: Config, *command: str
+) -> str:
+    return shlex.join((*_workspace_selector_argv(args, config), *command))
+
+
+def _objective_payload(
+    config: Config,
+    record,
+    *,
+    detailed: bool,
+    read_budget: ReadBudget | None = None,
+) -> dict[str, object]:
+    if read_budget is None:
+        derived_result = derive_objective_result(config, record)
+    else:
+        snapshot = build_scheduler_snapshot_bounded(
+            config, objective=record, budget=read_budget
+        )
+        derived_result = build_continuation_plan(snapshot).completion.value
+    payload: dict[str, object] = {
+        "id": record.objective.id,
+        "operator_state": record.operator_state,
+        "derived_result": derived_result,
+        "revision": record.revision,
+        "line": record.objective.line,
+        "targets": list(record.objective.targets),
+    }
+    if detailed:
+        payload.update(
+            {
+                "scope": list(record.scope),
+                "contract_sha256": record.contract_sha256,
+            }
+        )
+    return payload
 
 
 def _print_command(argv: tuple[str, ...]) -> None:
@@ -1196,12 +1422,27 @@ def cmd_bootstrap(args: argparse.Namespace) -> None:
 
 def cmd_doctor(args: argparse.Namespace) -> None:
     config = _config(args)
+    budget = _control_plane_budget(args) if args.format == "json" else None
+    findings = doctor(config, read_budget=budget)
+    failures = [item for item in findings if item.startswith("FAIL")]
+    if args.format == "json":
+        _print_control_plane_json(
+            "doctor",
+            workspace=config.name,
+            passed=not failures,
+            findings=[
+                _doctor_finding_payload(item, include_paths=args.include_paths)
+                for item in findings
+            ],
+        )
+        if failures:
+            raise SystemExit(2)
+        return
     print("\n" + title("━━ Dyro 健康检查 ━━"))
     print(muted(f"Profile：{config.name} · 检查仓库、基线与隔离工作区。"))
-    findings = doctor(config)
     for finding in findings:
         _print_doctor_finding(finding)
-    if any(item.startswith("FAIL") for item in findings):
+    if failures:
         raise DyroError("doctor 发现结构错误")
     print("\n" + success("检查通过。") + " 下一步：" + terminal_value("dyro"))
 
@@ -1284,22 +1525,47 @@ def cmd_workspace_add(args: argparse.Namespace) -> None:
 
 
 def cmd_workspace_list(args: argparse.Namespace) -> None:
-    registry = load_registry()
+    budget = _control_plane_budget(args) if args.format == "json" else None
+    registry = load_registry_bounded(budget) if budget is not None else load_registry()
+    rows: list[dict[str, object]] = []
+    for record in registry.workspaces:
+        try:
+            if budget is None:
+                load(record.root)
+            else:
+                load_profile_exact(record.root, budget)
+        except (DyroError, OSError, ValidationError):
+            available = False
+        else:
+            available = True
+        row: dict[str, object] = {
+            "name": record.name,
+            "default": record.name == registry.default,
+            "available": available,
+        }
+        if args.include_paths:
+            row["root"] = str(record.root)
+        rows.append(row)
+    if args.format == "json":
+        _print_control_plane_json(
+            "workspace_list",
+            default=registry.default or None,
+            workspaces=rows,
+        )
+        return
     if not registry.workspaces:
         print("还没有登记全局工作区。下一步：dyro workspace add <路径>")
         return
     print("\n" + title("━━ 全局工作区 ━━"))
     print(muted("这里只管理首页入口，不会移动或删除项目文件。"))
     print(muted(f"{'默认':4} {'名称':20} {'状态':8} 路径"))
-    for record in registry.workspaces:
+    for record, row in zip(registry.workspaces, rows, strict=True):
         marker = (
             success(f"{'●':4}")
             if record.name == registry.default
             else muted(f"{'·':4}")
         )
-        try:
-            load(record.root)
-        except (DyroError, ValidationError):
+        if not row["available"]:
             state = danger(f"{'不可用':8}")
         else:
             state = success(f"{'可用':8}")
@@ -1418,6 +1684,37 @@ def cmd_join(args: argparse.Namespace) -> None:
 
 
 def cmd_status(args: argparse.Namespace) -> None:
+    if args.format == "json":
+        budget = _control_plane_budget(args)
+        if not args.all:
+            _print_control_plane_json(
+                "workspace_status",
+                **_status_payload(_config(args), read_budget=budget),
+            )
+            return
+        registry = load_registry_bounded(budget)
+        workspaces: list[dict[str, object]] = []
+        for record in registry.workspaces:
+            try:
+                config = load_profile_exact(record.root, budget).config
+            except (DyroError, OSError, ValidationError) as exc:
+                workspaces.append(
+                    {
+                        "workspace": record.name,
+                        "available": False,
+                        "error_code": _control_plane_error_code(args, exc),
+                        "rows": [],
+                    }
+                )
+            else:
+                workspaces.append(
+                    {
+                        "available": True,
+                        **_status_payload(config, read_budget=budget),
+                    }
+                )
+        _print_control_plane_json("workspace_status_all", workspaces=workspaces)
+        return
     if args.all:
         print_all_status()
         return
@@ -1558,7 +1855,29 @@ def cmd_tool_pin(args: argparse.Namespace) -> None:
 
 
 def cmd_integration_status(args: argparse.Namespace) -> None:
-    status = integration_status(args.id)
+    status = integration_status(
+        args.id,
+        read_budget=_control_plane_budget(args) if args.format == "json" else None,
+    )
+    if args.format == "json":
+        avatars: list[dict[str, object]] = []
+        for avatar in status.avatars:
+            row: dict[str, object] = {
+                "host": avatar.host,
+                "state": avatar.state,
+            }
+            if args.include_paths:
+                row.update(path=str(avatar.path), detail=avatar.detail)
+            avatars.append(row)
+        payload: dict[str, object] = {
+            "integration": status.integration,
+            "state": status.state.value,
+            "avatars": avatars,
+        }
+        if args.include_paths:
+            payload.update(target=str(status.target), detail=status.detail)
+        _print_control_plane_json("integration_status", **payload)
+        return
     print(f"{status.integration}\t{status.state.value}\t{status.target}")
     print(status.detail)
     for avatar in status.avatars:
@@ -1750,51 +2069,216 @@ def cmd_start(args: argparse.Namespace) -> None:
     cmd_open(open_args)
 
 
+def _bootstrap_destination_safe(config: Config, relative: str) -> bool:
+    try:
+        validate_bootstrap_destination(config, relative)
+    except (DyroError, OSError):
+        return False
+    return True
+
+
 def cmd_next(args: argparse.Namespace) -> None:
     """Give newcomers one safe, concrete next step without making changes."""
 
     try:
         config = _config(args)
-    except ValidationError:
+    except WorkspaceResolutionError as exc:
+        if (
+            getattr(args, "workspace_alias", None)
+            or getattr(args, "root", None)
+            or exc.code is not WorkspaceResolutionFailure.WORKSPACE_NOT_FOUND
+        ):
+            raise
+        if args.format == "json":
+            _print_control_plane_json(
+                "next_step",
+                state="workspace_missing",
+                summary="尚未发现 Dyro 工作区。",
+                commands=[],
+                mutation_available=False,
+                required_choice="join_existing_or_setup_new",
+            )
+            return
         print("尚未发现 Dyro 工作区。")
         print("加入团队项目：dyro join <蓝图地址>")
         print("设置一个新项目：dyro setup")
         return
-    findings = doctor(config)
+    except ValidationError:
+        if args.format == "json" and (
+            getattr(args, "workspace_alias", None) or getattr(args, "root", None)
+        ):
+            raise
+        if args.format == "json":
+            _print_control_plane_json(
+                "next_step",
+                state="workspace_missing",
+                summary="尚未发现 Dyro 工作区。",
+                commands=[],
+                mutation_available=False,
+                required_choice="join_existing_or_setup_new",
+            )
+            return
+        print("尚未发现 Dyro 工作区。")
+        print("加入团队项目：dyro join <蓝图地址>")
+        print("设置一个新项目：dyro setup")
+        return
+    budget = _control_plane_budget(args) if args.format == "json" else None
+    findings = doctor(config, read_budget=budget)
     failures = [finding for finding in findings if finding.startswith("FAIL")]
     if failures:
+        absent_bootstrap_ids = {
+            repo_id
+            for repo_id, repository in config.repositories.items()
+            if repository.remote
+            and not (config.root / repository.path).exists()
+            and not (config.root / repository.path).is_symlink()
+            and _bootstrap_destination_safe(config, repository.path)
+        }
+        expected_bootstrap_failures = {
+            f"FAIL repository {repo_id}: missing or not Git: "
+            f"{config.root / config.repositories[repo_id].path}"
+            for repo_id in absent_bootstrap_ids
+        }
+        bootstrap_applicable = (
+            bool(absent_bootstrap_ids) and set(failures) == expected_bootstrap_failures
+        )
+        repair_commands = (
+            [_scoped_command(args, config, "bootstrap", "--yes")]
+            if bootstrap_applicable
+            else []
+        )
+        if args.format == "json":
+            _print_control_plane_json(
+                "next_step",
+                state="needs_repair",
+                summary="工作区还不能开始任务。",
+                commands=repair_commands,
+                diagnostic_commands=[_scoped_command(args, config, "doctor")],
+                mutation_available=bootstrap_applicable,
+                findings=[_finding_payload(item) for item in failures],
+            )
+            return
         print("工作区还不能开始任务：")
         for finding in failures:
             print("  " + finding)
-        print(
-            "下一步：dyro doctor；若仓库缺失且已配置 remote，则运行 dyro bootstrap --yes"
-        )
+        print(f"修复后运行：{_scoped_command(args, config, 'doctor')}")
+        if bootstrap_applicable:
+            print(
+                "缺失仓库均已配置 remote，可运行："
+                + _scoped_command(args, config, "bootstrap", "--yes")
+            )
         return
-    lines = list_lines(config)
+    lines = list_lines(config, read_budget=budget)
     if not lines:
-        print("Profile 已就绪，但还没有开发线。下一步：dyro line create dev --yes")
+        command = _scoped_command(args, config, "line", "create", "dev", "--yes")
+        if args.format == "json":
+            _print_control_plane_json(
+                "next_step",
+                state="needs_line",
+                summary="Profile 已就绪，但还没有开发线。",
+                commands=[command],
+                mutation_available=True,
+            )
+            return
+        print(f"Profile 已就绪，但还没有开发线。下一步：{command}")
         return
     if not config.adapters:
         if shutil.which("codex"):
+            command = _scoped_command(
+                args, config, "agent", "add", "codex", "--preset", "codex"
+            )
+            if args.format == "json":
+                _print_control_plane_json(
+                    "next_step",
+                    state="needs_agent",
+                    summary="工作区已就绪，检测到 Codex 尚未加入 Profile。",
+                    commands=[command],
+                    mutation_available=True,
+                )
+                return
             print(
-                "工作区已就绪，检测到 Codex 尚未加入 Profile。下一步：dyro agent add codex --preset codex"
+                f"工作区已就绪，检测到 Codex 尚未加入 Profile。下一步：{command}"
             )
         else:
+            command = _scoped_command(
+                args, config, "agent", "add", "<id>", "--command", "…"
+            )
+            if args.format == "json":
+                _print_control_plane_json(
+                    "next_step",
+                    state="needs_agent",
+                    summary="工作区已就绪，但尚未配置可启动的 Agent。",
+                    commands=[],
+                    mutation_available=False,
+                    required_inputs=["agent_id", "agent_command"],
+                )
+                return
             print(
-                "工作区已就绪，但尚未配置可启动的 Agent。下一步：dyro agent add <id> --command '…'"
+                f"工作区已就绪，但尚未配置可启动的 Agent。下一步：{command}"
             )
         return
     if len(lines) == 1 and len(config.adapters) == 1:
+        command = _scoped_command(
+            args,
+            config,
+            "start",
+            "--line",
+            lines[0].id,
+            "--agent",
+            next(iter(config.adapters)),
+        )
+        if args.format == "json":
+            _print_control_plane_json(
+                "next_step",
+                state="ready",
+                summary="工作区已就绪。",
+                commands=[command],
+                mutation_available=True,
+            )
+            return
         print(
-            f"工作区已就绪。下一步：dyro start --line {lines[0].id} --agent {next(iter(config.adapters))}"
+            f"工作区已就绪。下一步：{command}"
         )
         return
-    print("工作区已就绪。下一步：dyro start")
+    if args.format == "json":
+        _print_control_plane_json(
+            "next_step",
+            state="ready",
+            summary="工作区已就绪。",
+            commands=[_scoped_command(args, config, "start")],
+            mutation_available=True,
+        )
+        return
+    print(f"工作区已就绪。下一步：{_scoped_command(args, config, 'start')}")
 
 
 def cmd_line_list(args: argparse.Namespace) -> None:
     config = _config(args)
-    lines = list_lines(config, args.kind)
+    budget = _control_plane_budget(args) if args.format == "json" else None
+    lines = list_lines(config, args.kind, read_budget=budget)
+    if args.format == "json":
+        _print_control_plane_json(
+            "line_list",
+            workspace=config.name,
+            lines=[
+                {
+                    "kind": line.kind,
+                    "id": line.id,
+                    "branch": line.branch,
+                    "base": line.base,
+                    "repositories": [
+                        {
+                            "id": repository,
+                            "base": line.base_for(repository),
+                            "storage": line.storage_for(repository),
+                        }
+                        for repository in line.repositories
+                    ],
+                }
+                for line in lines
+            ],
+        )
+        return
     if not lines:
         print("暂无已登记开发线")
         return
@@ -1868,7 +2352,25 @@ def cmd_changeset_create(args: argparse.Namespace) -> None:
 
 
 def cmd_changeset_list(args: argparse.Namespace) -> None:
-    changesets = list_changesets(_config(args))
+    config = _config(args)
+    budget = _control_plane_budget(args) if args.format == "json" else None
+    changesets = list_changesets(config, read_budget=budget)
+    if args.format == "json":
+        _print_control_plane_json(
+            "changeset_list",
+            changesets=[
+                {
+                    "id": changeset.id,
+                    "line": changeset.line,
+                    "branch": changeset.branch,
+                    "repositories": list(changeset.repositories),
+                    "heads": changeset.heads,
+                    "created_at": changeset.created_at,
+                }
+                for changeset in changesets
+            ],
+        )
+        return
     if not changesets:
         print("暂无 Change Set")
         return
@@ -1881,10 +2383,26 @@ def cmd_changeset_list(args: argparse.Namespace) -> None:
 
 def cmd_changeset_verify(args: argparse.Namespace) -> None:
     config = _config(args)
-    findings = verify_changeset(config, get_changeset(config, args.id))
+    budget = _control_plane_budget(args) if args.format == "json" else None
+    findings = verify_changeset(
+        config,
+        get_changeset(config, args.id, read_budget=budget),
+        read_budget=budget,
+    )
+    failures = [finding for finding in findings if finding.startswith("FAIL")]
+    if args.format == "json":
+        _print_control_plane_json(
+            "changeset_verification",
+            changeset=args.id,
+            passed=not failures,
+            findings=[_finding_payload(item) for item in findings],
+        )
+        if failures:
+            raise SystemExit(2)
+        return
     for finding in findings:
         print(finding)
-    if any(finding.startswith("FAIL") for finding in findings):
+    if failures:
         raise DyroError(f"Change Set {args.id} 未通过核验")
 
 
@@ -2493,7 +3011,20 @@ def cmd_objective_start(args: argparse.Namespace) -> None:
 
 def cmd_objective_list(args: argparse.Namespace) -> None:
     config = _config(args)
-    records = list_objectives(config)
+    budget = _control_plane_budget(args) if args.format == "json" else None
+    records = list_objectives(config, recover=False, read_budget=budget)
+    if args.format == "json":
+        _print_control_plane_json(
+            "objective_list",
+            workspace=config.name,
+            objectives=[
+                _objective_payload(
+                    config, record, detailed=False, read_budget=budget
+                )
+                for record in records
+            ],
+        )
+        return
     if not records:
         print(
             "暂无 Objective。下一步：dyro objective start --file <objective.toml> --yes"
@@ -2506,7 +3037,19 @@ def cmd_objective_list(args: argparse.Namespace) -> None:
 
 def cmd_objective_status(args: argparse.Namespace) -> None:
     config = _config(args)
-    record = get_objective(config, args.id)
+    budget = _control_plane_budget(args) if args.format == "json" else None
+    record = get_objective(
+        config, args.id, recover=False, read_budget=budget
+    )
+    if args.format == "json":
+        _print_control_plane_json(
+            "objective_status",
+            workspace=config.name,
+            objective=_objective_payload(
+                config, record, detailed=True, read_budget=budget
+            ),
+        )
+        return
     print(f"Objective: {record.objective.id}")
     print(f"Operator state: {record.operator_state}")
     print(f"Derived result: {derive_objective_result(config, record)}")
@@ -2517,15 +3060,32 @@ def cmd_objective_status(args: argparse.Namespace) -> None:
     print(f"Contract SHA-256: {record.contract_sha256}")
 
 
-def _read_objective_plan(config: Config, objective_id: str):
+def _read_objective_plan(
+    config: Config,
+    objective_id: str,
+    *,
+    read_budget: ReadBudget | None = None,
+):
     """Build an Objective plan without recovery, mutation, dispatch, or agents."""
-    record = get_objective(config, objective_id, recover=False)
-    snapshot = build_scheduler_snapshot(config, objective=record)
+    record = get_objective(
+        config, objective_id, recover=False, read_budget=read_budget
+    )
+    snapshot = (
+        build_scheduler_snapshot(config, objective=record)
+        if read_budget is None
+        else build_scheduler_snapshot_bounded(
+            config, objective=record, budget=read_budget
+        )
+    )
     return snapshot, build_continuation_plan(snapshot)
 
 
 def cmd_objective_plan(args: argparse.Namespace) -> None:
-    _, plan = _read_objective_plan(_config(args), args.id)
+    _, plan = _read_objective_plan(
+        _config(args),
+        args.id,
+        read_budget=_control_plane_budget(args) if args.format == "json" else None,
+    )
     if args.format == "json":
         print(
             json.dumps(
@@ -2540,7 +3100,11 @@ def cmd_objective_plan(args: argparse.Namespace) -> None:
 
 
 def cmd_objective_explain(args: argparse.Namespace) -> None:
-    _, plan = _read_objective_plan(_config(args), args.id)
+    _, plan = _read_objective_plan(
+        _config(args),
+        args.id,
+        read_budget=_control_plane_budget(args) if args.format == "json" else None,
+    )
     if args.format == "json":
         print(
             json.dumps(
@@ -2555,7 +3119,11 @@ def cmd_objective_explain(args: argparse.Namespace) -> None:
 
 
 def cmd_objective_graph(args: argparse.Namespace) -> None:
-    snapshot, plan = _read_objective_plan(_config(args), args.id)
+    snapshot, plan = _read_objective_plan(
+        _config(args),
+        args.id,
+        read_budget=_control_plane_budget(args) if args.format == "json" else None,
+    )
     projection = build_scheduler_projection(snapshot, plan)
     if args.format == "json":
         print(render_projection_json(projection))
@@ -2566,8 +3134,19 @@ def cmd_objective_graph(args: argparse.Namespace) -> None:
 def cmd_objective_tick(args: argparse.Namespace) -> None:
     """Preview the next bounded Objective mutation wave without applying it."""
     config = _config(args)
-    record = get_objective(config, args.id, recover=False)
-    snapshot = build_scheduler_snapshot(config, objective=record)
+    record = get_objective(
+        config,
+        args.id,
+        recover=False,
+        read_budget=_control_plane_budget(args) if args.format == "json" else None,
+    )
+    snapshot = (
+        build_scheduler_snapshot(config, objective=record)
+        if args.format != "json"
+        else build_scheduler_snapshot_bounded(
+            config, objective=record, budget=_control_plane_budget(args)
+        )
+    )
     plan = build_continuation_plan(snapshot)
     tick = build_scheduler_tick(
         snapshot, plan, max_parallel=record.objective.budget.max_parallel
@@ -2581,8 +3160,19 @@ def cmd_objective_tick(args: argparse.Namespace) -> None:
 def cmd_objective_attention(args: argparse.Namespace) -> None:
     """Render the safe, deterministic attention view without mutating state."""
     config = _config(args)
-    record = get_objective(config, args.id, recover=False)
-    snapshot = build_scheduler_snapshot(config, objective=record)
+    record = get_objective(
+        config,
+        args.id,
+        recover=False,
+        read_budget=_control_plane_budget(args) if args.format == "json" else None,
+    )
+    snapshot = (
+        build_scheduler_snapshot(config, objective=record)
+        if args.format != "json"
+        else build_scheduler_snapshot_bounded(
+            config, objective=record, budget=_control_plane_budget(args)
+        )
+    )
     plan = build_continuation_plan(snapshot)
     scheduler = build_scheduler_projection(snapshot, plan)
     projection = build_attention_projection(
@@ -2980,9 +3570,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--default", action="store_true", help="设为裸 dyro 的默认项目"
     )
     workspace_add.set_defaults(func=cmd_workspace_add)
-    workspace_sub.add_parser("list", help="显示已登记工作区及可用状态").set_defaults(
-        func=cmd_workspace_list
+    workspace_list = workspace_sub.add_parser(
+        "list", help="显示已登记工作区及可用状态"
     )
+    workspace_list.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
+    workspace_list.add_argument(
+        "--include-paths",
+        action="store_true",
+        help="在 JSON 中显式包含本机工作区绝对路径",
+    )
+    workspace_list.set_defaults(func=cmd_workspace_list)
     workspace_default = workspace_sub.add_parser(
         "default", help="设置裸 dyro 的默认项目"
     )
@@ -3047,7 +3646,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     join.set_defaults(func=cmd_join)
 
-    sub.add_parser("doctor", help="验证动态工作区结构").set_defaults(func=cmd_doctor)
+    doctor_parser = sub.add_parser("doctor", help="验证动态工作区结构")
+    doctor_parser.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
+    doctor_parser.add_argument(
+        "--include-paths",
+        action="store_true",
+        help="在 JSON 中显式包含本机诊断路径",
+    )
+    doctor_parser.set_defaults(func=cmd_doctor)
     terminology = sub.add_parser("terminology", help="使用仓库外策略扫描候选术语")
     terminology_sub = terminology.add_subparsers(
         dest="terminology_command", required=True
@@ -3075,6 +3683,9 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = sub.add_parser("status", help="显示 anchors 与开发线 Git 状态")
     status_parser.add_argument(
         "--all", action="store_true", help="汇总所有全局登记工作区"
+    )
+    status_parser.add_argument(
+        "--format", choices=("text", "json"), default="text"
     )
     status_parser.set_defaults(func=cmd_status)
     bootstrap_parser = sub.add_parser(
@@ -3145,6 +3756,14 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="只读检查集成状态"
     )
     integration_status_parser.add_argument("id", choices=("skill", "codex"))
+    integration_status_parser.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
+    integration_status_parser.add_argument(
+        "--include-paths",
+        action="store_true",
+        help="在 JSON 中显式包含本机集成路径与路径相关细节",
+    )
     integration_status_parser.set_defaults(func=cmd_integration_status)
     integration_install_parser = integration_sub.add_parser(
         "install", help="预览或安装 Dyro 自有集成资产（镜像+分身）"
@@ -3347,14 +3966,17 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--agent")
     start.add_argument("--prompt", default="")
     start.set_defaults(func=cmd_start)
-    sub.add_parser("next", help="根据当前状态给出新手的唯一安全下一步").set_defaults(
-        func=cmd_next
+    next_parser = sub.add_parser("next", help="根据当前状态给出新手的唯一安全下一步")
+    next_parser.add_argument(
+        "--format", choices=("text", "json"), default="text"
     )
+    next_parser.set_defaults(func=cmd_next)
 
     line = sub.add_parser("line", help="功能开发线")
     line_sub = line.add_subparsers(dest="line_command", required=True)
     line_list = line_sub.add_parser("list")
     line_list.add_argument("--kind", choices=("line", "hotfix"))
+    line_list.add_argument("--format", choices=("text", "json"), default="text")
     line_list.set_defaults(func=cmd_line_list)
     line_create = line_sub.add_parser("create")
     line_create.add_argument("id")
@@ -3407,9 +4029,16 @@ def build_parser() -> argparse.ArgumentParser:
     changeset_create.add_argument("--line", required=True)
     changeset_create.add_argument("--repos", help="逗号分隔；默认该开发线全部仓库")
     changeset_create.set_defaults(func=cmd_changeset_create)
-    changeset_sub.add_parser("list").set_defaults(func=cmd_changeset_list)
+    changeset_list = changeset_sub.add_parser("list")
+    changeset_list.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
+    changeset_list.set_defaults(func=cmd_changeset_list)
     changeset_verify = changeset_sub.add_parser("verify")
     changeset_verify.add_argument("id")
+    changeset_verify.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
     changeset_verify.set_defaults(func=cmd_changeset_verify)
 
     objective = sub.add_parser(
@@ -3432,13 +4061,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     objective_start.add_argument("--yes", action="store_true")
     objective_start.set_defaults(func=cmd_objective_start)
-    objective_sub.add_parser("list", help="列出已接受的 Objective").set_defaults(
-        func=cmd_objective_list
+    objective_list = objective_sub.add_parser("list", help="列出已接受的 Objective")
+    objective_list.add_argument(
+        "--format", choices=("text", "json"), default="text"
     )
+    objective_list.set_defaults(func=cmd_objective_list)
     objective_status = objective_sub.add_parser(
         "status", help="显示 Objective 状态和派生结果"
     )
     objective_status.add_argument("id")
+    objective_status.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
     objective_status.set_defaults(func=cmd_objective_status)
     objective_plan = objective_sub.add_parser(
         "plan", help="只读生成确定性 Objective action plan，不执行任务"
@@ -3926,6 +4560,7 @@ def main(argv: list[str] | None = None) -> None:
     # The optional local dispatch surface ships in the dyro wheel.
     raw = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
+    args: argparse.Namespace | None = None
     try:
         experiment = _route_experiment_surface(raw)
         if experiment is not None and experiment[0] == "dispatch":
@@ -3943,8 +4578,25 @@ def main(argv: list[str] | None = None) -> None:
         else:
             cmd_home(args)
     except DyroError as exc:
+        if args is not None and getattr(args, "format", None) == "json":
+            _print_control_plane_error(args, exc)
+            raise SystemExit(2) from None
         parser.exit(2, danger(f"错误：{exc}\n", stream=sys.stderr))
+    except OSError as exc:
+        if args is not None and getattr(args, "format", None) == "json":
+            _print_control_plane_error(args, exc)
+            raise SystemExit(2) from None
+        raise
     except (KeyboardInterrupt, EOFError):
+        if args is not None and getattr(args, "format", None) == "json":
+            _print_control_plane_json(
+                "error",
+                stream=sys.stderr,
+                code="INTERRUPTED",
+                command=_control_plane_command(args),
+                retryable=False,
+            )
+            raise SystemExit(130) from None
         parser.exit(
             130,
             muted(

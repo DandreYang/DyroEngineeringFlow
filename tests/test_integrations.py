@@ -5,6 +5,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 import unittest
@@ -97,10 +98,86 @@ class IntegrationManagerTests(unittest.TestCase):
         }
         self.assertEqual(keys, {"name", "description"})
         self.assertIn("name: dyro-control-plane", frontmatter)
+        self.assertIn("coding agent", frontmatter)
+        self.assertNotIn("from Codex", frontmatter)
+        for command in (
+            "workspace list --format json",
+            "status --format json",
+            "doctor --format json",
+            "objective attention <id> --format json",
+            "objective plan <id> --format json",
+        ):
+            self.assertIn(command, content)
+        for forbidden_action in ("`console`", "`dispatch`", "`task gates`"):
+            self.assertIn(forbidden_action, content)
+        self.assertIn("skip global discovery", content)
+        self.assertIn("Never add `--include-paths`", content)
+        for private_pattern in (
+            r"/Users/[^<\s]",
+            r"/home/[^<\s]",
+            r"[A-Za-z]:[\\\\/]+Users[\\\\/]",
+            r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}",
+            r"session[_ -]?id",
+            r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+        ):
+            self.assertIsNone(
+                re.search(private_pattern, content, flags=re.IGNORECASE),
+                msg=private_pattern,
+            )
         self.assertIn("$dyro-control-plane", metadata.read_text(encoding="utf-8"))
         for line in metadata.read_text(encoding="utf-8").splitlines():
             if ": " in line:
                 self.assertTrue(line.split(": ", 1)[1].startswith('"'))
+
+    def test_integration_status_json_is_structured(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["integration", "status", "skill", "--format", "json"])
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["kind"], "integration_status")
+        self.assertEqual(payload["integration"], "skill")
+        self.assertEqual(payload["state"], "absent")
+        self.assertEqual(payload["avatars"][0]["host"], "codex")
+        self.assertEqual(payload["avatars"][0]["state"], "missing")
+        self.assertNotIn("target", payload)
+        self.assertNotIn("detail", payload)
+        self.assertNotIn("path", payload["avatars"][0])
+        self.assertNotIn("detail", payload["avatars"][0])
+
+        output = StringIO()
+        with redirect_stdout(output):
+            main(
+                [
+                    "integration",
+                    "status",
+                    "skill",
+                    "--format",
+                    "json",
+                    "--include-paths",
+                ]
+            )
+        with_paths = json.loads(output.getvalue())
+        self.assertEqual(with_paths["target"], str(self.mirror))
+        self.assertEqual(with_paths["avatars"][0]["path"], str(self.avatar))
+
+    def test_integration_status_json_rejects_an_oversized_manifest(self) -> None:
+        install_integration("skill", yes=True)
+        self.manifest.write_bytes(b"{" + b"x" * (1024 * 1024))
+        stdout = StringIO()
+        stderr = StringIO()
+
+        with (
+            redirect_stdout(stdout),
+            patch("sys.stderr", stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(["integration", "status", "skill", "--format", "json"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(json.loads(stderr.getvalue())["code"], "FILE_TOO_LARGE")
 
     def test_status_and_dry_run_are_strictly_zero_write(self) -> None:
         before = self._tree_snapshot()

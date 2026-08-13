@@ -45,6 +45,14 @@ _PROTOCOL_LIMIT_CEILINGS = {
     "task_records": 2000,
     "line_manifest_bytes": 256 * 1024,
     "line_records": 2000,
+    "changeset_manifest_bytes": 256 * 1024,
+    "changeset_records": 2000,
+    "integration_manifest_bytes": 1024 * 1024,
+    "integration_asset_bytes": 1024 * 1024,
+    "integration_records": 100,
+    "evidence_pointer_bytes": 64 * 1024,
+    "evidence_manifest_bytes": 1024 * 1024,
+    "task_heads_bytes": 256 * 1024,
     "objective_metadata_bytes": 256 * 1024,
     "objective_events_bytes": 8 * 1024 * 1024,
     "objective_event_records": 10_000,
@@ -65,6 +73,24 @@ class ObservationLimits:
     task_records: int = _PROTOCOL_LIMIT_CEILINGS["task_records"]
     line_manifest_bytes: int = _PROTOCOL_LIMIT_CEILINGS["line_manifest_bytes"]
     line_records: int = _PROTOCOL_LIMIT_CEILINGS["line_records"]
+    changeset_manifest_bytes: int = _PROTOCOL_LIMIT_CEILINGS[
+        "changeset_manifest_bytes"
+    ]
+    changeset_records: int = _PROTOCOL_LIMIT_CEILINGS["changeset_records"]
+    integration_manifest_bytes: int = _PROTOCOL_LIMIT_CEILINGS[
+        "integration_manifest_bytes"
+    ]
+    integration_asset_bytes: int = _PROTOCOL_LIMIT_CEILINGS[
+        "integration_asset_bytes"
+    ]
+    integration_records: int = _PROTOCOL_LIMIT_CEILINGS["integration_records"]
+    evidence_pointer_bytes: int = _PROTOCOL_LIMIT_CEILINGS[
+        "evidence_pointer_bytes"
+    ]
+    evidence_manifest_bytes: int = _PROTOCOL_LIMIT_CEILINGS[
+        "evidence_manifest_bytes"
+    ]
+    task_heads_bytes: int = _PROTOCOL_LIMIT_CEILINGS["task_heads_bytes"]
     objective_metadata_bytes: int = _PROTOCOL_LIMIT_CEILINGS["objective_metadata_bytes"]
     objective_events_bytes: int = _PROTOCOL_LIMIT_CEILINGS["objective_events_bytes"]
     objective_event_records: int = _PROTOCOL_LIMIT_CEILINGS["objective_event_records"]
@@ -257,6 +283,10 @@ class ReadBudget:
     def bytes_read(self) -> int:
         return self._bytes_read
 
+    @property
+    def remaining_bytes(self) -> int:
+        return self.limits.aggregate_bytes - self._bytes_read
+
     def check_deadline(self) -> None:
         current = self.monotonic()
         if (
@@ -297,6 +327,15 @@ class ReadBudget:
                 "Aggregate observation byte budget exceeded",
             )
         self._bytes_read += size
+
+    def charge_bytes(self, size: int) -> None:
+        """Charge bytes captured from a bounded observation subprocess."""
+
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise ValidationError("observation bytes 必须是非负整数")
+        self.check_deadline()
+        self._charge(size)
+        self.check_deadline()
 
     def _root_identity(self, root: Path) -> tuple[int, int]:
         absolute = _checked_absolute(root, "workspace root")
@@ -577,6 +616,39 @@ class ReadBudget:
             maximum_bytes=maximum_bytes,
             label=label,
         ).decode("utf-8")
+
+
+def bounded_directory_names(
+    directory_fd: int,
+    budget: ReadBudget,
+    *,
+    maximum_records: int,
+    label: str,
+) -> tuple[str, ...]:
+    """Enumerate at most ``maximum_records`` names without preloading a directory."""
+
+    if isinstance(maximum_records, bool) or maximum_records < 0:
+        raise ValidationError("maximum_records 必须是非负整数")
+    names: list[str] = []
+    try:
+        with os.scandir(directory_fd) as entries:
+            for entry in entries:
+                budget.check_deadline()
+                if len(names) >= maximum_records:
+                    raise ReadLimitError(
+                        ReadLimitCode.RECORD_LIMIT_EXCEEDED,
+                        f"{label} record limit exceeded",
+                    )
+                names.append(entry.name)
+    except ReadLimitError:
+        raise
+    except OSError as exc:
+        raise ReadLimitError(
+            ReadLimitCode.UNSAFE_FILE,
+            f"{label} directory cannot be safely enumerated",
+        ) from exc
+    budget.check_deadline()
+    return tuple(names)
 
 
 def require_safe_directory_chain(

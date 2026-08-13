@@ -7,3 +7,4 @@ include docs/workspace-blueprints.md
 include examples/blueprints/acme-platform.toml
 recursive-include src/dyro/console/assets *
 recursive-include src/dyro/integrations/assets *
+global-exclude *.py[cod]

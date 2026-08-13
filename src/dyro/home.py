@@ -1488,13 +1488,13 @@ def _create_line_from_home(config: Config, dry_run: bool) -> Line | None:
         if dry_run:
             print("DRY RUN: 已展示创建计划；不会创建 Git worktree。")
             return None
-        confirmation = (
-            input("\n确认创建这些隔离 worktree？[y/b/N；b 返回基线]：").strip().lower()
-        )
+        confirmation = input(
+            "\n确认创建这些隔离 worktree？[Y/b/n；回车确认，b 返回基线]："
+        ).strip().lower()
         if confirmation in {"b", "back", "返回"}:
             step = 3
             continue
-        if confirmation not in {"y", "yes"}:
+        if confirmation not in {"", "y", "yes"}:
             print("已取消；没有修改任何 Git 工作区。")
             return None
         try:

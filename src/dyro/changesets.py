@@ -3,13 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
+import stat
 import tomllib
 from typing import Iterable
 
 from .config import Config, validate_id
 from .errors import DyroError, ValidationError
-from .process import git, require_ok
+from .process import git_read, require_ok
+from .read_limits import (
+    ReadBudget,
+    ReadLimitCode,
+    ReadLimitError,
+    bounded_directory_names,
+)
 from .state import atomic_write_text
 from .workspace import get_line, line_repository_path
 
@@ -51,10 +59,10 @@ def _write(config: Config, changeset: ChangeSet) -> None:
     atomic_write_text(path, "\n".join((*chunks, "")))
 
 
-def _parse(path: Path) -> ChangeSet:
+def _parse_content(path: Path, content: bytes) -> ChangeSet:
     try:
-        raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as exc:
+        raw = tomllib.loads(content.decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
         raise ValidationError(f"Change Set 格式错误：{path}: {exc}") from exc
     if raw.get("schema_version") != 1:
         raise ValidationError(f"不支持的 Change Set 版本：{path}")
@@ -74,14 +82,74 @@ def _parse(path: Path) -> ChangeSet:
     return ChangeSet(changeset_id, line, branch, repositories, {repository: str(heads_raw[repository]) for repository in repositories}, created_at)
 
 
-def get_changeset(config: Config, changeset_id: str) -> ChangeSet:
+def _parse(path: Path) -> ChangeSet:
+    return _parse_content(path, path.read_bytes())
+
+
+def get_changeset(
+    config: Config,
+    changeset_id: str,
+    *,
+    read_budget: ReadBudget | None = None,
+) -> ChangeSet:
     path = _path(config, changeset_id)
+    if read_budget is not None:
+        try:
+            content = read_budget.read_regular_bytes_at(
+                root=config.root,
+                directory=config.changesets_dir,
+                name=path.name,
+                maximum_bytes=read_budget.limits.changeset_manifest_bytes,
+                label="Change Set manifest",
+            )
+        except FileNotFoundError as exc:
+            raise DyroError(f"未找到 Change Set：{changeset_id}") from exc
+        return _parse_content(path, content)
     if not path.is_file():
         raise DyroError(f"未找到 Change Set：{changeset_id}")
     return _parse(path)
 
 
-def list_changesets(config: Config) -> list[ChangeSet]:
+def list_changesets(
+    config: Config, *, read_budget: ReadBudget | None = None
+) -> list[ChangeSet]:
+    if read_budget is not None:
+        paths: list[Path] = []
+        with read_budget.open_safe_directory_chain(
+            config.root, config.changesets_dir, allow_missing=True
+        ) as directory_fd:
+            if directory_fd is None:
+                return []
+            names = sorted(
+                name
+                for name in bounded_directory_names(
+                    directory_fd,
+                    read_budget,
+                    maximum_records=read_budget.limits.changeset_records,
+                    label="Change Set",
+                )
+                if name.endswith(".toml")
+            )
+            for name in names:
+                try:
+                    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                except OSError as exc:
+                    raise ReadLimitError(
+                        ReadLimitCode.UNSAFE_FILE,
+                        "Change Set manifest is not a safe regular file",
+                    ) from exc
+                if not stat.S_ISREG(info.st_mode):
+                    raise ReadLimitError(
+                        ReadLimitCode.UNSAFE_FILE,
+                        "Change Set manifest is not a safe regular file",
+                    )
+                path = config.changesets_dir / name
+                read_budget.bind_file_identity(path, (info.st_dev, info.st_ino))
+                paths.append(path)
+        return [
+            get_changeset(config, path.stem, read_budget=read_budget)
+            for path in paths
+        ]
     if not config.changesets_dir.exists():
         return []
     return [_parse(path) for path in sorted(config.changesets_dir.glob("*.toml"))]
@@ -109,15 +177,23 @@ def create_changeset(
     heads: dict[str, str] = {}
     for repository in selected:
         target = line_repository_path(config, line, repository)
-        if git(target, "rev-parse", "--git-dir").code != 0:
+        if git_read(target, "rev-parse", "--git-dir").code != 0:
             raise DyroError(f"Change Set 开发线仓库不存在或不是 Git：{target}")
-        branch = require_ok(git(target, "branch", "--show-current"), f"读取 {repository} 分支").stdout.strip()
+        branch = require_ok(
+            git_read(target, "branch", "--show-current"),
+            f"读取 {repository} 分支",
+        ).stdout.strip()
         if branch != line.branch:
             raise DyroError(f"Change Set 要求 {repository} 位于 {line.branch}，当前为 {branch or 'DETACHED'}")
-        dirty = require_ok(git(target, "status", "--porcelain=v1", "-uall"), f"读取 {repository} 状态").stdout.strip()
+        dirty = require_ok(
+            git_read(target, "status", "--porcelain=v1", "-uall"),
+            f"读取 {repository} 状态",
+        ).stdout.strip()
         if dirty:
             raise DyroError(f"Change Set 拒绝记录未提交改动：{target}")
-        heads[repository] = require_ok(git(target, "rev-parse", "HEAD"), f"读取 {repository} HEAD").stdout.strip()
+        heads[repository] = require_ok(
+            git_read(target, "rev-parse", "HEAD"), f"读取 {repository} HEAD"
+        ).stdout.strip()
     changeset = ChangeSet(
         id=changeset_id,
         line=line.id,
@@ -131,26 +207,55 @@ def create_changeset(
     return changeset
 
 
-def verify_changeset(config: Config, changeset: ChangeSet) -> list[str]:
+def verify_changeset(
+    config: Config,
+    changeset: ChangeSet,
+    *,
+    read_budget: ReadBudget | None = None,
+) -> list[str]:
     findings: list[str] = []
-    line = get_line(config, changeset.line)
+    line = get_line(config, changeset.line, read_budget=read_budget)
     if line.branch != changeset.branch:
         findings.append(f"FAIL changeset {changeset.id}: registered line branch changed from {changeset.branch} to {line.branch}")
         return findings
     for repository in changeset.repositories:
         target = line_repository_path(config, line, repository)
-        if git(target, "rev-parse", "--git-dir").code != 0:
+        if (
+            git_read(
+                target,
+                "rev-parse",
+                "--git-dir",
+                read_budget=read_budget,
+            ).code
+            != 0
+        ):
             findings.append(f"FAIL {repository}: missing delivery-line repository")
             continue
-        branch = git(target, "branch", "--show-current")
+        branch = git_read(
+            target,
+            "branch",
+            "--show-current",
+            read_budget=read_budget,
+        )
         if branch.code != 0 or branch.stdout.strip() != changeset.branch:
             findings.append(f"FAIL {repository}: expected branch {changeset.branch}, found {branch.stdout.strip() or 'DETACHED'}")
             continue
-        dirty = git(target, "status", "--porcelain=v1", "-uall")
+        dirty = git_read(
+            target,
+            "status",
+            "--porcelain=v1",
+            "-uall",
+            read_budget=read_budget,
+        )
         if dirty.code != 0 or dirty.stdout.strip():
             findings.append(f"FAIL {repository}: delivery-line repository is dirty")
             continue
-        head = git(target, "rev-parse", "HEAD")
+        head = git_read(
+            target,
+            "rev-parse",
+            "HEAD",
+            read_budget=read_budget,
+        )
         if head.code != 0 or head.stdout.strip() != changeset.heads[repository]:
             findings.append(f"FAIL {repository}: HEAD differs from pinned Change Set")
             continue

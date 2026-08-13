@@ -340,11 +340,11 @@ class HubCliTests(WorkspaceCase):
         self,
     ) -> None:
         add_workspace(self.root, name="demo", make_default=True)
-        answers = iter(["3", "FEATURE-20260804", "", "yes"])
+        answers = iter(["3", "FEATURE-20260804", "", ""])
         output = StringIO()
         with (
             patch("dyro.home.interactive_terminal", return_value=True),
-            patch("builtins.input", side_effect=lambda _: next(answers)),
+            patch("builtins.input", side_effect=lambda _: next(answers)) as input_mock,
             patch("dyro.home._choose_tool", return_value=None),
             redirect_stdout(output),
         ):
@@ -357,6 +357,12 @@ class HubCliTests(WorkspaceCase):
         self.assertIn("[2/3] 参与仓库", rendered)
         self.assertIn("main（工作区默认基线）（推荐）", rendered)
         self.assertIn("━━ 创建前确认 ━━", rendered)
+        self.assertTrue(
+            any(
+                "[Y/b/n；回车确认，b 返回基线]" in call.args[0]
+                for call in input_mock.call_args_list
+            )
+        )
         self.assertIn("已创建功能开发线：FEATURE-20260804", rendered)
         line = get_line(load(self.root), "FEATURE-20260804", "line")
         self.assertEqual(line.base, "main")

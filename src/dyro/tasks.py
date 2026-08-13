@@ -4,8 +4,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import tomllib
 import uuid
 from typing import Any, Iterable
@@ -18,6 +20,10 @@ from .config import (
     validate_id,
 )
 from .evidence_store import (
+    CURRENT_EVIDENCE_FILE,
+    EVIDENCE_GENERATIONS_DIR,
+    GENERATION_PATTERN,
+    MANIFEST_FILE,
     EvidenceGeneration,
     cleanup_evidence_generations,
     list_evidence_generations,
@@ -25,8 +31,13 @@ from .evidence_store import (
     resolve_evidence_path,
 )
 from .errors import DyroError, ValidationError
-from .process import git, require_ok, run
-from .read_limits import ReadBudget
+from .process import git, git_read, require_ok, run
+from .read_limits import (
+    ReadBudget,
+    ReadLimitCode,
+    ReadLimitError,
+    bounded_directory_names,
+)
 from .provenance import (
     ExecutionAttempt,
     begin_execution_attempt,
@@ -408,6 +419,104 @@ def list_tasks(config: Config) -> list[Task]:
         load_task(config, path.parent.name)
         for path in sorted(config.task_specs_dir.glob("*/task.toml"))
     ]
+
+
+def list_task_ids_bounded(config: Config, budget: ReadBudget) -> tuple[str, ...]:
+    """Enumerate Task directories without following symlinks or exceeding limits."""
+
+    with budget.open_safe_directory_chain(
+        config.root, config.task_specs_dir, allow_missing=True
+    ) as directory_fd:
+        if directory_fd is None:
+            return ()
+        task_ids: list[str] = []
+        for name in sorted(
+            bounded_directory_names(
+                directory_fd,
+                budget,
+                maximum_records=budget.limits.task_records,
+                label="Task",
+            )
+        ):
+            try:
+                info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise ReadLimitError(
+                    ReadLimitCode.UNSAFE_FILE,
+                    "Task root contains an unsafe entry",
+                ) from exc
+            if stat.S_ISLNK(info.st_mode):
+                raise ReadLimitError(
+                    ReadLimitCode.UNSAFE_FILE,
+                    "Task root contains an unsafe entry",
+                )
+            if not stat.S_ISDIR(info.st_mode):
+                continue
+            validate_id(name, "任务 ID")
+            budget.bind_directory_identity(
+                config.task_specs_dir / name, (info.st_dev, info.st_ino)
+            )
+            task_ids.append(name)
+        return tuple(task_ids)
+
+
+def decisions_bounded(config: Config, budget: ReadBudget) -> dict[str, str]:
+    """Read decision facts through the machine-facing bounded reader."""
+
+    try:
+        content = budget.read_regular_bytes_at(
+            root=config.root,
+            directory=config.decisions_file.parent,
+            name=config.decisions_file.name,
+            maximum_bytes=budget.limits.task_manifest_bytes,
+            label="decisions.toml",
+        )
+    except FileNotFoundError:
+        return {}
+    try:
+        raw = tomllib.loads(content.decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
+        raise ValidationError("决策点格式错误") from exc
+    entries = raw.get("decisions", {})
+    if not isinstance(entries, dict):
+        raise ValidationError("decisions.toml 必须使用 [decisions.<id>]")
+    return {
+        str(key): str(value.get("status", "open"))
+        for key, value in entries.items()
+        if isinstance(value, dict)
+    }
+
+
+def external_claim_active_bounded(
+    config: Config,
+    task: Task,
+    budget: ReadBudget,
+    *,
+    now: datetime,
+) -> bool:
+    """Read claim liveness without following a Task-directory symlink."""
+
+    try:
+        content = budget.read_regular_bytes_at(
+            root=config.root,
+            directory=task.directory,
+            name=_claim_path(task).name,
+            maximum_bytes=budget.limits.task_manifest_bytes,
+            label="task claim",
+        )
+    except FileNotFoundError:
+        return False
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise ValidationError(f"任务 {task.id} 领取记录格式错误") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("task_id") != task.id
+        or not isinstance(payload.get("runner"), str)
+    ):
+        raise ValidationError(f"任务 {task.id} 领取记录无效")
+    return not _claim_expired(payload, now=now)
 
 
 def status(config: Config, task: Task) -> str:
@@ -1317,6 +1426,125 @@ def _load_task_heads(config: Config, task: Task) -> dict[str, str]:
     except json.JSONDecodeError as exc:
         raise ValidationError(f"任务 HEAD 证据不是有效 JSON：{path}") from exc
     return _validate_task_heads_payload(config, task, payload)
+
+
+def _json_object_bounded(content: bytes, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(content)
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise ValidationError(f"{label} 不是有效 JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValidationError(f"{label} 必须是 JSON 对象")
+    return payload
+
+
+def _load_task_heads_bounded(
+    config: Config, task: Task, budget: ReadBudget
+) -> dict[str, str]:
+    """Load legacy or imported task-head evidence through bounded safe reads."""
+
+    try:
+        pointer_content = budget.read_regular_bytes_at(
+            root=config.root,
+            directory=task.directory,
+            name=CURRENT_EVIDENCE_FILE,
+            maximum_bytes=budget.limits.evidence_pointer_bytes,
+            label="Current evidence pointer",
+        )
+    except FileNotFoundError:
+        heads_content = budget.read_regular_bytes_at(
+            root=config.root,
+            directory=task.directory,
+            name=TASK_HEADS_FILE,
+            maximum_bytes=budget.limits.task_heads_bytes,
+            label="Task heads evidence",
+        )
+        return _validate_task_heads_payload(
+            config,
+            task,
+            _json_object_bounded(heads_content, "任务 HEAD 证据"),
+        )
+
+    pointer = _json_object_bounded(pointer_content, "当前证据指针")
+    generation = pointer.get("generation")
+    manifest_sha256 = pointer.get("manifest_sha256")
+    if (
+        pointer.get("schema_version") != 1
+        or not isinstance(generation, str)
+        or GENERATION_PATTERN.fullmatch(generation) is None
+        or not isinstance(manifest_sha256, str)
+        or len(manifest_sha256) != 64
+    ):
+        raise ValidationError("当前证据指针格式无效")
+    generation_directory = (
+        task.directory / EVIDENCE_GENERATIONS_DIR / generation
+    )
+    manifest_content = budget.read_regular_bytes_at(
+        root=config.root,
+        directory=generation_directory,
+        name=MANIFEST_FILE,
+        maximum_bytes=budget.limits.evidence_manifest_bytes,
+        label="Evidence generation manifest",
+    )
+    if hashlib.sha256(manifest_content).hexdigest() != manifest_sha256:
+        raise ValidationError("当前证据世代 manifest 哈希不匹配")
+    manifest = _json_object_bounded(manifest_content, "证据世代 manifest")
+    files = manifest.get("files")
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("generation") != generation
+        or not isinstance(files, dict)
+    ):
+        raise ValidationError("证据世代 manifest 格式无效")
+    heads_content = budget.read_regular_bytes_at(
+        root=config.root,
+        directory=generation_directory,
+        name=TASK_HEADS_FILE,
+        maximum_bytes=budget.limits.task_heads_bytes,
+        label="Task heads evidence",
+    )
+    entry = files.get(TASK_HEADS_FILE)
+    if (
+        not isinstance(entry, dict)
+        or not isinstance(entry.get("sha256"), str)
+        or isinstance(entry.get("size"), bool)
+        or not isinstance(entry.get("size"), int)
+        or len(heads_content) != entry["size"]
+        or hashlib.sha256(heads_content).hexdigest() != entry["sha256"]
+    ):
+        raise ValidationError("不可变任务 HEAD 证据缺失或哈希不匹配")
+    return _validate_task_heads_payload(
+        config,
+        task,
+        _json_object_bounded(heads_content, "任务 HEAD 证据"),
+    )
+
+
+def dependency_integration_state_bounded(
+    config: Config, task: Task, budget: ReadBudget
+) -> str:
+    """Return the real integration state within the shared observation budget."""
+
+    try:
+        line = get_line(config, task.line, read_budget=budget)
+        heads = _load_task_heads_bounded(config, task, budget)
+        for repository_id, task_head in heads.items():
+            destination = line_repository_path(config, line, repository_id)
+            result = git_read(
+                destination,
+                "merge-base",
+                "--is-ancestor",
+                task_head,
+                "HEAD",
+                read_budget=budget,
+            )
+            if result.code != 0:
+                return "pending"
+    except ReadLimitError:
+        raise
+    except (DyroError, OSError, ValidationError):
+        return "pending"
+    return "integrated"
 
 
 def _assert_dependency_integrated(config: Config, task: Task) -> None:

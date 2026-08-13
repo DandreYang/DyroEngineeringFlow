@@ -1,4 +1,4 @@
 interface:
   display_name: "Dyro Control Plane"
-  short_description: "Safely inspect and plan Dyro work from Codex"
-  default_prompt: "Use $dyro-control-plane to inspect this Dyro workspace and prepare a read-only objective plan."
+  short_description: "Inspect and plan Dyro work safely"
+  default_prompt: "Use $dyro-control-plane to inspect Dyro control-plane state and prepare a bounded read-only plan."

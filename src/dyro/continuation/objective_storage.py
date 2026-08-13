@@ -19,7 +19,12 @@ from typing import Iterator
 from ..canonical import canonical_json_bytes
 from ..config import Config, validate_id
 from ..errors import DyroError, ValidationError
-from ..read_limits import ReadBudget, ReadLimitCode, ReadLimitError
+from ..read_limits import (
+    ReadBudget,
+    ReadLimitCode,
+    ReadLimitError,
+    bounded_directory_names,
+)
 from ..state import open_safe_child_directory, open_safe_directory
 from .models import Objective, RequestedMode
 
@@ -131,7 +136,9 @@ def open_objective_directory(
         os.close(workspace_fd)
 
 
-def list_objective_ids(config: Config) -> tuple[str, ...]:
+def list_objective_ids(
+    config: Config, *, budget: ReadBudget | None = None
+) -> tuple[str, ...]:
     """Return only verified Objective directory names from a stable root FD."""
     if os.name == "nt":
         raise DyroError(
@@ -141,6 +148,42 @@ def list_objective_ids(config: Config) -> tuple[str, ...]:
         raise DyroError(
             "当前平台缺少安全的 Objective 持久化能力；拒绝访问以避免路径逃逸"
         )
+    if budget is not None:
+        with budget.open_safe_directory_chain(
+            config.root, config.objectives_dir, allow_missing=True
+        ) as objectives_fd:
+            if objectives_fd is None:
+                return ()
+            names = sorted(
+                bounded_directory_names(
+                    objectives_fd,
+                    budget,
+                    maximum_records=budget.limits.objective_records,
+                    label="Objective",
+                )
+            )
+            result: list[str] = []
+            for name in names:
+                if name == "objectives.lock":
+                    continue
+                try:
+                    validate_id(name, "Objective ID")
+                    info = os.stat(name, dir_fd=objectives_fd, follow_symlinks=False)
+                except (OSError, ValidationError) as exc:
+                    raise ReadLimitError(
+                        ReadLimitCode.UNSAFE_FILE,
+                        "Objective root contains an unsafe entry",
+                    ) from exc
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                    raise ReadLimitError(
+                        ReadLimitCode.UNSAFE_FILE,
+                        "Objective root contains an unsafe entry",
+                    )
+                budget.bind_directory_identity(
+                    config.objectives_dir / name, (info.st_dev, info.st_ino)
+                )
+                result.append(name)
+            return tuple(result)
     workspace_fd = open_safe_directory(config.root)
     dyro_fd: int | None = None
     objectives_fd: int | None = None

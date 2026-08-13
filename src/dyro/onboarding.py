@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 import re
+import stat
+import tempfile
 from typing import Callable
 
 from .config import CONFIG_NAME, Config, load, validate_id
 from .errors import DyroError, ValidationError
 from .process import run
+from .read_limits import open_safe_directory_chain
 from .state import atomic_write_text, exclusive_lock
 
 
@@ -345,6 +349,153 @@ def ask_for_workspace(name_default: str, ask: Callable[[str], str] = input) -> t
     return name, repositories, base
 
 
+def validate_bootstrap_destination(config: Config, relative: str) -> Path:
+    """Reject clone targets whose path can escape through a symlink parent."""
+
+    destination = config.root / relative
+    try:
+        root_info = config.root.lstat()
+    except OSError as exc:
+        raise DyroError(f"bootstrap workspace root 无法读取：{config.root}") from exc
+    current = config.root
+    if current.is_symlink() or not current.is_dir():
+        raise DyroError(f"bootstrap 路径不能经过符号链接：{current}")
+    for part in Path(relative).parts:
+        current /= part
+        if current.is_symlink():
+            raise DyroError(f"bootstrap 路径不能经过符号链接：{current}")
+        if current != destination and current.exists() and not current.is_dir():
+            raise DyroError(f"bootstrap 父路径必须是目录：{current}")
+    current_root_info = config.root.lstat()
+    if (current_root_info.st_dev, current_root_info.st_ino) != (
+        root_info.st_dev,
+        root_info.st_ino,
+    ):
+        raise DyroError("bootstrap workspace root 在预检期间发生变化")
+    return destination
+
+
+@contextmanager
+def _open_bootstrap_parent(config: Config, relative: str):
+    """Hold the clone destination parent by descriptor until atomic publish."""
+
+    required = (os.open, os.mkdir, os.rename, os.stat)
+    if (
+        os.name != "posix"
+        or not hasattr(os, "O_NOFOLLOW")
+        or any(item not in os.supports_dir_fd for item in required)
+    ):
+        raise DyroError("当前平台缺少安全的 descriptor-bound bootstrap 能力")
+    parts = Path(relative).parts
+    if not parts:
+        raise ValidationError("bootstrap 仓库路径不能为空")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW
+    with open_safe_directory_chain(config.root, config.root) as root_fd:
+        assert root_fd is not None
+        current_fd = os.dup(root_fd)
+        try:
+            for part in parts[:-1]:
+                try:
+                    child_fd = os.open(part, flags, dir_fd=current_fd)
+                except FileNotFoundError:
+                    os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                    child_fd = os.open(part, flags, dir_fd=current_fd)
+                parent_fd = current_fd
+                current_fd = child_fd
+                os.close(parent_fd)
+            leaf = parts[-1]
+            try:
+                os.stat(leaf, dir_fd=current_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise DyroError(f"拒绝覆盖已有 bootstrap 目标：{config.root / relative}")
+            yield current_fd, leaf
+        finally:
+            os.close(current_fd)
+
+
+def _copy_bootstrap_tree(source: Path, destination_fd: int) -> None:
+    for entry in os.scandir(source):
+        info = entry.stat(follow_symlinks=False)
+        if stat.S_ISLNK(info.st_mode):
+            os.symlink(os.readlink(entry.path), entry.name, dir_fd=destination_fd)
+            continue
+        if stat.S_ISDIR(info.st_mode):
+            os.mkdir(entry.name, mode=stat.S_IMODE(info.st_mode), dir_fd=destination_fd)
+            child_fd = os.open(
+                entry.name,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW,
+                dir_fd=destination_fd,
+            )
+            try:
+                _copy_bootstrap_tree(Path(entry.path), child_fd)
+                os.fchmod(child_fd, stat.S_IMODE(info.st_mode))
+            finally:
+                os.close(child_fd)
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            raise DyroError(f"clone 产物包含不支持的文件类型：{entry.name}")
+        source_fd = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW)
+        destination_file_fd = os.open(
+            entry.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            stat.S_IMODE(info.st_mode),
+            dir_fd=destination_fd,
+        )
+        try:
+            while True:
+                chunk = os.read(source_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(destination_file_fd, view)
+                    view = view[written:]
+            os.fchmod(destination_file_fd, stat.S_IMODE(info.st_mode))
+        finally:
+            os.close(destination_file_fd)
+            os.close(source_fd)
+
+
+def _clear_bootstrap_directory(directory_fd: int) -> None:
+    for entry in os.scandir(directory_fd):
+        info = entry.stat(follow_symlinks=False)
+        if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+            child_fd = os.open(
+                entry.name,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+            try:
+                _clear_bootstrap_directory(child_fd)
+            finally:
+                os.close(child_fd)
+            os.rmdir(entry.name, dir_fd=directory_fd)
+        else:
+            os.unlink(entry.name, dir_fd=directory_fd)
+
+
+def _publish_bootstrap_tree(parent_fd: int, leaf: str, source: Path) -> None:
+    os.mkdir(leaf, mode=0o700, dir_fd=parent_fd)
+    destination_fd = os.open(
+        leaf,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW,
+        dir_fd=parent_fd,
+    )
+    try:
+        _copy_bootstrap_tree(source, destination_fd)
+    except BaseException:
+        try:
+            _clear_bootstrap_directory(destination_fd)
+            os.rmdir(leaf, dir_fd=parent_fd)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(destination_fd)
+
+
 def bootstrap(
     config: Config,
     *,
@@ -357,8 +508,8 @@ def bootstrap(
     """
     messages: list[str] = []
     for repo_id, repo in sorted(config.repositories.items()):
-        destination = config.root / repo.path
-        if destination.exists():
+        destination = validate_bootstrap_destination(config, repo.path)
+        if destination.exists() or destination.is_symlink():
             check = run(("git", "-C", str(destination), "rev-parse", "--git-dir"), dry_run=False)
             if check.code == 0:
                 messages.append(f"PASS {repo_id}: 已存在")
@@ -373,11 +524,18 @@ def bootstrap(
             # accepted base guarantees that create_line can resolve a local
             # anchor without trusting that remote default.
             command += (f"--branch={branch}",)
-        command += (repo.remote, str(destination))
-        messages.append(("DRY RUN " if dry_run else "CLONE ") + f"{repo_id}: {' '.join(command)}")
-        if not dry_run:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            result = run(command, timeout=600)
+        display_command = (*command, repo.remote, str(destination))
+        messages.append(("DRY RUN " if dry_run else "CLONE ") + f"{repo_id}: {' '.join(display_command)}")
+        if dry_run:
+            continue
+        with tempfile.TemporaryDirectory(prefix="dyro-bootstrap-") as temp_root:
+            stage_path = Path(temp_root) / "repository"
+            result = run(
+                (*command, repo.remote, str(stage_path)),
+                timeout=600,
+            )
             if result.code != 0:
                 raise DyroError(f"clone {repo_id} 失败：{result.stdout.strip()}")
+            with _open_bootstrap_parent(config, repo.path) as (parent_fd, leaf):
+                _publish_bootstrap_tree(parent_fd, leaf, stage_path)
     return messages

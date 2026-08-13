@@ -15,12 +15,11 @@ both of which are brittle and easy to misinterpret.
 
 An earlier Agent Bridge proposal combined read operations, planning, generic
 confirmed apply, Skill delivery, MCP tools, and cross-host Plugin packaging in
-one v1. The adversarial review at
-[`2026-08-06-dyro-agent-bridge-design-adversarial-review-board.md`](../superpowers/reviews/2026-08-06-dyro-agent-bridge-design-adversarial-review-board.md)
-rejected that scope. The subsequent
-[Phase 0 design closure review](../superpowers/reviews/2026-08-06-dyro-agent-bridge-phase-0-design-closure-review.md)
-closed eight implementation-blueprint findings and approved only the S1
-contract/catalog step. Current source disproves two key assumptions:
+one v1. A point-in-time adversarial design review rejected that scope. Its
+follow-up closure resolved eight implementation-blueprint findings and
+approved only the S1 contract/catalog step. The durable decisions from those
+reviews are incorporated into this ADR and the acceptance matrix. Current
+source disproves two key assumptions:
 
 - `task gates` executes configured argv, writes gate logs, and appends the
   ledger; it is not a read operation.
