@@ -278,9 +278,9 @@ python3 -m pip install --user --upgrade dyro
 Интерактивные запуски `dyro`, `dyro home` и `dyro start` проверяют официальный PyPI не чаще одного раза за локальный день. Ошибка не блокирует вход в рабочую область, а по умолчанию обновление требует подтверждения:
 
 ```bash
-dyro update              # то же, что dyro update check
-dyro update check
-dyro update now
+dyro update              # проверить, подтвердить и установить (то же, что dyro update now)
+dyro update check        # только проверка
+dyro update now          # псевдоним dyro update
 dyro update auto on      # включить автообновление patch-версий
 dyro update auto off
 dyro update disable

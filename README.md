@@ -294,9 +294,9 @@ PyPI endpoint at most once per local day. A failed or slow check never blocks
 workspace entry. Updates remain confirmation-first by default:
 
 ```bash
-dyro update              # same as: dyro update check
-dyro update check
-dyro update now
+dyro update              # check, confirm, then install (same as: dyro update now)
+dyro update check        # check only
+dyro update now          # alias of dyro update
 dyro update auto on      # opt in to patch-only automatic updates
 dyro update auto off
 dyro update disable      # also disables automatic updates

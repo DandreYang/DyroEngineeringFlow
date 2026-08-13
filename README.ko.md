@@ -276,9 +276,9 @@ python3 -m pip install --user --upgrade dyro
 대화형 `dyro`, `dyro home`, `dyro start` 실행은 현지 날짜 기준 하루에 한 번만 공식 PyPI 엔드포인트를 확인합니다. 실패해도 작업 공간 진입을 막지 않으며 기본적으로 업데이트 전 확인을 요청합니다.
 
 ```bash
-dyro update              # dyro update check 와 동일
-dyro update check
-dyro update now
+dyro update              # 확인 후 설치 (dyro update now 와 동일)
+dyro update check        # 검사만
+dyro update now          # dyro update 별칭
 dyro update auto on      # 패치 버전 자동 업데이트 사용
 dyro update auto off
 dyro update disable

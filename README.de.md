@@ -278,9 +278,9 @@ Erstinstallation bleibt opt-in über Setup oder
 Interaktive Starts mit `dyro`, `dyro home` oder `dyro start` prüfen höchstens einmal pro lokalem Tag den offiziellen PyPI-Endpunkt. Fehler blockieren den Arbeitsbereich nicht. Standardmäßig bleibt jede Aktualisierung bestätigt:
 
 ```bash
-dyro update              # entspricht dyro update check
-dyro update check
-dyro update now
+dyro update              # prüfen, bestätigen, dann installieren (entspricht dyro update now)
+dyro update check        # nur prüfen
+dyro update now          # Alias von dyro update
 dyro update auto on      # automatische Patch-Updates aktivieren
 dyro update auto off
 dyro update disable
