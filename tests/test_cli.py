@@ -128,6 +128,21 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["default"], "demo")
             self.assertEqual(payload["workspaces"][0]["name"], "demo")
             self.assertTrue(payload["workspaces"][0]["available"])
+            self.assertNotIn("root", payload["workspaces"][0])
+
+            output = StringIO()
+            with redirect_stdout(output):
+                main(
+                    [
+                        "workspace",
+                        "list",
+                        "--format",
+                        "json",
+                        "--include-paths",
+                    ]
+                )
+            with_paths = json.loads(output.getvalue())
+            self.assertEqual(with_paths["workspaces"][0]["root"], str(root.resolve()))
 
     def test_setup_presentation_uses_semantic_color_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
@@ -903,6 +918,18 @@ class ObjectiveCliTests(WorkspaceCase):
         self.assertEqual(doctor_payload["kind"], "doctor")
         self.assertTrue(doctor_payload["passed"])
         self.assertTrue(doctor_payload["findings"])
+        rendered_doctor = json.dumps(doctor_payload)
+        self.assertNotIn(str(self.root.resolve()), rendered_doctor)
+        self.assertNotIn(str(self.anchor.resolve()), rendered_doctor)
+        self.assertTrue(
+            any(
+                finding["message"] == "repository api: ready"
+                for finding in doctor_payload["findings"]
+            )
+        )
+
+        doctor_with_paths = self._read_json("doctor", "--include-paths")
+        self.assertIn(str(self.anchor.resolve()), json.dumps(doctor_with_paths))
 
         status_payload = self._read_json("status")
         self.assertEqual(status_payload["kind"], "workspace_status")

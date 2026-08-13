@@ -9,7 +9,7 @@ Treat Dyro as the delivery control plane. Run only the allowlisted observations 
 
 ## Read-only routing
 
-Start with `dyro workspace list --format json`. When more than one workspace is available, select an explicit alias from the request or ask the user; never guess. Then use the narrowest matching command:
+When the request already supplies a workspace alias, skip global discovery and use that alias directly. Otherwise start with `dyro workspace list --format json`; when more than one workspace is available, ask the user to choose an alias and never guess. Then use the narrowest matching command:
 
 - Git state: `dyro --workspace <alias> status --format json`
 - Health: `dyro --workspace <alias> doctor --format json`
@@ -24,6 +24,8 @@ Start with `dyro workspace list --format json`. When more than one workspace is 
 - Objective plan: `dyro --workspace <alias> objective plan <id> --format json`
 
 Use only an existing Objective or Change Set ID returned by Dyro or supplied by the user. A non-zero exit, unavailable workspace, pending transaction, failed finding, missing field, or partial observation is unknown or blocked—not ready.
+
+Treat local paths and workspace inventory as sensitive metadata. Never add `--include-paths` to any command, request paths only to enrich a summary, or repeat a local path in the response unless the user supplied that exact path and it is necessary to identify the requested workspace. Keep Task IDs, branch names, and commit identifiers to the minimum needed for the requested observation.
 
 For `--format json`, accept exactly one JSON document. If `kind` is `error`, report its stable `code` and `command` as blocked evidence; do not infer from missing details or retry with a write-capable command. Treat malformed JSON, mixed human/JSON output, or multiple JSON documents as a failed observation.
 

@@ -425,6 +425,27 @@ def _finding_payload(finding: str) -> dict[str, str]:
     }
 
 
+def _doctor_finding_payload(
+    finding: str, *, include_paths: bool
+) -> dict[str, str]:
+    payload = _finding_payload(finding)
+    if include_paths:
+        return payload
+    message = payload["message"]
+    if not message.startswith("repository "):
+        return payload
+    identity, separator, detail = message.partition(": ")
+    if not separator:
+        payload["message"] = "repository: unavailable"
+    elif payload["status"] == "PASS":
+        payload["message"] = f"{identity}: ready"
+    elif detail.startswith("missing or not Git:"):
+        payload["message"] = f"{identity}: missing or not Git"
+    else:
+        payload["message"] = f"{identity}: unavailable"
+    return payload
+
+
 def _status_payload(
     config: Config, *, read_budget: ReadBudget | None = None
 ) -> dict[str, object]:
@@ -1409,7 +1430,10 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             "doctor",
             workspace=config.name,
             passed=not failures,
-            findings=[_finding_payload(item) for item in findings],
+            findings=[
+                _doctor_finding_payload(item, include_paths=args.include_paths)
+                for item in findings
+            ],
         )
         if failures:
             raise SystemExit(2)
@@ -1514,14 +1538,14 @@ def cmd_workspace_list(args: argparse.Namespace) -> None:
             available = False
         else:
             available = True
-        rows.append(
-            {
-                "name": record.name,
-                "root": str(record.root),
-                "default": record.name == registry.default,
-                "available": available,
-            }
-        )
+        row: dict[str, object] = {
+            "name": record.name,
+            "default": record.name == registry.default,
+            "available": available,
+        }
+        if args.include_paths:
+            row["root"] = str(record.root)
+        rows.append(row)
     if args.format == "json":
         _print_control_plane_json(
             "workspace_list",
@@ -1836,22 +1860,23 @@ def cmd_integration_status(args: argparse.Namespace) -> None:
         read_budget=_control_plane_budget(args) if args.format == "json" else None,
     )
     if args.format == "json":
-        _print_control_plane_json(
-            "integration_status",
-            integration=status.integration,
-            state=status.state.value,
-            target=str(status.target),
-            detail=status.detail,
-            avatars=[
-                {
-                    "host": avatar.host,
-                    "state": avatar.state,
-                    "path": str(avatar.path),
-                    "detail": avatar.detail,
-                }
-                for avatar in status.avatars
-            ],
-        )
+        avatars: list[dict[str, object]] = []
+        for avatar in status.avatars:
+            row: dict[str, object] = {
+                "host": avatar.host,
+                "state": avatar.state,
+            }
+            if args.include_paths:
+                row.update(path=str(avatar.path), detail=avatar.detail)
+            avatars.append(row)
+        payload: dict[str, object] = {
+            "integration": status.integration,
+            "state": status.state.value,
+            "avatars": avatars,
+        }
+        if args.include_paths:
+            payload.update(target=str(status.target), detail=status.detail)
+        _print_control_plane_json("integration_status", **payload)
         return
     print(f"{status.integration}\t{status.state.value}\t{status.target}")
     print(status.detail)
@@ -3551,6 +3576,11 @@ def build_parser() -> argparse.ArgumentParser:
     workspace_list.add_argument(
         "--format", choices=("text", "json"), default="text"
     )
+    workspace_list.add_argument(
+        "--include-paths",
+        action="store_true",
+        help="在 JSON 中显式包含本机工作区绝对路径",
+    )
     workspace_list.set_defaults(func=cmd_workspace_list)
     workspace_default = workspace_sub.add_parser(
         "default", help="设置裸 dyro 的默认项目"
@@ -3619,6 +3649,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = sub.add_parser("doctor", help="验证动态工作区结构")
     doctor_parser.add_argument(
         "--format", choices=("text", "json"), default="text"
+    )
+    doctor_parser.add_argument(
+        "--include-paths",
+        action="store_true",
+        help="在 JSON 中显式包含本机诊断路径",
     )
     doctor_parser.set_defaults(func=cmd_doctor)
     terminology = sub.add_parser("terminology", help="使用仓库外策略扫描候选术语")
@@ -3723,6 +3758,11 @@ def build_parser() -> argparse.ArgumentParser:
     integration_status_parser.add_argument("id", choices=("skill", "codex"))
     integration_status_parser.add_argument(
         "--format", choices=("text", "json"), default="text"
+    )
+    integration_status_parser.add_argument(
+        "--include-paths",
+        action="store_true",
+        help="在 JSON 中显式包含本机集成路径与路径相关细节",
     )
     integration_status_parser.set_defaults(func=cmd_integration_status)
     integration_install_parser = integration_sub.add_parser(

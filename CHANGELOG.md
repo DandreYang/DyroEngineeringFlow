@@ -21,6 +21,14 @@
 - Keep machine-facing Objective completion consistent with text views by
   checking Task integration evidence and Git ancestry inside the same budget;
   reject unsafe bootstrap targets before `next` can hand off a mutation.
+- Minimize Agent-visible local metadata: workspace and Skill integration JSON
+  and health diagnostics omit absolute paths by default, expose them only through explicit
+  `--include-paths`, and let the Skill skip global discovery when an alias is
+  already known.
+- Let Enter confirm the already-previewed feature worktree plan while keeping
+  `b` as the explicit route back to baseline selection.
+- Exclude generated Python bytecode from source and wheel distributions, even
+  when release tests imported packaged integration assets before the build.
 
 ## 0.6.4 - 2026-08-12
 

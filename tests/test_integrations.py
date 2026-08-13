@@ -5,6 +5,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 import unittest
@@ -109,6 +110,20 @@ class IntegrationManagerTests(unittest.TestCase):
             self.assertIn(command, content)
         for forbidden_action in ("`console`", "`dispatch`", "`task gates`"):
             self.assertIn(forbidden_action, content)
+        self.assertIn("skip global discovery", content)
+        self.assertIn("Never add `--include-paths`", content)
+        for private_pattern in (
+            r"/Users/[^<\s]",
+            r"/home/[^<\s]",
+            r"[A-Za-z]:[\\\\/]+Users[\\\\/]",
+            r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}",
+            r"session[_ -]?id",
+            r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+        ):
+            self.assertIsNone(
+                re.search(private_pattern, content, flags=re.IGNORECASE),
+                msg=private_pattern,
+            )
         self.assertIn("$dyro-control-plane", metadata.read_text(encoding="utf-8"))
         for line in metadata.read_text(encoding="utf-8").splitlines():
             if ": " in line:
@@ -126,6 +141,26 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertEqual(payload["state"], "absent")
         self.assertEqual(payload["avatars"][0]["host"], "codex")
         self.assertEqual(payload["avatars"][0]["state"], "missing")
+        self.assertNotIn("target", payload)
+        self.assertNotIn("detail", payload)
+        self.assertNotIn("path", payload["avatars"][0])
+        self.assertNotIn("detail", payload["avatars"][0])
+
+        output = StringIO()
+        with redirect_stdout(output):
+            main(
+                [
+                    "integration",
+                    "status",
+                    "skill",
+                    "--format",
+                    "json",
+                    "--include-paths",
+                ]
+            )
+        with_paths = json.loads(output.getvalue())
+        self.assertEqual(with_paths["target"], str(self.mirror))
+        self.assertEqual(with_paths["avatars"][0]["path"], str(self.avatar))
 
     def test_integration_status_json_rejects_an_oversized_manifest(self) -> None:
         install_integration("skill", yes=True)
