@@ -288,9 +288,9 @@ python3 -m pip install --user --upgrade dyro
 交互运行 `dyro`、`dyro home` 或 `dyro start` 时，Dyro 每个本地自然日最多访问一次官方 PyPI；断网、超时或状态目录不可写都不会阻塞进入工作区。默认仍由用户确认更新：
 
 ```bash
-dyro update              # 等价于 dyro update check
-dyro update check
-dyro update now
+dyro update              # 检查后确认安装（等价于 dyro update now）
+dyro update check        # 仅检查
+dyro update now          # dyro update 的别名
 dyro update auto on      # 主动开启补丁版本自动更新
 dyro update auto off
 dyro update disable      # 同时关闭自动更新

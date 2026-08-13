@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Make bare `dyro update` check, confirm, and install (same path as
+  `update now`). `update check` remains check-only; `--yes` skips the
+  confirmation on both `update` and `update now`.
+
 ## 0.6.6 - 2026-08-13
 
 - Launch any installed coding tool from `dyro start` / `open`, not only a

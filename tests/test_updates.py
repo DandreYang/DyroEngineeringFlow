@@ -544,7 +544,8 @@ class DailyCliIntegrationTests(unittest.TestCase):
         install.assert_not_called()
         refresh_skill.assert_not_called()
         self.assertFalse(refreshed)
-        self.assertIn("dyro update now", output.getvalue())
+        self.assertIn("dyro update", output.getvalue())
+        self.assertNotIn("dyro update now", output.getvalue())
 
     def test_daily_check_failure_never_blocks_or_prints(self) -> None:
         from dyro.cli import _maybe_run_daily_update
@@ -709,7 +710,7 @@ class DailyCliIntegrationTests(unittest.TestCase):
                 main(["update", "now", "--yes"])
             refresh_skip.assert_not_called()
 
-    def test_bare_update_is_equivalent_to_update_check(self) -> None:
+    def test_bare_update_confirms_and_installs(self) -> None:
         from dyro.cli import main
 
         result = UpdateResult(
@@ -719,20 +720,66 @@ class DailyCliIntegrationTests(unittest.TestCase):
             kind=UpdateKind.PATCH,
         )
         with tempfile.TemporaryDirectory(prefix="dyro-update-bare-") as tmp:
-            for argv in (["update"], ["update", "check"]):
+            for argv in (["update", "--yes"], ["update", "now", "--yes"]):
                 output = StringIO()
                 with (
                     patch.dict(os.environ, {"DYRO_HOME": tmp}),
                     patch("dyro.cli.check_for_update", return_value=result) as check,
-                    patch("dyro.cli.perform_update") as install,
+                    patch("dyro.cli.perform_update", return_value=True) as install,
+                    patch("dyro.cli._refresh_skill_via_new_cli") as refresh,
                     redirect_stdout(output),
                 ):
                     main(argv)
                 check.assert_called_once()
-                install.assert_not_called()
+                install.assert_called_once_with("0.5.6", yes=True, dry_run=False)
+                refresh.assert_called_once_with()
                 text = output.getvalue()
                 self.assertIn("发现 Dyro 0.5.6", text)
-                self.assertIn("dyro update now", text)
+                self.assertNotIn("运行 dyro update", text)
+
+    def test_update_check_does_not_install(self) -> None:
+        from dyro.cli import main
+
+        result = UpdateResult(
+            checked=True,
+            current_version="0.5.5",
+            latest_version="0.5.6",
+            kind=UpdateKind.PATCH,
+        )
+        output = StringIO()
+        with tempfile.TemporaryDirectory(prefix="dyro-update-check-") as tmp:
+            with (
+                patch.dict(os.environ, {"DYRO_HOME": tmp}),
+                patch("dyro.cli.check_for_update", return_value=result) as check,
+                patch("dyro.cli.perform_update") as install,
+                redirect_stdout(output),
+            ):
+                main(["update", "check"])
+        check.assert_called_once()
+        install.assert_not_called()
+        text = output.getvalue()
+        self.assertIn("发现 Dyro 0.5.6", text)
+        self.assertIn("运行 dyro update 可确认并完成更新。", text)
+
+    def test_bare_update_without_yes_rejects_noninteractive(self) -> None:
+        from dyro.cli import cmd_update_now
+
+        result = UpdateResult(
+            checked=True,
+            current_version="0.5.5",
+            latest_version="0.5.6",
+            kind=UpdateKind.PATCH,
+        )
+        with (
+            patch("dyro.cli.check_for_update", return_value=result),
+            patch("dyro.cli.perform_update") as install,
+            patch("sys.stdin.isatty", return_value=False),
+            patch("sys.stdout.isatty", return_value=False),
+            redirect_stdout(StringIO()),
+        ):
+            with self.assertRaisesRegex(DyroError, "非交互环境"):
+                cmd_update_now(argparse.Namespace(yes=False, dry_run=False))
+        install.assert_not_called()
 
     def test_update_commands_work_without_a_workspace(self) -> None:
         from dyro.cli import main

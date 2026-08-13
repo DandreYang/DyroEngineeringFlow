@@ -1946,7 +1946,7 @@ def cmd_update_check(args: argparse.Namespace) -> None:
     result = _explicit_update_check()
     _print_update_result(result)
     if result.kind != UpdateKind.NONE:
-        print("运行 dyro update now 可确认并完成更新。")
+        print("运行 dyro update 可确认并完成更新。")
 
 
 def cmd_update_now(args: argparse.Namespace) -> None:
@@ -1954,8 +1954,9 @@ def cmd_update_now(args: argparse.Namespace) -> None:
     _print_update_result(result)
     if result.kind == UpdateKind.NONE:
         return
+    yes = bool(getattr(args, "yes", False))
     if (
-        not args.yes
+        not yes
         and not args.dry_run
         and not (sys.stdin.isatty() and sys.stdout.isatty())
     ):
@@ -1964,7 +1965,7 @@ def cmd_update_now(args: argparse.Namespace) -> None:
         )
     updated = perform_update(
         result.latest_version,
-        yes=args.yes,
+        yes=yes,
         dry_run=args.dry_run,
     )
     if updated:
@@ -3791,14 +3792,19 @@ def build_parser() -> argparse.ArgumentParser:
     integration_uninstall_parser.set_defaults(func=cmd_integration_uninstall)
     update = sub.add_parser(
         "update",
-        help="检测并安全更新 Dyro（无子命令时等价于 update check）",
+        help="检测并安全更新 Dyro（无子命令时确认后安装）",
+    )
+    update.add_argument(
+        "--yes", action="store_true", help="确认执行已展示的更新命令"
     )
     update_sub = update.add_subparsers(dest="update_command", required=False)
-    update.set_defaults(func=cmd_update_check)
+    update.set_defaults(func=cmd_update_now)
     update_sub.add_parser(
-        "check", help="立即检查官方 PyPI 的最新稳定版本（等价于 dyro update）"
+        "check", help="仅检查官方 PyPI 的最新稳定版本，不安装"
     ).set_defaults(func=cmd_update_check)
-    update_now = update_sub.add_parser("now", help="显示计划并更新到最新稳定版本")
+    update_now = update_sub.add_parser(
+        "now", help="显示计划并更新到最新稳定版本（等价于 dyro update）"
+    )
     update_now.add_argument(
         "--yes", action="store_true", help="确认执行已展示的更新命令"
     )
@@ -4451,14 +4457,14 @@ def _maybe_run_daily_update(*, install=None) -> bool:
             )
         except (DyroError, OSError) as exc:
             print(f"自动更新失败：{exc}")
-            print("本次启动继续使用当前版本；稍后可运行 dyro update now 重试。")
+            print("本次启动继续使用当前版本；稍后可运行 dyro update 重试。")
             return False
         if updated:
             print("自动更新完成；本次启动继续运行，下次将使用新版本。")
             _refresh_skill_via_new_cli()
             return True
         return False
-    print("运行 dyro update now 可一键确认更新；今天不再重复提示。")
+    print("运行 dyro update 可确认并完成更新；今天不再重复提示。")
     return False
 
 

@@ -20,8 +20,8 @@ automatic check.
 Use an explicit command to retry or to control the saved preference:
 
 ```bash
-dyro update          # same as: dyro update check
-dyro update check
+dyro update          # check, confirm, then install (same as: dyro update now)
+dyro update check    # check only
 dyro update enable
 dyro update disable
 ```
@@ -44,9 +44,9 @@ filter).
 
 ## Installing an update
 
-`dyro update now` fetches the latest stable `X.Y.Z` version, shows the exact
-plan, and asks before writing. For automation, review the plan first and then
-use `dyro update now --yes`. Dyro recognizes its active `uv tool` or `pipx`
+`dyro update` (or the `now` alias) fetches the latest stable `X.Y.Z` version,
+shows the exact plan, and asks before writing. For automation, review the plan
+first and then use `dyro update --yes`. Dyro recognizes its active `uv tool` or `pipx`
 environment and otherwise uses the active Python interpreter's `pip`. A normal
 virtual environment without pip falls back to `uv pip --python` when uv is
 available. Commands are fixed argument arrays, never shell strings or
@@ -58,7 +58,7 @@ command succeeds.
 
 Interactive `dyro setup` can install the Skill during personal preferences
 (preview in the plan, applied only after confirmation). After a successful
-`dyro update now` (or patch auto-update), Dyro best-effort syncs an **already
+`dyro update` (or patch auto-update), Dyro best-effort syncs an **already
 managed** Skill via the fresh `dyro` entry point. On interactive
 `dyro` / `dyro home` / `dyro start` launches, an **outdated** managed Skill is
 repaired automatically. First-time install is never forced on upgrade or
@@ -87,5 +87,5 @@ dyro update auto off
 This preference is off by default. When enabled, only a higher patch within the
 same major and minor line can install automatically, such as `0.5.5` to
 `0.5.6`. A minor or major change still produces a notice and requires
-`dyro update now`. An installation failure is reported but does not prevent the
+`dyro update`. An installation failure is reported but does not prevent the
 current Dyro launch from continuing.

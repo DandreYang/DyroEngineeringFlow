@@ -278,9 +278,9 @@ obsolète. La première installation reste opt-in via setup ou
 Les lancements interactifs `dyro`, `dyro home` ou `dyro start` interrogent le point officiel PyPI au plus une fois par jour local. Un échec ne bloque jamais l’espace de travail et chaque mise à jour reste soumise à confirmation par défaut :
 
 ```bash
-dyro update              # équivalent à dyro update check
-dyro update check
-dyro update now
+dyro update              # vérifier, confirmer, puis installer (équivalent à dyro update now)
+dyro update check        # vérification seulement
+dyro update now          # alias de dyro update
 dyro update auto on      # active les mises à jour correctives automatiques
 dyro update auto off
 dyro update disable
