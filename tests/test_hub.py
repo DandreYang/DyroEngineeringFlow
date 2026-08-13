@@ -1340,8 +1340,10 @@ mount = "web"
         self.assertIn("codex", rendered)
         self.assertIn("claude", rendered)
         self.assertIn("尚未配置", rendered)
+        self.assertIn("dyro agent add claude --preset claude", rendered)
+        self.assertIn("dyro agent add cursor-agent --preset cursor-agent", rendered)
         self.assertIn("尚未集成", rendered)
-        self.assertIn("首页可仅打开工作区", rendered)
+        self.assertIn("首页可打开工作区", rendered)
         self.assertIn("不获得执行、门禁或复核权限", rendered)
 
     def test_agent_discovery_reports_configured_missing_command(self) -> None:

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Launch any installed coding tool from `dyro start` / `open`, not only a
+  Codex Profile adapter; `agent add --preset` now covers the catalogued
+  launchable tools.
+- Treat a healthy workspace as ready with no mutation: `next --format json`
+  no longer hands Agents a `start --agent codex` command.
+- Install the control-plane Skill avatar for Grok when `~/.grok` is present.
+- Teach the packaged Skill to read `objective explain --format json`.
+
 ## 0.6.5 - 2026-08-13
 
 - Expand the packaged `dyro-control-plane` Skill into a host-neutral,

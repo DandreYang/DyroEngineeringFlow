@@ -51,7 +51,7 @@ from .workspace import (
 
 
 DISCOVERABLE_AGENTS = tuple(
-    (definition.command, definition.id == "codex")
+    (definition.command, bool(definition.launch))
     for definition in TOOL_DEFINITIONS
     if definition.interface != "desktop"
 )
@@ -491,8 +491,9 @@ def print_agent_discovery(config: Config) -> None:
             state = f"已配置但不可用:{configured_as}"
             note = "命令不可用；请检查安装或 adapter 配置"
         elif installed and integrated:
+            preset = definition.id if definition is not None else command
             state = "尚未配置"
-            note = f"运行 dyro agent add {command} --preset {command}"
+            note = f"运行 dyro agent add {preset} --preset {preset}"
         elif installed:
             state = "尚未集成"
             note = "首页可仅打开工作区；不获得执行、门禁或复核权限"
@@ -543,6 +544,106 @@ def print_agent_discovery(config: Config) -> None:
             f"{value(f'{executable:16}')}{installed_cell}"
             f"{state_cell(state, installed=installed, configured=True)} {muted(note)}"
         )
+
+
+def ready_home_tools(config: Config, *, workspace: Path) -> list[HomeTool]:
+    return [
+        tool
+        for tool in home_tools(config, workspace=workspace)
+        if tool.available and tool.id != "shell"
+    ]
+
+
+def resolve_start_tool(
+    config: Config,
+    *,
+    requested: str | None,
+    workspace: Path,
+    last_tool: str = "",
+) -> HomeTool | None:
+    """Pick a ready adapter or installed launcher.
+
+    Returns None when the user must choose among multiple tools.
+    """
+
+    ready = ready_home_tools(config, workspace=workspace)
+    if not ready:
+        raise DyroError(
+            "未发现可启动的编码工具；安装本机 Agent 后运行 dyro agent discover"
+        )
+
+    def match(value: str) -> HomeTool | None:
+        for tool in ready:
+            if tool.id == value:
+                return tool
+        definition = tool_definition(value) or tool_definition_for_command(value)
+        if definition is None:
+            return None
+        for tool in ready:
+            if tool.id == definition.id or tool.id == definition.command:
+                return tool
+        return None
+
+    if requested:
+        tool = match(requested)
+        if tool is None:
+            available = "、".join(tool.id for tool in ready)
+            raise DyroError(
+                f"未找到可启动的 Agent：{requested}。"
+                f"本机可用：{available}。运行 dyro agent discover 查看详情"
+            )
+        return tool
+
+    preferences = load_tool_preferences()
+    for candidate in (preferences.default_tool, last_tool):
+        if candidate:
+            tool = match(candidate)
+            if tool is not None:
+                return tool
+    adapters = [tool for tool in ready if tool.kind == "adapter"]
+    if len(adapters) == 1:
+        return adapters[0]
+    if len(ready) == 1:
+        return ready[0]
+    return None
+
+
+def launch_start_tool(
+    config: Config,
+    *,
+    workspace: Path,
+    tool: HomeTool,
+    line: str = "",
+    task: str = "",
+    prompt: str = "",
+    dry_run: bool,
+) -> None:
+    if tool.kind == "adapter":
+        launch_adapter(
+            config,
+            workspace=workspace,
+            adapter_id=tool.id,
+            line=line,
+            task=task,
+            prompt=prompt,
+            dry_run=dry_run,
+        )
+        return
+    if not tool.argv:
+        rebuilt = next(
+            (
+                item
+                for item in home_tools(config, workspace=workspace)
+                if item.id == tool.id and item.argv
+            ),
+            None,
+        )
+        if rebuilt is None:
+            raise DyroError(
+                f"{tool.label} 没有可执行的启动命令；运行 dyro agent discover 查看详情"
+            )
+        tool = rebuilt
+    launch_home_tool(workspace=workspace, tool=tool, dry_run=dry_run)
 
 
 def launch_adapter(
@@ -636,15 +737,29 @@ def open_line(
     line_id: str,
     *,
     kind: str | None,
-    agent: str,
+    agent: str | None,
     prompt: str,
     dry_run: bool,
+    last_tool: str = "",
 ) -> None:
     line, workspace = existing_line_workspace(config, line_id, kind)
-    launch_adapter(
+    tool = resolve_start_tool(
+        config,
+        requested=agent or None,
+        workspace=workspace,
+        last_tool=last_tool,
+    )
+    if tool is None:
+        ready = "、".join(
+            item.id for item in ready_home_tools(config, workspace=workspace)
+        )
+        raise DyroError(
+            f"有多个可启动的编码工具；请用 --agent <id> 指定。本机可用：{ready}"
+        )
+    launch_start_tool(
         config,
         workspace=workspace,
-        adapter_id=agent,
+        tool=tool,
         line=line.id,
         prompt=prompt,
         dry_run=dry_run,
@@ -652,13 +767,33 @@ def open_line(
 
 
 def open_task(
-    config: Config, task_id: str, *, agent: str, prompt: str, dry_run: bool
+    config: Config,
+    task_id: str,
+    *,
+    agent: str | None,
+    prompt: str,
+    dry_run: bool,
+    last_tool: str = "",
 ) -> None:
     task = load_task(config, task_id)
-    launch_adapter(
+    workspace = existing_task_workspace(config, task)
+    tool = resolve_start_tool(
         config,
-        workspace=existing_task_workspace(config, task),
-        adapter_id=agent,
+        requested=agent or None,
+        workspace=workspace,
+        last_tool=last_tool,
+    )
+    if tool is None:
+        ready = "、".join(
+            item.id for item in ready_home_tools(config, workspace=workspace)
+        )
+        raise DyroError(
+            f"有多个可启动的编码工具；请用 --agent <id> 指定。本机可用：{ready}"
+        )
+    launch_start_tool(
+        config,
+        workspace=workspace,
+        tool=tool,
         line=task.line,
         task=task.id,
         prompt=prompt,

@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import shlex
-import shutil
 import subprocess
 import sys
 import time
@@ -92,14 +91,19 @@ from .evidence import build_execution_bundle, unpack_execution_bundle
 from .errors import DyroError, ValidationError
 from .home import (
     HomeTool,
+    _record_for_root,
+    existing_line_workspace,
     home_tools,
+    launch_start_tool,
     launcher_tools,
     open_line,
     open_task,
     print_agent_discovery,
     print_all_status,
     print_status,
+    ready_home_tools,
     resolve_home_config,
+    resolve_start_tool,
     run_home,
     sort_home_tools,
 )
@@ -142,6 +146,8 @@ from .profile import (
     append_adapter,
     command_adapter,
     config_value,
+    installed_launchable_presets,
+    launchable_preset_ids,
     preset_adapter,
     set_config_value,
     test_adapter,
@@ -914,38 +920,34 @@ def _apply_setup_personal_preferences(preferences: SetupPersonalPreferences) -> 
     return "success"
 
 
-def _setup_provider_preset() -> str | None:
-    """Offer only a Provider that Core can configure and execute safely today."""
+def _normalize_provider_presets(value: object) -> tuple[str, ...]:
+    if not value:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    return tuple(value)
 
-    discovered = [
-        command
-        for command in (
-            "agy",
-            "codex",
-            "claude",
-            "cursor-agent",
-            "grok",
-            "opencode",
-            "hermes",
-            "kimi",
-            "qodercli",
-        )
-        if shutil.which(command)
-    ]
+
+def _setup_provider_preset() -> tuple[str, ...]:
+    """Register every installed launchable Agent the user confirms."""
+
+    discovered = installed_launchable_presets()
     if not discovered:
-        print("未发现本机 Agent；可稍后运行 dyro agent add <id> --command '…'。")
-        return None
-    if "codex" in discovered:
-        if _ask_yes_no("检测到 Codex。将它加入 Dyro Profile 吗", default=True):
-            return "codex"
-    unsupported = [command for command in discovered if command != "codex"]
-    if unsupported:
         print(
-            "已发现 "
-            + "、".join(unsupported)
-            + "；它们尚无 Core 的受审计适配器，因此不会写入配置。"
+            "未发现本机 Agent；可稍后运行 dyro agent add <id> --command '…'，"
+            "或直接 dyro start 使用已安装工具。"
         )
-    return None
+        return ()
+    labels = "、".join(discovered)
+    print("检测到本机编码工具：" + labels)
+    question = (
+        "将它加入 Dyro Profile 吗"
+        if len(discovered) == 1
+        else "将它们加入 Dyro Profile 吗"
+    )
+    if _ask_yes_no(question, default=True):
+        return discovered
+    return ()
 
 
 def _setup_registration_plan(
@@ -1078,7 +1080,9 @@ def _apply_setup_plan(
     if config_file.exists():
         raise DyroError(f"配置已存在：{config_file}")
     plan.root.mkdir(parents=True, exist_ok=True)
-    adapter_presets = (plan.provider_preset,) if plan.provider_preset else ()
+    adapter_presets = plan.provider_presets or (
+        (plan.provider_preset,) if plan.provider_preset else ()
+    )
     atomic_write_text(
         config_file,
         render_config(
@@ -1212,7 +1216,7 @@ def _interactive_setup(args: argparse.Namespace) -> None:
     line_id = _ask_value("首条开发线 ID（留空则仅创建 Profile）", default="dev")
     if line_id:
         validate_id(line_id, "开发线 ID")
-    provider = _setup_provider_preset()
+    presets = _normalize_provider_presets(_setup_provider_preset())
     plan = SetupPlan(
         root=root,
         name=name,
@@ -1220,7 +1224,8 @@ def _interactive_setup(args: argparse.Namespace) -> None:
         default_base=base,
         line_id=line_id or None,
         branch=f"feat/{line_id}" if line_id else None,
-        provider_preset=provider,
+        provider_preset=presets[0] if presets else None,
+        provider_presets=presets,
     )
     registration = _setup_registration_plan(plan.root, plan.name, args)
     preferences = _setup_personal_preferences(
@@ -2053,20 +2058,29 @@ def cmd_start(args: argparse.Namespace) -> None:
         raise DyroError(
             "工作区尚未就绪；先修复 doctor 失败项，或运行 dyro bootstrap --yes"
         )
-    if not config.adapters:
-        raise DyroError("尚未配置可启动的 Agent；先运行 dyro next 查看安全的下一步")
     line_id = args.line or _choose("开发线", [line.id for line in list_lines(config)])
-    line = get_line(config, line_id, args.kind)
-    agent = args.agent or _choose("Agent", sorted(config.adapters))
-    open_args = argparse.Namespace(
-        root=str(config.root),
+    line, workspace = existing_line_workspace(config, line_id, args.kind)
+    record = _record_for_root(config.root)
+    last_tool = record.last_agent if record else ""
+    requested = args.agent or None
+    tool = resolve_start_tool(
+        config,
+        requested=requested,
+        workspace=workspace,
+        last_tool=last_tool,
+    )
+    if tool is None:
+        ready = ready_home_tools(config, workspace=workspace)
+        chosen = _choose("Agent", [item.id for item in ready])
+        tool = next(item for item in ready if item.id == chosen)
+    launch_start_tool(
+        config,
+        workspace=workspace,
+        tool=tool,
         line=line.id,
-        kind=line.kind,
-        agent=agent,
         prompt=args.prompt or "",
         dry_run=args.dry_run,
     )
-    cmd_open(open_args)
 
 
 def _bootstrap_destination_safe(config: Config, relative: str) -> bool:
@@ -2182,62 +2196,21 @@ def cmd_next(args: argparse.Namespace) -> None:
             return
         print(f"Profile 已就绪，但还没有开发线。下一步：{command}")
         return
-    if not config.adapters:
-        if shutil.which("codex"):
-            command = _scoped_command(
-                args, config, "agent", "add", "codex", "--preset", "codex"
-            )
-            if args.format == "json":
-                _print_control_plane_json(
-                    "next_step",
-                    state="needs_agent",
-                    summary="工作区已就绪，检测到 Codex 尚未加入 Profile。",
-                    commands=[command],
-                    mutation_available=True,
-                )
-                return
-            print(
-                f"工作区已就绪，检测到 Codex 尚未加入 Profile。下一步：{command}"
-            )
-        else:
-            command = _scoped_command(
-                args, config, "agent", "add", "<id>", "--command", "…"
-            )
-            if args.format == "json":
-                _print_control_plane_json(
-                    "next_step",
-                    state="needs_agent",
-                    summary="工作区已就绪，但尚未配置可启动的 Agent。",
-                    commands=[],
-                    mutation_available=False,
-                    required_inputs=["agent_id", "agent_command"],
-                )
-                return
-            print(
-                f"工作区已就绪，但尚未配置可启动的 Agent。下一步：{command}"
-            )
-        return
-    if len(lines) == 1 and len(config.adapters) == 1:
-        command = _scoped_command(
-            args,
-            config,
-            "start",
-            "--line",
-            lines[0].id,
-            "--agent",
-            next(iter(config.adapters)),
-        )
+    if not config.adapters and not installed_launchable_presets():
         if args.format == "json":
             _print_control_plane_json(
                 "next_step",
-                state="ready",
-                summary="工作区已就绪。",
-                commands=[command],
-                mutation_available=True,
+                state="needs_agent",
+                summary="工作区已就绪，但尚未发现可启动的编码工具。",
+                commands=[],
+                mutation_available=False,
+                required_inputs=["agent_id", "agent_command"],
             )
             return
         print(
-            f"工作区已就绪。下一步：{command}"
+            "工作区已就绪，但尚未发现可启动的编码工具。"
+            "安装本机 Agent 后运行 dyro start，或 "
+            + _scoped_command(args, config, "agent", "add", "<id>", "--command", "…")
         )
         return
     if args.format == "json":
@@ -2245,11 +2218,11 @@ def cmd_next(args: argparse.Namespace) -> None:
             "next_step",
             state="ready",
             summary="工作区已就绪。",
-            commands=[_scoped_command(args, config, "start")],
-            mutation_available=True,
+            commands=[],
+            mutation_available=False,
         )
         return
-    print(f"工作区已就绪。下一步：{_scoped_command(args, config, 'start')}")
+    print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。")
 
 
 def cmd_line_list(args: argparse.Namespace) -> None:
@@ -3717,7 +3690,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agent_add.add_argument("id")
     agent_source = agent_add.add_mutually_exclusive_group(required=True)
-    agent_source.add_argument("--preset", choices=("codex", "noop"))
+    agent_source.add_argument("--preset", choices=launchable_preset_ids())
     agent_source.add_argument(
         "--command", help="作为 launch/read/write 的 argv 命令行；不会经 shell 执行"
     )
@@ -3957,7 +3930,7 @@ def build_parser() -> argparse.ArgumentParser:
     open_cmd = sub.add_parser("open", help="在指定开发线启动 Agent")
     open_cmd.add_argument("line")
     open_cmd.add_argument("--kind", choices=("line", "hotfix"))
-    open_cmd.add_argument("--agent", default="codex")
+    open_cmd.add_argument("--agent")
     open_cmd.add_argument("--prompt", default="")
     open_cmd.set_defaults(func=cmd_open)
     start = sub.add_parser("start", help="新人入口：检查工作区、选择开发线和 Agent")
@@ -4237,7 +4210,7 @@ def build_parser() -> argparse.ArgumentParser:
         "open", help="进入已存在的任务工作树，不改变任务状态"
     )
     task_open.add_argument("id")
-    task_open.add_argument("--agent", default="codex")
+    task_open.add_argument("--agent")
     task_open.add_argument("--prompt", default="")
     task_open.set_defaults(func=cmd_task_open)
     task_claim = task_sub.add_parser("claim", help="由隔离执行器一次性领取任务")

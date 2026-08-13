@@ -12,6 +12,7 @@ from typing import Callable
 
 from .config import CONFIG_NAME, Config, load, validate_id
 from .errors import DyroError, ValidationError
+from .profile import preset_adapter
 from .process import run
 from .read_limits import open_safe_directory_chain
 from .state import atomic_write_text, exclusive_lock
@@ -37,6 +38,7 @@ class SetupPlan:
     line_id: str | None
     branch: str | None
     provider_preset: str | None = None
+    provider_presets: tuple[str, ...] = ()
 
     @property
     def needs_bootstrap(self) -> bool:
@@ -285,15 +287,14 @@ def render_config(
         ]
     )
     for preset in adapter_presets:
-        if preset != "codex":
-            raise ValidationError(f"首次设置不支持的 Agent preset：{preset}")
+        adapter = preset_adapter(preset, preset)
         chunks.extend(
             (
                 "",
-                "[adapters.codex]",
-                'launch = ["codex", "-C", "{workspace}"]',
-                'read = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "{prompt}"]',
-                'write = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "{prompt}"]',
+                f"[adapters.{_toml_table_key(adapter.id)}]",
+                f"launch = {json.dumps(list(adapter.launch), ensure_ascii=False)}",
+                f"read = {json.dumps(list(adapter.read), ensure_ascii=False)}",
+                f"write = {json.dumps(list(adapter.write), ensure_ascii=False)}",
             )
         )
     for repo in repositories:
@@ -320,8 +321,11 @@ def render_setup_plan(plan: SetupPlan) -> tuple[str, ...]:
         lines.append(f"开发线：{plan.line_id}（{plan.branch}）")
     else:
         lines.append("开发线：暂不创建")
-    if plan.provider_preset:
-        lines.append(f"Agent：{plan.provider_preset}")
+    presets = plan.provider_presets or (
+        (plan.provider_preset,) if plan.provider_preset else ()
+    )
+    if presets:
+        lines.append("Agent：" + "、".join(presets))
     else:
         lines.append("Agent：暂不配置")
     return tuple(lines)

@@ -340,9 +340,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("not allowed with argument", stderr.getvalue())
 
-    def test_setup_reports_detected_but_unintegrated_providers_without_registering_them(
-        self,
-    ) -> None:
+    def test_setup_offers_every_detected_launchable_provider(self) -> None:
         discovered = {
             "agy",
             "claude",
@@ -356,19 +354,32 @@ class CliTests(unittest.TestCase):
         output = StringIO()
         with (
             patch(
-                "dyro.cli.shutil.which",
+                "dyro.profile.shutil.which",
                 side_effect=lambda command: (
                     f"/fake/{command}" if command in discovered else None
                 ),
             ),
+            patch("dyro.cli._ask_yes_no", return_value=True),
             redirect_stdout(output),
         ):
-            self.assertIsNone(_setup_provider_preset())
+            presets = _setup_provider_preset()
 
+        self.assertEqual(
+            presets,
+            (
+                "antigravity",
+                "claude",
+                "cursor-agent",
+                "grok",
+                "opencode",
+                "hermes",
+                "kimi",
+                "qoder",
+            ),
+        )
         rendered = output.getvalue()
-        for command in discovered:
-            self.assertIn(command, rendered)
-        self.assertIn("不会写入配置", rendered)
+        self.assertIn("antigravity", rendered)
+        self.assertIn("grok", rendered)
 
     def test_interactive_setup_can_be_cancelled_without_writing(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
@@ -810,6 +821,44 @@ class ProfileCommandsTests(WorkspaceCase):
         self.assertIn("isolated", load(self.root).adapters)
         main(["--root", str(self.root), "agent", "test", "isolated"])
 
+        main(["--root", str(self.root), "agent", "add", "grok", "--preset", "grok"])
+        self.assertEqual(
+            load(self.root).adapters["grok"].launch,
+            ("grok", "--cwd", "{workspace}"),
+        )
+
+    def test_start_can_launch_an_installed_tool_without_a_profile_adapter(self) -> None:
+        create_line(load(self.root), line_id="alpha", branch="feat/alpha", base="main")
+        launched: list[object] = []
+
+        def fake_available(executable: str, cwd=None) -> bool:
+            return Path(executable).name == "grok"
+
+        with (
+            patch("dyro.home.shutil.which", side_effect=lambda name: "/fake/grok" if name == "grok" else None),
+            patch("dyro.home.executable_available", side_effect=fake_available),
+            patch(
+                "dyro.cli.launch_start_tool",
+                side_effect=lambda *args, **kwargs: launched.append(
+                    kwargs["tool"].id
+                ),
+            ),
+        ):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "--dry-run",
+                    "start",
+                    "--line",
+                    "alpha",
+                    "--agent",
+                    "grok",
+                ]
+            )
+
+        self.assertEqual(launched, ["grok"])
+
 
 class ExternalClaimCommandsTests(WorkspaceCase):
     def test_claim_output_preflight_preserves_task_and_existing_file(
@@ -939,10 +988,8 @@ class ObjectiveCliTests(WorkspaceCase):
         next_payload = self._read_json("next")
         self.assertEqual(next_payload["kind"], "next_step")
         self.assertEqual(next_payload["state"], "ready")
-        self.assertEqual(
-            next_payload["commands"],
-            [f"dyro --root {self.root.resolve()} start --line alpha --agent noop"],
-        )
+        self.assertEqual(next_payload["commands"], [])
+        self.assertFalse(next_payload["mutation_available"])
 
         lines_payload = self._read_json("line", "list")
         self.assertEqual(lines_payload["kind"], "line_list")
@@ -978,10 +1025,9 @@ class ObjectiveCliTests(WorkspaceCase):
                     )
 
         payload = json.loads(output.getvalue())
-        self.assertEqual(
-            payload["commands"],
-            ["dyro --workspace selected start --line alpha --agent noop"],
-        )
+        self.assertEqual(payload["state"], "ready")
+        self.assertEqual(payload["commands"], [])
+        self.assertFalse(payload["mutation_available"])
 
     def test_control_plane_json_runtime_errors_use_one_stable_envelope(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-registry-") as registry_home:

@@ -18,6 +18,7 @@ When the request already supplies a workspace alias, skip global discovery and u
 - Change Sets: `dyro --workspace <alias> changeset list --format json` or `dyro --workspace <alias> changeset verify <id> --format json`
 - Installed Skill health: `dyro integration status skill --format json`
 - Objective inventory or facts: `dyro --workspace <alias> objective list --format json` or `dyro --workspace <alias> objective status <id> --format json`
+- Objective explanation: `dyro --workspace <alias> objective explain <id> --format json`
 - Objective blockers or human attention: `dyro --workspace <alias> objective attention <id> --format json`
 - Objective dependency graph: `dyro --workspace <alias> objective graph <id> --format json`
 - Objective next-wave preview: `dyro --workspace <alias> objective tick <id> --format json`
