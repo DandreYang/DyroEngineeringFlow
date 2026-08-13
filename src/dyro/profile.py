@@ -4,11 +4,12 @@ import json
 from pathlib import Path
 import re
 import shutil
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .config import Adapter, CONFIG_NAME, Config, expand_argv, load, validate_id
 from .errors import DyroError, ValidationError
 from .state import atomic_write_text, exclusive_lock
+from .tooling import TOOL_DEFINITIONS, tool_definition
 
 
 _BARE_TOML_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -40,6 +41,26 @@ def _validate_argv(argv: Iterable[str], label: str) -> tuple[str, ...]:
     return value
 
 
+def launchable_preset_ids() -> tuple[str, ...]:
+    """Presets that can be written into a Profile and used by `dyro start`."""
+
+    tool_ids = tuple(
+        definition.id for definition in TOOL_DEFINITIONS if definition.launch
+    )
+    return ("noop", *tool_ids)
+
+
+def installed_launchable_presets(
+    *, which: Callable[[str], str | None] | None = None
+) -> tuple[str, ...]:
+    lookup = which or shutil.which
+    found: list[str] = []
+    for definition in TOOL_DEFINITIONS:
+        if definition.launch and lookup(definition.command):
+            found.append(definition.id)
+    return tuple(found)
+
+
 def preset_adapter(adapter_id: str, preset: str) -> Adapter:
     validate_id(adapter_id, "adapter id")
     if preset == "codex":
@@ -51,7 +72,11 @@ def preset_adapter(adapter_id: str, preset: str) -> Adapter:
         )
     if preset == "noop":
         return Adapter(adapter_id, ("/usr/bin/true",), ("/usr/bin/true",), ("/usr/bin/true",))
-    raise ValidationError(f"未知 Agent preset：{preset}")
+    definition = tool_definition(preset)
+    if definition is None or not definition.launch:
+        raise ValidationError(f"未知 Agent preset：{preset}")
+    launch = _validate_argv(definition.launch, "Agent launch")
+    return Adapter(adapter_id, launch, launch, launch)
 
 
 def command_adapter(adapter_id: str, argv: Iterable[str]) -> Adapter:

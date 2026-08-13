@@ -55,6 +55,7 @@ HOSTS: tuple[HostSpec, ...] = (
     HostSpec("claude", "CLAUDE_HOME", ".claude"),
     HostSpec("agents", "AGENTS_HOME", ".agents"),
     HostSpec("cursor", "CURSOR_HOME", ".cursor"),
+    HostSpec("grok", "GROK_HOME", ".grok"),
 )
 
 

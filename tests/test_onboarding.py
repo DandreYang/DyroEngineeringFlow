@@ -88,6 +88,18 @@ class OnboardingTests(WorkspaceCase):
 
         self.assertNotIn("[adapters.codex]", content)
 
+    def test_render_config_writes_launchable_non_codex_presets(self) -> None:
+        content = render_config(
+            "workspace",
+            [RepositoryInput("api", "repositories/api", "api")],
+            adapter_presets=("grok", "claude"),
+        )
+
+        self.assertIn("[adapters.grok]", content)
+        self.assertIn('launch = ["grok", "--cwd", "{workspace}"]', content)
+        self.assertIn("[adapters.claude]", content)
+        self.assertIn('launch = ["claude"]', content)
+
     def test_remote_repository_and_setup_plan_are_safe_to_preview(self) -> None:
         repository = repository_from_remote("git@github.com:acme/payments.git")
         plan = SetupPlan(

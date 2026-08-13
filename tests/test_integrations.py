@@ -105,6 +105,7 @@ class IntegrationManagerTests(unittest.TestCase):
             "status --format json",
             "doctor --format json",
             "objective attention <id> --format json",
+            "objective explain <id> --format json",
             "objective plan <id> --format json",
         ):
             self.assertIn(command, content)
