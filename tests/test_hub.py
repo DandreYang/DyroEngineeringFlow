@@ -1342,9 +1342,9 @@ mount = "web"
         self.assertIn("尚未配置", rendered)
         self.assertIn("dyro agent add claude --preset claude", rendered)
         self.assertIn("dyro agent add cursor-agent --preset cursor-agent", rendered)
-        self.assertIn("尚未集成", rendered)
-        self.assertIn("首页可打开工作区", rendered)
-        self.assertIn("不获得执行、门禁或复核权限", rendered)
+        self.assertIn("dyro agent add codex --preset codex", rendered)
+        self.assertIn("未安装", rendered)
+        self.assertNotIn("尚无 Core", rendered)
 
     def test_agent_discovery_reports_configured_missing_command(self) -> None:
         with self.root.joinpath("dyro.toml").open("a", encoding="utf-8") as handle:
