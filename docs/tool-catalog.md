@@ -77,7 +77,7 @@ page.
 
 Current catalog entries include Antigravity CLI, Codex CLI, Codex App, Claude
 Code CLI, Claude Code Desktop, Cursor Desktop, Cursor CLI, Grok, OpenCode,
-OpenClaw, Hermes, Kimi Code, Qoder CLI, ZCode, and Shell. Antigravity uses the
+OpenClaw, Hermes, Kimi Code, DeepSeek Harness, Pi, Qoder CLI, ZCode, and Shell. Antigravity uses the
 official `agy` command; Qoder uses `qodercli`; ZCode is opened as a desktop
 workspace tool. An entry can be known without having an audited installation
 recipe; such entries fail closed with an actionable message.

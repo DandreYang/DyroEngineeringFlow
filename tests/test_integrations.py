@@ -690,7 +690,15 @@ class IntegrationManagerTests(unittest.TestCase):
 
     def test_plan_surfaces_missing_host_blocker(self) -> None:
         with patch.dict(os.environ):
-            for key in ("CODEX_HOME", "CLAUDE_HOME", "AGENTS_HOME", "CURSOR_HOME"):
+            for key in (
+                "CODEX_HOME",
+                "CLAUDE_HOME",
+                "AGENTS_HOME",
+                "CURSOR_HOME",
+                "GROK_HOME",
+                "PI_CODING_AGENT_DIR",
+                "DSH_HOME",
+            ):
                 os.environ.pop(key, None)
             plan = install_integration("skill", yes=False, dry_run=True)
         self.assertEqual(plan.status.state, IntegrationState.ABSENT)
@@ -757,6 +765,29 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertIn("avatar\tcodex\tcurrent", text)
         self.assertIn(f"移除镜像 {self.mirror}", text)
         self.assertEqual(integration_status("skill").state, IntegrationState.ABSENT)
+
+
+    def test_pi_skill_host_uses_coding_agent_dir(self) -> None:
+        spec = next(host for host in manager.HOSTS if host.host_id == "pi")
+        self.assertEqual(spec.env_var, "PI_CODING_AGENT_DIR")
+        self.assertEqual(spec.default_dirname, ".pi/agent")
+
+        pi_home = self.root / "pi-agent"
+        install_integration("skill", yes=True, host_homes={"pi": pi_home})
+        avatar = pi_home / "skills" / "dyro-control-plane"
+        self.assertTrue(avatar.is_symlink() or avatar.is_dir())
+        self.assertTrue((avatar / "SKILL.md").is_file())
+
+    def test_dsh_skill_host_uses_dsh_home(self) -> None:
+        spec = next(host for host in manager.HOSTS if host.host_id == "dsh")
+        self.assertEqual(spec.env_var, "DSH_HOME")
+        self.assertEqual(spec.default_dirname, ".dsh")
+
+        dsh_home = self.root / "dsh-home"
+        install_integration("skill", yes=True, host_homes={"dsh": dsh_home})
+        avatar = dsh_home / "skills" / "dyro-control-plane"
+        self.assertTrue(avatar.is_symlink() or avatar.is_dir())
+        self.assertTrue((avatar / "SKILL.md").is_file())
 
 
 if __name__ == "__main__":

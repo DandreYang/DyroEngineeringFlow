@@ -48,7 +48,7 @@ closed until a Windows process-tree backend is implemented.
 
 See design §4 (five-part contract). `auto` considers only integrated, authenticated
 Providers; with several it requires `dyro dispatch route add default <backend>`, and
-with none it fails closed. `cursor-agent`, `opencode`, `grok`, `hermes`, and `kimi`
+with none it fails closed. `cursor-agent`, `opencode`, `grok`, `hermes`, `kimi`, `dsh`, and `pi`
 may be discovered, but cannot run until an audited adapter exists. Backend `echo` is
 an explicit offline simulation: task JSON must set `allow_offline_simulation: true`
 and callers must not treat its low-confidence result as a Provider conclusion.

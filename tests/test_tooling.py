@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from dyro.errors import DyroError, ValidationError
+from dyro.profile import launchable_preset_ids, preset_adapter
 from dyro.tooling import (
     ToolPreferences,
     install_tool,
@@ -59,10 +60,30 @@ class GuidedInstallerTests(unittest.TestCase):
         antigravity = tool_definition("antigravity")
         codex_desktop = tool_definition("codex-desktop")
         claude_desktop = tool_definition("claude-desktop")
+        dsh = tool_definition("dsh")
+        pi = tool_definition("pi")
         qoder = tool_definition("qoder")
         zcode = tool_definition("zcode")
 
         self.assertEqual(antigravity.command if antigravity else "", "agy")
+        self.assertEqual(dsh.command if dsh else "", "dsh")
+        self.assertEqual(dsh.launch if dsh else (), ("dsh", "web"))
+        self.assertEqual(
+            dsh.install.argv if dsh and dsh.install else (),
+            ("npm", "install", "-g", "@deepseek-ai/dsh@latest"),
+        )
+        self.assertEqual(pi.command if pi else "", "pi")
+        self.assertEqual(pi.launch if pi else (), ("pi",))
+        self.assertEqual(
+            pi.install.argv if pi and pi.install else (),
+            (
+                "npm",
+                "install",
+                "-g",
+                "--ignore-scripts",
+                "@earendil-works/pi-coding-agent@latest",
+            ),
+        )
         self.assertEqual(qoder.command if qoder else "", "qodercli")
         self.assertEqual(zcode.interface if zcode else "", "desktop")
         self.assertEqual(codex_desktop.interface if codex_desktop else "", "desktop")
@@ -71,6 +92,10 @@ class GuidedInstallerTests(unittest.TestCase):
             qoder.install.argv if qoder and qoder.install else (),
             ("npm", "install", "-g", "@qoder-ai/qodercli"),
         )
+        self.assertIn("dsh", launchable_preset_ids())
+        self.assertIn("pi", launchable_preset_ids())
+        self.assertEqual(preset_adapter("dsh", "dsh").launch, ("dsh", "web"))
+        self.assertEqual(preset_adapter("pi", "pi").launch, ("pi",))
 
     def test_command_recipe_is_explicit_argv_and_requires_confirmation(self) -> None:
         calls: list[tuple[str, ...]] = []

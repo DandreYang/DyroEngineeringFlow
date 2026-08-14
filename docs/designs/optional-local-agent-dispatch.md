@@ -239,7 +239,7 @@ process-tree 与 pipe 后端。
 安装/刷新时：
 
 1. `dyro dispatch backends` 探测本机命令与登录态；当前受审计、可执行的集成为 `codex` 和 `claude`。
-2. `cursor-agent`、`opencode`、`grok`、`hermes`、`kimi` 会被展示为“已发现但未集成”，不得被自动或手动路由，直到各自拥有经过审计的非交互协议 adapter。
+2. `cursor-agent`、`opencode`、`grok`、`hermes`、`kimi`、`dsh`、`pi` 会被展示为“已发现但未集成”，不得被自动或手动路由，直到各自拥有经过审计的非交互协议 adapter。
 3. 当只有一个已认证 Provider 时，`backend: auto` 可以选择它；当有多个时，用户必须使用 `dyro dispatch route add default <provider>` 选择默认路由；一个也没有时 fail-closed 并给出发现结果。
 4. `echo` 仅用于显式 `--backend echo --allow-offline-simulation` 的确定性测试，输出的 `execution_kind=offline-simulation`、低置信度和非生产警告不得被上游当作真实模型结论。
 5. 渲染 skill 正文只含已准备 Provider、发现但未集成的命令、路由表与上述限制，再分发到各宿主 skills 目录。

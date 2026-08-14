@@ -18,6 +18,8 @@ DISCOVER_ONLY_PROVIDERS = {
     "grok": "grok",
     "hermes": "hermes",
     "kimi": "kimi",
+    "dsh": "dsh",
+    "pi": "pi",
 }
 
 
