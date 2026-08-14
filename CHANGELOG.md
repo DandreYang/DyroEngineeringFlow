@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.8 - 2026-08-15
+
 - Fix Console inspection falsely timing out healthy workspaces by budgeting for
   isolated Python process startup. Unavailable or missing workspace counts now
   render as unknown instead of zero, and partial pages no longer claim that all
