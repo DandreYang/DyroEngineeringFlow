@@ -8,6 +8,9 @@
   route work. Install the control-plane Skill avatar for Pi when
   `~/.pi/agent` is present, and for DeepSeek Harness when `~/.dsh` is
   present.
+
+## 0.6.7 - 2026-08-13
+
 - Make bare `dyro update` check, confirm, and install (same path as
   `update now`). `update check` remains check-only; `--yes` skips the
   confirmation on both `update` and `update now`.
