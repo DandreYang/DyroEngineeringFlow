@@ -69,6 +69,10 @@ class ConsoleAssetTests(unittest.TestCase):
         script = load_asset("app.js")
         self.assertIn(b"AVAILABILITY_LABELS", script.body)
         self.assertIn("任务总数".encode(), script.body)
+        self.assertIn(b"function workspaceCount", script.body)
+        self.assertIn("仓库".encode(), script.body)
+        self.assertIn("状态不完整".encode(), script.body)
+        self.assertIn("—".encode(), script.body)
 
 
 if __name__ == "__main__":

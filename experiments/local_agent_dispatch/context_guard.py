@@ -37,6 +37,22 @@ CONTENT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+    re.compile(r"\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b"),
+    re.compile(
+        r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b"
+    ),
+    re.compile(
+        r"(?im)\b(?:ANTHROPIC(?:_AUTH)?_TOKEN|ANTHROPIC_API_KEY|"
+        r"CLAUDE_CODE_OAUTH_TOKEN|CURSOR_API_KEY|DEEPINFRA_API_KEY|"
+        r"DEEPSEEK_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|GROK_API_KEY|"
+        r"KIMI(?:_CODING|_CN|_MODEL)?_API_KEY|MINIMAX(?:_CN)?_API_KEY|"
+        r"NVIDIA_API_KEY|OPENAI_API_KEY|OPENROUTER_API_KEY|"
+        r"STEPFUN_API_KEY|XAI_API_KEY|Z_AI_API_KEY|ZAI_API_KEY|"
+        r"GLM_API_KEY)\b\s*(?:=|:)\s*"
+        r"(?:['\"][^'\"\r\n]{4,}['\"]|[A-Za-z0-9_./+=-]{4,})"
+        r"\s*(?:[,#}]|$)"
+    ),
 )
 MAX_CONTEXT_FILE_BYTES = 512 * 1024
 
@@ -93,6 +109,16 @@ def assert_content_allowed(content: str, *, label: str) -> None:
     verdict = check_content(content, file_label=label)
     if not verdict.allowed:
         raise DispatchValidationError(f"secret-like content is not allowed in {label}")
+
+
+def is_credential_field_name(name: str) -> bool:
+    """Return whether a mapping key names a credential-bearing field."""
+    if type(name) is not str or not name:
+        return False
+    return not check_content(
+        f"{name}=credential-value",
+        file_label="credential field name",
+    ).allowed
 
 
 def safe_error_text(error: object, *, fallback: str = "dispatch failure") -> str:

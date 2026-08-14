@@ -833,6 +833,29 @@ mount = "web"
             self.assertEqual(by_id[tool_id].state, ToolState.READY)
             self.assertNotIn(tool_id, load(self.root).adapters)
 
+    def test_home_marks_detected_pi_unavailable_when_node_is_incompatible(
+        self,
+    ) -> None:
+        with (
+            patch(
+                "dyro.home.shutil.which",
+                side_effect=lambda name: "/fake/pi" if name == "pi" else None,
+            ),
+            patch(
+                "dyro.home.tool_runtime_issue",
+                side_effect=lambda definition: (
+                    "Pi 需要 Node.js >= 22.19.0；当前为 22.15.1"
+                    if definition.id == "pi"
+                    else ""
+                ),
+            ),
+        ):
+            tools = home_tools(load(self.root), workspace=self.root)
+
+        pi = next(tool for tool in tools if tool.id == "pi")
+        self.assertEqual(pi.state, ToolState.UNAVAILABLE)
+        self.assertFalse(pi.available)
+
     def test_home_detects_codex_and_claude_desktops_as_launch_only_tools(
         self,
     ) -> None:
@@ -1345,6 +1368,35 @@ mount = "web"
         self.assertIn("dyro agent add codex --preset codex", rendered)
         self.assertIn("未安装", rendered)
         self.assertNotIn("尚无 Core", rendered)
+
+    def test_agent_discovery_keeps_dsh_and_pi_out_of_profile_presets(self) -> None:
+        output = StringIO()
+        discovered = {"dsh", "pi"}
+        with (
+            patch(
+                "dyro.home.shutil.which",
+                side_effect=lambda name: (
+                    f"/fake/{name}" if name in discovered else None
+                ),
+            ),
+            patch(
+                "dyro.home.tool_runtime_issue",
+                side_effect=lambda definition: (
+                    "Pi 需要 Node.js >= 22.19.0；当前为 22.15.1"
+                    if definition.id == "pi"
+                    else ""
+                ),
+            ),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root), "agent", "discover"])
+
+        rendered = output.getvalue()
+        self.assertIn("尚未集成", rendered)
+        self.assertIn("运行环境不兼容", rendered)
+        self.assertIn("Node.js >= 22.19.0", rendered)
+        self.assertNotIn("dyro agent add dsh", rendered)
+        self.assertNotIn("dyro agent add pi", rendered)
 
     def test_agent_discovery_reports_configured_missing_command(self) -> None:
         with self.root.joinpath("dyro.toml").open("a", encoding="utf-8") as handle:

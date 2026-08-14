@@ -13,18 +13,35 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import unittest
 from unittest.mock import Mock, patch
 
 from experiments.local_agent_dispatch.adapters.base import AdapterResult
 from experiments.local_agent_dispatch.adapters.subprocess_cli import (
+    _HERMES_ONESHOT_BOOTSTRAP,
     _completed_to_result,
+    _dsh_has_default_credential,
     _parse_model_json,
+    _parse_wrapped_model_json,
+    _provider_credentials,
+    _temporary_text_file,
     claude_adapter,
     codex_adapter,
+    cursor_adapter,
+    dsh_adapter,
+    grok_adapter,
+    hermes_adapter,
+    kimi_adapter,
+    opencode_adapter,
+    pi_adapter,
 )
-from experiments.local_agent_dispatch.adapters.registry import get_adapter
-from experiments.local_agent_dispatch.adapters.registry import probe_backends
+from experiments.local_agent_dispatch.adapters.registry import (
+    adapter_execution_profile,
+    adapter_is_authenticated,
+    get_adapter,
+    probe_backends,
+)
 from experiments.local_agent_dispatch.bounded_process import (
     BoundedCompletedProcess,
     _terminate_process_group,
@@ -44,6 +61,7 @@ from experiments.local_agent_dispatch.gc import gc
 from experiments.local_agent_dispatch.json_store import atomic_write_json, read_json
 from experiments.local_agent_dispatch.lease import SlotManager
 from experiments.local_agent_dispatch.process_identity import (
+    process_group_has_live_members,
     process_identity_is_dead,
     process_is_alive,
     process_started_at,
@@ -345,7 +363,7 @@ class DispatchIsolationTests(unittest.TestCase):
             )
             with patch(
                 "experiments.local_agent_dispatch.edit_workspace._git",
-                side_effect=[added, diffed],
+                side_effect=[added, added, diffed],
             ):
                 patch_ref = workspace.seal_patch()
 
@@ -386,6 +404,29 @@ class DispatchIsolationTests(unittest.TestCase):
             )
             workspace.cleanup()
 
+    def test_edit_patch_rejects_temporary_dispatch_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            _init_git_project(project)
+            workspace = EditWorkspace.create(
+                project_root=project,
+                home=root / "home",
+                run_id="run-temp-input",
+            )
+            try:
+                (workspace.worktree_root / ".dyro-dispatch-leftover.md").write_text(
+                    "private task context\n", encoding="utf-8"
+                )
+                with self.assertRaisesRegex(
+                    DispatchValidationError, "temporary dispatch input"
+                ):
+                    workspace.seal_patch()
+                self.assertFalse(workspace.patch_path.exists())
+            finally:
+                workspace.cleanup()
+
     def test_strict_mode_rejects_backend_without_physical_isolation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -408,6 +449,54 @@ class DispatchIsolationTests(unittest.TestCase):
 
 
 class DispatchOwnershipTests(unittest.TestCase):
+    def test_process_group_zombies_are_not_treated_as_live_members(self) -> None:
+        process_table = subprocess.CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout="  42 Z\n  42 Z+\n  99 S\n",
+            stderr="",
+        )
+        with patch(
+            "experiments.local_agent_dispatch.process_identity.subprocess.run",
+            return_value=process_table,
+        ) as run:
+            self.assertFalse(process_group_has_live_members(42))
+            self.assertTrue(process_group_has_live_members(99))
+        self.assertEqual(run.call_args.args[0][0], "/bin/ps")
+
+    def test_process_group_probe_failures_are_unverifiable(self) -> None:
+        cases = (
+            OSError("ps unavailable"),
+            subprocess.TimeoutExpired(cmd="/bin/ps", timeout=2),
+            subprocess.CompletedProcess(
+                args=["/bin/ps"], returncode=1, stdout="", stderr="failed"
+            ),
+            subprocess.CompletedProcess(
+                args=["/bin/ps"], returncode=0, stdout="", stderr=""
+            ),
+            subprocess.CompletedProcess(
+                args=["/bin/ps"],
+                returncode=0,
+                stdout="not-a-process-table\n",
+                stderr="",
+            ),
+        )
+        for outcome in cases:
+            with (
+                self.subTest(outcome=outcome),
+                patch(
+                    "experiments.local_agent_dispatch.process_identity."
+                    "subprocess.run",
+                    side_effect=(
+                        outcome if isinstance(outcome, BaseException) else None
+                    ),
+                    return_value=(
+                        None if isinstance(outcome, BaseException) else outcome
+                    ),
+                ),
+            ):
+                self.assertIsNone(process_group_has_live_members(42))
+
     def test_equal_coarse_start_token_does_not_prove_process_dead(
         self,
     ) -> None:
@@ -940,6 +1029,25 @@ class ContextAndResultContractTests(unittest.TestCase):
         with self.assertRaisesRegex(DispatchValidationError, "JSON"):
             _parse_model_json("plain text is not the result contract")
 
+    def test_pretty_printed_grok_envelope_is_decoded(self) -> None:
+        result = _parse_wrapped_model_json(
+            json.dumps(
+                {
+                    "text": json.dumps(
+                        {
+                            "summary": "bounded",
+                            "confidence": "high",
+                            "evidence": [],
+                        }
+                    ),
+                    "stopReason": "end_turn",
+                },
+                indent=2,
+            ),
+            backend="grok",
+        )
+        self.assertEqual(result["summary"], "bounded")
+
     def test_backend_result_rejects_secret_like_model_echo_without_leaking_it(self) -> None:
         token = "github_pat_" + ("a" * 82)
         with self.assertRaisesRegex(DispatchValidationError, "secret-like") as raised:
@@ -965,6 +1073,94 @@ class ContextAndResultContractTests(unittest.TestCase):
                 warnings=[f"provider echoed {token}"],
             )
         self.assertNotIn(token, str(raised.exception))
+
+    def test_result_envelope_recursively_rejects_named_credentials_in_usage(self) -> None:
+        credential = "ordinary-provider-credential"
+        with self.assertRaisesRegex(DispatchValidationError, "secret-like") as raised:
+            build_result(
+                run_id="run-1",
+                status="error",
+                summary="",
+                cwd=Path.cwd(),
+                usage={"nested": [{"KIMI_API_KEY": credential}]},
+            )
+        self.assertNotIn(credential, str(raised.exception))
+
+    def test_result_envelope_rejects_credentials_wrapped_under_sensitive_key(self) -> None:
+        credential = "ordinary-provider-credential"
+        for wrapped in ([credential], {"value": credential}):
+            with (
+                self.subTest(value_type=type(wrapped).__name__),
+                self.assertRaisesRegex(DispatchValidationError, "secret-like"),
+            ):
+                build_result(
+                    run_id="run-1",
+                    status="error",
+                    summary="",
+                    cwd=Path.cwd(),
+                    usage={"KIMI_API_KEY": wrapped},
+                )
+
+    def test_result_envelope_rejects_deceptive_sensitive_container_subclasses(self) -> None:
+        class DeceptiveList(list):
+            def __eq__(self, _other) -> bool:
+                return True
+
+        class DeceptiveDict(dict):
+            def __eq__(self, _other) -> bool:
+                return True
+
+        credential = "ordinary-provider-credential"
+        for wrapped in (
+            DeceptiveList([credential]),
+            DeceptiveDict({"value": credential}),
+        ):
+            with (
+                self.subTest(value_type=type(wrapped).__name__),
+                self.assertRaisesRegex(DispatchValidationError, "secret-like"),
+            ):
+                build_result(
+                    run_id="run-1",
+                    status="error",
+                    summary="",
+                    cwd=Path.cwd(),
+                    usage={"KIMI_API_KEY": wrapped},
+                )
+
+    def test_result_envelope_rejects_stateful_container_subclasses(self) -> None:
+        class StatefulDict(dict):
+            def __init__(self) -> None:
+                super().__init__({"safe": 1})
+                self.calls = 0
+
+            def items(self):
+                self.calls += 1
+                if self.calls < 3:
+                    return {"safe": 1}.items()
+                return {"KIMI_API_KEY": "ordinary-provider-credential"}.items()
+
+        with self.assertRaisesRegex(DispatchValidationError, "non-JSON"):
+            build_result(
+                run_id="run-1",
+                status="error",
+                summary="",
+                cwd=Path.cwd(),
+                usage=StatefulDict(),
+            )
+
+    def test_result_envelope_rejects_non_finite_usage_numbers(self) -> None:
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with (
+                self.subTest(value=repr(value)),
+                self.assertRaisesRegex(DispatchValidationError, "finite"),
+            ):
+                build_result(
+                    run_id="run-1",
+                    status="error",
+                    summary="",
+                    cwd=Path.cwd(),
+                    usage={"nested": [value]},
+                )
 
     def test_empty_evidence_is_not_fully_verified(self) -> None:
         result = build_result(
@@ -1052,7 +1248,16 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 return_value=completed,
             ) as bounded,
         ):
-            result = codex_adapter().run(
+            adapter = codex_adapter()
+            adapter.configure_execution_profile(
+                {
+                    "backend": "codex",
+                    "command_path": "/usr/local/bin/codex",
+                    "provider": "openai",
+                    "model": "reviewed-codex-model",
+                }
+            )
+            result = adapter.run(
                 contract=contract,
                 cwd=Path.cwd(),
                 context_files={"app.py": "safe = True\n"},
@@ -1119,6 +1324,1134 @@ class ProcessAndLifecycleTests(unittest.TestCase):
         environment = bounded.call_args.kwargs["env"]
         self.assertNotIn("CODEX_HOME", environment)
         self.assertEqual(environment.get("ANTHROPIC_API_KEY"), "claude-only")
+
+    def test_all_discovered_harnesses_have_bounded_provider_adapters(self) -> None:
+        contract = parse_task_contract(
+            {
+                **_payload(),
+                "backend": "fake",
+            }
+        )
+        provider_payload = json.dumps(
+            {
+                "summary": "bounded",
+                "confidence": "high",
+                "evidence": [],
+            }
+        )
+        cases = {
+            "cursor-agent": (
+                cursor_adapter,
+                json.dumps({"type": "result", "result": provider_payload}),
+                ("--mode", "ask", "--sandbox", "disabled"),
+            ),
+            "opencode": (
+                opencode_adapter,
+                json.dumps(
+                    {
+                        "type": "text",
+                        "part": {"type": "text", "text": provider_payload},
+                    }
+                ),
+                ("run", "--format", "json", "--pure"),
+            ),
+            "grok": (
+                grok_adapter,
+                json.dumps({"text": provider_payload}),
+                ("--permission-mode", "plan", "--sandbox", "read-only"),
+            ),
+            "hermes": (
+                hermes_adapter,
+                provider_payload,
+                ("-I", "clarify"),
+            ),
+            "kimi": (
+                kimi_adapter,
+                json.dumps({"role": "assistant", "content": provider_payload}),
+                ("--output-format", "stream-json", "--agent-file"),
+            ),
+            "dsh": (
+                dsh_adapter,
+                provider_payload,
+                ("--profile", "headless"),
+            ),
+            "pi": (
+                pi_adapter,
+                json.dumps(
+                    {
+                        "type": "message_end",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": provider_payload}],
+                        },
+                    }
+                ),
+                ("--mode", "json", "--tools", "read,grep,find,ls"),
+            ),
+        }
+
+        for backend, (factory, stdout, required) in cases.items():
+            with self.subTest(backend=backend):
+                completed = BoundedCompletedProcess(
+                    args=(backend,),
+                    returncode=0,
+                    stdout=stdout,
+                    stderr="",
+                )
+                captured_prompt_files: list[str] = []
+
+                def bounded(argv, **kwargs):
+                    candidates = [Path(str(raw)) for raw in argv]
+                    candidates.extend(
+                        Path(kwargs["cwd"]).glob(".dyro-dispatch-*")
+                    )
+                    for candidate in candidates:
+                        if candidate.name.startswith(
+                            ".dyro-dispatch-"
+                        ) and candidate.is_file():
+                            captured_prompt_files.append(
+                                candidate.read_text(encoding="utf-8")
+                            )
+                    return completed
+
+                with (
+                    patch(
+                        "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
+                        return_value=f"/usr/local/bin/{backend}",
+                    ),
+                    patch(
+                        "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
+                        side_effect=bounded,
+                    ) as run,
+                    patch(
+                        "experiments.local_agent_dispatch.adapters.subprocess_cli._hermes_python_runtime",
+                        return_value=Path(sys.executable),
+                    ),
+                    patch(
+                        "experiments.local_agent_dispatch.adapters.subprocess_cli."
+                        "_materialize_kimi_worker_home",
+                    ),
+                ):
+                    adapter = factory()
+                    profile = {
+                        "backend": backend,
+                        "command_path": f"/usr/local/bin/{backend}",
+                        "provider": (
+                            "deepseek-official"
+                            if backend == "dsh"
+                            else "test-provider"
+                        ),
+                        "model": (
+                            "deepseek-v4-flash"
+                            if backend == "dsh"
+                            else "reviewed-model"
+                        ),
+                    }
+                    if backend == "kimi":
+                        profile["route_sha256"] = "a" * 64
+                    adapter.configure_execution_profile(profile)
+                    result = adapter.run(
+                        contract=contract,
+                        cwd=Path.cwd(),
+                        context_files={"app.py": "safe = True\n"},
+                        timeout_seconds=10.0,
+                    )
+
+                self.assertEqual(result.status, "ok")
+                argv = [str(item) for item in run.call_args.args[0]]
+                for value in required:
+                    self.assertIn(value, argv)
+                self.assertNotIn("safe = True", " ".join(argv))
+                if backend == "opencode":
+                    self.assertLess(
+                        argv.index("Follow the attached Dyro dispatch task exactly."),
+                        argv.index("--file"),
+                    )
+                    environment = run.call_args.kwargs["env"]
+                    self.assertIn("XDG_CONFIG_HOME", environment)
+                    self.assertIn("XDG_DATA_HOME", environment)
+                    self.assertNotIn(
+                        "OPENCODE_DISABLE_DEFAULT_PLUGINS", environment
+                    )
+                if backend == "hermes":
+                    self.assertIn("clarify", argv)
+                    environment = run.call_args.kwargs["env"]
+                    self.assertEqual(environment.get("HERMES_SAFE_MODE"), "1")
+                if backend == "dsh":
+                    self.assertTrue(
+                        any(
+                            "agent-default-model" in text
+                            and "deepseek-official" in text
+                            and "deepseek-v4-flash" in text
+                            for text in captured_prompt_files
+                        )
+                    )
+                supplied = run.call_args.kwargs.get("input_text") or ""
+                self.assertTrue(
+                    "safe = True" in supplied
+                    or any("safe = True" in text for text in captured_prompt_files),
+                    f"{backend} must receive the guarded prompt out of argv",
+                )
+
+    def test_dsh_sync_run_uses_isolated_home_without_user_settings(self) -> None:
+        contract = parse_task_contract({**_payload(), "backend": "dsh"})
+        payload = json.dumps(
+            {"summary": "reviewed", "confidence": "medium", "evidence": []}
+        )
+        completed = BoundedCompletedProcess(
+            args=("dsh",), returncode=0, stdout=payload, stderr=""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            source_home = Path(tmp) / "source"
+            source_home.mkdir()
+            credentials = source_home / ".credentials.yaml"
+            credentials.write_text(
+                "DEEPSEEK_API_KEY: test-selected-dsh-credential\n",
+                encoding="utf-8",
+            )
+            credentials.chmod(0o600)
+            (source_home / "settings.yaml").write_text(
+                "agent-default-model:\n  model: unreviewed-model\n",
+                encoding="utf-8",
+            )
+            observed: dict[str, object] = {}
+
+            def bounded(_argv, **kwargs):
+                isolated_home = Path(kwargs["env"]["DSH_HOME"])
+                observed.update(
+                    home=isolated_home,
+                    private=(
+                        (isolated_home / ".credentials.yaml").stat().st_mode
+                        & 0o077
+                    )
+                    == 0,
+                    settings=(isolated_home / "settings.yaml").exists(),
+                )
+                return completed
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {"DSH_HOME": str(source_home)},
+                    clear=True,
+                ),
+                patch(
+                    "experiments.local_agent_dispatch.adapters."
+                    "subprocess_cli.shutil.which",
+                    return_value="/usr/local/bin/dsh",
+                ),
+                patch(
+                    "experiments.local_agent_dispatch.adapters."
+                    "subprocess_cli.run_bounded",
+                    side_effect=bounded,
+                ),
+            ):
+                adapter = dsh_adapter()
+                profile = adapter_execution_profile(adapter)
+                adapter.configure_execution_profile(profile)
+                result = adapter.run(
+                    contract=contract,
+                    cwd=Path.cwd(),
+                    context_files={"app.py": "safe = True\n"},
+                    timeout_seconds=10.0,
+                )
+
+            self.assertEqual(result.status, "ok")
+            self.assertTrue(observed["private"])
+            self.assertFalse(observed["settings"])
+            self.assertFalse(Path(observed["home"]).exists())
+
+    def test_pi_sync_run_uses_isolated_home_without_lateral_auth(self) -> None:
+        contract = parse_task_contract({**_payload(), "backend": "pi"})
+        payload = json.dumps(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "summary": "reviewed",
+                                    "confidence": "medium",
+                                    "evidence": [],
+                                }
+                            ),
+                        }
+                    ],
+                },
+            }
+        )
+        completed = BoundedCompletedProcess(
+            args=("pi",), returncode=0, stdout=payload, stderr=""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            source_home = Path(tmp) / "pi"
+            source_home.mkdir()
+            (source_home / "settings.json").write_text(
+                json.dumps(
+                    {"defaultProvider": "openai", "defaultModel": "gpt-test"}
+                ),
+                encoding="utf-8",
+            )
+            (source_home / "auth.json").write_text(
+                json.dumps(
+                    {
+                        "openai": {"token": "selected-oauth"},
+                        "anthropic": {"token": "lateral-oauth"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            observed: dict[str, object] = {}
+
+            def bounded(_argv, **kwargs):
+                isolated_home = Path(kwargs["env"]["PI_CODING_AGENT_DIR"])
+                observed.update(
+                    home=isolated_home,
+                    auth=json.loads(
+                        (isolated_home / "auth.json").read_text(encoding="utf-8")
+                    ),
+                    environment=dict(kwargs["env"]),
+                )
+                return completed
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "PI_CODING_AGENT_DIR": str(source_home),
+                        "OPENAI_API_KEY": "selected-key",
+                        "ANTHROPIC_API_KEY": "lateral-key",
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "experiments.local_agent_dispatch.adapters."
+                    "subprocess_cli.shutil.which",
+                    return_value="/usr/local/bin/pi",
+                ),
+                patch(
+                    "experiments.local_agent_dispatch.adapters."
+                    "subprocess_cli.run_bounded",
+                    side_effect=bounded,
+                ),
+            ):
+                adapter = pi_adapter()
+                profile = adapter_execution_profile(adapter)
+                adapter.configure_execution_profile(profile)
+                result = adapter.run(
+                    contract=contract,
+                    cwd=Path.cwd(),
+                    context_files={"app.py": "safe = True\n"},
+                    timeout_seconds=10.0,
+                )
+
+            self.assertEqual(result.status, "ok")
+            environment = observed["environment"]
+            self.assertEqual(environment.get("OPENAI_API_KEY"), "selected-key")
+            self.assertNotIn("ANTHROPIC_API_KEY", environment)
+            self.assertEqual(
+                observed["auth"],
+                {"openai": {"token": "selected-oauth"}},
+            )
+            self.assertNotEqual(Path(observed["home"]), source_home)
+            self.assertFalse(Path(observed["home"]).exists())
+
+    def test_opencode_sync_run_uses_isolated_home_without_lateral_auth(self) -> None:
+        contract = parse_task_contract({**_payload(), "backend": "opencode"})
+        payload = json.dumps(
+            {
+                "type": "text",
+                "part": {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "summary": "reviewed",
+                            "confidence": "medium",
+                            "evidence": [],
+                        }
+                    ),
+                },
+            }
+        )
+        completed = BoundedCompletedProcess(
+            args=("opencode",), returncode=0, stdout=payload, stderr=""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            config_root = Path(tmp) / "config"
+            data_root = Path(tmp) / "data"
+            (config_root / "opencode").mkdir(parents=True)
+            (data_root / "opencode").mkdir(parents=True)
+            (config_root / "opencode" / "opencode.json").write_text(
+                json.dumps(
+                    {
+                        "model": "openai/reviewed-model",
+                        "provider": {
+                            "openai": {"options": {"apiKey": "selected"}},
+                            "anthropic": {"options": {"apiKey": "lateral"}},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (data_root / "opencode" / "auth.json").write_text(
+                json.dumps(
+                    {
+                        "openai": {"token": "selected-oauth"},
+                        "anthropic": {"token": "lateral-oauth"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            observed: dict[str, object] = {}
+
+            def bounded(_argv, **kwargs):
+                isolated_config = Path(kwargs["env"]["XDG_CONFIG_HOME"])
+                isolated_data = Path(kwargs["env"]["XDG_DATA_HOME"])
+                observed.update(
+                    home=isolated_config.parent,
+                    config=json.loads(
+                        (
+                            isolated_config / "opencode" / "opencode.json"
+                        ).read_text(encoding="utf-8")
+                    ),
+                    auth=json.loads(
+                        (isolated_data / "opencode" / "auth.json").read_text(
+                            encoding="utf-8"
+                        )
+                    ),
+                    environment=dict(kwargs["env"]),
+                )
+                return completed
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "XDG_CONFIG_HOME": str(config_root),
+                        "XDG_DATA_HOME": str(data_root),
+                        "OPENAI_API_KEY": "selected-key",
+                        "ANTHROPIC_API_KEY": "lateral-key",
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "experiments.local_agent_dispatch.adapters."
+                    "subprocess_cli.shutil.which",
+                    return_value="/usr/local/bin/opencode",
+                ),
+                patch(
+                    "experiments.local_agent_dispatch.adapters."
+                    "subprocess_cli.run_bounded",
+                    side_effect=bounded,
+                ),
+            ):
+                adapter = opencode_adapter()
+                profile = adapter_execution_profile(adapter)
+                adapter.configure_execution_profile(profile)
+                result = adapter.run(
+                    contract=contract,
+                    cwd=Path.cwd(),
+                    context_files={"app.py": "safe = True\n"},
+                    timeout_seconds=10.0,
+                )
+
+            self.assertEqual(result.status, "ok")
+            environment = observed["environment"]
+            self.assertEqual(environment.get("OPENAI_API_KEY"), "selected-key")
+            self.assertNotIn("ANTHROPIC_API_KEY", environment)
+            self.assertEqual(observed["config"]["model"], "openai/reviewed-model")
+            self.assertEqual(
+                set(observed["config"]["provider"]),
+                {"openai"},
+            )
+            self.assertEqual(
+                observed["auth"],
+                {"openai": {"token": "selected-oauth"}},
+            )
+            self.assertNotEqual(Path(observed["home"]), config_root)
+            self.assertFalse(Path(observed["home"]).exists())
+
+    def test_pi_authenticated_returns_false_when_profile_is_unselectable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source_home = Path(tmp) / "pi"
+            source_home.mkdir()
+            with (
+                patch.dict(
+                    os.environ,
+                    {"PI_CODING_AGENT_DIR": str(source_home)},
+                    clear=True,
+                ),
+                patch(
+                    "experiments.local_agent_dispatch.adapters."
+                    "subprocess_cli.shutil.which",
+                    return_value="/usr/local/bin/pi",
+                ),
+            ):
+                adapter = pi_adapter()
+                self.assertFalse(adapter_is_authenticated(adapter))
+                self.assertFalse(adapter.authenticated())
+
+    def test_dsh_credential_probe_rejects_fifo_without_blocking(self) -> None:
+        if os.name != "posix" or not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO semantics require POSIX")
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fifo = home / ".credentials.yaml"
+            os.mkfifo(fifo, mode=0o600)
+            fifo.chmod(0o600)
+            with patch.dict(
+                os.environ,
+                {"DSH_HOME": str(home)},
+                clear=True,
+            ):
+                started = time.monotonic()
+                self.assertFalse(_dsh_has_default_credential())
+            self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_kimi_worker_home_pins_env_route_without_ambient_model_variables(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_home = root / "source"
+            source_home.mkdir()
+            isolated_home = root / "isolated"
+            ambient = {
+                "KIMI_CODE_HOME": str(source_home),
+                "KIMI_MODEL_NAME": "reviewed-model",
+                "KIMI_MODEL_API_KEY": "test-selected-kimi-credential",
+                "KIMI_MODEL_PROVIDER_TYPE": "openai",
+                "KIMI_MODEL_BASE_URL": "https://provider.invalid/v1",
+                "KIMI_MODEL_MAX_CONTEXT_SIZE": "65536",
+            }
+            with (
+                patch.dict(os.environ, ambient, clear=True),
+                patch(
+                    "experiments.local_agent_dispatch.adapters."
+                    "subprocess_cli.shutil.which",
+                    return_value="/usr/local/bin/kimi",
+                ),
+            ):
+                adapter = kimi_adapter()
+                profile = adapter_execution_profile(adapter)
+                adapter.configure_execution_profile(profile)
+                worker_environment = adapter.worker_environment(
+                    isolated_home=isolated_home
+                )
+
+            self.assertEqual(profile["provider"], "__kimi_env__")
+            self.assertEqual(profile["model"], "__kimi_env_model__")
+            self.assertRegex(profile["route_sha256"], r"^[0-9a-f]{64}$")
+            self.assertFalse(
+                any(name.startswith("KIMI_MODEL_") for name in worker_environment)
+            )
+            self.assertEqual(
+                worker_environment["KIMI_CODE_HOME"],
+                str(isolated_home),
+            )
+            isolated = tomllib.loads(
+                (isolated_home / "config.toml").read_text(encoding="utf-8")
+            )
+            self.assertEqual(isolated["default_model"], "__kimi_env_model__")
+            self.assertEqual(
+                isolated["providers"]["__kimi_env__"]["type"],
+                "openai",
+            )
+            self.assertEqual(
+                isolated["models"]["__kimi_env_model__"]["model"],
+                "reviewed-model",
+            )
+            with (
+                patch.dict(os.environ, worker_environment, clear=True),
+                patch(
+                    "experiments.local_agent_dispatch.adapters."
+                    "subprocess_cli.shutil.which",
+                    return_value="/usr/local/bin/kimi",
+                ),
+            ):
+                self.assertEqual(
+                    adapter_execution_profile(kimi_adapter()),
+                    profile,
+                )
+
+    def test_kimi_worker_home_copies_only_selected_config_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_home = root / "source"
+            source_home.mkdir()
+            (source_home / "config.toml").write_text(
+                'default_provider = "selected"\n'
+                'default_model = "selected/model-a"\n\n'
+                '[providers.selected]\n'
+                'type = "openai"\n'
+                'api_key = "selected-test-credential"\n'
+                'base_url = "https://selected.invalid/v1"\n\n'
+                '[providers.lateral]\n'
+                'type = "anthropic"\n'
+                'api_key = "lateral-test-credential"\n\n'
+                '[models."selected/model-a"]\n'
+                'provider = "selected"\n'
+                'model = "model-a"\n'
+                'max_context_size = 32768\n\n'
+                '[models."lateral/model-b"]\n'
+                'provider = "lateral"\n'
+                'model = "model-b"\n'
+                'max_context_size = 32768\n',
+                encoding="utf-8",
+            )
+            isolated_home = root / "isolated"
+            with (
+                patch.dict(
+                    os.environ,
+                    {"KIMI_CODE_HOME": str(source_home)},
+                    clear=True,
+                ),
+                patch(
+                    "experiments.local_agent_dispatch.adapters."
+                    "subprocess_cli.shutil.which",
+                    return_value="/usr/local/bin/kimi",
+                ),
+            ):
+                adapter = kimi_adapter()
+                profile = adapter_execution_profile(adapter)
+                adapter.configure_execution_profile(profile)
+                adapter.worker_environment(isolated_home=isolated_home)
+
+            isolated = tomllib.loads(
+                (isolated_home / "config.toml").read_text(encoding="utf-8")
+            )
+            self.assertEqual(set(isolated["providers"]), {"selected"})
+            self.assertEqual(set(isolated["models"]), {"selected/model-a"})
+            self.assertNotIn("lateral", json.dumps(isolated))
+
+    def test_kimi_worker_home_scopes_file_oauth_and_binds_token_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_home = root / "source"
+            credentials = source_home / "credentials"
+            credentials.mkdir(parents=True, mode=0o700)
+            token = credentials / "kimi-code.json"
+            token.write_text(
+                json.dumps(
+                    {
+                        "access_token": "test-access",
+                        "refresh_token": "test-refresh",
+                        "expires_at": 4102444800,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            token.chmod(0o600)
+            (source_home / "config.toml").write_text(
+                'default_provider = "managed:kimi-code"\n'
+                'default_model = "kimi/model-a"\n\n'
+                '[providers."managed:kimi-code"]\n'
+                'type = "kimi"\n'
+                'base_url = "https://api.kimi.com/coding/v1"\n\n'
+                '[providers."managed:kimi-code".oauth]\n'
+                'storage = "file"\n'
+                'key = "oauth/kimi-code"\n\n'
+                '[models."kimi/model-a"]\n'
+                'provider = "managed:kimi-code"\n'
+                'model = "model-a"\n'
+                'max_context_size = 32768\n',
+                encoding="utf-8",
+            )
+            isolated_home = root / "isolated"
+            with (
+                patch.dict(
+                    os.environ,
+                    {"KIMI_CODE_HOME": str(source_home)},
+                    clear=True,
+                ),
+                patch(
+                    "experiments.local_agent_dispatch.adapters."
+                    "subprocess_cli.shutil.which",
+                    return_value="/usr/local/bin/kimi",
+                ),
+            ):
+                adapter = kimi_adapter()
+                before = adapter_execution_profile(adapter)
+                adapter.configure_execution_profile(before)
+                adapter.worker_environment(isolated_home=isolated_home)
+                token.write_text(
+                    json.dumps(
+                        {
+                            "access_token": "test-access-refreshed",
+                            "refresh_token": "test-refresh",
+                            "expires_at": 4102444800,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                token.chmod(0o600)
+                after = adapter_execution_profile(kimi_adapter())
+
+            self.assertNotEqual(before["route_sha256"], after["route_sha256"])
+            copied = isolated_home / "credentials" / "kimi-code.json"
+            self.assertTrue(copied.is_file())
+            self.assertEqual(copied.stat().st_mode & 0o077, 0)
+            self.assertEqual(
+                {path.name for path in (isolated_home / "credentials").iterdir()},
+                {"kimi-code.json"},
+            )
+
+    def test_all_discovered_harnesses_pin_edit_capabilities(self) -> None:
+        contract = parse_task_contract(
+            {
+                **_payload(mode="edit"),
+                "backend": "fake",
+            }
+        )
+        payload = json.dumps(
+            {"summary": "edited", "confidence": "medium", "evidence": []}
+        )
+        expectations = {
+            "opencode": (opencode_adapter, ("run", "--format", "json", "--pure")),
+            "grok": (grok_adapter, ("--permission-mode", "acceptEdits")),
+            "hermes": (hermes_adapter, ("file",)),
+            "kimi": (kimi_adapter, ("--agent-file",)),
+            "dsh": (dsh_adapter, ("--profile", "headless")),
+            "pi": (pi_adapter, ("--tools", "read,grep,find,ls,edit,write")),
+        }
+        for backend, (factory, required) in expectations.items():
+            with self.subTest(backend=backend):
+                completed = BoundedCompletedProcess(
+                    args=(backend,), returncode=0, stdout=payload, stderr=""
+                )
+                with (
+                    patch(
+                        "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
+                        return_value=f"/usr/local/bin/{backend}",
+                    ),
+                    patch(
+                        "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
+                        return_value=completed,
+                    ) as run,
+                    patch(
+                        "experiments.local_agent_dispatch.adapters.subprocess_cli._hermes_python_runtime",
+                        return_value=Path(sys.executable),
+                    ),
+                    patch(
+                        "experiments.local_agent_dispatch.adapters.subprocess_cli."
+                        "_materialize_kimi_worker_home",
+                    ),
+                ):
+                    adapter = factory()
+                    profile = {
+                        "backend": backend,
+                        "command_path": f"/usr/local/bin/{backend}",
+                        "provider": (
+                            "deepseek-official"
+                            if backend == "dsh"
+                            else "test-provider"
+                        ),
+                        "model": (
+                            "deepseek-v4-flash"
+                            if backend == "dsh"
+                            else "reviewed-model"
+                        ),
+                    }
+                    if backend == "kimi":
+                        profile["route_sha256"] = "a" * 64
+                    adapter.configure_execution_profile(profile)
+                    adapter.run(
+                        contract=contract,
+                        cwd=Path.cwd(),
+                        context_files={"app.py": "safe = True\n"},
+                        timeout_seconds=10.0,
+                    )
+                argv = [str(item) for item in run.call_args.args[0]]
+                for value in required:
+                    self.assertIn(value, argv)
+
+    def test_cursor_edit_fails_closed_before_spawn(self) -> None:
+        contract = parse_task_contract(
+            {
+                **_payload(mode="edit"),
+                "backend": "cursor-agent",
+            }
+        )
+        with (
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
+                return_value="/usr/local/bin/cursor-agent",
+            ),
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded"
+            ) as bounded,
+        ):
+            result = cursor_adapter().run(
+                contract=contract,
+                cwd=Path.cwd(),
+                context_files={"app.py": "safe = True\n"},
+                timeout_seconds=10.0,
+            )
+        self.assertEqual(result.error_code, "backend_mode_unsupported")
+        bounded.assert_not_called()
+
+    def test_provider_credentials_are_selected_not_shared(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "ANTHROPIC_API_KEY": "anthropic-secret",
+                "OPENAI_API_KEY": "openai-secret",
+                "XAI_API_KEY": "xai-secret",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                _provider_credentials("xai"), {"XAI_API_KEY": "xai-secret"}
+            )
+            self.assertEqual(
+                _provider_credentials("openai-compatible"),
+                {"OPENAI_API_KEY": "openai-secret"},
+            )
+            self.assertEqual(_provider_credentials("openai-codex"), {})
+            self.assertEqual(_provider_credentials("xai-oauth"), {})
+            self.assertNotIn(
+                "ANTHROPIC_API_KEY", _provider_credentials("xai")
+            )
+
+    def test_provider_credentials_read_only_selected_dotenv_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dotenv = Path(tmp) / ".env"
+            dotenv.write_text(
+                "XAI_API_KEY='selected'\n"
+                "ANTHROPIC_API_KEY=must-not-pass\n",
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {}, clear=True):
+                credentials = _provider_credentials(
+                    "xai", dotenv_path=dotenv
+                )
+        self.assertEqual(credentials, {"XAI_API_KEY": "selected"})
+
+    def test_temporary_dispatch_input_cleanup_failure_is_fatal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(Path, "unlink", side_effect=OSError("blocked")),
+                self.assertRaisesRegex(
+                    DispatchValidationError, "could not be removed"
+                ),
+            ):
+                with _temporary_text_file(
+                    Path(tmp), suffix=".md", content="private task"
+                ):
+                    pass
+
+    def test_cursor_dispatch_auth_requires_api_key_and_positive_status(self) -> None:
+        adapter = cursor_adapter()
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
+                return_value="/usr/local/bin/cursor-agent",
+            ),
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded"
+            ) as bounded,
+        ):
+            self.assertFalse(adapter.authenticated())
+        bounded.assert_not_called()
+
+        completed = BoundedCompletedProcess(
+            args=("cursor-agent",),
+            returncode=0,
+            stdout="Not logged in",
+            stderr="",
+        )
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "test-key"}, clear=True),
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
+                return_value="/usr/local/bin/cursor-agent",
+            ),
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
+                return_value=completed,
+            ),
+        ):
+            self.assertFalse(adapter.authenticated())
+
+    def test_grok_auth_rejects_unauthenticated_model_listing(self) -> None:
+        completed = BoundedCompletedProcess(
+            args=("grok",),
+            returncode=0,
+            stdout=(
+                "You are not authenticated.\n"
+                "Available models:\n  * grok-4.5\n"
+            ),
+            stderr="",
+        )
+        with (
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
+                return_value="/usr/local/bin/grok",
+            ),
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
+                return_value=completed,
+            ),
+        ):
+            self.assertFalse(grok_adapter().authenticated())
+
+    def test_hermes_auth_is_bound_to_selected_provider(self) -> None:
+        completed = BoundedCompletedProcess(
+            args=("hermes",),
+            returncode=0,
+            stdout=(
+                "OpenAI Codex  ✓ logged in\n"
+                "Anthropic     ✗ (not set)\n"
+            ),
+            stderr="",
+        )
+        with (
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli._hermes_python_runtime",
+                return_value=Path(sys.executable),
+            ),
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli._hermes_model_selection",
+                return_value=("anthropic", "claude-test"),
+            ),
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
+                return_value="/usr/local/bin/hermes",
+            ),
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
+                return_value=completed,
+            ),
+        ):
+            self.assertFalse(hermes_adapter().authenticated())
+
+    def test_hermes_bootstrap_disables_ambient_context_and_memory(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs) -> None:
+                captured["kwargs"] = kwargs
+                captured["agent_home"] = os.environ.get("HERMES_HOME")
+                captured["agent_home_mode"] = stat.S_IMODE(
+                    Path(str(captured["agent_home"])).stat().st_mode
+                )
+
+            def run_conversation(self, prompt):
+                captured["prompt"] = prompt
+                return {"final_response": "bounded result"}
+
+            def close(self) -> None:
+                captured["closed"] = True
+
+        hermes_cli = type(sys)("hermes_cli")
+        hermes_cli.__path__ = []
+        hermes_config = type(sys)("hermes_cli.config")
+        hermes_config.load_config = lambda: {"ambient": True}
+        hermes_config.load_config_readonly = lambda: {"ambient": True}
+        hermes_env_loader = type(sys)("hermes_cli.env_loader")
+        hermes_env_loader.load_hermes_dotenv = lambda **kwargs: ["ambient"]
+        runtime_provider = type(sys)("hermes_cli.runtime_provider")
+        def resolve_runtime_provider(**kwargs):
+            captured["runtime_home"] = os.environ.get("HERMES_HOME")
+            return {
+                "provider": kwargs["requested"],
+                "requested_provider": kwargs["requested"],
+                "api_mode": "chat_completions",
+                "api_key": "test-key",
+                "base_url": "https://example.invalid",
+                "credential_pool": {"ambient": "must-not-pass"},
+            }
+
+        runtime_provider.resolve_runtime_provider = resolve_runtime_provider
+        run_agent = type(sys)("run_agent")
+        run_agent.AIAgent = FakeAgent
+        hermes_cli.config = hermes_config
+        hermes_cli.env_loader = hermes_env_loader
+        modules = {
+            "hermes_cli": hermes_cli,
+            "hermes_cli.config": hermes_config,
+            "hermes_cli.env_loader": hermes_env_loader,
+            "hermes_cli.runtime_provider": runtime_provider,
+            "run_agent": run_agent,
+        }
+        stdout = io.StringIO()
+        isolated_home = Path(tempfile.mkdtemp(prefix="dyro-hermes-test-"))
+        self.addCleanup(shutil.rmtree, isolated_home, True)
+        isolated_home.chmod(0o700)
+        with (
+            patch.dict(sys.modules, modules),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "bootstrap",
+                    "model",
+                    "provider",
+                    "clarify",
+                    "/source/hermes",
+                    str(isolated_home),
+                ],
+            ),
+            patch.object(sys, "stdin", io.StringIO("guarded prompt")),
+            patch.dict(os.environ, {"HERMES_HOME": str(isolated_home)}),
+            redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            exec(_HERMES_ONESHOT_BOOTSTRAP, {})
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(stdout.getvalue().strip(), "bounded result")
+        self.assertEqual(captured["prompt"], "guarded prompt")
+        self.assertTrue(captured["closed"])
+        self.assertEqual(captured["runtime_home"], "/source/hermes")
+        self.assertNotEqual(captured["agent_home"], "/source/hermes")
+        self.assertEqual(captured["agent_home_mode"], 0o700)
+        self.assertTrue(Path(str(captured["agent_home"])).exists())
+        kwargs = captured["kwargs"]
+        self.assertEqual(kwargs["enabled_toolsets"], ["clarify"])
+        self.assertTrue(kwargs["skip_context_files"])
+        self.assertFalse(kwargs["load_soul_identity"])
+        self.assertTrue(kwargs["skip_memory"])
+        self.assertTrue(kwargs["skip_background_review"])
+        self.assertIsNone(kwargs["session_db"])
+        self.assertIsNone(kwargs["fallback_model"])
+        self.assertIsNone(kwargs["credential_pool"])
+        self.assertFalse(kwargs["checkpoints_enabled"])
+        self.assertEqual(hermes_env_loader.load_hermes_dotenv(), [])
+        self.assertEqual(
+            hermes_config.load_config_readonly()["context"]["engine"],
+            "compressor",
+        )
+
+    def test_hermes_bootstrap_rejects_runtime_tool_bypass(self) -> None:
+        class ForbiddenRuntimeAgent:
+            def __init__(self, **kwargs) -> None:
+                raise AssertionError("forbidden runtime must fail before Agent init")
+
+        hermes_cli = type(sys)("hermes_cli")
+        hermes_cli.__path__ = []
+        hermes_config = type(sys)("hermes_cli.config")
+        hermes_env_loader = type(sys)("hermes_cli.env_loader")
+        runtime_provider = type(sys)("hermes_cli.runtime_provider")
+        runtime_provider.resolve_runtime_provider = lambda **kwargs: {
+            "api_mode": "codex_app_server"
+        }
+        run_agent = type(sys)("run_agent")
+        run_agent.AIAgent = ForbiddenRuntimeAgent
+        hermes_cli.config = hermes_config
+        hermes_cli.env_loader = hermes_env_loader
+        modules = {
+            "hermes_cli": hermes_cli,
+            "hermes_cli.config": hermes_config,
+            "hermes_cli.env_loader": hermes_env_loader,
+            "hermes_cli.runtime_provider": runtime_provider,
+            "run_agent": run_agent,
+        }
+        with (
+            patch.dict(sys.modules, modules),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "bootstrap",
+                    "model",
+                    "openai",
+                    "clarify",
+                    "/source/hermes",
+                    "/isolated/hermes",
+                ],
+            ),
+            patch.object(sys, "stdin", io.StringIO("guarded prompt")),
+            self.assertRaisesRegex(RuntimeError, "unsupported runtime mode"),
+        ):
+            exec(_HERMES_ONESHOT_BOOTSTRAP, {})
+
+    def test_hermes_parent_cleans_home_after_forced_termination(self) -> None:
+        contract = parse_task_contract(
+            {**_payload(), "backend": "hermes"}
+        )
+        cases = (
+            BoundedCompletedProcess(
+                args=("hermes",),
+                returncode=-15,
+                stdout="",
+                stderr="",
+                timed_out=True,
+            ),
+            BoundedCompletedProcess(
+                args=("hermes",),
+                returncode=-15,
+                stdout="",
+                stderr="",
+                output_limited=True,
+            ),
+        )
+        for completed in cases:
+            with self.subTest(completed=completed):
+                captured: dict[str, Path] = {}
+
+                def bounded(argv, **kwargs):
+                    home = Path(kwargs["env"]["HERMES_HOME"])
+                    captured["home"] = home
+                    self.assertTrue(home.is_dir())
+                    self.assertEqual(stat.S_IMODE(home.stat().st_mode), 0o700)
+                    self.assertEqual(Path(str(argv[-1])), home)
+                    return completed
+
+                with (
+                    patch(
+                        "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
+                        return_value="/usr/local/bin/hermes",
+                    ),
+                    patch(
+                        "experiments.local_agent_dispatch.adapters.subprocess_cli._hermes_python_runtime",
+                        return_value=Path(sys.executable),
+                    ),
+                    patch(
+                        "experiments.local_agent_dispatch.adapters.subprocess_cli._hermes_model_selection",
+                        return_value=("xai-oauth", "grok-test"),
+                    ),
+                    patch(
+                        "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
+                        side_effect=bounded,
+                    ),
+                ):
+                    hermes_adapter().run(
+                        contract=contract,
+                        cwd=Path.cwd(),
+                        context_files={"app.py": "safe = True\n"},
+                        timeout_seconds=10.0,
+                    )
+                self.assertFalse(captured["home"].exists())
+
+    def test_hermes_auth_supports_non_legacy_provider_labels(self) -> None:
+        completed = BoundedCompletedProcess(
+            args=("hermes",),
+            returncode=0,
+            stdout="Z.AI / GLM  ✓ logged in\n",
+            stderr="",
+        )
+        with (
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli._hermes_python_runtime",
+                return_value=Path(sys.executable),
+            ),
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli._hermes_model_selection",
+                return_value=("z-ai", "glm-test"),
+            ),
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
+                return_value="/usr/local/bin/hermes",
+            ),
+            patch(
+                "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
+                return_value=completed,
+            ),
+        ):
+            self.assertTrue(hermes_adapter().authenticated())
 
     def test_backend_failure_does_not_persist_raw_stderr(self) -> None:
         result = _completed_to_result(
@@ -1232,6 +2565,30 @@ class ProcessAndLifecycleTests(unittest.TestCase):
             )
             self.assertTrue(completed.timed_out)
             time.sleep(1.2)
+            self.assertFalse(marker.exists())
+
+    def test_successful_leader_cannot_leave_closed_stdio_descendant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "closed-stdio-descendant-survived"
+            descendant = (
+                "import pathlib,time;"
+                "time.sleep(0.7);"
+                f"pathlib.Path({str(marker)!r}).write_text('bad')"
+            )
+            leader = (
+                "import subprocess,sys;"
+                "subprocess.Popen("
+                f"[sys.executable,'-c',{descendant!r}],"
+                "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,"
+                "stderr=subprocess.DEVNULL)"
+            )
+            completed = run_bounded(
+                [sys.executable, "-c", leader],
+                cwd=Path(tmp),
+                timeout_seconds=2.0,
+            )
+            self.assertEqual(completed.returncode, 0)
+            time.sleep(0.9)
             self.assertFalse(marker.exists())
 
     def test_output_limit_terminates_backend(self) -> None:
@@ -1572,6 +2929,61 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                     worker_token="generation",
                 )
 
+    def test_backend_cleanup_never_escalates_after_lifetime_lock_release(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = supervisor_module.RunStore(Path(tmp) / "home")
+            lifetime_path = store.root / "run-1.backend.lifetime"
+            record = RunRecord(
+                run_id="run-1",
+                status="running",
+                contract={},
+                project_root=str(Path(tmp)),
+                backend="codex",
+                created_at=1.0,
+                updated_at=1.0,
+                worker_token="generation",
+                worker_pid=12,
+                worker_started_at="worker-generation",
+                backend_pid=42,
+                backend_pgid=42,
+                backend_started_at="backend-generation",
+                backend_lock_path=str(lifetime_path),
+            )
+
+            with (
+                patch(
+                    "experiments.local_agent_dispatch.run_store."
+                    "file_lock_is_held",
+                    side_effect=[True, False, False],
+                ),
+                patch(
+                    "experiments.local_agent_dispatch.run_store."
+                    "process_group_has_live_members",
+                    side_effect=[True, True],
+                ),
+                patch(
+                    "experiments.local_agent_dispatch.run_store."
+                    "process_started_at",
+                    return_value="backend-generation",
+                ),
+                patch(
+                    "experiments.local_agent_dispatch.run_store.os.getpgid",
+                    return_value=42,
+                ),
+                patch(
+                    "experiments.local_agent_dispatch.run_store.os.killpg"
+                ) as kill_group,
+                patch(
+                    "experiments.local_agent_dispatch.run_store.time.monotonic",
+                    side_effect=[0.0, 1.0, 2.0, 3.0],
+                ),
+            ):
+                self.assertFalse(store._backend_cleanup_proven(record))
+
+            kill_group.assert_called_once_with(42, signal.SIGTERM)
+
     def test_reaper_cannot_terminalize_unproven_backend_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1786,6 +3198,47 @@ class ProcessAndLifecycleTests(unittest.TestCase):
             self.assertIn("thread unavailable", failed.error)
             self.assertNotIn(process, supervisor_module._ASYNC_WORKERS)
 
+    def test_duplicate_async_spawn_cannot_remove_reserved_worker_profile_home(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            (project / "app.py").write_text("safe = True\n", encoding="utf-8")
+            home = root / "home"
+            supervisor = DispatchSupervisor(home=home)
+            contract = parse_task_contract(
+                {
+                    **_payload(),
+                    "backend": "pi",
+                    "allow_unconfined_provider": True,
+                }
+            )
+            record = supervisor.store.create(
+                contract=contract,
+                project_root=project,
+                backend="pi",
+            )
+            supervisor.store.reserve_async_worker(
+                record.run_id,
+                worker_token="first-generation",
+            )
+            profile_home = (
+                home / "runs" / f".{record.run_id}.pi.home"
+            )
+            profile_home.mkdir()
+            marker = profile_home / "first-worker-auth"
+            marker.write_text("owned", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                DispatchValidationError,
+                "not available for async spawn",
+            ):
+                supervisor.spawn_worker(record.run_id)
+
+            self.assertEqual(marker.read_text(encoding="utf-8"), "owned")
+
     def test_startup_timeout_has_no_concurrent_reaper_waiter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1981,9 +3434,16 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 worker_pid = running.worker_pid
                 self.assertGreater(worker_pid, 0)
                 backend_deadline = time.time() + 2.0
+                observed_backend_pid = 0
                 while time.time() < backend_deadline:
                     running = store.load(run_id)
-                    if backend_pid_path.is_file() and running.backend_pid > 0:
+                    try:
+                        observed_backend_pid = int(
+                            backend_pid_path.read_text(encoding="utf-8").strip()
+                        )
+                    except (FileNotFoundError, ValueError):
+                        observed_backend_pid = 0
+                    if observed_backend_pid > 0 and running.backend_pid > 0:
                         break
                     time.sleep(0.02)
                 worker_log = (
@@ -1993,9 +3453,8 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                     backend_pid_path.is_file(),
                     f"record={running.to_mapping()!r} log={worker_log!r}",
                 )
-                backend_pid = int(
-                    backend_pid_path.read_text(encoding="utf-8").strip()
-                )
+                backend_pid = observed_backend_pid
+                self.assertGreater(backend_pid, 0)
                 self.assertNotEqual(running.backend_pid, backend_pid)
                 self.assertEqual(
                     running.backend_pgid,
@@ -2026,7 +3485,11 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 DispatchSupervisor(home=home)
 
                 failed = store.load(run_id)
-                self.assertEqual(failed.status, "failed")
+                self.assertEqual(
+                    failed.status,
+                    "failed",
+                    f"record={failed.to_mapping()!r}",
+                )
                 self.assertIn("worker process exited", failed.error)
                 self.assertEqual(failed.backend_pid, 0)
                 self.assertEqual(failed.backend_pgid, 0)
@@ -2471,7 +3934,7 @@ class ProcessAndLifecycleTests(unittest.TestCase):
         self.assertNotIn("/global-project", forwarded)
 
     def test_top_level_root_is_injected_after_dispatch_home_option(self) -> None:
-        for command in ("run", "panel"):
+        for command in ("run", "panel", "batch-plan", "batch-start"):
             with self.subTest(command=command):
                 surface, forwarded = _route_experiment_surface(
                     [

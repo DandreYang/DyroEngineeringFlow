@@ -11,6 +11,7 @@ from unittest.mock import patch
 import experiments.local_agent_dispatch.adapters.registry as registry_module
 from experiments.local_agent_dispatch.adapters.registry import get_adapter, probe_backends
 from experiments.local_agent_dispatch.cli import main as cli_main
+from experiments.local_agent_dispatch.context_guard import check_content
 from experiments.local_agent_dispatch.errors import DispatchValidationError
 from experiments.local_agent_dispatch.gc import gc
 from experiments.local_agent_dispatch.lease import SlotManager
@@ -63,6 +64,18 @@ class LeaseTests(unittest.TestCase):
             mgr.release_all(leases)
             leases2 = mgr.acquire("echo")
             mgr.release_all(leases2)
+
+
+class SecretGuardTests(unittest.TestCase):
+    def test_rejects_google_stripe_and_jwt_credentials(self) -> None:
+        samples = (
+            "AIza" + ("A" * 35),
+            "sk_live_" + ("a" * 24),
+            "eyJheader123.payload123.signature123",
+        )
+        for sample in samples:
+            with self.subTest(sample=sample[:8]):
+                self.assertFalse(check_content(sample).allowed)
 
 
 class SupervisorEchoTests(unittest.TestCase):
@@ -120,12 +133,89 @@ class PanelTests(unittest.TestCase):
             with self.assertRaisesRegex(DispatchValidationError, "no authenticated"):
                 resolve_panel_members(None)
 
+    def test_default_panel_can_use_non_codex_ready_provider(self) -> None:
+        with patch(
+            "experiments.local_agent_dispatch.panel.probe_backends",
+            return_value=[
+                {
+                    "id": "grok",
+                    "available": True,
+                    "authenticated": True,
+                    "supported": True,
+                    "execution_kind": "provider",
+                }
+            ],
+        ):
+            self.assertEqual(resolve_panel_members(None), ["grok"])
+
+    def test_all_panel_members_selects_every_ready_provider(self) -> None:
+        rows = [
+            {
+                "id": backend,
+                "available": True,
+                "authenticated": True,
+                "supported": True,
+                "execution_kind": "provider",
+            }
+            for backend in ("pi", "claude", "codex", "grok", "hermes")
+        ]
+        rows.append(
+            {
+                "id": "echo",
+                "available": True,
+                "authenticated": True,
+                "supported": False,
+                "execution_kind": "offline-simulation",
+            }
+        )
+        with patch(
+            "experiments.local_agent_dispatch.panel.probe_backends",
+            return_value=rows,
+        ):
+            self.assertEqual(
+                resolve_panel_members(["all"]),
+                ["codex", "claude", "grok", "hermes", "pi"],
+            )
+
+    def test_all_panel_member_cannot_be_mixed_with_backend_ids(self) -> None:
+        with self.assertRaisesRegex(DispatchValidationError, "cannot be combined"):
+            resolve_panel_members(["all", "codex"])
+
+    def test_requested_panel_members_are_deduplicated(self) -> None:
+        self.assertEqual(resolve_panel_members(["echo", "echo"]), ["echo"])
+
+    def test_panel_member_failure_is_recorded_without_losing_board(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = _home(tmp)
+            with patch.object(
+                DispatchSupervisor,
+                "execute",
+                side_effect=DispatchValidationError("simulated member failure"),
+            ):
+                board = run_panel(
+                    _task(),
+                    project_root=_project(tmp),
+                    members=["echo"],
+                    home=home,
+                    timeout_seconds=30,
+                )
+            self.assertEqual(board["runs"][0]["status"], "failed")
+            self.assertEqual(
+                board["runs"][0]["error"], "simulated member failure"
+            )
+            persisted = DispatchSupervisor(home=home).store.load(
+                str(board["runs"][0]["run_id"])
+            )
+            self.assertEqual(persisted.status, "failed")
+            self.assertTrue(Path(str(board["board_path"])).is_file())
+
 
 class SkillAndGcTests(unittest.TestCase):
     def test_skill_render_and_gc(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = _home(tmp)
             text = render_skill_markdown(home=home)
+            self.assertIn("name: dyro-dispatch", text)
             self.assertIn("Available backends", text)
             self.assertIn("never `**/*`", text)
             path = write_skill(home=home)
@@ -202,6 +292,7 @@ class CliTests(unittest.TestCase):
                         str(task_path),
                     ]
                 )
+
             self.assertEqual(code, 0)
             self.assertTrue(json.loads(output.getvalue())["valid"])
             self.assertTrue(
@@ -241,22 +332,68 @@ class RegistryTests(unittest.TestCase):
                 get_adapter("auto")
         rows = probe_backends()
         self.assertTrue(any(r["id"] == "echo" for r in rows))
-        self.assertTrue(any(r["id"] == "opencode" and not r["supported"] for r in rows))
-        for provider_id in ("dsh", "pi"):
+        for provider_id in (
+            "cursor-agent",
+            "opencode",
+            "grok",
+            "hermes",
+            "kimi",
+            "dsh",
+            "pi",
+        ):
             row = next(r for r in rows if r["id"] == provider_id)
-            self.assertFalse(row["supported"])
-            self.assertEqual(row["execution_kind"], "unintegrated")
+            self.assertTrue(row["supported"])
+            self.assertEqual(row["execution_kind"], "provider")
             self.assertEqual(row["command"], provider_id)
+
+    def test_dry_run_backend_and_doctor_surfaces_never_probe_authentication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = _home(tmp)
+            with patch.object(
+                registry_module,
+                "adapter_is_authenticated",
+                side_effect=AssertionError("active auth probe is forbidden"),
+            ):
+                for command in ("backends", "doctor"):
+                    output = io.StringIO()
+                    with self.subTest(command=command), redirect_stdout(output):
+                        code = cli_main(
+                            [
+                                "--home",
+                                str(home),
+                                "--dry-run",
+                                command,
+                            ]
+                        )
+                    self.assertEqual(code, 0)
+                    rows = json.loads(output.getvalue())["backends"]
+                    self.assertTrue(rows)
+                    self.assertTrue(
+                        all(
+                            row["authentication_probe"] == "not_run"
+                            for row in rows
+                        )
+                    )
+            self.assertFalse(home.exists())
 
     def test_routes_reject_simulation_and_unknown_providers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = _home(tmp)
-            for backend in ("echo", "not-a-provider", "opencode"):
+            for backend in ("echo", "not-a-provider"):
                 with self.subTest(backend=backend), self.assertRaises(DispatchValidationError):
                     save_route("default", backend, home=home)
 
 
 class ContractRejectTests(unittest.TestCase):
+    def test_named_provider_credential_assignment_is_rejected(self) -> None:
+        for assignment in (
+            "KIMI_API_KEY=ordinary-kimi-credential",
+            "DEEPSEEK_API_KEY: ordinary-deepseek-credential",
+        ):
+            with self.subTest(assignment=assignment):
+                verdict = check_content(assignment)
+                self.assertFalse(verdict.allowed)
+
     def test_forbidden_star(self) -> None:
         with self.assertRaises(DispatchValidationError):
             parse_task_contract(

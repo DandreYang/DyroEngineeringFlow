@@ -16,6 +16,7 @@ MANAGED_DIRECTORIES = (
     "edit-worktrees",
     "skills",
     "panels",
+    "orchestrations",
     "patches",
 )
 
@@ -104,6 +105,10 @@ def skills_dir(home: Path | None = None) -> Path:
 
 def panels_dir(home: Path | None = None) -> Path:
     return dispatch_home(home) / "panels"
+
+
+def orchestrations_dir(home: Path | None = None) -> Path:
+    return dispatch_home(home) / "orchestrations"
 
 
 def patches_dir(home: Path | None = None) -> Path:

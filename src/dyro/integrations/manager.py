@@ -1,4 +1,4 @@
-"""Safe mirror + avatar installation of the Dyro control-plane Skill."""
+"""Safe mirror + avatar installation of Dyro-owned Skills."""
 
 from __future__ import annotations
 
@@ -27,10 +27,45 @@ from ..state import atomic_write_text, exclusive_lock, fsync_directory
 CANONICAL_INTEGRATION_ID = "skill"
 LEGACY_INTEGRATION_ID = "codex"
 SKILL_NAME = "dyro-control-plane"
-ASSET_VERSION = 2
+ASSET_VERSION = 3
+DISPATCH_INTEGRATION_ID = "dispatch"
+DISPATCH_SKILL_NAME = "dyro-dispatch"
+DISPATCH_ASSET_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 2
 LEGACY_MANIFEST_SCHEMA_VERSION = 1
 _SHA256_PREFIX = "sha256:"
+
+
+@dataclass(frozen=True)
+class SkillIntegrationSpec:
+    integration_id: str
+    skill_name: str
+    asset_version: int
+    aliases: tuple[str, ...] = ()
+    legacy_manifest_id: str | None = None
+
+
+CONTROL_PLANE_SPEC = SkillIntegrationSpec(
+    integration_id=CANONICAL_INTEGRATION_ID,
+    skill_name=SKILL_NAME,
+    asset_version=ASSET_VERSION,
+    aliases=(LEGACY_INTEGRATION_ID,),
+    legacy_manifest_id=LEGACY_INTEGRATION_ID,
+)
+DISPATCH_SPEC = SkillIntegrationSpec(
+    integration_id=DISPATCH_INTEGRATION_ID,
+    skill_name=DISPATCH_SKILL_NAME,
+    asset_version=DISPATCH_ASSET_VERSION,
+)
+SKILL_INTEGRATIONS: tuple[SkillIntegrationSpec, ...] = (
+    CONTROL_PLANE_SPEC,
+    DISPATCH_SPEC,
+)
+INTEGRATION_CHOICES: tuple[str, ...] = tuple(
+    choice
+    for spec in SKILL_INTEGRATIONS
+    for choice in (spec.integration_id, *spec.aliases)
+)
 
 
 class IntegrationState(str, Enum):
@@ -86,8 +121,16 @@ class IntegrationPlan:
     changes: tuple[str, ...]
 
 
-def _asset_root() -> Path:
-    return Path(__file__).parent / "assets" / SKILL_NAME
+def _integration_spec(integration: str) -> SkillIntegrationSpec:
+    for spec in SKILL_INTEGRATIONS:
+        if integration == spec.integration_id or integration in spec.aliases:
+            return spec
+    raise ValidationError(f"未知 Integration：{integration}")
+
+
+def _asset_root(integration: str = CANONICAL_INTEGRATION_ID) -> Path:
+    skill_spec = _integration_spec(integration)
+    return Path(__file__).parent / "assets" / skill_spec.skill_name
 
 
 def _absolute_path(value: Path, label: str) -> Path:
@@ -110,32 +153,31 @@ def _user_home() -> Path:
     return Path.home()
 
 
-def _normalize_integration(integration: str) -> str:
-    if integration in {CANONICAL_INTEGRATION_ID, LEGACY_INTEGRATION_ID}:
-        return CANONICAL_INTEGRATION_ID
-    raise ValidationError(f"未知 Integration：{integration}")
-
-
 def _avatar_kind() -> str:
     return "junction" if os.name == "nt" else "symlink"
 
 
-def _mirror_path(dyro_home: Path | None) -> Path:
+def _mirror_path(dyro_home: Path | None, spec: SkillIntegrationSpec) -> Path:
     home = _dyro_home(dyro_home)
-    mirror = home / "skills" / SKILL_NAME
-    if mirror.parent.parent != home or mirror.name != SKILL_NAME:
+    mirror = home / "skills" / spec.skill_name
+    if mirror.parent.parent != home or mirror.name != spec.skill_name:
         raise ValidationError("Skill 镜像路径越界")
     return mirror
 
 
-def _state_paths(dyro_home: Path | None) -> tuple[Path, Path, Path, Path]:
+def _state_paths(
+    dyro_home: Path | None,
+    spec: SkillIntegrationSpec,
+) -> tuple[Path, Path, Path, Path | None]:
     home = _dyro_home(dyro_home)
     state_dir = home / "integrations"
     return (
-        state_dir / f"{CANONICAL_INTEGRATION_ID}.json",
-        state_dir / f"{CANONICAL_INTEGRATION_ID}.transaction.json",
-        state_dir / f"{CANONICAL_INTEGRATION_ID}.lock",
-        state_dir / f"{LEGACY_INTEGRATION_ID}.json",
+        state_dir / f"{spec.integration_id}.json",
+        state_dir / f"{spec.integration_id}.transaction.json",
+        state_dir / f"{spec.integration_id}.lock",
+        state_dir / f"{spec.legacy_manifest_id}.json"
+        if spec.legacy_manifest_id is not None
+        else None,
     )
 
 
@@ -156,9 +198,9 @@ def _host_home(
     return None
 
 
-def _avatar_path(host_home: Path) -> Path:
-    target = host_home / "skills" / SKILL_NAME
-    if target.parent.parent != host_home or target.name != SKILL_NAME:
+def _avatar_path(host_home: Path, spec: SkillIntegrationSpec) -> Path:
+    target = host_home / "skills" / spec.skill_name
+    if target.parent.parent != host_home or target.name != spec.skill_name:
         raise ValidationError("Skill 分身路径越界")
     return target
 
@@ -258,8 +300,10 @@ def _inventory(
     return files
 
 
-def _asset_inventory() -> dict[str, str]:
-    return _inventory(_asset_root())
+def _asset_inventory(
+    integration: str = CANONICAL_INTEGRATION_ID,
+) -> dict[str, str]:
+    return _inventory(_asset_root(integration))
 
 
 def _asset_digest(files: Mapping[str, str]) -> str:
@@ -379,14 +423,15 @@ def _remove_avatar_link(avatar: Path) -> None:
 
 
 def _manifest_payload(
+    spec: SkillIntegrationSpec,
     mirror: Path,
     files: Mapping[str, str],
     avatars: Mapping[str, Mapping[str, str]],
 ) -> dict[str, object]:
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
-        "integration": CANONICAL_INTEGRATION_ID,
-        "asset_version": ASSET_VERSION,
+        "integration": spec.integration_id,
+        "asset_version": spec.asset_version,
         "asset_digest": _asset_digest(files),
         "mirror": str(mirror),
         "files": dict(sorted(files.items())),
@@ -418,7 +463,10 @@ def _validate_file_map(files: object) -> dict[str, str]:
 
 
 def _parse_manifest(
-    path: Path, *, read_budget: ReadBudget | None = None
+    path: Path,
+    spec: SkillIntegrationSpec = CONTROL_PLANE_SPEC,
+    *,
+    read_budget: ReadBudget | None = None,
 ) -> dict[str, object]:
     try:
         content = (
@@ -450,7 +498,7 @@ def _parse_manifest(
     }
     if set(raw) != expected:
         raise ValidationError("Integration ownership manifest 字段不匹配")
-    if raw["integration"] != CANONICAL_INTEGRATION_ID:
+    if raw["integration"] != spec.integration_id:
         raise ValidationError("Integration ownership manifest 主体不匹配")
     if not isinstance(raw["asset_version"], int) or raw["asset_version"] < 1:
         raise ValidationError("Integration ownership manifest asset version 无效")
@@ -478,7 +526,10 @@ def _parse_manifest(
 
 
 def _parse_legacy_manifest(
-    path: Path, *, read_budget: ReadBudget | None = None
+    path: Path,
+    spec: SkillIntegrationSpec = CONTROL_PLANE_SPEC,
+    *,
+    read_budget: ReadBudget | None = None,
 ) -> dict[str, object]:
     try:
         content = (
@@ -509,7 +560,10 @@ def _parse_legacy_manifest(
         raise ValidationError("Legacy Integration ownership manifest 字段不匹配")
     if raw["schema_version"] != LEGACY_MANIFEST_SCHEMA_VERSION:
         raise ValidationError("Legacy Integration ownership manifest schema 不受支持")
-    if raw["integration"] != LEGACY_INTEGRATION_ID:
+    if (
+        spec.legacy_manifest_id is None
+        or raw["integration"] != spec.legacy_manifest_id
+    ):
         raise ValidationError("Legacy Integration ownership manifest 主体不匹配")
     if not isinstance(raw["asset_version"], int) or raw["asset_version"] < 1:
         raise ValidationError("Legacy Integration ownership manifest asset version 无效")
@@ -554,24 +608,30 @@ def _inspect_avatar(
 
 def _allowed_legacy_targets(
     detected: list[tuple[HostSpec, Path]],
+    spec: SkillIntegrationSpec = CONTROL_PLANE_SPEC,
 ) -> set[Path]:
     """Legacy whole-directory installs may only live on detected host avatars."""
-    return {_avatar_path(home) for _spec, home in detected}
+    return {_avatar_path(home, spec) for _spec, home in detected}
 
 
 def _legacy_owned_copy(
-    legacy_manifest_path: Path,
+    legacy_manifest_path: Path | None,
     *,
+    spec: SkillIntegrationSpec = CONTROL_PLANE_SPEC,
     expected_target: Path | None = None,
     allowed_targets: set[Path] | None = None,
     require_current_assets: bool = True,
     read_budget: ReadBudget | None = None,
 ) -> tuple[dict[str, object], Path] | None:
+    if legacy_manifest_path is None:
+        return None
     if not legacy_manifest_path.is_file() or legacy_manifest_path.is_symlink():
         return None
     try:
         manifest = _parse_legacy_manifest(
-            legacy_manifest_path, read_budget=read_budget
+            legacy_manifest_path,
+            spec,
+            read_budget=read_budget,
         )
     except ReadLimitError:
         raise
@@ -588,7 +648,9 @@ def _legacy_owned_copy(
         inventory = _inventory(target, read_budget=read_budget)
         if inventory != manifest["files"]:
             return None
-        if require_current_assets and inventory != _asset_inventory():
+        if require_current_assets and inventory != _asset_inventory(
+            spec.integration_id
+        ):
             return None
     except ValidationError:
         return None
@@ -606,13 +668,16 @@ def integration_status(
 ) -> IntegrationStatus:
     """Inspect Skill mirror/avatar ownership without creating files."""
     requested = integration
-    _normalize_integration(integration)
+    skill_spec = _integration_spec(integration)
     overrides: dict[str, Path] = dict(host_homes or {})
     if codex_home is not None:
         overrides["codex"] = codex_home
 
-    mirror = _mirror_path(dyro_home)
-    manifest_path, transaction_path, _, legacy_manifest_path = _state_paths(dyro_home)
+    mirror = _mirror_path(dyro_home, skill_spec)
+    manifest_path, transaction_path, _, legacy_manifest_path = _state_paths(
+        dyro_home,
+        skill_spec,
+    )
     state_root = manifest_path.parent
     unsafe_state = _symlink_component(state_root, boundary=_dyro_home(dyro_home))
     if unsafe_state is not None:
@@ -633,17 +698,17 @@ def integration_status(
         )
 
     detected: list[tuple[HostSpec, Path]] = []
-    for spec in HOSTS:
-        home = _host_home(spec, overrides)
+    for host_spec in HOSTS:
+        home = _host_home(host_spec, overrides)
         if home is not None:
-            detected.append((spec, home))
+            detected.append((host_spec, home))
 
     avatar_rows: list[AvatarStatus] = []
-    host_by_id = {spec.host_id: spec for spec, _home in detected}
-    for spec, home in detected:
-        avatar = _avatar_path(home)
+    host_by_id = {host_spec.host_id: host_spec for host_spec, _home in detected}
+    for host_spec, home in detected:
+        avatar = _avatar_path(home, skill_spec)
         row = _inspect_avatar(
-            host=spec.host_id,
+            host=host_spec.host_id,
             avatar=avatar,
             mirror=mirror,
             host_home=home,
@@ -655,7 +720,8 @@ def integration_status(
     mirror_exists = mirror.exists() or mirror.is_symlink()
     legacy = _legacy_owned_copy(
         legacy_manifest_path,
-        allowed_targets=_allowed_legacy_targets(detected),
+        spec=skill_spec,
+        allowed_targets=_allowed_legacy_targets(detected, skill_spec),
         require_current_assets=True,
         read_budget=read_budget,
     )
@@ -664,8 +730,8 @@ def integration_status(
         if row.state in {"missing", "current"}:
             continue
         if row.state == "unowned":
-            spec = host_by_id.get(row.host)
-            if spec is None or not _host_is_explicit(spec, overrides):
+            host_spec = host_by_id.get(row.host)
+            if host_spec is None or not _host_is_explicit(host_spec, overrides):
                 continue
         blocking_avatars.append(row)
 
@@ -717,7 +783,11 @@ def integration_status(
         )
 
     try:
-        manifest = _parse_manifest(manifest_path, read_budget=read_budget)
+        manifest = _parse_manifest(
+            manifest_path,
+            skill_spec,
+            read_budget=read_budget,
+        )
     except ReadLimitError:
         raise
     except ValidationError as exc:
@@ -787,11 +857,11 @@ def integration_status(
     recorded_avatars = manifest["avatars"]
     assert isinstance(recorded_avatars, dict)
     refreshed: list[AvatarStatus] = []
-    for spec, home in detected:
-        avatar = _avatar_path(home)
-        recorded = recorded_avatars.get(spec.host_id)
+    for host_spec, home in detected:
+        avatar = _avatar_path(home, skill_spec)
+        recorded = recorded_avatars.get(host_spec.host_id)
         row = _inspect_avatar(
-            host=spec.host_id,
+            host=host_spec.host_id,
             avatar=avatar,
             mirror=mirror,
             host_home=home,
@@ -820,9 +890,9 @@ def integration_status(
             tuple(refreshed),
         )
 
-    desired = _asset_inventory()
+    desired = _asset_inventory(skill_spec.integration_id)
     if (
-        manifest["asset_version"] == ASSET_VERSION
+        manifest["asset_version"] == skill_spec.asset_version
         and manifest["asset_digest"] == _asset_digest(desired)
         and installed == desired
         and managed_or_new
@@ -923,9 +993,9 @@ def plan_integration(
     return IntegrationPlan(action, status, changes)
 
 
-def _write_stage(stage: Path) -> None:
-    source = _asset_root()
-    for relative in _asset_inventory():
+def _write_stage(stage: Path, spec: SkillIntegrationSpec) -> None:
+    source = _asset_root(spec.integration_id)
+    for relative in _asset_inventory(spec.integration_id):
         source_file = source / relative
         destination = stage / relative
         destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -935,7 +1005,7 @@ def _write_stage(stage: Path) -> None:
             os.fsync(handle.fileno())
         destination.chmod(0o644)
     fsync_directory(stage)
-    if _inventory(stage) != _asset_inventory():
+    if _inventory(stage) != _asset_inventory(spec.integration_id):
         raise DyroError("Integration staging 校验失败")
 
 
@@ -944,7 +1014,12 @@ def _remove_tree(path: Path) -> None:
 
 
 def _transaction_payload(
-    action: str, mirror: Path, backup: Path | None, *, phase: str
+    action: str,
+    mirror: Path,
+    backup: Path | None,
+    spec: SkillIntegrationSpec,
+    *,
+    phase: str,
 ) -> str:
     if phase not in {"prepared", "committed"}:
         raise ValidationError(f"未知 Integration transaction phase：{phase}")
@@ -952,7 +1027,7 @@ def _transaction_payload(
         json.dumps(
             {
                 "schema_version": 1,
-                "integration": CANONICAL_INTEGRATION_ID,
+                "integration": spec.integration_id,
                 "action": action,
                 "phase": phase,
                 "mirror": str(mirror),
@@ -995,7 +1070,10 @@ def _execution_result(
 
 
 def _restored_owned_installation(
-    mirror: Path, manifest_path: Path, original_manifest_text: str
+    mirror: Path,
+    manifest_path: Path,
+    original_manifest_text: str,
+    spec: SkillIntegrationSpec = CONTROL_PLANE_SPEC,
 ) -> bool:
     if (
         mirror.is_symlink()
@@ -1007,7 +1085,7 @@ def _restored_owned_installation(
     try:
         if manifest_path.read_text(encoding="utf-8") != original_manifest_text:
             return False
-        manifest = _parse_manifest(manifest_path)
+        manifest = _parse_manifest(manifest_path, spec)
         if manifest["mirror"] != str(mirror):
             return False
         if _inventory(mirror) != manifest["files"]:
@@ -1062,6 +1140,7 @@ def _host_is_explicit(
 
 def _install_avatars(
     *,
+    skill_spec: SkillIntegrationSpec,
     mirror: Path,
     detected: list[tuple[HostSpec, Path]],
     legacy_target: Path | None,
@@ -1076,17 +1155,19 @@ def _install_avatars(
     avatars: dict[str, dict[str, str]] = {}
     created: list[Path] = []
     legacy_backups: list[tuple[Path, Path]] = []
-    allowed = _allowed_legacy_targets(detected)
+    allowed = _allowed_legacy_targets(detected, skill_spec)
     try:
-        for spec, home in detected:
-            avatar = _avatar_path(home)
+        for host_spec, home in detected:
+            avatar = _avatar_path(home, skill_spec)
             unsafe = _symlink_component(avatar.parent, boundary=home)
             if unsafe is not None:
-                if _host_is_explicit(spec, overrides):
-                    raise DyroError(f"{spec.host_id} skills 目录不安全：{unsafe}")
+                if _host_is_explicit(host_spec, overrides):
+                    raise DyroError(
+                        f"{host_spec.host_id} skills 目录不安全：{unsafe}"
+                    )
                 continue
             if _is_link(avatar) and _resolves_to(avatar, mirror):
-                avatars[spec.host_id] = {
+                avatars[host_spec.host_id] = {
                     "path": str(avatar),
                     "kind": _avatar_kind(),
                 }
@@ -1099,27 +1180,32 @@ def _install_avatars(
                     and avatar.is_dir()
                     and not avatar.is_symlink()
                 ):
-                    if _inventory(avatar) != _asset_inventory():
+                    if _inventory(avatar) != _asset_inventory(
+                        skill_spec.integration_id
+                    ):
                         raise DyroError(f"拒绝删除非 Dyro 资产目录：{avatar}")
                     backup = Path(
                         tempfile.mkdtemp(
-                            prefix=f".{SKILL_NAME}.legacy-", dir=avatar.parent
+                            prefix=f".{skill_spec.skill_name}.legacy-",
+                            dir=avatar.parent,
                         )
                     )
                     backup.rmdir()
                     os.replace(avatar, backup)
                     legacy_backups.append((avatar, backup))
-                elif _host_is_explicit(spec, overrides):
+                elif _host_is_explicit(host_spec, overrides):
                     raise DyroError(f"拒绝覆盖非 Dyro 分身路径：{avatar}")
                 else:
                     # Auto-detected host with a foreign skill: leave it alone.
                     continue
             _ensure_safe_directory(
-                avatar.parent, f"{spec.host_id} skills 目录", boundary=home
+                avatar.parent,
+                f"{host_spec.host_id} skills 目录",
+                boundary=home,
             )
             kind = _create_avatar_link(avatar, mirror)
             created.append(avatar)
-            avatars[spec.host_id] = {"path": str(avatar), "kind": kind}
+            avatars[host_spec.host_id] = {"path": str(avatar), "kind": kind}
         if not avatars:
             raise DyroError("没有可挂接的宿主分身；拒绝只安装孤立镜像")
         return avatars, legacy_backups
@@ -1134,6 +1220,7 @@ def _install_avatars(
 
 
 def sync_managed_skill(
+    integration: str = CANONICAL_INTEGRATION_ID,
     *,
     yes: bool,
     dry_run: bool = False,
@@ -1150,7 +1237,7 @@ def sync_managed_skill(
     - conflict / recovery states: raise ``DyroError`` (callers may soft-fail)
     """
     status = integration_status(
-        CANONICAL_INTEGRATION_ID,
+        integration,
         dyro_home=dyro_home,
         host_homes=host_homes,
         codex_home=codex_home,
@@ -1160,7 +1247,7 @@ def sync_managed_skill(
     if status.state is IntegrationState.ABSENT and not allow_first_install:
         return None
     return install_integration(
-        CANONICAL_INTEGRATION_ID,
+        integration,
         yes=yes,
         dry_run=dry_run,
         dyro_home=dyro_home,
@@ -1178,6 +1265,7 @@ def install_integration(
     host_homes: Mapping[str, Path] | None = None,
     codex_home: Path | None = None,
 ) -> IntegrationPlan:
+    spec = _integration_spec(integration)
     overrides: dict[str, Path] = dict(host_homes or {})
     if codex_home is not None:
         overrides["codex"] = codex_home
@@ -1196,7 +1284,8 @@ def install_integration(
         return plan
 
     manifest_path, transaction_path, lock_path, legacy_manifest_path = _state_paths(
-        dyro_home
+        dyro_home,
+        spec,
     )
     mirror = plan.status.target
     detected = _detected_hosts(overrides)
@@ -1223,13 +1312,17 @@ def install_integration(
 
         legacy = _legacy_owned_copy(
             legacy_manifest_path,
-            allowed_targets=_allowed_legacy_targets(detected),
+            spec=spec,
+            allowed_targets=_allowed_legacy_targets(detected, spec),
             require_current_assets=True,
         )
         legacy_target = legacy[1] if legacy is not None else None
 
         stage = Path(
-            tempfile.mkdtemp(prefix=f".{SKILL_NAME}.stage-", dir=mirror.parent)
+            tempfile.mkdtemp(
+                prefix=f".{spec.skill_name}.stage-",
+                dir=mirror.parent,
+            )
         )
         backup: Path | None = None
         activated = False
@@ -1245,16 +1338,20 @@ def install_integration(
         manifest_replaced = False
         transaction_payload = ""
         try:
-            _write_stage(stage)
+            _write_stage(stage, spec)
             if mirror.exists():
                 backup = Path(
                     tempfile.mkdtemp(
-                        prefix=f".{SKILL_NAME}.backup-", dir=mirror.parent
+                        prefix=f".{spec.skill_name}.backup-", dir=mirror.parent
                     )
                 )
                 backup.rmdir()
             transaction_payload = _transaction_payload(
-                "install", mirror, backup, phase="prepared"
+                "install",
+                mirror,
+                backup,
+                spec,
+                phase="prepared",
             )
             atomic_write_text(transaction_path, transaction_payload)
             if backup is not None:
@@ -1263,8 +1360,9 @@ def install_integration(
                 raise DyroError("Skill 镜像在事务期间被其他进程创建；已中止")
             os.replace(stage, mirror)
             activated = True
-            desired = _asset_inventory()
+            desired = _asset_inventory(spec.integration_id)
             avatars, legacy_backups = _install_avatars(
+                skill_spec=spec,
                 mirror=mirror,
                 detected=detected,
                 legacy_target=legacy_target,
@@ -1283,7 +1381,7 @@ def install_integration(
             atomic_write_text(
                 manifest_path,
                 json.dumps(
-                    _manifest_payload(mirror, desired, avatars),
+                    _manifest_payload(spec, mirror, desired, avatars),
                     ensure_ascii=True,
                     indent=2,
                     sort_keys=True,
@@ -1291,10 +1389,16 @@ def install_integration(
                 + "\n",
             )
             manifest_replaced = True
-            if legacy_manifest_path.exists() or legacy_manifest_path.is_symlink():
+            if legacy_manifest_path is not None and (
+                legacy_manifest_path.exists() or legacy_manifest_path.is_symlink()
+            ):
                 legacy_manifest_path.unlink()
             transaction_payload = _transaction_payload(
-                "install", mirror, backup, phase="committed"
+                "install",
+                mirror,
+                backup,
+                spec,
+                phase="committed",
             )
             atomic_write_text(transaction_path, transaction_payload)
             committed = True
@@ -1339,7 +1443,10 @@ def install_integration(
                     )
                 elif mirror.exists() and manifest_path.exists():
                     restored = _restored_owned_installation(
-                        mirror, manifest_path, old_manifest_text
+                        mirror,
+                        manifest_path,
+                        old_manifest_text,
+                        spec,
                     )
             finally:
                 if stage.exists():
@@ -1362,6 +1469,7 @@ def uninstall_integration(
     host_homes: Mapping[str, Path] | None = None,
     codex_home: Path | None = None,
 ) -> IntegrationPlan:
+    spec = _integration_spec(integration)
     overrides: dict[str, Path] = dict(host_homes or {})
     if codex_home is not None:
         overrides["codex"] = codex_home
@@ -1380,7 +1488,8 @@ def uninstall_integration(
         return plan
 
     manifest_path, transaction_path, lock_path, legacy_manifest_path = _state_paths(
-        dyro_home
+        dyro_home,
+        spec,
     )
     mirror = plan.status.target
     _safe_existing_directory(
@@ -1404,7 +1513,8 @@ def uninstall_integration(
         detected = _detected_hosts(overrides)
         legacy = _legacy_owned_copy(
             legacy_manifest_path,
-            allowed_targets=_allowed_legacy_targets(detected),
+            spec=spec,
+            allowed_targets=_allowed_legacy_targets(detected, spec),
             require_current_assets=True,
         )
         manifest_text = (
@@ -1423,7 +1533,10 @@ def uninstall_integration(
             boundary = _dyro_home(dyro_home)
         _ensure_safe_directory(backup_dir, "Skill 卸载备份目录", boundary=boundary)
         backup = Path(
-            tempfile.mkdtemp(prefix=f".{SKILL_NAME}.backup-", dir=backup_dir)
+            tempfile.mkdtemp(
+                prefix=f".{spec.skill_name}.backup-",
+                dir=backup_dir,
+            )
         )
         backup.rmdir()
         removed_manifest = False
@@ -1431,7 +1544,11 @@ def uninstall_integration(
         committed = False
         restored = False
         transaction_payload = _transaction_payload(
-            "uninstall", mirror, backup, phase="prepared"
+            "uninstall",
+            mirror,
+            backup,
+            spec,
+            phase="prepared",
         )
         atomic_write_text(transaction_path, transaction_payload)
         try:
@@ -1452,10 +1569,16 @@ def uninstall_integration(
             if manifest_path.exists():
                 manifest_path.unlink()
                 removed_manifest = True
-            if legacy_manifest_path.exists() or legacy_manifest_path.is_symlink():
+            if legacy_manifest_path is not None and (
+                legacy_manifest_path.exists() or legacy_manifest_path.is_symlink()
+            ):
                 legacy_manifest_path.unlink()
             transaction_payload = _transaction_payload(
-                "uninstall", mirror, backup, phase="committed"
+                "uninstall",
+                mirror,
+                backup,
+                spec,
+                phase="committed",
             )
             atomic_write_text(transaction_path, transaction_payload)
             committed = True
@@ -1484,7 +1607,10 @@ def uninstall_integration(
                     and manifest_path.exists()
                 ):
                     restored = _restored_owned_installation(
-                        mirror, manifest_path, manifest_text
+                        mirror,
+                        manifest_path,
+                        manifest_text,
+                        spec,
                     )
             finally:
                 if restored and transaction_path.exists():

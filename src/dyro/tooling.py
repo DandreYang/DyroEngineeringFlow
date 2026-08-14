@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 import json
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -40,6 +41,13 @@ class InstallGuide:
 
 
 @dataclass(frozen=True)
+class RuntimeRequirement:
+    command: str
+    label: str
+    minimum_version: tuple[int, int, int]
+
+
+@dataclass(frozen=True)
 class ToolDefinition:
     id: str
     label: str
@@ -48,6 +56,8 @@ class ToolDefinition:
     launch: tuple[str, ...]
     environment: tuple[tuple[str, str], ...] = ()
     install: InstallGuide | None = None
+    profile_preset: bool = False
+    runtime: RuntimeRequirement | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +77,7 @@ TOOL_DEFINITIONS = (
         "agy",
         "terminal",
         ("agy",),
+        profile_preset=True,
         install=InstallGuide(
             "https://antigravity.google/download",
             "Antigravity 官方用户级安装目录",
@@ -79,6 +90,7 @@ TOOL_DEFINITIONS = (
         "codex",
         "terminal",
         ("codex", "-C", "{workspace}"),
+        profile_preset=True,
         install=InstallGuide(
             "https://developers.openai.com/codex/cli/",
             _NPM_SCOPE,
@@ -93,6 +105,7 @@ TOOL_DEFINITIONS = (
         "codex-desktop",
         "desktop",
         ("codex", "app", "{workspace}"),
+        profile_preset=True,
         install=InstallGuide(
             "https://openai.com/codex/",
             "当前操作系统的 Codex 桌面应用",
@@ -105,6 +118,7 @@ TOOL_DEFINITIONS = (
         "claude",
         "terminal",
         ("claude",),
+        profile_preset=True,
         install=InstallGuide(
             "https://docs.anthropic.com/en/docs/claude-code/getting-started",
             _NPM_SCOPE,
@@ -143,19 +157,28 @@ TOOL_DEFINITIONS = (
         "cursor-agent",
         "terminal",
         ("cursor-agent", "--workspace", "{workspace}"),
+        profile_preset=True,
         install=InstallGuide(
             "https://docs.cursor.com/en/cli/installation",
             "Cursor 官方用户级安装目录",
             remote_script_only=True,
         ),
     ),
-    ToolDefinition("grok", "Grok", "grok", "terminal", ("grok", "--cwd", "{workspace}")),
+    ToolDefinition(
+        "grok",
+        "Grok",
+        "grok",
+        "terminal",
+        ("grok", "--cwd", "{workspace}"),
+        profile_preset=True,
+    ),
     ToolDefinition(
         "opencode",
         "OpenCode",
         "opencode",
         "terminal",
         ("opencode", "{workspace}"),
+        profile_preset=True,
         install=InstallGuide(
             "https://opencode.ai/docs",
             _NPM_SCOPE,
@@ -171,6 +194,7 @@ TOOL_DEFINITIONS = (
         "runtime",
         ("openclaw",),
         environment=(("OPENCLAW_WORKSPACE_DIR", "{workspace}"),),
+        profile_preset=True,
         install=InstallGuide(
             "https://docs.openclaw.ai/install",
             _NPM_SCOPE,
@@ -186,6 +210,7 @@ TOOL_DEFINITIONS = (
         "hermes",
         "terminal",
         ("hermes",),
+        profile_preset=True,
         install=InstallGuide(
             "https://github.com/NousResearch/hermes-agent/blob/main/website/docs/getting-started/quickstart.md",
             "Hermes 官方用户级安装目录",
@@ -198,6 +223,7 @@ TOOL_DEFINITIONS = (
         "kimi",
         "terminal",
         ("kimi",),
+        profile_preset=True,
         install=InstallGuide(
             "https://www.kimi.com/code/docs/kimi-code-cli/guides/getting-started.html",
             _NPM_SCOPE,
@@ -239,6 +265,7 @@ TOOL_DEFINITIONS = (
             prerequisite="npm",
             risk=_NPM_RISK,
         ),
+        runtime=RuntimeRequirement("node", "Node.js", (22, 19, 0)),
     ),
     ToolDefinition(
         "qoder",
@@ -246,6 +273,7 @@ TOOL_DEFINITIONS = (
         "qodercli",
         "terminal",
         ("qodercli",),
+        profile_preset=True,
         install=InstallGuide(
             "https://docs.qoder.com/en/cli/quick-start",
             _NPM_SCOPE,
@@ -260,6 +288,7 @@ TOOL_DEFINITIONS = (
         "zcode",
         "desktop",
         ("zcode", "{workspace}"),
+        profile_preset=True,
         install=InstallGuide(
             "https://zcode.z.ai/en/docs/install",
             "当前操作系统的桌面应用",
@@ -375,6 +404,53 @@ def _run_install(
     return subprocess.run(argv, check=check)
 
 
+_SEMANTIC_VERSION = re.compile(r"(?<!\d)(\d+)\.(\d+)\.(\d+)")
+
+
+def _run_runtime_probe(
+    argv: tuple[str, ...], *, check: bool
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        argv,
+        check=check,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+    )
+
+
+def tool_runtime_issue(
+    definition: ToolDefinition,
+    *,
+    which: Callable[[str], str | None] | None = None,
+    run: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> str:
+    requirement = definition.runtime
+    if requirement is None:
+        return ""
+    lookup = which or shutil.which
+    executable = lookup(requirement.command)
+    minimum = ".".join(str(part) for part in requirement.minimum_version)
+    expected = f"{requirement.label} >= {minimum}"
+    if executable is None:
+        return f"{definition.label} 需要 {expected}，但当前 PATH 未检测到"
+    runner = run or _run_runtime_probe
+    try:
+        completed = runner((executable, "--version"), check=False)
+    except (OSError, subprocess.SubprocessError):
+        return f"{definition.label} 需要 {expected}，但版本检测失败"
+    output = str(completed.stdout or "").strip()
+    match = _SEMANTIC_VERSION.search(output)
+    if completed.returncode != 0 or match is None:
+        return f"{definition.label} 需要 {expected}，但无法识别当前版本"
+    current = tuple(int(part) for part in match.groups())
+    if current < requirement.minimum_version:
+        current_text = ".".join(str(part) for part in current)
+        return f"{definition.label} 需要 {expected}；当前为 {current_text}"
+    return ""
+
+
 def install_tool(
     tool_id: str,
     *,
@@ -385,7 +461,7 @@ def install_tool(
     open_url: Callable[[str], bool] | None = None,
 ) -> bool:
     ask = ask or input
-    run = run or _run_install
+    command_runner = run or _run_install
     open_url = open_url or webbrowser.open
     definition = tool_definition(tool_id)
     if definition is None or definition.install is None:
@@ -415,6 +491,9 @@ def install_tool(
                 f"安装 {definition.label} 需要 {guide.prerequisite}；"
                 f"请先准备该工具，或查看 {guide.source_url}"
             )
+    runtime_issue = tool_runtime_issue(definition, run=run)
+    if runtime_issue:
+        raise DyroError(f"无法安装 {definition.label}：{runtime_issue}")
     if not yes:
         confirmed = ask("是否继续？[y/N]：").strip().lower()
         if confirmed not in {"y", "yes"}:
@@ -431,7 +510,7 @@ def install_tool(
         if prerequisite_path and guide.argv[0] == guide.prerequisite
         else guide.argv
     )
-    completed = run(tuple(argv), check=False)
+    completed = command_runner(tuple(argv), check=False)
     if completed.returncode != 0:
         raise DyroError(
             f"{definition.label} 安装命令失败（exit {completed.returncode}）；"
@@ -444,7 +523,7 @@ def install_tool(
             f"{definition.command}；请重新打开终端后再运行 dyro。"
         )
         return True
-    verification = run((executable, "--version"), check=False)
+    verification = command_runner((executable, "--version"), check=False)
     if verification.returncode != 0:
         raise DyroError(
             f"{definition.label} 已安装但版本验证失败"

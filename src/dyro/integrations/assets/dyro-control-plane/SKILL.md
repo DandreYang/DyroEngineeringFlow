@@ -16,7 +16,8 @@ When the request already supplies a workspace alias, skip global discovery and u
 - One safe next step: `dyro --workspace <alias> next --format json`
 - Lines or hotfixes: `dyro --workspace <alias> line list [--kind line|hotfix] --format json`
 - Change Sets: `dyro --workspace <alias> changeset list --format json` or `dyro --workspace <alias> changeset verify <id> --format json`
-- Installed Skill health: `dyro integration status skill --format json`
+- Installed control-plane Skill health: `dyro integration status skill --format json`
+- Installed dispatch Skill health: `dyro integration status dispatch --format json`
 - Objective inventory or facts: `dyro --workspace <alias> objective list --format json` or `dyro --workspace <alias> objective status <id> --format json`
 - Objective explanation: `dyro --workspace <alias> objective explain <id> --format json`
 - Objective blockers or human attention: `dyro --workspace <alias> objective attention <id> --format json`

@@ -11,7 +11,7 @@ from ..task_contract import TaskContract
 
 @dataclass
 class AdapterResult:
-    status: str  # ok | error | timeout
+    status: str  # ok | error | timeout | cancelled
     summary: str
     evidence: list[dict[str, object]] = field(default_factory=list)
     confidence: str = "medium"
@@ -28,10 +28,19 @@ class BackendAdapter(Protocol):
     id: str
     command: str
     strict_isolation: bool
+    supported_modes: frozenset[str]
 
     def available(self) -> bool: ...
 
     def authenticated(self) -> bool: ...
+
+    def readiness_reason(self) -> str: ...
+
+    def worker_environment(
+        self, *, isolated_home: Path | None = None
+    ) -> dict[str, str]: ...
+
+    def execution_profile(self) -> Mapping[str, str]: ...
 
     def run(
         self,

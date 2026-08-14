@@ -283,11 +283,25 @@ To upgrade later, run `pipx upgrade dyro`. If your team manages Python packages 
 python3 -m pip install --user --upgrade dyro
 ```
 
-Interactive `dyro setup` can install the control-plane Skill during personal
-preferences. After package updates, already-managed Skills sync automatically;
-interactive launches also repair an outdated managed Skill. First-time install
-remains opt-in via setup or `dyro integration install skill --yes` (alias:
-`codex`).
+Interactive `dyro setup` can install the first-party Skill bundle during personal
+preferences. That one opt-in installs both `dyro-control-plane` and the separate
+`dyro-dispatch` Skill. Existing managed control-plane installations automatically
+gain the Dispatch companion on the next interactive launch or package refresh, and
+both managed Skills then stay synchronized with Dyro updates. Machines that have
+never opted into a Dyro Skill are not modified silently.
+
+Multi-harness delegation remains separate from the read-only control plane so its
+process/network effects are explicit. Manual installation is still available:
+preview with `dyro integration install dispatch --dry-run`, then install with
+`dyro integration install dispatch --yes`.
+
+For two to four different roles, `dyro dispatch batch-plan` produces a
+side-effect-free, context-bound plan. Review its digest before
+`batch-start --expect-plan-sha256 …`, then recover through `batch-status`,
+`batch-result`, or `batch-cancel`. Batch V1 is independent fan-out with at most
+one edit writer; it is not a dependency DAG, retry queue, or automatic judge.
+Use explicit synchronous `panel --members all` only for a full-ready-Provider
+same-task comparison.
 
 Interactive `dyro`, `dyro home`, and `dyro start` launches check the official
 PyPI endpoint at most once per local day. A failed or slow check never blocks

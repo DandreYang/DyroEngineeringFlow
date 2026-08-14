@@ -9,7 +9,7 @@ from typing import Callable, Iterable
 from .config import Adapter, CONFIG_NAME, Config, expand_argv, load, validate_id
 from .errors import DyroError, ValidationError
 from .state import atomic_write_text, exclusive_lock
-from .tooling import TOOL_DEFINITIONS, tool_definition
+from .tooling import TOOL_DEFINITIONS, tool_definition, tool_runtime_issue
 
 
 _BARE_TOML_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -45,7 +45,9 @@ def launchable_preset_ids() -> tuple[str, ...]:
     """Presets that can be written into a Profile and used by `dyro start`."""
 
     tool_ids = tuple(
-        definition.id for definition in TOOL_DEFINITIONS if definition.launch
+        definition.id
+        for definition in TOOL_DEFINITIONS
+        if definition.launch and definition.profile_preset
     )
     return ("noop", *tool_ids)
 
@@ -56,13 +58,27 @@ def installed_launchable_presets(
     lookup = which or shutil.which
     found: list[str] = []
     for definition in TOOL_DEFINITIONS:
-        if definition.launch and lookup(definition.command):
-            found.append(definition.id)
+        if not definition.launch or not definition.profile_preset:
+            continue
+        if not lookup(definition.command):
+            continue
+        if tool_runtime_issue(definition, which=lookup):
+            continue
+        found.append(definition.id)
     return tuple(found)
 
 
 def preset_adapter(adapter_id: str, preset: str) -> Adapter:
     validate_id(adapter_id, "adapter id")
+    if preset == "noop":
+        return Adapter(adapter_id, ("/usr/bin/true",), ("/usr/bin/true",), ("/usr/bin/true",))
+    definition = tool_definition(preset)
+    if definition is None or not definition.launch:
+        raise ValidationError(f"未知 Agent preset：{preset}")
+    if not definition.profile_preset:
+        raise ValidationError(
+            f"{definition.label} 仅支持首页启动；尚无经过审计的任务 adapter"
+        )
     if preset == "codex":
         return Adapter(
             adapter_id,
@@ -70,11 +86,6 @@ def preset_adapter(adapter_id: str, preset: str) -> Adapter:
             ("codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "{prompt}"),
             ("codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "{prompt}"),
         )
-    if preset == "noop":
-        return Adapter(adapter_id, ("/usr/bin/true",), ("/usr/bin/true",), ("/usr/bin/true",))
-    definition = tool_definition(preset)
-    if definition is None or not definition.launch:
-        raise ValidationError(f"未知 Agent preset：{preset}")
     launch = _validate_argv(definition.launch, "Agent launch")
     return Adapter(adapter_id, launch, launch, launch)
 

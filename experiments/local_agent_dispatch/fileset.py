@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
+
+from dyro.canonical import canonical_json_bytes
 
 from .context_guard import (
     MAX_CONTEXT_FILE_BYTES,
@@ -148,6 +151,20 @@ def collect_guarded_context(
             )
         context[relative] = content
     return context
+
+
+def guarded_context_sha256(context: Mapping[str, str]) -> str:
+    """Digest one sealed context snapshot without retaining its full contents."""
+    entries = [
+        {
+            "path": path,
+            "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        }
+        for path, content in sorted(context.items())
+    ]
+    return hashlib.sha256(
+        canonical_json_bytes({"files": entries})
+    ).hexdigest()
 
 
 def filter_readable(paths: Iterable[Path], project_root: Path) -> list[Path]:

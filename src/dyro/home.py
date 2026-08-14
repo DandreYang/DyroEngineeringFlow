@@ -34,6 +34,7 @@ from .tooling import (
     load_tool_preferences,
     tool_definition,
     tool_definition_for_command,
+    tool_runtime_issue,
 )
 from .process import git
 from .terminal import danger, muted, success, title, value, warning
@@ -51,7 +52,7 @@ from .workspace import (
 
 
 DISCOVERABLE_AGENTS = tuple(
-    (definition.command, bool(definition.launch))
+    (definition.command, definition.profile_preset)
     for definition in TOOL_DEFINITIONS
     if definition.interface != "desktop"
 )
@@ -331,7 +332,10 @@ def _launcher_tool(
         )
         for key, value in definition.environment
     )
-    if installed:
+    runtime_issue = tool_runtime_issue(definition) if installed else ""
+    if runtime_issue:
+        state = ToolState.UNAVAILABLE
+    elif installed:
         needs_setup = definition.id == "openclaw" and _openclaw_needs_setup()
         state = ToolState.NEEDS_SETUP if needs_setup else ToolState.READY
         if needs_setup:
@@ -377,6 +381,9 @@ def home_tools(config: Config, *, workspace: Path) -> list[HomeTool]:
         configured_commands.add(command)
         definition = tool_definition_for_command(command)
         installed = executable_available(executable, cwd=workspace)
+        runtime_issue = (
+            tool_runtime_issue(definition) if definition and installed else ""
+        )
         tools.append(
             HomeTool(
                 adapter_id,
@@ -386,9 +393,9 @@ def home_tools(config: Config, *, workspace: Path) -> list[HomeTool]:
                 (),
                 (
                     ToolState.READY
-                    if installed
+                    if installed and not runtime_issue
                     else ToolState.INSTALLABLE
-                    if definition and definition.install
+                    if definition and definition.install and not runtime_issue
                     else ToolState.UNAVAILABLE
                 ),
             )
@@ -482,9 +489,19 @@ def print_agent_discovery(config: Config) -> None:
     known_commands = {command for command, _ in DISCOVERABLE_AGENTS}
     for command, integrated in DISCOVERABLE_AGENTS:
         definition = tool_definition_for_command(command)
-        installed = shutil.which(command) is not None
+        detected = shutil.which(command) is not None
+        runtime_issue = (
+            tool_runtime_issue(definition) if definition is not None and detected else ""
+        )
+        installed = detected and not runtime_issue
         configured_as = ",".join(configured_commands.get(command, ()))
-        if configured_as and installed:
+        if runtime_issue and configured_as:
+            state = f"已配置但不兼容:{configured_as}"
+            note = runtime_issue
+        elif runtime_issue:
+            state = "运行环境不兼容"
+            note = runtime_issue
+        elif configured_as and installed:
             state = f"已配置:{configured_as}"
             note = "可由当前 Profile 启动"
         elif configured_as:
@@ -504,10 +521,15 @@ def print_agent_discovery(config: Config) -> None:
                 if definition and definition.install
                 else "未安装；暂无内置安装方案"
             )
-        installed_cell = success(f"{'已检测':10}") if installed else muted(f"{'-':10}")
+        if runtime_issue:
+            installed_cell = warning(f"{'不兼容':10}")
+        elif installed:
+            installed_cell = success(f"{'已检测':10}")
+        else:
+            installed_cell = muted(f"{'-':10}")
         print(
             f"{value(f'{command:16}')}{installed_cell}"
-            f"{state_cell(state, installed=installed, configured=bool(configured_as))} "
+            f"{state_cell(state, installed=detected, configured=bool(configured_as))} "
             f"{muted(note)}"
         )
     for definition in TOOL_DEFINITIONS:

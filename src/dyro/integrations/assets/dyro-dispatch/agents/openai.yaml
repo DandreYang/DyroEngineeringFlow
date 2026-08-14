@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dyro Dispatch"
+  short_description: "Parallelize work through local agent harnesses"
+  default_prompt: "Use $dyro-dispatch to plan and dispatch this task across multiple local harnesses."

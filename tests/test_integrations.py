@@ -72,6 +72,18 @@ class IntegrationManagerTests(unittest.TestCase):
     def legacy_manifest(self) -> Path:
         return self.dyro_home / "integrations" / "codex.json"
 
+    @property
+    def dispatch_mirror(self) -> Path:
+        return self.dyro_home / "skills" / "dyro-dispatch"
+
+    @property
+    def dispatch_avatar(self) -> Path:
+        return self.codex_home / "skills" / "dyro-dispatch"
+
+    @property
+    def dispatch_manifest(self) -> Path:
+        return self.dyro_home / "integrations" / "dispatch.json"
+
     def _host_homes(self, *, claude: bool = False) -> dict[str, Path]:
         homes = {"codex": self.codex_home}
         if claude:
@@ -108,6 +120,7 @@ class IntegrationManagerTests(unittest.TestCase):
             "workspace list --format json",
             "status --format json",
             "doctor --format json",
+            "integration status dispatch --format json",
             "objective attention <id> --format json",
             "objective explain <id> --format json",
             "objective plan <id> --format json",
@@ -133,6 +146,140 @@ class IntegrationManagerTests(unittest.TestCase):
         for line in metadata.read_text(encoding="utf-8").splitlines():
             if ": " in line:
                 self.assertTrue(line.split(": ", 1)[1].startswith('"'))
+
+    def test_packaged_dispatch_skill_is_concise_and_has_required_metadata(
+        self,
+    ) -> None:
+        root = manager._asset_root("dispatch")
+        skill = root / "SKILL.md"
+        metadata = root / "agents" / "openai.yaml"
+
+        content = skill.read_text(encoding="utf-8")
+        self.assertLessEqual(len(content.encode("utf-8")), 8 * 1024)
+        self.assertNotIn("TODO", content)
+        frontmatter = content.split("---", 2)[1]
+        keys = {
+            line.split(":", 1)[0] for line in frontmatter.splitlines() if line.strip()
+        }
+        self.assertEqual(keys, {"name", "description"})
+        self.assertIn("name: dyro-dispatch", frontmatter)
+        self.assertIn("parallel", frontmatter.lower())
+        for command in (
+            "dyro dispatch --dry-run doctor",
+            "dyro dispatch run",
+            "dyro dispatch result",
+        ):
+            self.assertIn(command, content)
+        for boundary in ("merge", "push", "signoff", "Dyro gate"):
+            self.assertIn(boundary, content)
+        self.assertIn("$dyro-dispatch", metadata.read_text(encoding="utf-8"))
+        for line in metadata.read_text(encoding="utf-8").splitlines():
+            if ": " in line:
+                self.assertTrue(line.split(": ", 1)[1].startswith('"'))
+
+    def test_dispatch_skill_installs_independently_from_control_plane(self) -> None:
+        self.assertEqual(
+            integration_status("dispatch").state,
+            IntegrationState.ABSENT,
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["integration", "status", "dispatch", "--format", "json"])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["integration"], "dispatch")
+        self.assertEqual(payload["state"], "absent")
+
+        installed = install_integration("dispatch", yes=True)
+
+        self.assertEqual(installed.status.state, IntegrationState.CURRENT)
+        self.assertTrue(self.dispatch_mirror.joinpath("SKILL.md").is_file())
+        self.assertTrue(self.dispatch_avatar.is_symlink())
+        self.assertEqual(
+            self.dispatch_avatar.resolve(),
+            self.dispatch_mirror.resolve(),
+        )
+        manifest = json.loads(self.dispatch_manifest.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["integration"], "dispatch")
+        self.assertFalse(self.mirror.exists())
+        self.assertFalse(self.avatar.exists() or self.avatar.is_symlink())
+
+        removed = uninstall_integration("dispatch", yes=True)
+        self.assertEqual(removed.status.state, IntegrationState.ABSENT)
+        self.assertFalse(self.dispatch_mirror.exists())
+        self.assertFalse(
+            self.dispatch_avatar.exists() or self.dispatch_avatar.is_symlink()
+        )
+
+    def test_dispatch_skill_status_and_dry_run_are_zero_write(self) -> None:
+        before = self._tree_snapshot()
+        status = integration_status("dispatch")
+        plan = install_integration("dispatch", yes=False, dry_run=True)
+        uninstall_plan = uninstall_integration(
+            "dispatch",
+            yes=False,
+            dry_run=True,
+        )
+
+        self.assertEqual(status.state, IntegrationState.ABSENT)
+        self.assertEqual(plan.status.state, IntegrationState.ABSENT)
+        self.assertEqual(uninstall_plan.status.state, IntegrationState.ABSENT)
+        self.assertEqual(self._tree_snapshot(), before)
+
+    def test_dispatch_and_control_plane_skills_coexist_and_uninstall_independently(
+        self,
+    ) -> None:
+        install_integration("skill", yes=True)
+        install_integration("dispatch", yes=True)
+
+        self.assertEqual(
+            integration_status("skill").state,
+            IntegrationState.CURRENT,
+        )
+        self.assertEqual(
+            integration_status("dispatch").state,
+            IntegrationState.CURRENT,
+        )
+        self.assertTrue(self.avatar.is_symlink())
+        self.assertTrue(self.dispatch_avatar.is_symlink())
+
+        uninstall_integration("dispatch", yes=True)
+
+        self.assertEqual(
+            integration_status("dispatch").state,
+            IntegrationState.ABSENT,
+        )
+        self.assertEqual(
+            integration_status("skill").state,
+            IntegrationState.CURRENT,
+        )
+        self.assertTrue(self.avatar.is_symlink())
+        self.assertTrue(self.mirror.joinpath("SKILL.md").is_file())
+
+    def test_dispatch_skill_sync_is_upgrade_only(self) -> None:
+        self.assertIsNone(
+            sync_managed_skill(
+                "dispatch",
+                yes=True,
+                allow_first_install=False,
+            )
+        )
+        install_integration("dispatch", yes=True)
+        manifest = json.loads(self.dispatch_manifest.read_text(encoding="utf-8"))
+        manifest["asset_version"] = manifest["asset_version"] + 1
+        self.dispatch_manifest.write_text(
+            json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["integration", "sync", "dispatch", "--yes"])
+
+        self.assertIn("dispatch", output.getvalue())
+        self.assertEqual(
+            integration_status("dispatch").state,
+            IntegrationState.CURRENT,
+        )
 
     def test_integration_status_json_is_structured(self) -> None:
         output = StringIO()

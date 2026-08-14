@@ -82,6 +82,11 @@ official `agy` command; Qoder uses `qodercli`; ZCode is opened as a desktop
 workspace tool. An entry can be known without having an audited installation
 recipe; such entries fail closed with an actionable message.
 
+DeepSeek Harness and Pi remain Home launch-only tools and are not offered as
+Profile presets until their non-interactive task adapters have been audited.
+Pi also requires Node.js 22.19.0 or newer; discovery and guided installation
+fail closed when the local runtime does not satisfy that requirement.
+
 ## Compact Home picker
 
 Home starts by showing at most three common choices: the most recent or

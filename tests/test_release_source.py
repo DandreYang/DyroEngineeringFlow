@@ -93,6 +93,8 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
             "Agent Bridge source/wheel/sdist gate (Ubuntu 24.04)", workflow
         )
         self.assertNotIn("bridge-gate-run.tsv", workflow)
+        self.assertIn("dyro-dispatch','SKILL.md", workflow)
+        self.assertIn("dyro-dispatch','agents','openai.yaml", workflow)
 
     def test_ci_no_longer_ships_agent_bridge_zero_effect_gate(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
@@ -103,3 +105,5 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
         self.assertNotIn("dyro-bridge-zero-effect-evidence", workflow)
         self.assertNotIn("verify_bridge_zero_effects.py", workflow)
         self.assertNotIn("Agent Bridge source/wheel/sdist gate", workflow)
+        self.assertIn("dyro-dispatch','SKILL.md", workflow)
+        self.assertIn("dyro-dispatch','agents','openai.yaml", workflow)
