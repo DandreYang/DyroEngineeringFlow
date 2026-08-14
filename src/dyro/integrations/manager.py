@@ -56,6 +56,8 @@ HOSTS: tuple[HostSpec, ...] = (
     HostSpec("agents", "AGENTS_HOME", ".agents"),
     HostSpec("cursor", "CURSOR_HOME", ".cursor"),
     HostSpec("grok", "GROK_HOME", ".grok"),
+    HostSpec("pi", "PI_CODING_AGENT_DIR", ".pi/agent"),
+    HostSpec("dsh", "DSH_HOME", ".dsh"),
 )
 
 
@@ -874,9 +876,11 @@ def plan_integration(
             changes = ("无需写入；Integration 已是当前版本",)
         elif status.state is IntegrationState.ABSENT:
             if not status.avatars:
+                host_envs = " / ".join(
+                    spec.env_var for spec in HOSTS if spec.env_var
+                )
                 changes = (
-                    "无法安装：未检测到宿主目录；需先创建或设置 "
-                    "CODEX_HOME / CLAUDE_HOME / AGENTS_HOME / CURSOR_HOME",
+                    "无法安装：未检测到宿主目录；需先创建或设置 " + host_envs,
                     "不会创建孤立镜像或分身",
                 )
             else:

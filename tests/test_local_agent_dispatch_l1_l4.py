@@ -242,6 +242,11 @@ class RegistryTests(unittest.TestCase):
         rows = probe_backends()
         self.assertTrue(any(r["id"] == "echo" for r in rows))
         self.assertTrue(any(r["id"] == "opencode" and not r["supported"] for r in rows))
+        for provider_id in ("dsh", "pi"):
+            row = next(r for r in rows if r["id"] == provider_id)
+            self.assertFalse(row["supported"])
+            self.assertEqual(row["execution_kind"], "unintegrated")
+            self.assertEqual(row["command"], provider_id)
 
     def test_routes_reject_simulation_and_unknown_providers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add DeepSeek Harness (`dsh`) and Pi (`pi`) to the coding-tool catalog,
+  Profile presets, and dispatch discovery. Neither has an audited
+  non-interactive adapter yet, so `dispatch` can see them but will not
+  route work. Install the control-plane Skill avatar for Pi when
+  `~/.pi/agent` is present, and for DeepSeek Harness when `~/.dsh` is
+  present.
 - Make bare `dyro update` check, confirm, and install (same path as
   `update now`). `update check` remains check-only; `--yes` skips the
   confirmation on both `update` and `update now`.
