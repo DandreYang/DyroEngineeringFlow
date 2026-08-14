@@ -32,9 +32,13 @@ class IntegrationManagerTests(unittest.TestCase):
         self.dyro_home = self.root / "dyro"
         self.fake_home = self.root / "home"
         self.fake_home.mkdir()
+        isolated_hosts = {
+            spec.env_var: "" for spec in manager.HOSTS if spec.env_var
+        }
         self.environment = patch.dict(
             os.environ,
             {
+                **isolated_hosts,
                 "CODEX_HOME": str(self.codex_home),
                 "DYRO_HOME": str(self.dyro_home),
                 "HOME": str(self.fake_home),
@@ -688,18 +692,23 @@ class IntegrationManagerTests(unittest.TestCase):
         assert plan is not None
         self.assertEqual(plan.status.state, IntegrationState.CURRENT)
 
+    def test_setup_isolates_every_host_env_var(self) -> None:
+        for spec in manager.HOSTS:
+            if not spec.env_var:
+                continue
+            if spec.env_var == "CODEX_HOME":
+                self.assertEqual(os.environ.get(spec.env_var), str(self.codex_home))
+                continue
+            self.assertFalse(
+                os.environ.get(spec.env_var, "").strip(),
+                msg=spec.env_var,
+            )
+
     def test_plan_surfaces_missing_host_blocker(self) -> None:
         with patch.dict(os.environ):
-            for key in (
-                "CODEX_HOME",
-                "CLAUDE_HOME",
-                "AGENTS_HOME",
-                "CURSOR_HOME",
-                "GROK_HOME",
-                "PI_CODING_AGENT_DIR",
-                "DSH_HOME",
-            ):
-                os.environ.pop(key, None)
+            for spec in manager.HOSTS:
+                if spec.env_var:
+                    os.environ.pop(spec.env_var, None)
             plan = install_integration("skill", yes=False, dry_run=True)
         self.assertEqual(plan.status.state, IntegrationState.ABSENT)
         self.assertFalse(plan.status.avatars)
