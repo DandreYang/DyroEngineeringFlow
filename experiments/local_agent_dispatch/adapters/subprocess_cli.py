@@ -1235,8 +1235,14 @@ class SubprocessCliAdapter:
                 isolated_home / "config" / "opencode"
             )
         if self.id == "hermes":
-            provider = self._execution_value("provider")
-            model = self._execution_value("model")
+            try:
+                provider = self._execution_value("provider")
+                model = self._execution_value("model")
+            except DispatchValidationError:
+                if isolated_home is not None:
+                    raise
+                provider = ""
+                model = ""
             if provider and model:
                 source_home = Path(
                     environment.get("HERMES_HOME", str(Path.home() / ".hermes"))
@@ -1258,9 +1264,16 @@ class SubprocessCliAdapter:
         elif self.id == "pi":
             # Pi can route many Providers. Propagate only the current default's
             # credentials so an async worker cannot inherit lateral keys.
-            provider = self._execution_value("provider")
-            model = self._execution_value("model")
-            environment.update(_provider_credentials(provider))
+            try:
+                provider = self._execution_value("provider")
+                model = self._execution_value("model")
+            except DispatchValidationError:
+                if isolated_home is not None:
+                    raise
+                provider = ""
+                model = ""
+            if provider:
+                environment.update(_provider_credentials(provider))
             if isolated_home is not None:
                 source_home = Path(
                     environment.get(

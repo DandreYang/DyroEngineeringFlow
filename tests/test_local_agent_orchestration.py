@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import redirect_stdout
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -34,6 +35,13 @@ from experiments.local_agent_dispatch.orchestration_store import OrchestrationSt
 from experiments.local_agent_dispatch.run_store import RunStore
 from experiments.local_agent_dispatch.supervisor import DispatchSupervisor
 from experiments.local_agent_dispatch.task_contract import parse_task_contract
+
+
+def _codex_home(root: Path) -> Path:
+    home = root / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text('model = "test-model"\n', encoding="utf-8")
+    return home
 
 
 def _project(root: Path) -> Path:
@@ -850,28 +858,33 @@ class BatchLifecycleTests(unittest.TestCase):
                 collect_guarded_context(contract.files, project)
             )
             store = RunStore(home)
-            execution_profile = get_adapter("codex").execution_profile()
-            record = store.create(
-                contract=contract,
-                project_root=project,
-                backend="codex",
-                thread_id="finder",
-                planned_context_sha256=digest,
-                planned_execution_profile_sha256=(
-                    adapter_execution_profile_sha256(get_adapter("codex"))
-                ),
-                planned_execution_profile=execution_profile,
-            )
-            (project / "src" / "app.py").write_text(
-                "def hello():\n    return 'drifted'\n",
-                encoding="utf-8",
-            )
+            with patch.dict(
+                os.environ,
+                {"CODEX_HOME": str(_codex_home(root))},
+                clear=False,
+            ):
+                execution_profile = get_adapter("codex").execution_profile()
+                record = store.create(
+                    contract=contract,
+                    project_root=project,
+                    backend="codex",
+                    thread_id="finder",
+                    planned_context_sha256=digest,
+                    planned_execution_profile_sha256=(
+                        adapter_execution_profile_sha256(get_adapter("codex"))
+                    ),
+                    planned_execution_profile=execution_profile,
+                )
+                (project / "src" / "app.py").write_text(
+                    "def hello():\n    return 'drifted'\n",
+                    encoding="utf-8",
+                )
 
-            finished = DispatchSupervisor(home=home).execute(
-                record.run_id,
-                timeout_seconds=5,
-                sync=True,
-            )
+                finished = DispatchSupervisor(home=home).execute(
+                    record.run_id,
+                    timeout_seconds=5,
+                    sync=True,
+                )
             self.assertEqual(finished.status, "failed")
             self.assertIn("context changed", finished.error)
 

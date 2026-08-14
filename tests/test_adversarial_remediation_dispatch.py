@@ -1314,7 +1314,16 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 return_value=completed,
             ) as bounded,
         ):
-            result = claude_adapter().run(
+            adapter = claude_adapter()
+            adapter.configure_execution_profile(
+                {
+                    "backend": "claude",
+                    "command_path": "/usr/local/bin/claude",
+                    "provider": "anthropic",
+                    "model": "reviewed-model",
+                }
+            )
+            result = adapter.run(
                 contract=contract,
                 cwd=Path.cwd(),
                 context_files={"app.py": "safe = True\n"},
@@ -3394,10 +3403,17 @@ class ProcessAndLifecycleTests(unittest.TestCase):
             payload["allow_unconfined_provider"] = True
             task_file = root / "task.json"
             task_file.write_text(json.dumps(payload), encoding="utf-8")
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text(
+                'model = "test-model"\n',
+                encoding="utf-8",
+            )
             environment = dict(os.environ)
             environment["PATH"] = (
                 f"{fake_bin}{os.pathsep}{environment.get('PATH', '')}"
             )
+            environment["CODEX_HOME"] = str(codex_home)
             worker_pid = 0
             backend_pid = 0
             try:
