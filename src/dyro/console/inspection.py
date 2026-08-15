@@ -64,7 +64,7 @@ class IsolatedOverviewService:
         self,
         *,
         registry_state_home: Path | None = None,
-        timeout_seconds: float = 5.0,
+        timeout_seconds: float = 8.0,
         cursor_secret: bytes | None = None,
         python_executable: str | None = None,
         target_root: Path | None = None,

@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+## 0.6.8 - 2026-08-15
+
+- Fix Console inspection falsely timing out healthy workspaces by budgeting for
+  isolated Python process startup. Unavailable or missing workspace counts now
+  render as unknown instead of zero, and partial pages no longer claim that all
+  projects are healthy.
+- Add executable dispatch adapters for Cursor Agent, OpenCode, Grok, Hermes,
+  Kimi, DeepSeek Harness (`dsh`), and Pi alongside Codex and Claude. Every
+  adapter now has bounded process supervision, an explicit read/edit tool or
+  sandbox policy, a backend-specific authentication probe, and a structured
+  result decoder. Cursor dispatch intentionally requires `CURSOR_API_KEY` so
+  it can run with an isolated home instead of loading user MCP processes;
+  Cursor edit dispatch remains fail-closed until its sandbox process lifecycle
+  can be proven. Provider credentials are scoped to the selected model, and
+  successful-looking CLIs cannot leave closed-stdio descendants running.
+  Hermes receives only projected task context: user rules, identity, memory,
+  fallback providers, background review, and session persistence are disabled.
+  Pi requires Node.js 22.19.0 or newer.
+- Preserve a multi-harness panel board when one member fails instead of losing
+  the other members' terminal results; deduplicate and cap explicit members,
+  and let every ready integrated Provider participate in selection. Default
+  panels remain a cost-bounded three-Provider sample; explicit `--members all`
+  runs every ready Provider with at most four concurrent members.
+- Add the separately managed `dyro-dispatch` Skill for explicit parallel,
+  delegated, and independent-agent work. It installs through
+  `dyro integration install dispatch`, keeps outbound Provider effects separate
+  from the read-only control plane, and preserves all gate, signoff, merge, and
+  push boundaries. A single setup opt-in now installs both first-party Skills;
+  existing managed control-plane installs automatically gain Dispatch, and both
+  stay synchronized across interactive launches and package updates.
+- Add persistent Batch V1 orchestration for two to four heterogeneous roles:
+  side-effect-free planning, digest-bound idempotent start, compact status,
+  bounded partial-result recovery, and cooperative cancellation. Plans bind
+  Provider choices, guarded context, timeouts, and edit HEAD; all members pass
+  preflight before any Provider starts, at most one may edit, and cleanup that
+  cannot be proven remains visible instead of being reported as cancelled.
+  Workers revalidate planned context immediately before Provider use, and edit
+  worktrees are pinned to the reviewed object ID.
+
 ## 0.6.7 - 2026-08-13
 
 - Make bare `dyro update` check, confirm, and install (same path as

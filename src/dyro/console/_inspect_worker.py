@@ -25,8 +25,8 @@ from .overview import ConsoleOverviewError, ConsoleOverviewService
 
 _CURSOR_SECRET_ENV = "DYRO_CONSOLE_CURSOR_SECRET"
 _MAX_WORKERS = 4
-_WORKSPACE_TIMEOUT_SECONDS = 0.75
-_OVERVIEW_TIMEOUT_SECONDS = 5.0
+_WORKSPACE_TIMEOUT_SECONDS = 3.0
+_OVERVIEW_TIMEOUT_SECONDS = 6.0
 _WORKER_RESPONSE_LIMIT = 2 * 1024 * 1024
 
 
@@ -222,7 +222,7 @@ def _isolated_workspace(
     )
     summaries, warnings = _isolated_summaries(
         isolated_registry,
-        total_timeout=_WORKSPACE_TIMEOUT_SECONDS,
+        total_timeout=_OVERVIEW_TIMEOUT_SECONDS,
     )
     if not summaries:
         raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")

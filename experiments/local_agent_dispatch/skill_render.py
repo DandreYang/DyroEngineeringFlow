@@ -64,8 +64,9 @@ def render_skill_markdown(
     *,
     home: Path | None = None,
     routes: Sequence[Mapping[str, str]] | None = None,
+    passive: bool = False,
 ) -> str:
-    backends = probe_backends()
+    backends = probe_backends(passive=passive)
     providers = [b for b in backends if b.get("execution_kind") == "provider"]
     available = [
         b
@@ -80,7 +81,7 @@ def render_skill_markdown(
 
     lines = [
         "---",
-        "name: dyro-local-agent-dispatch",
+        "name: dyro-dispatch",
         "description: >-",
         "  Dispatch read-only or isolated-edit tasks to local agent CLIs via",
         "  `python -m experiments.local_agent_dispatch`. Only backends listed",
@@ -97,7 +98,10 @@ def render_skill_markdown(
     ]
     if available:
         for row in available:
-            lines.append(f"- `{row['id']}` (command: `{row['command']}`)")
+            mode_note = "; read-only only" if row["id"] == "cursor-agent" else ""
+            lines.append(
+                f"- `{row['id']}` (command: `{row['command']}`{mode_note})"
+            )
     else:
         lines.append("- none ready; configure and authenticate an integrated Provider")
 
@@ -107,6 +111,11 @@ def render_skill_markdown(
         lines.append("")
         for row in unavailable:
             state = "not found" if not row["available"] else "not authenticated"
+            if row.get("authentication_probe") == "not_run" and row["available"]:
+                state = "authentication not probed"
+            reason = str(row.get("reason") or "").strip()
+            if reason:
+                state = f"{state}; {reason}"
             lines.append(f"- `{row['id']}` (`{row['command']}`: {state})")
 
     if discovery_only:

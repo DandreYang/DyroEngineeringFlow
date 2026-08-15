@@ -20,6 +20,12 @@ class EchoAdapter:
     def authenticated(self) -> bool:
         return True
 
+    def execution_profile(self) -> Mapping[str, str]:
+        return {"backend": self.id, "command": self.command}
+
+    def readiness_reason(self) -> str:
+        return ""
+
     def run(
         self,
         *,

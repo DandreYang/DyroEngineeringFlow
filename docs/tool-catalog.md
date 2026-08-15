@@ -77,10 +77,15 @@ page.
 
 Current catalog entries include Antigravity CLI, Codex CLI, Codex App, Claude
 Code CLI, Claude Code Desktop, Cursor Desktop, Cursor CLI, Grok, OpenCode,
-OpenClaw, Hermes, Kimi Code, Qoder CLI, ZCode, and Shell. Antigravity uses the
+OpenClaw, Hermes, Kimi Code, DeepSeek Harness, Pi, Qoder CLI, ZCode, and Shell. Antigravity uses the
 official `agy` command; Qoder uses `qodercli`; ZCode is opened as a desktop
 workspace tool. An entry can be known without having an audited installation
 recipe; such entries fail closed with an actionable message.
+
+DeepSeek Harness and Pi remain Home launch-only tools and are not offered as
+Profile presets until their non-interactive task adapters have been audited.
+Pi also requires Node.js 22.19.0 or newer; discovery and guided installation
+fail closed when the local runtime does not satisfy that requirement.
 
 ## Compact Home picker
 

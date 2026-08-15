@@ -14,6 +14,13 @@ from .adapters.registry import probe_backends
 from .errors import DispatchValidationError
 from .context_guard import safe_error_text
 from .gc import gc
+from .orchestration import (
+    cancel_batch,
+    get_batch_result,
+    get_batch_status,
+    plan_batch,
+    start_batch,
+)
 from .panel import run_panel
 from .paths import dispatch_home, dispatch_home_path
 from .run_store import RunRecord, RunStore
@@ -60,8 +67,8 @@ def _load_payload(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
-def cmd_backends(_: argparse.Namespace) -> int:
-    _print_json({"backends": probe_backends()})
+def cmd_backends(args: argparse.Namespace) -> int:
+    _print_json({"backends": probe_backends(passive=args.dry_run)})
     return 0
 
 
@@ -195,6 +202,79 @@ def cmd_panel(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_batch_plan(args: argparse.Namespace) -> int:
+    payload = _load_payload(args)
+    home = Path(args.home) if args.home else None
+    plan = plan_batch(
+        payload,
+        project_root=Path(args.project).resolve(),
+        home=home,
+    )
+    output = plan.to_mapping()
+    if args.dry_run:
+        output = {"dry_run": True, **output}
+    _print_json(output)
+    return 0
+
+
+def cmd_batch_start(args: argparse.Namespace) -> int:
+    payload = _load_payload(args)
+    home = Path(args.home) if args.home else None
+    project_root = Path(args.project).resolve()
+    if args.dry_run:
+        plan = plan_batch(payload, project_root=project_root, home=home)
+        if plan.plan_sha256 != args.expect_plan_sha256:
+            raise DispatchValidationError(
+                "batch plan digest changed; run batch-plan again before starting"
+            )
+        _print_json({"dry_run": True, **plan.to_mapping()})
+        return 0
+    status = start_batch(
+        payload,
+        expected_plan_sha256=args.expect_plan_sha256,
+        project_root=project_root,
+        home=home,
+    )
+    _print_json(status)
+    return 0
+
+
+def cmd_batch_status(args: argparse.Namespace) -> int:
+    home = Path(args.home) if args.home else None
+    _print_json(
+        get_batch_status(
+            args.orchestration_id,
+            home=home,
+            reconcile=not args.dry_run,
+        )
+    )
+    return 0
+
+
+def cmd_batch_result(args: argparse.Namespace) -> int:
+    home = Path(args.home) if args.home else None
+    _print_json(
+        get_batch_result(
+            args.orchestration_id,
+            home=home,
+            wait=args.wait and not args.dry_run,
+            timeout_seconds=args.timeout,
+            reconcile=not args.dry_run,
+        )
+    )
+    return 0
+
+
+def cmd_batch_cancel(args: argparse.Namespace) -> int:
+    if args.dry_run:
+        raise DispatchValidationError(
+            "dry-run cannot request cancellation; use batch-status to inspect state"
+        )
+    home = Path(args.home) if args.home else None
+    _print_json(cancel_batch(args.orchestration_id, home=home))
+    return 0
+
+
 def cmd_gc(args: argparse.Namespace) -> int:
     home = Path(args.home) if args.home else None
     report = gc(
@@ -224,7 +304,7 @@ def cmd_skill_render(args: argparse.Namespace) -> int:
         )
         _print_json({"written": str(path)})
     else:
-        print(render_skill_markdown(home=home))
+        print(render_skill_markdown(home=home, passive=args.dry_run))
     return 0
 
 
@@ -262,7 +342,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _print_json(
         {
             "home": str(home),
-            "backends": probe_backends(),
+            "backends": probe_backends(passive=args.dry_run),
             "notes": [
                 "This experimental tool is shipped in the dyro package.",
                 "Never merge/push/signoff from dispatch results.",
@@ -358,9 +438,46 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project", required=True)
     p.add_argument("--stdin", action="store_true")
     p.add_argument("--file", default="")
-    p.add_argument("--members", default="", help="Comma backends, e.g. echo,codex")
+    p.add_argument(
+        "--members",
+        default="",
+        help="Comma backends, e.g. codex,claude; use all for every ready Provider",
+    )
     p.add_argument("--timeout", type=_positive_finite_float, default=120.0)
     p.set_defaults(func=cmd_panel)
+
+    p = sub.add_parser(
+        "batch-plan",
+        help="Plan a persistent multi-role batch without creating state",
+    )
+    p.add_argument("--project", required=True)
+    p.add_argument("--stdin", action="store_true")
+    p.add_argument("--file", default="")
+    p.set_defaults(func=cmd_batch_plan)
+
+    p = sub.add_parser(
+        "batch-start",
+        help="Start a previously reviewed batch plan",
+    )
+    p.add_argument("--project", required=True)
+    p.add_argument("--stdin", action="store_true")
+    p.add_argument("--file", default="")
+    p.add_argument("--expect-plan-sha256", required=True)
+    p.set_defaults(func=cmd_batch_start)
+
+    p = sub.add_parser("batch-status", help="Inspect a persistent batch")
+    p.add_argument("orchestration_id")
+    p.set_defaults(func=cmd_batch_status)
+
+    p = sub.add_parser("batch-result", help="Fetch bounded batch results")
+    p.add_argument("orchestration_id")
+    p.add_argument("--wait", action="store_true")
+    p.add_argument("--timeout", type=_positive_finite_float, default=300.0)
+    p.set_defaults(func=cmd_batch_result)
+
+    p = sub.add_parser("batch-cancel", help="Request safe batch cancellation")
+    p.add_argument("orchestration_id")
+    p.set_defaults(func=cmd_batch_cancel)
 
     p = sub.add_parser("gc", help="Garbage-collect aged state")
     p.add_argument(

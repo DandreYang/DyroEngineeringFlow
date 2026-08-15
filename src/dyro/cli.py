@@ -119,6 +119,7 @@ from .hub import (
     set_default_workspace,
 )
 from .integrations import (
+    INTEGRATION_CHOICES,
     IntegrationState,
     install_integration,
     integration_status,
@@ -249,6 +250,12 @@ path = "repositories/clients/web"
 mount = "clients/web"
 verify = [["npm", "test", "--", "--runInBand"]]
 """
+
+
+_MANAGED_SKILL_BUNDLE: tuple[tuple[str, str], ...] = (
+    ("skill", "控制面"),
+    ("dispatch", "Dispatch"),
+)
 
 
 def _config(args: argparse.Namespace) -> Config:
@@ -791,44 +798,74 @@ def _setup_default_workspace(
 
 
 def _setup_skill_preference() -> bool:
-    """Ask whether to install/sync the control-plane Skill during setup."""
-    status = integration_status("skill")
-    if status.state is IntegrationState.CURRENT:
-        print(muted("控制面 Skill 已是当前版本；无需在 setup 中重复安装。"))
+    """Ask whether to install/sync the first-party Skill bundle during setup."""
+    statuses = {
+        integration: integration_status(integration)
+        for integration, _label in _MANAGED_SKILL_BUNDLE
+    }
+    if all(
+        status.state is IntegrationState.CURRENT for status in statuses.values()
+    ):
+        print(muted("Dyro Skills 已是当前版本；无需在 setup 中重复安装。"))
         return False
-    if status.state in {
-        IntegrationState.DRIFTED,
-        IntegrationState.UNOWNED_CONFLICT,
-        IntegrationState.STALE_MANIFEST,
-        IntegrationState.RECOVERY_REQUIRED,
-    }:
+    blocked = {
+        integration: status
+        for integration, status in statuses.items()
+        if status.state
+        in {
+            IntegrationState.DRIFTED,
+            IntegrationState.UNOWNED_CONFLICT,
+            IntegrationState.STALE_MANIFEST,
+            IntegrationState.RECOVERY_REQUIRED,
+        }
+    }
+    if blocked:
+        detail = "；".join(
+            f"{integration}={status.state.value}（{status.detail}）"
+            for integration, status in blocked.items()
+        )
         print(
             warning(
-                f"控制面 Skill 状态为 {status.state.value}（{status.detail}）；"
-                "setup 不会自动改写，请先手动处理后再运行 "
-                "dyro integration install skill。"
+                f"Dyro Skills 状态需要人工处理：{detail}；"
+                "setup 不会自动改写，请先运行对应的 "
+                "dyro integration status <id>。"
             )
         )
         return False
-    hosts = [row.host for row in status.avatars]
+    hosts = sorted(
+        {
+            row.host
+            for status in statuses.values()
+            for row in status.avatars
+        }
+    )
     if hosts:
         host_text = "、".join(hosts)
-        prompt = f"控制面 Skill（将挂接到已检测宿主：{host_text}）"
+        prompt = f"Dyro Skills（控制面 + Dispatch；挂接到：{host_text}）"
         option_one = "安装 / 同步到已检测宿主（推荐）"
         default = "1"
     else:
-        prompt = "控制面 Skill（当前未检测到 Agent 宿主目录）"
+        prompt = "Dyro Skills（当前未检测到 Agent 宿主目录）"
         option_one = "仍要尝试安装（当前无宿主，预期失败）"
         default = "2"
     selected = _ask_setup_choice(
         prompt,
         (
             ("1", option_one),
-            ("2", "稍后手动安装（dyro integration install skill）"),
+            ("2", "稍后手动安装（dyro integration install skill / dispatch）"),
         ),
         default=default,
     )
     return selected == "1"
+
+
+def _skill_status_blocks_automatic_change(status: IntegrationState) -> bool:
+    return status in {
+        IntegrationState.DRIFTED,
+        IntegrationState.UNOWNED_CONFLICT,
+        IntegrationState.STALE_MANIFEST,
+        IntegrationState.RECOVERY_REQUIRED,
+    }
 
 
 def _setup_personal_preferences(
@@ -871,27 +908,44 @@ def _render_setup_personal_preferences(
     else:
         print("  - 编码工具：" + muted("不设置个人默认"))
     if preferences.install_skill:
-        status = integration_status("skill")
-        if status.state is IntegrationState.ABSENT and not status.avatars:
-            print("  - Skill：无法安装：未检测到 Agent 宿主目录")
+        statuses = {
+            integration: integration_status(integration)
+            for integration, _label in _MANAGED_SKILL_BUNDLE
+        }
+        if all(
+            status.state is IntegrationState.ABSENT and not status.avatars
+            for status in statuses.values()
+        ):
+            print("  - Skills：无法安装：未检测到 Agent 宿主目录")
             print(
                 "      · 确认后会 soft-fail；请安装宿主后运行 "
-                "dyro integration install skill"
+                "dyro integration install skill / dispatch"
             )
             return
-        plan = sync_managed_skill(yes=False, dry_run=True, allow_first_install=True)
-        if plan is None:
-            print("  - Skill：" + muted("已是当前版本"))
+        plans = []
+        for integration, label in _MANAGED_SKILL_BUNDLE:
+            plan = sync_managed_skill(
+                integration,
+                yes=False,
+                dry_run=True,
+                allow_first_install=True,
+            )
+            if plan is not None:
+                plans.append((label, plan))
+        if not plans:
+            print("  - Skills：" + muted("已是当前版本"))
         else:
-            print("  - Skill：安装 / 同步控制面 Skill（镜像 + 宿主分身）")
-            for change in plan.changes:
-                print("      · " + change)
+            print("  - Skills：安装 / 同步控制面与 Dispatch（镜像 + 宿主分身）")
+            for label, plan in plans:
+                print(f"      · {label}")
+                for change in plan.changes:
+                    print("        · " + change)
     else:
-        print("  - Skill：" + muted("稍后手动安装"))
+        print("  - Skills：" + muted("稍后手动安装"))
 
 
 def _apply_setup_personal_preferences(preferences: SetupPersonalPreferences) -> str:
-    """Apply personal preferences; return Skill outcome for setup completion."""
+    """Apply personal preferences; return Skill-bundle setup outcome."""
     if preferences.check_enabled:
         set_update_enabled(True)
         set_auto_patch(preferences.auto_patch)
@@ -901,22 +955,37 @@ def _apply_setup_personal_preferences(preferences: SetupPersonalPreferences) -> 
         set_default_tool(preferences.default_tool)
     if not preferences.install_skill:
         return "skipped"
-    try:
-        plan = sync_managed_skill(yes=True, allow_first_install=True)
-    except DyroError as exc:
+    plans = []
+    failures = []
+    for integration, label in _MANAGED_SKILL_BUNDLE:
+        try:
+            plan = sync_managed_skill(
+                integration,
+                yes=True,
+                allow_first_install=True,
+            )
+        except DyroError as exc:
+            failures.append((integration, label, exc))
+            continue
+        if plan is not None:
+            plans.append((label, plan))
+    for integration, label, exc in failures:
         print(
             warning(
-                f"控制面 Skill 未安装成功：{exc}；"
-                "可稍后运行 dyro integration install skill --dry-run 排查。"
+                f"{label} Skill 未安装成功：{exc}；可稍后运行 "
+                f"dyro integration install {integration} --dry-run 排查。"
             )
         )
+    if failures:
         return "failed"
-    if plan is None:
-        print(muted("控制面 Skill 已是当前版本。"))
+    if not plans:
+        print(muted("Dyro Skills 已是当前版本。"))
         return "current"
-    print(success("已安装 / 同步控制面 Skill。"))
-    for change in plan.changes:
-        print("  - " + change)
+    print(success("已安装 / 同步 Dyro Skills。"))
+    for label, plan in plans:
+        print(f"  - {label}")
+        for change in plan.changes:
+            print("    - " + change)
     return "success"
 
 
@@ -1023,18 +1092,18 @@ def _print_setup_completion(
             tool = preferences.default_tool or "未设置"
             print(f"  - 编码工具：个人默认 {terminal_value(tool)}")
         if skill_outcome == "success":
-            print("  - Skill：已安装 / 同步")
+            print("  - Skills：已安装 / 同步")
         elif skill_outcome == "current":
-            print("  - Skill：" + muted("已是当前版本"))
+            print("  - Skills：" + muted("已是当前版本"))
         elif skill_outcome == "failed":
             print(
-                "  - Skill："
+                "  - Skills："
                 + warning(
-                    "安装未成功；可稍后运行 dyro integration install skill --dry-run"
+                    "安装未成功；可运行 dyro integration status skill / dispatch 排查"
                 )
             )
         else:
-            print("  - Skill：" + muted("未在 setup 中安装"))
+            print("  - Skills：" + muted("未在 setup 中安装"))
     print("下一步：" + terminal_value("dyro start"))
 
 
@@ -1910,6 +1979,7 @@ def cmd_integration_sync(args: argparse.Namespace) -> None:
     """Upgrade a managed Skill install; never performs a first-time install."""
     preview = args.dry_run or not args.yes
     plan = sync_managed_skill(
+        args.id,
         yes=args.yes,
         dry_run=preview,
         allow_first_install=False,
@@ -3729,7 +3799,7 @@ def build_parser() -> argparse.ArgumentParser:
     integration_status_parser = integration_sub.add_parser(
         "status", help="只读检查集成状态"
     )
-    integration_status_parser.add_argument("id", choices=("skill", "codex"))
+    integration_status_parser.add_argument("id", choices=INTEGRATION_CHOICES)
     integration_status_parser.add_argument(
         "--format", choices=("text", "json"), default="text"
     )
@@ -3744,8 +3814,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     integration_install_parser.add_argument(
         "id",
-        choices=("skill", "codex"),
-        help="skill 为 canonical id；codex 为兼容别名",
+        choices=INTEGRATION_CHOICES,
+        help="skill 为控制面 Skill；dispatch 为多 Harness 派发 Skill；codex 为兼容别名",
     )
     integration_install_parser.add_argument(
         "--yes", action="store_true", help="确认执行已预览的安装或升级"
@@ -3763,8 +3833,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     integration_sync_parser.add_argument(
         "id",
-        choices=("skill", "codex"),
-        help="skill 为 canonical id；codex 为兼容别名",
+        choices=INTEGRATION_CHOICES,
+        help="skill 为控制面 Skill；dispatch 为多 Harness 派发 Skill；codex 为兼容别名",
     )
     integration_sync_parser.add_argument(
         "--yes", action="store_true", help="确认执行已预览的同步或升级"
@@ -3779,7 +3849,7 @@ def build_parser() -> argparse.ArgumentParser:
     integration_uninstall_parser = integration_sub.add_parser(
         "uninstall", help="仅卸载仍匹配 ownership manifest 的资产"
     )
-    integration_uninstall_parser.add_argument("id", choices=("skill", "codex"))
+    integration_uninstall_parser.add_argument("id", choices=INTEGRATION_CHOICES)
     integration_uninstall_parser.add_argument(
         "--yes", action="store_true", help="确认卸载仍完整的自有资产"
     )
@@ -4402,7 +4472,7 @@ def _route_experiment_surface(raw: list[str]) -> tuple[str, list[str]] | None:
             selected_root = str(get_workspace(global_args.workspace_alias).root)
         if (
             selected_root
-            and dispatch_command in {"run", "panel"}
+            and dispatch_command in {"run", "panel", "batch-plan", "batch-start"}
             and not any(
                 token == "--project" or token.startswith("--project=")
                 for token in forwarded
@@ -4481,56 +4551,117 @@ def _fresh_dyro_argv(*cli_args: str) -> list[str]:
 
 
 def _refresh_skill_via_new_cli() -> None:
-    """Best-effort Skill sync using the freshly installed ``dyro`` entry point."""
-    argv = _fresh_dyro_argv("integration", "sync", "skill", "--yes")
-    print("正在同步已托管的控制面 Skill……")
+    """Best-effort Skill-bundle sync through the freshly installed CLI."""
+    requests = [("sync", "skill")]
     try:
-        completed = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
+        control_status = integration_status("skill")
+        dispatch_status = integration_status("dispatch")
+    except (DyroError, OSError, ValidationError):
+        control_status = None
+        dispatch_status = None
+    if control_status is not None and control_status.state in {
+        IntegrationState.CURRENT,
+        IntegrationState.OUTDATED,
+    }:
+        # Existing control-plane ownership is the user's one-time opt-in to the
+        # first-party Skill bundle. Install a newly shipped companion safely.
+        requests.append(("install", "dispatch"))
+    elif dispatch_status is not None and dispatch_status.state in {
+        IntegrationState.CURRENT,
+        IntegrationState.OUTDATED,
+    }:
+        requests.append(("sync", "dispatch"))
+
+    print("正在同步已托管的 Dyro Skills……")
+    for action, integration in requests:
+        argv = _fresh_dyro_argv(
+            "integration",
+            action,
+            integration,
+            "--yes",
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        print(warning(f"Skill 同步未完成：{exc}；下次启动将重试。"))
-        return
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        message = "Skill 同步未完成"
-        if detail:
-            message += f"：{detail}"
-        print(warning(message + "；下次启动将重试。"))
-        return
-    output = (completed.stdout or "").strip()
-    if output:
-        print(output)
+        try:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(
+                warning(
+                    f"{integration} Skill 同步未完成：{exc}；下次启动将重试。"
+                )
+            )
+            continue
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            message = f"{integration} Skill 同步未完成"
+            if detail:
+                message += f"：{detail}"
+            print(warning(message + "；下次启动将重试。"))
+            continue
+        output = (completed.stdout or "").strip()
+        if output:
+            print(output)
 
 
 def _maybe_sync_managed_skill() -> None:
-    """Auto-repair OUTDATED managed Skill installs on interactive launch."""
-    try:
-        status = integration_status("skill")
-    except (DyroError, OSError, ValidationError):
-        return
-    if status.state is not IntegrationState.OUTDATED:
-        return
-    print("\n检测到控制面 Skill 可升级，正在自动同步……")
-    try:
-        plan = sync_managed_skill(yes=True, allow_first_install=False)
-    except DyroError as exc:
-        print(
-            warning(
-                f"Skill 自动同步未完成：{exc}；"
-                "可运行 dyro integration sync skill --dry-run 查看详情。"
-            )
+    """Auto-repair the opted-in Skill bundle on interactive launch."""
+    statuses = {}
+    for integration, _label in _MANAGED_SKILL_BUNDLE:
+        try:
+            statuses[integration] = integration_status(integration)
+        except (DyroError, OSError, ValidationError):
+            continue
+    control_status = statuses.get("skill")
+    control_opted_in = (
+        control_status is not None
+        and control_status.state
+        in {IntegrationState.CURRENT, IntegrationState.OUTDATED}
+    )
+    candidates = []
+    for integration, label in _MANAGED_SKILL_BUNDLE:
+        status = statuses.get(integration)
+        if status is None or _skill_status_blocks_automatic_change(status.state):
+            continue
+        allow_first_install = (
+            integration == "dispatch"
+            and status.state is IntegrationState.ABSENT
+            and control_opted_in
         )
+        if status.state is IntegrationState.OUTDATED or allow_first_install:
+            candidates.append((integration, label, allow_first_install))
+    if not candidates:
         return
-    if plan is None:
+
+    print("\n检测到 Dyro Skills 可自动安装 / 同步，正在处理……")
+    changed = []
+    for integration, label, allow_first_install in candidates:
+        try:
+            plan = sync_managed_skill(
+                integration,
+                yes=True,
+                allow_first_install=allow_first_install,
+            )
+        except DyroError as exc:
+            print(
+                warning(
+                    f"{label} Skill 自动同步未完成：{exc}；可运行 "
+                    f"dyro integration sync {integration} --dry-run 查看详情。"
+                )
+            )
+            continue
+        if plan is not None:
+            changed.append((label, plan))
+    if not changed:
         return
-    print(success("控制面 Skill 已同步到当前 Dyro 包。"))
-    for change in plan.changes:
-        print("  - " + change)
+    print(success("Dyro Skills 已同步到当前 Dyro 包。"))
+    for label, plan in changed:
+        print(f"  - {label}")
+        for change in plan.changes:
+            print("    - " + change)
 
 
 def main(argv: list[str] | None = None) -> None:

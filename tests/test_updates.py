@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from dyro import __version__
 from dyro.errors import DyroError, ValidationError
@@ -589,24 +589,135 @@ class DailyCliIntegrationTests(unittest.TestCase):
         from dyro.cli import _maybe_sync_managed_skill
         from dyro.integrations import IntegrationState, IntegrationStatus
 
-        status = IntegrationStatus(
-            "skill",
-            IntegrationState.OUTDATED,
-            Path("/tmp/mirror"),
-            Path("/tmp/manifest"),
-            "outdated",
-        )
+        statuses = {
+            "skill": IntegrationStatus(
+                "skill",
+                IntegrationState.OUTDATED,
+                Path("/tmp/mirror"),
+                Path("/tmp/manifest"),
+                "outdated",
+            ),
+            "dispatch": IntegrationStatus(
+                "dispatch",
+                IntegrationState.OUTDATED,
+                Path("/tmp/dispatch"),
+                Path("/tmp/dispatch.json"),
+                "outdated",
+            ),
+        }
         plan = Mock()
         plan.changes = ("升级镜像",)
         output = StringIO()
         with (
-            patch("dyro.cli.integration_status", return_value=status),
+            patch("dyro.cli.integration_status", side_effect=statuses.__getitem__),
             patch("dyro.cli.sync_managed_skill", return_value=plan) as sync,
             redirect_stdout(output),
         ):
             _maybe_sync_managed_skill()
-        sync.assert_called_once_with(yes=True, allow_first_install=False)
-        self.assertIn("控制面 Skill 已同步", output.getvalue())
+        self.assertEqual(
+            sync.call_args_list,
+            [
+                call("skill", yes=True, allow_first_install=False),
+                call("dispatch", yes=True, allow_first_install=False),
+            ],
+        )
+        self.assertIn("Dyro Skills 已同步", output.getvalue())
+
+    def test_startup_auto_installs_dispatch_for_managed_control_plane(self) -> None:
+        from dyro.cli import _maybe_sync_managed_skill
+        from dyro.integrations import IntegrationState, IntegrationStatus
+
+        statuses = {
+            "skill": IntegrationStatus(
+                "skill",
+                IntegrationState.CURRENT,
+                Path("/tmp/mirror"),
+                Path("/tmp/manifest"),
+                "current",
+            ),
+            "dispatch": IntegrationStatus(
+                "dispatch",
+                IntegrationState.ABSENT,
+                Path("/tmp/dispatch"),
+                Path("/tmp/dispatch.json"),
+                "absent",
+            ),
+        }
+        plan = Mock(changes=("创建 Dispatch Skill",))
+        output = StringIO()
+        with (
+            patch("dyro.cli.integration_status", side_effect=statuses.__getitem__),
+            patch("dyro.cli.sync_managed_skill", return_value=plan) as sync,
+            redirect_stdout(output),
+        ):
+            _maybe_sync_managed_skill()
+
+        sync.assert_called_once_with(
+            "dispatch", yes=True, allow_first_install=True
+        )
+        self.assertIn("自动安装 / 同步", output.getvalue())
+
+    def test_startup_does_not_first_install_skills_without_prior_opt_in(self) -> None:
+        from dyro.cli import _maybe_sync_managed_skill
+        from dyro.integrations import IntegrationState, IntegrationStatus
+
+        def absent(integration: str) -> IntegrationStatus:
+            return IntegrationStatus(
+                integration,
+                IntegrationState.ABSENT,
+                Path(f"/tmp/{integration}"),
+                Path(f"/tmp/{integration}.json"),
+                "absent",
+            )
+
+        with (
+            patch("dyro.cli.integration_status", side_effect=absent),
+            patch("dyro.cli.sync_managed_skill") as sync,
+        ):
+            _maybe_sync_managed_skill()
+
+        sync.assert_not_called()
+
+    def test_post_update_refresh_installs_dispatch_companion(self) -> None:
+        from dyro.cli import _refresh_skill_via_new_cli
+        from dyro.integrations import IntegrationState, IntegrationStatus
+
+        statuses = {
+            "skill": IntegrationStatus(
+                "skill",
+                IntegrationState.CURRENT,
+                Path("/tmp/control"),
+                Path("/tmp/control.json"),
+                "current",
+            ),
+            "dispatch": IntegrationStatus(
+                "dispatch",
+                IntegrationState.ABSENT,
+                Path("/tmp/dispatch"),
+                Path("/tmp/dispatch.json"),
+                "absent",
+            ),
+        }
+        completed = Mock(returncode=0, stdout="synced\n", stderr="")
+        with (
+            patch("dyro.cli.integration_status", side_effect=statuses.__getitem__),
+            patch(
+                "dyro.cli._fresh_dyro_argv",
+                side_effect=lambda *args: ["dyro", *args],
+            ) as argv,
+            patch("dyro.cli.subprocess.run", return_value=completed) as run,
+            redirect_stdout(StringIO()),
+        ):
+            _refresh_skill_via_new_cli()
+
+        self.assertEqual(
+            argv.call_args_list,
+            [
+                call("integration", "sync", "skill", "--yes"),
+                call("integration", "install", "dispatch", "--yes"),
+            ],
+        )
+        self.assertEqual(run.call_count, 2)
 
     def test_auto_patch_refresh_skips_same_turn_inprocess_skill_sync(self) -> None:
         """P0 regression: successful refresh must not be overwritten in-process."""
@@ -637,6 +748,7 @@ class DailyCliIntegrationTests(unittest.TestCase):
 
     def test_refresh_skill_uses_install_bound_argv(self) -> None:
         from dyro.cli import _fresh_dyro_argv, _refresh_skill_via_new_cli
+        from dyro.integrations import IntegrationState, IntegrationStatus
 
         argv = _fresh_dyro_argv("integration", "sync", "skill", "--yes")
         self.assertIn("integration", argv)
@@ -647,8 +759,16 @@ class DailyCliIntegrationTests(unittest.TestCase):
         )
 
         completed = Mock(returncode=0, stdout="synced\n", stderr="")
+        absent = IntegrationStatus(
+            "skill",
+            IntegrationState.ABSENT,
+            Path("/tmp/mirror"),
+            Path("/tmp/manifest"),
+            "absent",
+        )
         output = StringIO()
         with (
+            patch("dyro.cli.integration_status", return_value=absent),
             patch("dyro.cli._fresh_dyro_argv", return_value=["dyro", "integration", "sync", "skill", "--yes"]),
             patch("dyro.cli.subprocess.run", return_value=completed) as run,
             redirect_stdout(output),

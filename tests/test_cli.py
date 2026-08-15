@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from dyro.cli import (
     _print_doctor_finding,
@@ -349,6 +349,8 @@ class CliTests(unittest.TestCase):
             "opencode",
             "hermes",
             "kimi",
+            "dsh",
+            "pi",
             "qodercli",
         }
         output = StringIO()
@@ -677,8 +679,46 @@ class CliTests(unittest.TestCase):
             outcome = _apply_setup_personal_preferences(preferences)
         set_enabled.assert_called_once_with(True)
         set_auto.assert_called_once_with(False)
-        sync.assert_called_once_with(yes=True, allow_first_install=True)
+        self.assertEqual(
+            sync.call_args_list,
+            [
+                call("skill", yes=True, allow_first_install=True),
+                call("dispatch", yes=True, allow_first_install=True),
+            ],
+        )
         self.assertEqual(outcome, "success")
+
+    def test_setup_skill_preference_offers_missing_dispatch_companion(self) -> None:
+        from dyro.cli import _setup_skill_preference
+        from dyro.integrations import AvatarStatus, IntegrationState, IntegrationStatus
+
+        statuses = {
+            "skill": IntegrationStatus(
+                "skill",
+                IntegrationState.CURRENT,
+                Path("/tmp/control"),
+                Path("/tmp/control.json"),
+                "current",
+                avatars=(
+                    AvatarStatus("codex", Path("/tmp/codex"), "current", "current"),
+                ),
+            ),
+            "dispatch": IntegrationStatus(
+                "dispatch",
+                IntegrationState.ABSENT,
+                Path("/tmp/dispatch"),
+                Path("/tmp/dispatch.json"),
+                "absent",
+                avatars=(
+                    AvatarStatus("codex", Path("/tmp/codex"), "missing", "missing"),
+                ),
+            ),
+        }
+        with (
+            patch("dyro.cli.integration_status", side_effect=statuses.__getitem__),
+            patch("builtins.input", return_value=""),
+        ):
+            self.assertTrue(_setup_skill_preference())
 
     def test_print_setup_completion_reflects_skill_failure(self) -> None:
         from dyro.cli import SetupPersonalPreferences, _print_setup_completion

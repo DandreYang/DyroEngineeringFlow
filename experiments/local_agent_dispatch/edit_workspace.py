@@ -6,7 +6,9 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
+import re
 import shutil
+from typing import Sequence
 
 from .bounded_process import run_bounded
 from .errors import DispatchValidationError
@@ -15,6 +17,7 @@ from .paths import edit_worktrees_dir, patches_dir
 
 GIT_TIMEOUT_SECONDS = 30.0
 MAX_PATCH_BYTES = 8 * 1024 * 1024
+_GIT_HEAD = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
 def _git(
@@ -25,16 +28,21 @@ def _git(
     max_output_bytes: int = MAX_PATCH_BYTES,
 ):
     environment = {
-        "PATH": os.environ.get("PATH", ""),
-        "HOME": os.environ.get("HOME", ""),
-        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
         "GIT_TERMINAL_PROMPT": "0",
     }
     completed = run_bounded(
         [
             "git",
+            "--no-optional-locks",
             "-c",
             "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
             "-C",
             str(project_root),
             *arguments,
@@ -56,6 +64,56 @@ def _git(
     return completed
 
 
+def review_edit_snapshot(
+    project_root: Path,
+    relative_paths: Sequence[str],
+) -> str:
+    """Return a clean reviewed HEAD for the exact tracked edit context."""
+    root = Path(project_root).resolve(strict=True)
+    top_level = Path(
+        _git(root, ["rev-parse", "--show-toplevel"]).stdout.strip()
+    ).resolve(strict=True)
+    if top_level != root:
+        raise DispatchValidationError(
+            "edit mode requires project_root to be the Git worktree root"
+        )
+    head = _git(root, ["rev-parse", "--verify", "HEAD"]).stdout.strip()
+    if _GIT_HEAD.fullmatch(head) is None:
+        raise DispatchValidationError(
+            "edit mode requires a Git project with a valid HEAD"
+        )
+    paths = sorted(relative_paths)
+    tracked = _git(
+        root,
+        ["ls-files", "-z", "--cached", "--", *paths],
+    ).stdout_bytes
+    tracked_paths = {
+        item.decode("utf-8") for item in tracked.split(b"\0") if item
+    }
+    if tracked_paths != set(paths):
+        raise DispatchValidationError(
+            "edit context must contain only files tracked at the reviewed HEAD"
+        )
+    status = _git(
+        root,
+        [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            *paths,
+        ],
+    ).stdout_bytes
+    if status:
+        raise DispatchValidationError(
+            "edit context differs from the reviewed Git HEAD"
+        )
+    if _git(root, ["rev-parse", "--verify", "HEAD"]).stdout.strip() != head:
+        raise DispatchValidationError("edit Git HEAD changed during review")
+    return head
+
+
 @dataclass
 class EditWorkspace:
     project_root: Path
@@ -70,6 +128,7 @@ class EditWorkspace:
         project_root: Path,
         home: Path | None,
         run_id: str,
+        base_head: str = "HEAD",
     ) -> EditWorkspace:
         project_root = Path(project_root).resolve(strict=True)
         top_level = Path(
@@ -93,7 +152,13 @@ class EditWorkspace:
         try:
             _git(
                 project_root,
-                ["worktree", "add", "--detach", str(worktree_root), "HEAD"],
+                [
+                    "worktree",
+                    "add",
+                    "--detach",
+                    str(worktree_root),
+                    base_head,
+                ],
             )
         except Exception:
             try:
@@ -116,6 +181,14 @@ class EditWorkspace:
     def seal_patch(self) -> str | None:
         if not self._created:
             raise DispatchValidationError("edit workspace was not created")
+        status = _git(
+            self.worktree_root,
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )
+        if b".dyro-dispatch-" in status.stdout_bytes:
+            raise DispatchValidationError(
+                "temporary dispatch input remains in edit workspace"
+            )
         _git(self.worktree_root, ["add", "--intent-to-add", "--all"])
         completed = _git(
             self.worktree_root,

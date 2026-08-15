@@ -38,9 +38,8 @@ Cancelling setup leaves both project files and update preferences untouched.
 which keeps scripts and CI free of user-level side effects.
 
 Set `DYRO_NO_UPDATE_CHECK=1` for a process-level opt-out without changing the
-saved preference. The same gate currently also skips the interactive startup
-repair of an outdated managed Skill (they share the daily-update launch
-filter).
+saved preference. The same gate currently also skips interactive startup repair
+of the managed Skill bundle (they share the daily-update launch filter).
 
 ## Installing an update
 
@@ -54,15 +53,16 @@ instructions returned by the network. The requirement is pinned to the version
 that was checked and Dyro verifies the installed distribution version after the
 command succeeds.
 
-## Control-plane Skill
+## First-party Skill bundle
 
-Interactive `dyro setup` can install the Skill during personal preferences
-(preview in the plan, applied only after confirmation). After a successful
-`dyro update` (or patch auto-update), Dyro best-effort syncs an **already
-managed** Skill via the fresh `dyro` entry point. On interactive
-`dyro` / `dyro home` / `dyro start` launches, an **outdated** managed Skill is
-repaired automatically. First-time install is never forced on upgrade or
-startup; use setup or:
+Interactive `dyro setup` can install the first-party Skill bundle during
+personal preferences (preview in the plan, applied only after confirmation).
+After a successful `dyro update` or patch auto-update, Dyro best-effort syncs
+the managed bundle through the fresh `dyro` entry point. Interactive `dyro`,
+`dyro home`, and `dyro start` launches also repair outdated managed Skills.
+The control-plane opt-in covers first-party companions, so an existing managed
+control plane automatically gains `dyro-dispatch`. A machine with no prior Dyro
+Skill ownership remains untouched. Manual control-plane commands are:
 
 ```bash
 dyro integration install skill --dry-run
@@ -71,6 +71,19 @@ dyro integration sync skill --yes   # upgrade-only; skips absent installs
 ```
 
 (`codex` is an alias for `skill`.)
+
+The outbound `dyro-dispatch` Skill keeps independent ownership state from the
+read-only control-plane Skill. One `dyro setup` opt-in installs both. An existing
+managed control-plane installation also gains the Dispatch companion on the next
+interactive launch or post-update refresh; after that, both stay synchronized.
+Hosts with no prior Dyro Skill opt-in remain untouched. Manual lifecycle commands
+are still available:
+
+```bash
+dyro integration install dispatch --dry-run
+dyro integration install dispatch --yes
+dyro integration sync dispatch --yes
+```
 
 Editable source installations are deliberately rejected. Update those through
 their Git checkout so a convenience command cannot replace a development

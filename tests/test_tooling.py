@@ -10,12 +10,14 @@ import unittest
 from unittest.mock import patch
 
 from dyro.errors import DyroError, ValidationError
+from dyro.profile import launchable_preset_ids, preset_adapter
 from dyro.tooling import (
     ToolPreferences,
     install_tool,
     load_tool_preferences,
     save_tool_preferences,
     tool_definition,
+    tool_runtime_issue,
 )
 
 
@@ -59,10 +61,30 @@ class GuidedInstallerTests(unittest.TestCase):
         antigravity = tool_definition("antigravity")
         codex_desktop = tool_definition("codex-desktop")
         claude_desktop = tool_definition("claude-desktop")
+        dsh = tool_definition("dsh")
+        pi = tool_definition("pi")
         qoder = tool_definition("qoder")
         zcode = tool_definition("zcode")
 
         self.assertEqual(antigravity.command if antigravity else "", "agy")
+        self.assertEqual(dsh.command if dsh else "", "dsh")
+        self.assertEqual(dsh.launch if dsh else (), ("dsh", "web"))
+        self.assertEqual(
+            dsh.install.argv if dsh and dsh.install else (),
+            ("npm", "install", "-g", "@deepseek-ai/dsh@latest"),
+        )
+        self.assertEqual(pi.command if pi else "", "pi")
+        self.assertEqual(pi.launch if pi else (), ("pi",))
+        self.assertEqual(
+            pi.install.argv if pi and pi.install else (),
+            (
+                "npm",
+                "install",
+                "-g",
+                "--ignore-scripts",
+                "@earendil-works/pi-coding-agent@latest",
+            ),
+        )
         self.assertEqual(qoder.command if qoder else "", "qodercli")
         self.assertEqual(zcode.interface if zcode else "", "desktop")
         self.assertEqual(codex_desktop.interface if codex_desktop else "", "desktop")
@@ -70,6 +92,18 @@ class GuidedInstallerTests(unittest.TestCase):
         self.assertEqual(
             qoder.install.argv if qoder and qoder.install else (),
             ("npm", "install", "-g", "@qoder-ai/qodercli"),
+        )
+        self.assertNotIn("dsh", launchable_preset_ids())
+        self.assertNotIn("pi", launchable_preset_ids())
+        with self.assertRaisesRegex(ValidationError, "任务 adapter"):
+            preset_adapter("dsh", "dsh")
+        with self.assertRaisesRegex(ValidationError, "任务 adapter"):
+            preset_adapter("pi", "pi")
+
+        self.assertEqual(pi.runtime.command if pi and pi.runtime else "", "node")
+        self.assertEqual(
+            pi.runtime.minimum_version if pi and pi.runtime else (),
+            (22, 19, 0),
         )
 
     def test_command_recipe_is_explicit_argv_and_requires_confirmation(self) -> None:
@@ -172,6 +206,78 @@ class GuidedInstallerTests(unittest.TestCase):
             self.assertRaisesRegex(DyroError, "版本验证失败"),
         ):
             install_tool("openclaw", yes=True, dry_run=False, run=run)
+
+    def test_pi_installation_rejects_incompatible_node_before_mutation(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def run(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout="v22.15.1\n")
+
+        executables = {"npm": "/fake/npm", "node": "/fake/node"}
+        with (
+            patch(
+                "dyro.tooling.shutil.which",
+                side_effect=lambda name: executables.get(name),
+            ),
+            self.assertRaisesRegex(DyroError, "Node.js >= 22.19.0"),
+        ):
+            install_tool("pi", yes=True, dry_run=False, run=run)
+
+        self.assertEqual(calls, [("/fake/node", "--version")])
+
+    def test_pi_runtime_probe_captures_the_default_node_version_output(self) -> None:
+        pi = tool_definition("pi")
+        self.assertIsNotNone(pi)
+        completed = subprocess.CompletedProcess(
+            ("/fake/node", "--version"),
+            0,
+            stdout="v22.19.0\n",
+        )
+        with (
+            patch("dyro.tooling.shutil.which", return_value="/fake/node"),
+            patch("dyro.tooling.subprocess.run", return_value=completed) as run,
+        ):
+            issue = tool_runtime_issue(pi)
+
+        self.assertEqual(issue, "")
+        self.assertTrue(run.call_args.kwargs["text"])
+        self.assertEqual(run.call_args.kwargs["stderr"], subprocess.STDOUT)
+
+    def test_pi_installation_accepts_compatible_node_and_verifies_tool(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def run(argv: tuple[str, ...], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            stdout = "v22.19.0\n" if argv == ("/fake/node", "--version") else ""
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout)
+
+        executables = {
+            "npm": "/fake/npm",
+            "node": "/fake/node",
+            "pi": "/fake/pi",
+        }
+        with patch(
+            "dyro.tooling.shutil.which",
+            side_effect=lambda name: executables.get(name),
+        ):
+            installed = install_tool("pi", yes=True, dry_run=False, run=run)
+
+        self.assertTrue(installed)
+        self.assertEqual(
+            calls,
+            [
+                ("/fake/node", "--version"),
+                (
+                    "/fake/npm",
+                    "install",
+                    "-g",
+                    "--ignore-scripts",
+                    "@earendil-works/pi-coding-agent@latest",
+                ),
+                ("/fake/pi", "--version"),
+            ],
+        )
 
     def test_unknown_install_recipe_fails_closed(self) -> None:
         with self.assertRaisesRegex(DyroError, "没有内置安装方案"):

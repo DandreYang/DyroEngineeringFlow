@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dyro"
-version = "0.6.7"
+version = "0.6.8"
 description = "DyroEngineeringFlow: local-first automation and delivery control for multi-repository teams"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -62,6 +62,8 @@ packages = [
 "dyro.integrations" = [
   "assets/dyro-control-plane/SKILL.md",
   "assets/dyro-control-plane/agents/openai.yaml",
+  "assets/dyro-dispatch/SKILL.md",
+  "assets/dyro-dispatch/agents/openai.yaml",
 ]
 
 [tool.unittest]
