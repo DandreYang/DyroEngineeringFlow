@@ -61,7 +61,7 @@ max_actions = 20
 max_attempts_per_task = 2
 max_failures = 3
 max_no_progress_cycles = 2
-max_parallel = 1
+max_parallel = 3
 deadline = "2026-10-02T12:00:00Z"
 ```
 

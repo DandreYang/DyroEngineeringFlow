@@ -1984,6 +1984,72 @@ def run_gates(config: Config, task: Task, *, dry_run: bool = False) -> bool:
     return all_passed
 
 
+def _resolve_run_executor(task: Task, executor_override: str | None) -> str:
+    from .peer_wave import (
+        AUTO_EXECUTOR,
+        bind_wave_executors,
+        discover_available_write_providers,
+    )
+
+    if executor_override:
+        return executor_override
+    if task.executor != AUTO_EXECUTOR:
+        return task.executor
+    decision = bind_wave_executors((task,), discover_available_write_providers())
+    chosen = decision.executor_for(task.id)
+    if chosen is None:
+        reason = (
+            decision.deferred[0].reason
+            if decision.deferred
+            else "无法绑定 auto executor"
+        )
+        raise ValidationError(reason)
+    return chosen
+
+
+def _execute_task_agent(
+    config: Config,
+    task: Task,
+    *,
+    workspace: Path,
+    prompt: str,
+    log_name: str,
+    dry_run: bool,
+    executor_override: str | None = None,
+) -> object:
+    from .peer_wave import assert_write_executor_allowed
+    from .task_dispatch import is_dispatch_write_ready, run_task_bound_dispatch
+
+    executor = _resolve_run_executor(task, executor_override)
+    if task.risk == "write":
+        assert_write_executor_allowed(executor, risk=task.risk)
+    if is_dispatch_write_ready(executor):
+        result = run_task_bound_dispatch(
+            task,
+            executor=executor,
+            workspace=workspace,
+            prompt=prompt,
+            timeout_seconds=float(task.timeout_minutes * 60),
+            dry_run=dry_run,
+        )
+    elif executor in config.adapters:
+        argv = _adapter_argv(
+            config,
+            executor,
+            "write" if task.risk == "write" else "read",
+            workspace=workspace,
+            prompt=prompt,
+            task=task,
+        )
+        result = run(
+            argv, cwd=workspace, timeout=task.timeout_minutes * 60, dry_run=dry_run
+        )
+    else:
+        raise ValidationError(f"任务 {task.id} 使用的 Agent adapter 未配置：{executor}")
+    _capture(task, log_name, result.stdout, dry_run=dry_run)
+    return result
+
+
 def run_task(
     config: Config,
     task: Task,
@@ -1991,11 +2057,14 @@ def run_task(
     dry_run: bool = False,
     legacy_scheduler: bool = False,
     expected_contract_sha256: str | None = None,
+    executor_override: str | None = None,
 ) -> str:
     _require_local_execution(config, "任务", dry_run=dry_run)
     if dry_run:
         _assert_expected_task_contract(task, expected_contract_sha256)
-        return _run_task(config, task, dry_run=True)
+        return _run_task(
+            config, task, dry_run=True, executor_override=executor_override
+        )
     with exclusive_lock(_execution_lock_path(task), timeout_seconds=1.0):
         try:
             _reserve_local_execution(
@@ -2020,12 +2089,23 @@ def run_task(
             config,
             task,
             attempt,
-            lambda: _run_task(config, task, dry_run=False, reserved=True),
+            lambda: _run_task(
+                config,
+                task,
+                dry_run=False,
+                reserved=True,
+                executor_override=executor_override,
+            ),
         )
 
 
 def _run_task(
-    config: Config, task: Task, *, dry_run: bool, reserved: bool = False
+    config: Config,
+    task: Task,
+    *,
+    dry_run: bool,
+    reserved: bool = False,
+    executor_override: str | None = None,
 ) -> str:
     if not reserved:
         _reserve_local_execution(
@@ -2042,25 +2122,22 @@ def _run_task(
         if not dry_run:
             set_status(config, task, "failed")
         raise
-    argv = _adapter_argv(
+    result = _execute_task_agent(
         config,
-        task.executor,
-        "write" if task.risk == "write" else "read",
+        task,
         workspace=workspace,
         prompt=_prompt(task, "executor", workspace),
-        task=task,
+        log_name="executor.log",
+        dry_run=dry_run,
+        executor_override=executor_override,
     )
-    result = run(
-        argv, cwd=workspace, timeout=task.timeout_minutes * 60, dry_run=dry_run
-    )
-    _capture(task, "executor.log", result.stdout, dry_run=dry_run)
     if not dry_run:
         ledger(
             config,
             task.id,
             "executor",
             agent=task.executor,
-            argv=list(argv),
+            argv=list(result.argv),
             exit_code=result.code,
         )
     if result.code != 0:
@@ -2332,18 +2409,14 @@ def _answer_task(
         if not dry_run:
             set_status(config, task, "failed")
         raise
-    argv = _adapter_argv(
+    result = _execute_task_agent(
         config,
-        task.executor,
-        "write" if task.risk == "write" else "read",
+        task,
         workspace=workspace,
         prompt=_prompt(task, "continuation", workspace),
-        task=task,
+        log_name="executor-continuation.log",
+        dry_run=dry_run,
     )
-    result = run(
-        argv, cwd=workspace, timeout=task.timeout_minutes * 60, dry_run=dry_run
-    )
-    _capture(task, "executor-continuation.log", result.stdout, dry_run=dry_run)
     if result.code != 0:
         set_status(config, task, "failed", dry_run=dry_run)
         return "failed"
@@ -3033,6 +3106,7 @@ timeout_minutes = 60
 review_timeout_minutes = 45
 depends_on = []
 blocked_on = []
+# Overlapping slices must share a conflict_group; distinct slices stay parallel.
 conflict_group = ""
 
 [executor]

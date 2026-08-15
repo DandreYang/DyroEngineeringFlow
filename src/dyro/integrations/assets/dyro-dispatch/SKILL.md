@@ -1,6 +1,6 @@
 ---
 name: dyro-dispatch
-description: Plan and dispatch bounded work to multiple local coding-agent harnesses through Dyro, then collect and reconcile their advisory results. Use when the user explicitly asks to parallelize, delegate, obtain independent reviews, compare multiple harnesses, or split a task across agents; use isolated edit mode only when the user also authorizes project changes.
+description: Plan and dispatch bounded advisory work to local coding-agent harnesses, or help split delivery work into parallel Core tasks. Use when the user explicitly asks to parallelize, delegate, compare harnesses, or obtain independent opinions. Default write-parallel work is Core peer wave (task worktrees), not one writer plus watchers.
 ---
 
 # Dyro Dispatch
@@ -14,8 +14,9 @@ Treat `dyro dispatch` as an outbound harness, separate from the read-only
   multi-harness, or independent-agent work. A Skill trigger alone is not consent.
 - Treat Provider execution as a local-state, process, and potentially network or
   usage-billed effect even when the delegated task is read-only.
-- Use `mode=edit` only when the user also authorizes code changes. Edit runs must
-  remain in detached worktrees and may return only a patch reference.
+- Use `mode=edit` only when the user also authorizes code changes. Scratch
+  `dispatch run --mode edit` stays in a detached worktree and returns a patch
+  reference. Delivery writes go to a Core task worktree, not a scratch tree.
 - Never merge, push, commit, signoff, release, publish, import production
   evidence, or represent a dispatch result as a Dyro gate.
 - Never enable `echo` as a fallback. It is an explicit offline simulation, not a
@@ -46,16 +47,20 @@ Treat `dyro dispatch` as an outbound harness, separate from the read-only
 
 2. Choose the smallest useful strategy:
 
+   - Simultaneous writes on different slices: split into N Core tasks with
+     honest `conflict_group` values and distinct `executor` agents, then use
+     `task daemon --parallel` or an Objective `max_parallel` wave. Every wave
+     member is an executor. Do not park extra harnesses as live supervisors.
    - Independent opinions on one question: use `panel`.
    - An explicitly requested full-harness comparison: use `panel --members all`;
      it selects every ready Provider and executes at most four concurrently.
-   - Different roles or repository slices: use a persistent Batch V1 request.
-     It supports two to four independent members and at most one edit writer.
-   - One delegated task: use one asynchronous `run`.
-   - Review: prefer a finder plus an adversarial verifier.
-   - Edit: use exactly one writer for an overlapping repository/fileset, followed
-     by an independent verifier.
-   - Keep the default fan-out at two or three runs and never exceed the dispatch
+   - Different advisory roles that are not yet tasks: use Batch V1. It remains
+     independent fan-out with at most one scratch edit writer.
+   - One delegated scratch task: use one asynchronous `run`.
+   - Review of finished work is the Core task `reviewer` phase on frozen HEADs,
+     or a later independent `run`. It is not a sibling watching a live writer.
+   - Cursor cannot join a write wave; its edit path stays fail-closed.
+   - Keep advisory fan-out at two or three runs and never exceed the dispatch
      global limit.
 
 3. Build one self-contained TaskContract per role. Include `schema_version=1`,

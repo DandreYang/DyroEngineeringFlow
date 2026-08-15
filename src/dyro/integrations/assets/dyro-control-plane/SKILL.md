@@ -22,7 +22,7 @@ When the request already supplies a workspace alias, skip global discovery and u
 - Objective explanation: `dyro --workspace <alias> objective explain <id> --format json`
 - Objective blockers or human attention: `dyro --workspace <alias> objective attention <id> --format json`
 - Objective dependency graph: `dyro --workspace <alias> objective graph <id> --format json`
-- Objective next-wave preview: `dyro --workspace <alias> objective tick <id> --format json`
+- Objective next-wave preview: `dyro --workspace <alias> objective tick <id> --format json`. Treat `peer_wave.executor_bindings` as the intended peer executors for that wave, and `peer_wave.warnings` as missing `conflict_group` or harness-capacity notes. A wave member is an executor, not a live supervisor.
 - Objective plan: `dyro --workspace <alias> objective plan <id> --format json`
 
 Use only an existing Objective or Change Set ID returned by Dyro or supplied by the user. A non-zero exit, unavailable workspace, pending transaction, failed finding, missing field, or partial observation is unknown or blocked—not ready.

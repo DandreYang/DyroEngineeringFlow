@@ -78,7 +78,7 @@ docs/reviews/YYYY-MM-DD-<topic>-adversarial-board.md
 
 | 规则 | 说明 |
 | --- | --- |
-| 一仓一 branch 同时仅一个写 agent | 并行写同一 checkout 会导致已验证修复被静默覆盖 |
+| 一棵 task worktree / 同一 `conflict_group` 同时仅一个写 agent | 并行写同一 checkout 会覆盖已验证修复；不同 task 树或不同冲突组可以同时写 |
 | 改前 `git log -5 -- <path>` | 避免回退到已废弃的 workaround |
 | 精确 stage | 禁止盲目 `git add .`；同文件无关 hunk 必须拆分 |
 | 「验证后又坏了」 | 先查是否有后续 commit 覆盖，再查运行时 |
@@ -112,5 +112,5 @@ docs/reviews/YYYY-MM-DD-<topic>-adversarial-board.md
 5. 验证者是否被要求「打开真产物并尝试证伪」？  
 6. 若 resume：substrate 是否变化？  
 7. 是否声明缩放妥协？  
-8. 写路径是否保证单写 agent？  
-9. 结果是否只回收摘要/契约字段，而非完整事件流？  
+8. 写路径是否保证每棵 task worktree / 每个 conflict_group 只有一个写 agent，且波次成员都是执行位？
+9. 结果是否只回收摘要/契约字段，而非完整事件流？

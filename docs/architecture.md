@@ -234,4 +234,4 @@ Dyro 的交付拓扑与之**实质相近**：TaskGraph（`depends_on` / conflict
 
 未来的 adapter、通知、签名规则、发布平台与审批系统应使用 Python entry point 或独立 Profile 扩展包接入；不要把某个组织的策略加入 core 默认行为。
 
-开发者侧的可选本地多 Agent 派发（五段式任务契约、注入前机密守卫、locator 核验、隔离 patch）与上述控制面分层并列，随 `dyro` 安装包分发（`dyro dispatch` / `import experiments.local_agent_dispatch`），但**不**替代 gates/合并；见 [`ADR-0002`](adr/0002-optional-local-agent-dispatch.md)、[`多智能体编排纪律`](agent-orchestration-discipline.md) 与 [`可选本地 Agent 派发设计`](designs/optional-local-agent-dispatch.md)。
+开发者侧的可选本地多 Agent 派发（五段式任务契约、注入前机密守卫、locator 核验、隔离 patch）与上述控制面分层并列，随 `dyro` 安装包分发（`dyro dispatch` / `import experiments.local_agent_dispatch`），但**不**替代 gates/合并。同时写多块走 Core Peer Wave（task worktree + `conflict_group`），见 [`peer-wave-execution.md`](designs/peer-wave-execution.md)、[`ADR-0002`](adr/0002-optional-local-agent-dispatch.md)、[`多智能体编排纪律`](agent-orchestration-discipline.md) 与 [`可选本地 Agent 派发设计`](designs/optional-local-agent-dispatch.md)。

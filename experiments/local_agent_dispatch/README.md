@@ -53,9 +53,10 @@ python3 -m experiments.local_agent_dispatch doctor
 
 State home: `~/.dyro/local-agent-dispatch/` (override with `--home` or `DYRO_LOCAL_AGENT_DISPATCH_HOME`).
 
-Batch V1 accepts two to four independent member contracts, resolves installed
-Provider candidates without starting authentication CLIs, and allows at most one
-edit writer. `batch-start` actively authenticates every selected Provider before
+Batch V1 is the advisory plane: two to four independent member contracts,
+installed Provider candidates without starting authentication CLIs, and at most
+one scratch edit writer. Simultaneous delivery writes use Core peer wave
+(`docs/designs/peer-wave-execution.md`), not a second Batch writer. `batch-start` actively authenticates every selected Provider before
 creating state. Its reviewed
 plan digest binds the canonical project root, normalized contracts, Provider
 choices and non-secret execution profiles, guarded context digests, timeouts, and

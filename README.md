@@ -298,8 +298,10 @@ preview with `dyro integration install dispatch --dry-run`, then install with
 For two to four different roles, `dyro dispatch batch-plan` produces a
 side-effect-free, context-bound plan. Review its digest before
 `batch-start --expect-plan-sha256 …`, then recover through `batch-status`,
-`batch-result`, or `batch-cancel`. Batch V1 is independent fan-out with at most
-one edit writer; it is not a dependency DAG, retry queue, or automatic judge.
+`batch-result`, or `batch-cancel`. Batch V1 is advisory independent fan-out with
+at most one scratch edit writer; it is not the delivery write plane, a
+dependency DAG, retry queue, or automatic judge. Simultaneous writes use Core
+peer wave: one executor per task worktree, serialized only by `conflict_group`.
 Use explicit synchronous `panel --members all` only for a full-ready-Provider
 same-task comparison.
 
