@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.9 - 2026-08-15
+
 - Make multi-harness writes a Core peer wave: each task worktree has one
   executor, overlapping slices share a `conflict_group`, and wave members are
   not live supervisors. Objective budgets now default to `max_parallel = 3`;
