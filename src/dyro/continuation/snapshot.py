@@ -67,6 +67,7 @@ class SchedulerSnapshot:
     objective_requested_mode: str = ""
     objective_operations: tuple[str, ...] = ()
     objective_drifted: bool = False
+    decayed_merge_subjects: tuple[str, ...] = ()
 
     @property
     def tasks_by_id(self) -> dict[str, SchedulerTaskSnapshot]:
@@ -192,6 +193,7 @@ def build_scheduler_snapshot(
     objective: StoredObjective | None = None,
     candidates: Iterable[Task] | None = None,
     inspect_integration: bool = True,
+    inspect_proofs: bool | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> SchedulerSnapshot:
     """Read the task graph exactly once and publish canonical, immutable facts."""
@@ -200,6 +202,8 @@ def build_scheduler_snapshot(
     if issues:
         details = "; ".join(issue.message for issue in issues[:5])
         raise ValidationError(f"任务图结构无效：{details}")
+    if inspect_proofs is None:
+        inspect_proofs = inspect_integration
     observed_at = _utc(clock())
     known_tasks = tuple(sorted(graph.known_tasks, key=lambda item: item.id))
     known_by_id = {task.id: task for task in known_tasks}
@@ -272,6 +276,13 @@ def build_scheduler_snapshot(
             )
         )
     ).hexdigest()
+    decayed_subjects: tuple[str, ...] = ()
+    if inspect_proofs:
+        done_tasks = tuple(item.task for item in tasks if item.status == "done")
+        if done_tasks:
+            from ..proof.evaluate import decayed_merge_subjects
+
+            decayed_subjects = decayed_merge_subjects(config, done_tasks)
     return SchedulerSnapshot(
         observed_at=observed_at,
         tasks=tasks,
@@ -287,4 +298,5 @@ def build_scheduler_snapshot(
         objective_requested_mode="" if objective is None else objective.objective.requested_mode.value,
         objective_operations=() if objective is None else tuple(item.value for item in objective.objective.operations),
         objective_drifted=objective_drifted,
+        decayed_merge_subjects=decayed_subjects,
     )

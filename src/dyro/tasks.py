@@ -629,6 +629,8 @@ def _schedule_block_reason(reason: str, facts: dict[str, str]) -> str:
         return f"任务与活跃任务 {facts.get('active_task_ids', '')} 共用冲突组 {facts.get('conflict_group', '')}"
     if reason == "EXTERNAL_CLAIM_ACTIVE":
         return "任务已有有效的外部执行 claim"
+    if reason == "PROOF_DECAYED":
+        return "任务的 merge 绑定已衰减（PROOF_DECAYED），当前工作区无法按原复核合并"
     return reason
 
 
@@ -1174,6 +1176,9 @@ def _adapter_argv(config: Config, agent: str, mode: str, *, workspace: Path, pro
         adapter = config.adapters[agent]
     except KeyError as exc:
         raise ValidationError(f"任务 {task.id} 使用的 Agent adapter 未配置：{agent}") from exc
+    card = getattr(config, "capabilities", {}).get(agent)
+    if card is not None and mode == "write" and "execute" not in getattr(card, "intents", ()):
+        raise DyroError(f"Capability {agent} 未授予 execute，不能作为任务执行器")
     template = adapter.write if mode == "write" else adapter.read
     return expand_argv(template, workspace=workspace, root=config.root, prompt=prompt, task=task.id, line=task.line)
 
@@ -2056,10 +2061,10 @@ def merge_task(config: Config, task: Task, *, push: bool = False, dry_run: bool 
         raise DyroError(f"仅 done 任务可合并：{task.id}")
     if not _valid_review_acceptance(config, task):
         raise DyroError(
-            "仅具有有效的独立复核、当前回执与任务 HEAD 绑定的 done 任务可合并"
+            "仅具有有效的独立复核、当前回执与任务 HEAD 绑定的 done 任务可合并（PROOF_DECAYED）"
         )
     if config.policy.require_external_signoff and not _valid_external_signoff(config, task):
-        raise DyroError("当前 Profile 要求有效的外部签收后才能合并")
+        raise DyroError("当前 Profile 要求有效的外部签收后才能合并（PROOF_DECAYED）")
     _merge_task_repositories(config, task, push=push, dry_run=dry_run)
 
 

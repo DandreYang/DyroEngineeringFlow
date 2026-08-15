@@ -311,6 +311,7 @@ def _kind_for_blocked(action: PlannedAction) -> AttentionKind:
         ReasonCode.OBJECTIVE_SCOPE_CONFLICT,
         ReasonCode.ACTIVATION_REQUIRED,
         ReasonCode.POLICY_DISALLOWS_OPERATION,
+        ReasonCode.PROOF_DECAYED,
     }:
         return AttentionKind.NEEDS_USER
     if action.reason in {

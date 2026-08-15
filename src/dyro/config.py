@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import re
 import tomllib
@@ -71,6 +71,7 @@ class Config:
     adapters: dict[str, Adapter]
     policy: Policy
     recommended_tool: str = ""
+    capabilities: dict[str, object] = field(default_factory=dict)
 
     @property
     def task_specs_dir(self) -> Path:
@@ -250,6 +251,10 @@ def load(root: Path | None = None) -> Config:
         write = _argv(entry.get("write", entry.get("command")), f"adapters.{adapter_id}.write")
         launch = _argv(entry.get("launch", entry.get("command", entry.get("write"))), f"adapters.{adapter_id}.launch")
         adapters[adapter_id] = Adapter(adapter_id, launch, read, write)
+    from .capability.cards import merge_capability_plane, parse_capability_tables
+
+    cards = parse_capability_tables(raw.get("capabilities"))
+    adapters, cards = merge_capability_plane(adapters, cards)
     return Config(
         workspace,
         name,
@@ -258,6 +263,7 @@ def load(root: Path | None = None) -> Config:
         adapters,
         policy,
         recommended_tool,
+        cards,
     )
 
 

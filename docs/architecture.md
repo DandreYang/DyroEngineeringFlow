@@ -215,6 +215,13 @@ Ed25519 信任根位于 `.dyro/trust/ed25519/execution/`、`.dyro/trust/ed25519/
 11. Change Set 只记录干净开发线的精确提交组合；`changeset verify` 会拒绝 dirty、分支或 HEAD 漂移。具体发布平台、promotion 与 forward-port 由 Profile 扩展执行并回写其证据。
 12. 下游调度不仅要求依赖任务为 `done`，还要求依赖的逐仓 task HEAD 已进入所属开发线；状态完成不能代替代码集成。
 13. 外部执行的后续 attempt 必须继承同一 run、递增 attempt number，并绑定前一 attempt 与回答摘要；同一编号不可被不同证据重写。
+14. 任何界面或宿主投影不得把 decayed / inconclusive Proof 显示为通过。
+15. Capability Card 缺少 `cannot_prove` 时，默认至少包含 `done` 与 `merge`。
+16. Host Compiler 的输出哈希必须可重算；手改投影在 doctor 中失败，不在运行时「尽量兼容」。
+17. Proof Bundle 不得包含工作区绝对路径、remote URL 中的凭据、adapter 环境、prompt 或 answer。
+18. `verify-bundle` 在缺 procedure、缺 substrate、缺调用方 git 对象、或缺已声明的签名密钥时返回 `inconclusive`，退出码与 `live` 区分。捆内不塞 git 对象。该 `live` 是完整性结论，不是「现在能否 merge」。
+19. 发现到的未审计命令不得写入可执行 Card，也不得被 Objective 自动选中。
+20. 密钥缺席：Card 不得声明看起来像秘密的环境变量名；需要认证的工具使用用户已登录的本机 CLI 会话，或独立的本机经纪，不把 token 写进 Profile。
 
 ## 与 Graph Engineering 的关系（可选读）
 
@@ -233,5 +240,7 @@ Dyro 的交付拓扑与之**实质相近**：TaskGraph（`depends_on` / conflict
 ## 扩展路线
 
 未来的 adapter、通知、签名规则、发布平台与审批系统应使用 Python entry point 或独立 Profile 扩展包接入；不要把某个组织的策略加入 core 默认行为。
+
+`0.7` 起先把已有证据物理学抽成可复验的 Proof（衰减与现有 merge / 下游检查同真值；`proof verify` 看当前工作区，`verify-bundle` 只核完整性，两套结论不得混称）。`0.8` 再把 argv adapter 升级为 Capability Card，并做 Console Proof 只读展示。`0.9` 把定律编译为只收缩权威的宿主投影。`1.0` 的可携带核验是 Proof Bundle 加调用方提供的 git 对象，核验完整性而不是身份，也不承诺与当前 merge 同一套 `live`。这不另造 TaskGraph 或完成状态机；见 [`交付物理学`](designs/delivery-physics.md) 与 [`ADR-0006`](adr/0006-delivery-physics-and-capability-plane.md)。
 
 开发者侧的可选本地多 Agent 派发（五段式任务契约、注入前机密守卫、locator 核验、隔离 patch）与上述控制面分层并列，随 `dyro` 安装包分发（`dyro dispatch` / `import experiments.local_agent_dispatch`），但**不**替代 gates/合并；见 [`ADR-0002`](adr/0002-optional-local-agent-dispatch.md)、[`多智能体编排纪律`](agent-orchestration-discipline.md) 与 [`可选本地 Agent 派发设计`](designs/optional-local-agent-dispatch.md)。

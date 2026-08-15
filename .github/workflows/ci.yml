@@ -88,6 +88,7 @@ jobs:
           "$smoke_root/sdist-venv/bin/pip" install /tmp/dyro-dist/dyro-*.tar.gz
           "$smoke_root/sdist-venv/bin/python" -I -c "import dyro.continuation"
           "$smoke_root/sdist-venv/bin/python" -I -c "from dyro.console.assets import validate_assets; validate_assets()"
+          "$smoke_root/sdist-venv/bin/python" "$GITHUB_WORKSPACE/tools/verify_bundle_stranger.py" "$smoke_root/sdist-venv/bin/dyro"
 
   windows-dispatch-import:
     name: Windows dispatch import / fail-closed smoke

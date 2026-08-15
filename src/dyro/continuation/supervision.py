@@ -387,6 +387,10 @@ def apply_supervised_wave(
     ):
         raise DyroError("确认后的 wave 已发生语义变化；请重新运行 objective apply --dry-run")
 
+    from ..host.doctor import assert_projections_allow_mutation
+
+    assert_projections_allow_mutation(config)
+
     acquired_at = _utc(clock())
     grant = acquire_objective_owner_lease(
         config,

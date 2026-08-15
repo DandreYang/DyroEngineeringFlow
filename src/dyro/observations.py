@@ -110,6 +110,7 @@ class WorkspaceReadSnapshot:
     workspace_revision: str
     source_digests: tuple[tuple[str, str], ...]
     completeness: str
+    proof_inspection: str
     lines: tuple[WorkspaceLineObservation, ...]
     tasks: tuple[WorkspaceTaskObservation, ...]
     objectives: tuple[WorkspaceObjectiveObservation, ...]
@@ -204,6 +205,7 @@ def _revision_payload(
     return {
         "schema_version": READ_SNAPSHOT_SCHEMA_VERSION,
         "workspace_name": workspace_name,
+        "proof_inspection": "not_inspected",
         "lines": [
             {
                 "id": item.id,
@@ -353,6 +355,7 @@ def capture_workspace_read_snapshot(
         workspace_revision=revision,
         source_digests=frozen_sources,
         completeness="complete" if not frozen_failures else "partial",
+        proof_inspection="not_inspected",
         lines=lines,
         tasks=tasks,
         objectives=objectives,

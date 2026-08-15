@@ -40,6 +40,7 @@ def _snapshot(
         workspace_revision="a" * 64,
         source_digests=(("tasks", "b" * 64),),
         completeness="partial" if partial else "complete",
+        proof_inspection="not_inspected",
         lines=(
             WorkspaceLineObservation(
                 id="alpha",
