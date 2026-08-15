@@ -37,7 +37,7 @@ class ObjectiveContractTests(unittest.TestCase):
         self.assertEqual(objective.completion, CompletionRule.ALL_TARGETS_INTEGRATED)
         self.assertEqual(objective.requested_mode, RequestedMode.SUPERVISED)
         self.assertEqual(objective.operations, (Operation.EXECUTE, Operation.REVIEW))
-        self.assertEqual(objective.budget.max_parallel, 1)
+        self.assertEqual(objective.budget.max_parallel, 3)
         self.assertEqual(objective.budget.max_attempts_per_task, 2)
 
     def test_parses_complete_contract(self) -> None:

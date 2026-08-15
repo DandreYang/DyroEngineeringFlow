@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.6.9 - 2026-08-15
+
+- Make multi-harness writes a Core peer wave: each task worktree has one
+  executor, overlapping slices share a `conflict_group`, and wave members are
+  not live supervisors. Objective budgets now default to `max_parallel = 3`;
+  when write-capable Providers are ready the effective wave size is
+  `min(requested, ready_count)`. Empty `conflict_group` values warn in a
+  parallel wave. `task.executor` can run a ready dispatch adapter inside the
+  existing task worktree (Cursor edit stays fail-closed); scratch
+  `dispatch run --mode edit` remains detached and patch-only. `objective tick`
+  and `task daemon` preview idle-harness bindings and honor per-backend caps.
+
 ## 0.6.8 - 2026-08-15
 
 - Fix Console inspection falsely timing out healthy workspaces by budgeting for

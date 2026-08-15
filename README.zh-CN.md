@@ -293,8 +293,10 @@ Dyro Skill 的机器不会被后台静默写入。
 需要 2–4 个不同角色时，先用 `dyro dispatch batch-plan` 生成不创建状态、绑定
 上下文的计划；审阅摘要后再执行 `batch-start --expect-plan-sha256 …`，随后可用
 `batch-status`、`batch-result` 或 `batch-cancel` 恢复生命周期。Batch V1 是最多
-一个编辑者的独立 fan-out，并非依赖 DAG、重试队列或自动终裁器。只有用户明确要求
-全 Harness 同题比较时，才使用同步的 `panel --members all`。
+一个 scratch 编辑者的建议面 fan-out，不是交付写路径，也不是依赖 DAG、重试队列
+或自动终裁器。要同时改多块，走 Core Peer Wave：每条 task worktree 一个执行位，
+只按 `conflict_group` 串行。只有用户明确要求全 Harness 同题比较时，才使用同步
+的 `panel --members all`。
 
 交互运行 `dyro`、`dyro home` 或 `dyro start` 时，Dyro 每个本地自然日最多访问一次官方 PyPI；断网、超时或状态目录不可写都不会阻塞进入工作区。默认仍由用户确认更新：
 

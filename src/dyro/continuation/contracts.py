@@ -19,7 +19,7 @@ DEFAULT_BUDGET = BudgetLimit(
     max_attempts_per_task=2,
     max_failures=3,
     max_no_progress_cycles=2,
-    max_parallel=1,
+    max_parallel=3,
     deadline=None,
 )
 MAX_TITLE_LENGTH = 240

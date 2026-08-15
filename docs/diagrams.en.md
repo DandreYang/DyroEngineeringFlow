@@ -269,7 +269,7 @@ flowchart TB
   Host -->|"explicit dyro commands"| Dyro
 ```
 
-See `docs/agent-orchestration-discipline.md`. The optional harness under `experiments/local_agent_dispatch/` ships with the installed package but never replaces Core gates or merge.
+See `docs/agent-orchestration-discipline.md` and `docs/designs/peer-wave-execution.md`. `dyro dispatch` is advisory; simultaneous writes use Core task worktrees, not Batch supervisors. The optional harness under `experiments/local_agent_dispatch/` ships with the installed package but never replaces Core gates or merge.
 
 ---
 

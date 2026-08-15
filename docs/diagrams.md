@@ -269,7 +269,7 @@ flowchart TB
   Host -->|"显式 dyro 命令"| Dyro
 ```
 
-见 [`agent-orchestration-discipline.md`](agent-orchestration-discipline.md)。能力：`dyro dispatch` / `experiments.local_agent_dispatch`（随 `dyro` 安装；**不**替代 gates/merge）。
+见 [`agent-orchestration-discipline.md`](agent-orchestration-discipline.md) 与 [`peer-wave-execution.md`](designs/peer-wave-execution.md)。`dyro dispatch` 是建议面；同时写多块走 Core task worktree 波次，不在 Batch 里陪跑监工。能力：`dyro dispatch` / `experiments.local_agent_dispatch`（随 `dyro` 安装；**不**替代 gates/merge）。
 
 ---
 

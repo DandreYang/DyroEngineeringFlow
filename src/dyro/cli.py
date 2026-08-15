@@ -36,8 +36,8 @@ from .continuation.attention import (
 )
 from .continuation.engine import (
     build_scheduler_tick,
-    render_scheduler_tick_json,
     render_scheduler_tick_text,
+    scheduler_tick_payload,
 )
 from .continuation.models import Operation, RequestedMode
 from .continuation.planner import (
@@ -3192,13 +3192,34 @@ def cmd_objective_tick(args: argparse.Namespace) -> None:
         )
     )
     plan = build_continuation_plan(snapshot)
-    tick = build_scheduler_tick(
-        snapshot, plan, max_parallel=record.objective.budget.max_parallel
+    from .peer_wave import (
+        annotate_objective_tick,
+        discover_available_write_providers,
+        recommended_max_parallel,
     )
+
+    available_write = discover_available_write_providers()
+    tick = build_scheduler_tick(
+        snapshot,
+        plan,
+        max_parallel=recommended_max_parallel(
+            record.objective.budget.max_parallel, len(available_write)
+        ),
+    )
+    overlay = annotate_objective_tick(snapshot, plan, tick, available_write)
     if args.format == "json":
-        print(render_scheduler_tick_json(tick))
+        payload = scheduler_tick_payload(tick)
+        payload.update(overlay)
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
         return
     print(render_scheduler_tick_text(tick))
+    for note in overlay.get("peer_wave", {}).get("warnings", []):
+        print(f"Warning: {note}")
+    for binding in overlay.get("peer_wave", {}).get("executor_bindings", []):
+        print(
+            f"Harness: {binding['task_id']} -> {binding['executor']} "
+            f"({binding['source']})"
+        )
 
 
 def cmd_objective_attention(args: argparse.Namespace) -> None:
@@ -3458,7 +3479,20 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
         tasks = list_tasks(config)
         assert_legacy_scheduler_allowed(config, (task.id for task in tasks))
         queued = _daemon_select_runnable(config, tasks, limit=max(1, args.parallel))
-        if queued:
+        from .peer_wave import apply_harness_bindings, discover_available_write_providers
+        from .tasks import ScheduleWave
+
+        available_write = discover_available_write_providers()
+        bound, decision = apply_harness_bindings(
+            ScheduleWave(tasks=tuple(queued), deferred=()),
+            available_write,
+        )
+        for note in decision.warnings:
+            print(f"warning: {note}")
+        for item in decision.deferred:
+            print(f"defer {item.task.id}: {item.reason}")
+        if bound:
+            overrides = {item.task_id: item.executor for item in decision.bindings}
             with ThreadPoolExecutor(
                 max_workers=max(1, args.parallel), thread_name_prefix="dyro-dispatch"
             ) as pool:
@@ -3469,8 +3503,9 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
                         task,
                         dry_run=args.dry_run,
                         legacy_scheduler=True,
+                        executor_override=overrides.get(task.id),
                     ): task
-                    for task in queued
+                    for task in bound
                 }
                 for future in as_completed(futures):
                     task = futures[future]

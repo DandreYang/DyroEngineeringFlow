@@ -288,7 +288,8 @@ judge 或多 edit writer。显式 `panel --members all` 仍是同步的全 ready
 
 | 场景 | 用哪条路径 |
 | --- | --- |
-| 开发者要第二意见 / 大调研 / patch 竞赛 | ADR-0002 本设计 |
+| 同时改多块交付代码 | Core Peer Wave：多 task + worktree + `conflict_group`；见 [peer-wave-execution.md](peer-wave-execution.md) |
+| 开发者要第二意见 / 大调研 / scratch patch | ADR-0002 本设计 |
 | 高风险设计评审 | 本设计 panel + 对抗评审板 |
 | 生产 evidence / merge | 仅 Dyro 控制面；派发 harness 不可越权 |
 
