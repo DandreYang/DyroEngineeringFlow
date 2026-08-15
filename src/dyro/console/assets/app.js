@@ -1,6 +1,15 @@
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const TOKEN_KEY = "dyro.console.bearer";
-const state = { bearer: "", etags: new Map(), timer: null, focus: "" };
+const state = { bearer: "", etags: new Map(), timer: null, focus: "", partial: false };
+const HEALTH_LABELS = { healthy: "健康", degraded: "需关注", unavailable: "不可用" };
+const FRESHNESS_LABELS = { fresh: "新鲜", partial: "部分可用", stale: "待更新" };
+const AVAILABILITY_LABELS = { available: "可用", unavailable: "不可用" };
+const ERROR_LABELS = {
+  LOCAL_READ_UNAVAILABLE: "本地状态暂时不可读取",
+  OVERVIEW_UNAVAILABLE: "工作区概览暂时不可读取",
+  WORKSPACE_UNAVAILABLE: "工作区当前不可用",
+  SESSION_REJECTED: "本地会话未建立",
+};
 
 const $ = (id) => document.getElementById(id);
 
@@ -16,6 +25,27 @@ function text(value) {
 
 function count(value) {
   return Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+function workspaceCount(summary, key) {
+  if (!summary || text(summary.availability) !== "available") return "—";
+  const value = summary[key];
+  return Number.isInteger(value) && value >= 0 ? String(value) : "—";
+}
+
+function unavailableWorkspaceCount(workspaces) {
+  if (!Array.isArray(workspaces)) return 0;
+  return workspaces.filter((summary) => text(summary.availability) !== "available").length;
+}
+
+function displayLabel(value, labels) {
+  const raw = text(value);
+  return labels[raw] || raw || "未提供";
+}
+
+function userError(value) {
+  const code = text(value);
+  return ERROR_LABELS[code] || "本地状态暂时不可读取";
 }
 
 function element(name, value = "") {
@@ -84,6 +114,56 @@ function addBadge(parent, label, level = "") {
   parent.append(badge);
 }
 
+function workspaceAttention(summary) {
+  const attention = summary.attention_counts || {};
+  if (count(attention.repair_required)) return 0;
+  if (count(attention.needs_user)) return 1;
+  if (count(attention.ready)) return 2;
+  if (count(attention.waiting)) return 3;
+  if (count(attention.paused)) return 4;
+  return 5;
+}
+
+function priorityWorkspace(workspaces) {
+  const focused = workspaces.find((summary) => text(summary.alias) === state.focus);
+  if (focused && text(focused.recommendation && focused.recommendation.command)) return focused;
+  return [...workspaces]
+    .sort((left, right) => workspaceAttention(left) - workspaceAttention(right))
+    .find((summary) => text(summary.recommendation && summary.recommendation.command));
+}
+
+function overviewState(attention, workspaces) {
+  if (count(attention && attention.repair_required)) return "需要修复";
+  if (count(attention && attention.needs_user)) return "等待你的处理";
+  if (unavailableWorkspaceCount(workspaces)) return "状态不完整";
+  if (count(attention && attention.ready)) return "有工作可推进";
+  if (count(attention && attention.waiting)) return "等待外部条件";
+  if (count(attention && attention.paused)) return "存在已暂停工作";
+  return "全部正常";
+}
+
+function renderPrimaryAction(workspaces) {
+  const summary = priorityWorkspace(workspaces);
+  const guidance = $("primary-guidance");
+  const command = $("primary-command");
+  const button = $("primary-copy");
+  const recommendation = summary && summary.recommendation;
+  const nextCommand = text(recommendation && recommendation.command);
+  if (!summary || !nextCommand) {
+    guidance.textContent = "下一步 · 等待工作区建议";
+    command.textContent = "尚无可复制的推荐命令";
+    button.dataset.command = "";
+    button.disabled = true;
+    button.textContent = "复制命令";
+    return;
+  }
+  guidance.textContent = `下一步 · ${text(summary.display_name) || text(summary.alias)}`;
+  command.textContent = nextCommand;
+  button.dataset.command = nextCommand;
+  button.disabled = false;
+  button.textContent = "复制命令";
+}
+
 async function copyCommand(command, button) {
   try {
     await navigator.clipboard.writeText(command);
@@ -124,6 +204,9 @@ function renderCounts(attention) {
   ]) {
     const card = element("div");
     card.className = "count";
+    if (key === "repair_required" && count(attention && attention[key])) card.dataset.level = "danger";
+    if (key === "needs_user" && count(attention && attention[key])) card.dataset.level = "warning";
+    if (!count(attention && attention[key])) card.dataset.level = "success";
     card.append(element("strong", String(count(attention && attention[key]))), element("span", label));
     root.append(card);
   }
@@ -131,42 +214,46 @@ function renderCounts(attention) {
 
 function renderWorkspaceCard(summary) {
   const card = element("article");
-  card.className = "workspace-card";
-  const header = element("header");
+  card.className = "workspace-row";
+  const identity = element("div");
+  identity.className = "workspace-identity";
   const title = element("h3", text(summary.display_name) || text(summary.alias) || "未命名工作区");
-  const badges = element("div");
-  badges.className = "badges";
-  addBadge(badges, text(summary.health) || "unavailable", attentionLevel(summary));
-  addBadge(badges, text(summary.freshness) || "partial");
-  header.append(title, badges);
-  card.append(header);
-
-  const meta = element("p", `别名：${text(summary.alias)} · Task：${count(summary.task_count)} · Active Objective：${count(summary.active_objective_count)}`);
+  const meta = element("p", `别名：${text(summary.alias)} · 仓库 ${workspaceCount(summary, "repository_count")} · 开发线 ${workspaceCount(summary, "line_count")} · 任务 ${workspaceCount(summary, "task_count")} · 活跃目标 ${workspaceCount(summary, "active_objective_count")}`);
   meta.className = "workspace-meta";
-  card.append(meta);
-  const statuses = summary.task_status_counts && typeof summary.task_status_counts === "object"
-    ? Object.entries(summary.task_status_counts).filter(([, value]) => Number.isInteger(value) && value > 0)
-    : [];
-  if (statuses.length) {
-    const execution = element("p", `任务状态：${statuses.map(([key, value]) => `${key} ${value}`).join(" · ")}`);
-    execution.className = "workspace-meta";
-    card.append(execution);
-  }
+  identity.append(title, meta);
+  card.append(identity);
 
-  const recommendation = summary.recommendation || {};
-  const reason = text(recommendation.reason) || "LOCAL_READ_UNAVAILABLE";
-  const priority = element("p", `当前关注：${reason}`);
-  priority.className = "priority";
-  card.append(priority);
-  const command = text(recommendation.command);
-  if (command) card.append(commandRow(command));
+  const health = element("div");
+  health.className = "workspace-signal";
+  health.append(element("span", "状态"));
+  health.firstChild.className = "workspace-signal-label";
+  addBadge(health, displayLabel(summary.health, HEALTH_LABELS), attentionLevel(summary));
+  card.append(health);
 
-  const footer = element("footer");
+  const freshness = element("div");
+  freshness.className = "workspace-signal";
+  freshness.append(element("span", "新鲜度"));
+  freshness.firstChild.className = "workspace-signal-label";
+  addBadge(freshness, displayLabel(summary.freshness, FRESHNESS_LABELS));
+  card.append(freshness);
+
+  const tasks = element("div", workspaceCount(summary, "task_count"));
+  tasks.className = "workspace-count";
+  tasks.dataset.label = "任务数";
+  card.append(tasks);
+  const objectives = element("div", workspaceCount(summary, "objective_count"));
+  objectives.className = "workspace-count";
+  objectives.dataset.label = "目标数";
+  card.append(objectives);
+
+  const action = element("div");
+  action.className = "workspace-action";
   const view = element("button", "查看摘要");
+  view.className = "secondary";
   view.type = "button";
   view.addEventListener("click", () => loadWorkspace(text(summary.alias)));
-  footer.append(view);
-  card.append(footer);
+  action.append(view);
+  card.append(action);
   return card;
 }
 
@@ -174,9 +261,17 @@ function renderOverview(payload) {
   const data = payload && payload.data;
   if (!data || !Array.isArray(data.workspaces)) throw new Error("OVERVIEW_UNAVAILABLE");
   const total = count(data.total_workspaces);
-  $("overview-summary").textContent = total ? `已加载 ${total} 个本地工作区；先处理有明确恢复路径的事项。` : "尚未登记工作区。可运行 dyro setup、dyro join 或 dyro workspace add。";
-  $("captured-at").textContent = text(payload.captured_at) ? `采样时间：${text(payload.captured_at)}` : "";
+  const attention = data.attention_counts || {};
+  const unavailable = unavailableWorkspaceCount(data.workspaces);
+  $("overview-heading").textContent = total ? overviewState(attention, data.workspaces) : "尚未登记工作区";
+  $("overview-summary").textContent = total
+    ? unavailable
+      ? `已登记 ${total} 个本地工作区，其中 ${unavailable} 个暂时不可读取；未知数据不会按 0 展示。`
+      : `已加载 ${total} 个本地工作区；优先使用下一步命令继续已识别的工程工作。`
+    : "尚未登记工作区。可运行 dyro setup、dyro join 或 dyro workspace add。";
+  $("captured-at").textContent = text(payload.captured_at) ? `采样于 ${new Date(text(payload.captured_at)).toLocaleString("zh-CN")}` : "";
   renderCounts(data.attention_counts || {});
+  renderPrimaryAction(data.workspaces);
   const list = $("workspace-list");
   list.replaceChildren();
   if (!data.workspaces.length) {
@@ -186,7 +281,6 @@ function renderOverview(payload) {
     return;
   }
   for (const summary of data.workspaces) list.append(renderWorkspaceCard(summary));
-  if (state.focus) loadWorkspace(state.focus, true);
 }
 
 function definition(label, value) {
@@ -208,11 +302,12 @@ async function loadWorkspace(alias, silent = false) {
     grid.className = "detail-grid";
     grid.append(
       definition("别名", text(summary.alias)),
-      definition("健康", text(summary.health)),
-      definition("可用性", text(summary.availability)),
-      definition("Task 总数", String(count(summary.task_count))),
-      definition("开发线", String(count(summary.line_count))),
-      definition("Objective", String(count(summary.objective_count))),
+      definition("健康", displayLabel(summary.health, HEALTH_LABELS)),
+      definition("可用性", displayLabel(summary.availability, AVAILABILITY_LABELS)),
+      definition("仓库", workspaceCount(summary, "repository_count")),
+      definition("任务总数", workspaceCount(summary, "task_count")),
+      definition("开发线", workspaceCount(summary, "line_count")),
+      definition("目标", workspaceCount(summary, "objective_count")),
     );
     content.replaceChildren(grid);
     const command = text(summary.recommendation && summary.recommendation.command);
@@ -230,10 +325,11 @@ async function loadWorkspace(alias, silent = false) {
 
 function showError(error) {
   const code = text(error && error.message) || "LOCAL_READ_UNAVAILABLE";
-  setStatus(`无法读取本地状态：${code}。可重新运行 dyro console。`, true);
+  const message = userError(code);
+  setStatus(`${message}。可重新运行 dyro console。`, true);
   const list = $("workspace-list");
   list.replaceChildren();
-  const notice = element("p", `读取失败：${code}。Console 未修改任何项目文件。`);
+  const notice = element("p", `${message}。Console 未修改任何项目文件。`);
   notice.className = "error";
   list.append(notice);
 }
@@ -241,8 +337,14 @@ function showError(error) {
 async function refresh() {
   try {
     const payload = await request("/api/v1/overview?limit=100", "overview");
-    if (payload) renderOverview(payload);
-    setStatus("本地会话已就绪；页面只读。", false);
+    if (payload) {
+      renderOverview(payload);
+      state.partial = Boolean(payload.freshness && payload.freshness.partial);
+    }
+    setStatus(
+      state.partial ? "本地会话已就绪；部分工作区状态未能读取，页面只读。" : "本地会话已就绪；页面只读。",
+      false,
+    );
   } catch (error) {
     if (error && error.message === "SESSION_EXPIRED") {
       expireSession();
@@ -262,6 +364,11 @@ function scheduleRefresh() {
 
 async function start() {
   $("refresh").addEventListener("click", async () => { await refresh(); scheduleRefresh(); });
+  $("primary-copy").addEventListener("click", () => {
+    const button = $("primary-copy");
+    const command = text(button.dataset.command);
+    if (command) copyCommand(command, button);
+  });
   $("detail-close").addEventListener("click", () => { $("workspace-detail").hidden = true; });
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {

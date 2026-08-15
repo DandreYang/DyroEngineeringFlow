@@ -273,11 +273,18 @@ Para actualizar, ejecuta `pipx upgrade dyro`. Si el equipo gestiona paquetes Pyt
 python3 -m pip install --user --upgrade dyro
 ```
 
+El `dyro setup` interactivo puede instalar el Skill del plano de control. Tras
+actualizar el paquete, los Skills ya gestionados se sincronizan solos; los
+arranques interactivos también reparan un Skill managed desactualizado. La
+primera instalación sigue siendo opt-in vía setup o
+`dyro integration install skill --yes` (alias: `codex`).
+
 Los inicios interactivos con `dyro`, `dyro home` o `dyro start` consultan el endpoint oficial de PyPI como máximo una vez al día local. Los errores nunca bloquean el espacio de trabajo y, por defecto, cada actualización requiere confirmación:
 
 ```bash
-dyro update check
-dyro update now
+dyro update              # comprobar, confirmar e instalar (equivalente a dyro update now)
+dyro update check        # solo comprobar
+dyro update now          # alias de dyro update
 dyro update auto on      # activa actualizaciones automáticas de parches
 dyro update auto off
 dyro update disable

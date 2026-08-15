@@ -1,5 +1,169 @@
 # Changelog
 
+## Unreleased
+
+## 0.6.9 - 2026-08-15
+
+- Make multi-harness writes a Core peer wave: each task worktree has one
+  executor, overlapping slices share a `conflict_group`, and wave members are
+  not live supervisors. Objective budgets now default to `max_parallel = 3`;
+  when write-capable Providers are ready the effective wave size is
+  `min(requested, ready_count)`. Empty `conflict_group` values warn in a
+  parallel wave. `task.executor` can run a ready dispatch adapter inside the
+  existing task worktree (Cursor edit stays fail-closed); scratch
+  `dispatch run --mode edit` remains detached and patch-only. `objective tick`
+  and `task daemon` preview idle-harness bindings and honor per-backend caps.
+
+## 0.6.8 - 2026-08-15
+
+- Fix Console inspection falsely timing out healthy workspaces by budgeting for
+  isolated Python process startup. Unavailable or missing workspace counts now
+  render as unknown instead of zero, and partial pages no longer claim that all
+  projects are healthy.
+- Add executable dispatch adapters for Cursor Agent, OpenCode, Grok, Hermes,
+  Kimi, DeepSeek Harness (`dsh`), and Pi alongside Codex and Claude. Every
+  adapter now has bounded process supervision, an explicit read/edit tool or
+  sandbox policy, a backend-specific authentication probe, and a structured
+  result decoder. Cursor dispatch intentionally requires `CURSOR_API_KEY` so
+  it can run with an isolated home instead of loading user MCP processes;
+  Cursor edit dispatch remains fail-closed until its sandbox process lifecycle
+  can be proven. Provider credentials are scoped to the selected model, and
+  successful-looking CLIs cannot leave closed-stdio descendants running.
+  Hermes receives only projected task context: user rules, identity, memory,
+  fallback providers, background review, and session persistence are disabled.
+  Pi requires Node.js 22.19.0 or newer.
+- Preserve a multi-harness panel board when one member fails instead of losing
+  the other members' terminal results; deduplicate and cap explicit members,
+  and let every ready integrated Provider participate in selection. Default
+  panels remain a cost-bounded three-Provider sample; explicit `--members all`
+  runs every ready Provider with at most four concurrent members.
+- Add the separately managed `dyro-dispatch` Skill for explicit parallel,
+  delegated, and independent-agent work. It installs through
+  `dyro integration install dispatch`, keeps outbound Provider effects separate
+  from the read-only control plane, and preserves all gate, signoff, merge, and
+  push boundaries. A single setup opt-in now installs both first-party Skills;
+  existing managed control-plane installs automatically gain Dispatch, and both
+  stay synchronized across interactive launches and package updates.
+- Add persistent Batch V1 orchestration for two to four heterogeneous roles:
+  side-effect-free planning, digest-bound idempotent start, compact status,
+  bounded partial-result recovery, and cooperative cancellation. Plans bind
+  Provider choices, guarded context, timeouts, and edit HEAD; all members pass
+  preflight before any Provider starts, at most one may edit, and cleanup that
+  cannot be proven remains visible instead of being reported as cancelled.
+  Workers revalidate planned context immediately before Provider use, and edit
+  worktrees are pinned to the reviewed object ID.
+
+## 0.6.7 - 2026-08-13
+
+- Make bare `dyro update` check, confirm, and install (same path as
+  `update now`). `update check` remains check-only; `--yes` skips the
+  confirmation on both `update` and `update now`.
+
+## 0.6.6 - 2026-08-13
+
+- Launch any installed coding tool from `dyro start` / `open`, not only a
+  Codex Profile adapter; `agent add --preset` now covers the catalogued
+  launchable tools.
+- Treat a healthy workspace as ready with no mutation: `next --format json`
+  no longer hands Agents a `start --agent codex` command.
+- Install the control-plane Skill avatar for Grok when `~/.grok` is present.
+- Teach the packaged Skill to read `objective explain --format json`.
+
+## 0.6.5 - 2026-08-13
+
+- Expand the packaged `dyro-control-plane` Skill into a host-neutral,
+  intent-routed read-only control surface for workspace health, lines, Change
+  Sets, integrations, and Objective attention/graph/tick/plan observations.
+- Add stable JSON views for `workspace list`, `status`, `doctor`, `next`,
+  `line list`, `changeset list|verify`, `integration status`, and
+  `objective list|status` while preserving existing text output by default.
+- Make `objective list` and `objective status` strictly zero-write by refusing
+  to recover an interrupted Objective transaction during observation.
+- Run control-plane Git observations with `git --no-optional-locks` so status,
+  doctor, and Change Set verification cannot refresh Git index metadata.
+- Bind workspace-local `next --format json` handoffs to their resolved alias or
+  absolute root, and only offer bootstrap when every failure is an absent
+  repository with a configured remote.
+- Return one stable JSON error envelope for machine-facing runtime failures and
+  use deadline-, byte-, record-, and symlink-bounded reads for Profile, line,
+  Change Set, integration, Objective, Task, evidence, and Git observations.
+- Keep machine-facing Objective completion consistent with text views by
+  checking Task integration evidence and Git ancestry inside the same budget;
+  reject unsafe bootstrap targets before `next` can hand off a mutation.
+- Minimize Agent-visible local metadata: workspace and Skill integration JSON
+  and health diagnostics omit absolute paths by default, expose them only
+  through explicit `--include-paths`, and let the Skill skip global discovery
+  when an alias is already known.
+- Let Enter confirm the already-previewed feature worktree plan while keeping
+  `b` as the explicit route back to baseline selection.
+- Exclude generated Python bytecode from source and wheel distributions, even
+  when release tests imported packaged integration assets before the build.
+
+## 0.6.4 - 2026-08-12
+
+- Guide control-plane Skill install during interactive `dyro setup` (preview in
+  the plan; apply only after confirmation; soft-fail if no host is ready).
+- After a successful package update (`dyro update now` or patch auto-update),
+  best-effort sync an already-managed Skill through the fresh `dyro` entry
+  point (`dyro integration sync skill --yes`).
+- On interactive `dyro` / `home` / `start` launches, automatically repair an
+  outdated managed Skill; never first-install on startup.
+- Make bare `dyro update` equivalent to `dyro update check` (common CLI
+  ergonomics; `check` remains as an explicit alias).
+- After a same-turn package auto-update Skill refresh, skip in-process startup
+  Skill sync so stale in-memory assets cannot overwrite the fresh write.
+- Pin post-update Skill sync to this install (`bin/dyro` beside the interpreter,
+  else `python -m dyro`) instead of bare `PATH` lookup.
+- Make setup Skill UX honest when no agent host is present (defer by default;
+  completion reports install outcome).
+
+## 0.6.3 - 2026-08-12
+
+- Keep the shipping surface as CLI + Skill only. PyPI releases through 0.6.2
+  never exposed `dyro-bridge` / `dyro-mcp` entry points or the optional `[mcp]`
+  extra; those remain out of the wheel. Historical ADR/design/evidence docs stay
+  in the repository as archive only. Upgraders from interim git builds that had
+  those entry points should expect them to be absent after upgrading.
+- Install the cross-platform Skill as a Dyro-owned **mirror** under
+  `DYRO_HOME/skills/dyro-control-plane`, with per-host **avatars** (symlinks /
+  Windows junctions) for detected agent homes (Codex, Claude, Agents, Cursor).
+  After upgrading, preview then install with
+  `dyro integration install skill --dry-run` / `dyro integration install skill --yes`
+  (or the `codex` alias). The Skill uses read-only `dyro` CLI commands
+  (`workspace list` / `status`, `objective list|status|plan`).
+- Migrate legacy whole-directory Codex Skill installs to mirror+avatar on the
+  next owned install, but only when the legacy target is a detected host avatar
+  whose content matches the packaged Skill assets (fail closed otherwise).
+- Let interactive line/hotfix repository picks accept list indices and/or
+  repository IDs; when a token matches a repository ID exactly (including
+  pure-numeric IDs), the ID wins over index interpretation.
+
+## 0.6.2 - 2026-08-05
+
+- Extend interactive `dyro setup` and Profile onboarding with a single,
+  preview-first personal-preferences step: update checks, optional patch-only
+  auto-updates, a locally detected coding-tool default, and Console project
+  selection can be saved together, while cancel and dry-run remain read-only.
+- Make coding-tool choice easier to scan by showing a short detected list
+  first, exposing the full catalog on demand, and accepting a supported tool
+  identifier directly even when it is not in the initial shortlist.
+
+## 0.6.1 - 2026-08-04
+
+- Make the global Dyro home, first-run setup, line creation, and Hotfix
+  creation genuinely guided: show safe previews, offer meaningful defaults,
+  support retry/back/cancel, and preflight every selected repository before
+  any Git worktree mutation.
+- Register setup Profiles with the global Console by default while preserving
+  an existing default workspace, and make workspace, repository, Agent, and
+  coding-tool management more readable and actionable.
+- Expand the coding-tool catalog across CLI and desktop launchers, including
+  Codex, Claude, Antigravity, ZCode, and Qoder-family tooling; unavailable
+  tools remain informative rather than blocking a workspace launch.
+- Refresh the read-only Console into a compact Signal Room command center and
+  align terminal output with semantic colors, clear status grouping, and
+  graceful interruption recovery.
+
 ## 0.6.0 - 2026-08-04
 
 - Add the native, local-first Continuation engine: versioned Objectives have

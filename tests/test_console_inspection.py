@@ -5,14 +5,16 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import queue
 import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
 from dyro.canonical import canonical_json_bytes
+from dyro.console import _inspect_worker
 from dyro.console.inspection import IsolatedOverviewService
 from dyro.console.overview import ConsoleOverviewError
-from dyro.hub import add_workspace
+from dyro.hub import WorkspaceRecord, WorkspaceRegistry, add_workspace
 
 from .support import WorkspaceCase
 
@@ -41,8 +43,70 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
 
         self.assertEqual(overview["data"]["workspaces"][0]["alias"], "demo")
         self.assertEqual(workspace["data"]["workspace"]["alias"], "demo")
+        self.assertEqual(overview["data"]["workspaces"][0]["availability"], "available")
+        self.assertEqual(workspace["data"]["workspace"]["availability"], "available")
         self.assertNotIn(str(self.root), repr(overview))
         self.assertNotIn(str(self.root), repr(workspace))
+
+    def test_default_workspace_budget_tolerates_process_startup_overhead(self) -> None:
+        clock = [0.0]
+        record = WorkspaceRecord(name="demo", root=self.root)
+        registry = WorkspaceRegistry(default="demo", workspaces=(record,))
+        available = _inspect_worker._unavailable_summary("demo", "IGNORED")
+        available.update(
+            {
+                "availability": "available",
+                "health": "healthy",
+                "freshness": "fresh",
+                "recommendation": None,
+            }
+        )
+
+        class DelayedQueue:
+            def get_nowait(self) -> object:
+                if clock[0] < 1.0:
+                    raise queue.Empty
+                return {"summary": available, "warnings": []}
+
+            def get(self, *, timeout: float) -> object:
+                del timeout
+                return self.get_nowait()
+
+            def close(self) -> None:
+                return None
+
+        class DelayedProcess:
+            def start(self) -> None:
+                return None
+
+            def is_alive(self) -> bool:
+                return clock[0] < 1.0
+
+            def terminate(self) -> None:
+                return None
+
+            def join(self, *, timeout: float) -> None:
+                del timeout
+
+        context = Mock()
+        context.Queue.return_value = DelayedQueue()
+        context.Process.return_value = DelayedProcess()
+
+        with (
+            patch("dyro.console._inspect_worker.get_context", return_value=context),
+            patch(
+                "dyro.console._inspect_worker.time.monotonic",
+                side_effect=lambda: clock[0],
+            ),
+            patch(
+                "dyro.console._inspect_worker.time.sleep",
+                side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+            ),
+        ):
+            summaries, warnings = _inspect_worker._isolated_summaries(registry)
+
+        self.assertEqual(warnings, set())
+        self.assertEqual(summaries[0]["availability"], "available")
 
     def test_temporary_root_is_read_without_registering_it_globally(self) -> None:
         service = IsolatedOverviewService(

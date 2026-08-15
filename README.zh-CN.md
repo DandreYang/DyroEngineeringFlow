@@ -285,11 +285,29 @@ dyro --version
 python3 -m pip install --user --upgrade dyro
 ```
 
+交互式 `dyro setup` 可在个人偏好步骤一次启用第一方 Skill 套件，同时安装
+`dyro-control-plane` 与独立的 `dyro-dispatch`。已经托管控制面 Skill 的用户会在下次
+交互启动或包更新后自动补装 Dispatch，此后两项都会随 Dyro 自动同步；从未启用过
+Dyro Skill 的机器不会被后台静默写入。
+
+多 Harness 委派仍与只读控制面隔离，确保 Provider 进程与网络副作用需要明确请求。
+也可手动运行 `dyro integration install dispatch --dry-run` 预览，再用
+`dyro integration install dispatch --yes` 安装。
+
+需要 2–4 个不同角色时，先用 `dyro dispatch batch-plan` 生成不创建状态、绑定
+上下文的计划；审阅摘要后再执行 `batch-start --expect-plan-sha256 …`，随后可用
+`batch-status`、`batch-result` 或 `batch-cancel` 恢复生命周期。Batch V1 是最多
+一个 scratch 编辑者的建议面 fan-out，不是交付写路径，也不是依赖 DAG、重试队列
+或自动终裁器。要同时改多块，走 Core Peer Wave：每条 task worktree 一个执行位，
+只按 `conflict_group` 串行。只有用户明确要求全 Harness 同题比较时，才使用同步
+的 `panel --members all`。
+
 交互运行 `dyro`、`dyro home` 或 `dyro start` 时，Dyro 每个本地自然日最多访问一次官方 PyPI；断网、超时或状态目录不可写都不会阻塞进入工作区。默认仍由用户确认更新：
 
 ```bash
-dyro update check
-dyro update now
+dyro update              # 检查后确认安装（等价于 dyro update now）
+dyro update check        # 仅检查
+dyro update now          # dyro update 的别名
 dyro update auto on      # 主动开启补丁版本自动更新
 dyro update auto off
 dyro update disable      # 同时关闭自动更新

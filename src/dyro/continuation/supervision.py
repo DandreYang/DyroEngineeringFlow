@@ -178,7 +178,19 @@ def build_supervised_wave(
         raise DyroError("当前 Objective 不是 supervised 模式；拒绝使用受监督 apply")
     snapshot = build_scheduler_snapshot(config, objective=record, clock=clock)
     plan = build_continuation_plan(snapshot)
-    tick = build_scheduler_tick(snapshot, plan, max_parallel=record.objective.budget.max_parallel)
+    from ..peer_wave import (
+        discover_available_write_providers,
+        recommended_max_parallel,
+    )
+
+    tick = build_scheduler_tick(
+        snapshot,
+        plan,
+        max_parallel=recommended_max_parallel(
+            record.objective.budget.max_parallel,
+            len(discover_available_write_providers()),
+        ),
+    )
     actions = tuple(action for action in tick.wave if action.kind in _SUPPORTED_ACTIONS)
     if len(actions) != len(tick.wave):
         raise DyroError("当前 wave 含尚未获受监督执行支持的 Action；拒绝部分执行")
@@ -246,7 +258,19 @@ def _current_action(
         raise DyroError("Objective 模式已变化；拒绝执行已确认 Action")
     snapshot = build_scheduler_snapshot(config, objective=record, clock=clock)
     plan = build_continuation_plan(snapshot)
-    tick = build_scheduler_tick(snapshot, plan, max_parallel=record.objective.budget.max_parallel)
+    from ..peer_wave import (
+        discover_available_write_providers,
+        recommended_max_parallel,
+    )
+
+    tick = build_scheduler_tick(
+        snapshot,
+        plan,
+        max_parallel=recommended_max_parallel(
+            record.objective.budget.max_parallel,
+            len(discover_available_write_providers()),
+        ),
+    )
     actual = next((action for action in tick.wave if action == expected), None)
     if actual is None:
         raise DyroError("确认后的 Action 已不再位于当前安全 wave；请重新运行 objective apply")
@@ -356,7 +380,15 @@ def _task_result_status(action: PlannedAction, result: object) -> tuple[ActionSt
 
 def _dispatch(config: Config, action: PlannedAction, task: Task, *, expected_contract_sha256: str) -> object:
     if action.kind is ActionKind.EXECUTE_TASK:
-        return run_task(config, task, expected_contract_sha256=expected_contract_sha256)
+        from ..peer_wave import bind_wave_executors, discover_available_write_providers
+
+        decision = bind_wave_executors((task,), discover_available_write_providers())
+        return run_task(
+            config,
+            task,
+            expected_contract_sha256=expected_contract_sha256,
+            executor_override=decision.executor_for(task.id),
+        )
     if action.kind is ActionKind.REVIEW_TASK:
         return review_task(config, task, expected_contract_sha256=expected_contract_sha256)
     raise DyroError("受监督执行只支持 execute_task 与 review_task")

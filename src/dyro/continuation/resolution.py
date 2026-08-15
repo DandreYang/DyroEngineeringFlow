@@ -2,19 +2,53 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
+import stat
 import sys
 from typing import Callable
 
-from ..config import CONFIG_NAME, Config, load
+from ..config import CONFIG_NAME, Config, LoadedProfile, load, load_profile_exact, validate_id
 from ..errors import DyroError, ValidationError
-from ..hub import WorkspaceRecord, load_registry
+from ..hub import WorkspaceRecord, load_registry, load_registry_bounded
+from ..read_limits import ReadBudget, ReadLimitCode, ReadLimitError
 from ..tasks import list_tasks, worktree_root
 from ..workspace import Line, get_line, line_root, list_lines
 from .store import StoredObjective, get_objective, list_objectives
 
 
 Chooser = Callable[[str, tuple[str, ...]], str]
+
+
+class WorkspaceResolutionSource(str, Enum):
+    EXPLICIT = "explicit"
+    LOCAL = "local"
+    DEFAULT = "default"
+    UNIQUE = "unique"
+
+
+class WorkspaceResolutionFailure(str, Enum):
+    LOCAL_PROFILE_INVALID = "LOCAL_PROFILE_INVALID"
+    REGISTRY_INVALID = "REGISTRY_INVALID"
+    WORKSPACE_NOT_REGISTERED = "WORKSPACE_NOT_REGISTERED"
+    REGISTERED_ROOT_STALE = "REGISTERED_ROOT_STALE"
+    HOST_READ_PERMISSION_REQUIRED = "HOST_READ_PERMISSION_REQUIRED"
+    AMBIGUOUS_WORKSPACE = "AMBIGUOUS_WORKSPACE"
+    WORKSPACE_NOT_FOUND = "WORKSPACE_NOT_FOUND"
+
+
+class WorkspaceResolutionError(DyroError):
+    def __init__(self, code: WorkspaceResolutionFailure) -> None:
+        super().__init__(code.value)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class ResolvedWorkspace:
+    profile: LoadedProfile
+    source: WorkspaceResolutionSource
+    registry_alias: str | None
 
 
 def _interactive() -> bool:
@@ -91,6 +125,161 @@ def resolve_workspace(
         _interactive() if interactive is None else interactive,
     )
     return load(next(record.root for record in records if record.name == selected))
+
+
+def _readonly_location(start: str | Path | None, cwd: Path) -> Path:
+    if not cwd.is_absolute():
+        raise ValidationError("Bridge cwd 必须是绝对路径")
+    raw = "." if start is None else str(start)
+    if not raw or raw.startswith("~") or "\x00" in raw:
+        raise ValidationError("Bridge start 路径无效")
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = cwd / candidate
+    try:
+        location = candidate.resolve(strict=False)
+        if location.is_file():
+            return location.parent
+        return location
+    except PermissionError as exc:
+        raise WorkspaceResolutionError(
+            WorkspaceResolutionFailure.HOST_READ_PERMISSION_REQUIRED
+        ) from exc
+    except (OSError, RuntimeError) as exc:
+        raise ValidationError("Bridge start 路径无法解析") from exc
+
+
+def _readonly_local_root(location: Path) -> Path | None:
+    for candidate in (location, *location.parents):
+        profile = candidate / CONFIG_NAME
+        try:
+            info = profile.lstat()
+        except FileNotFoundError:
+            continue
+        except PermissionError as exc:
+            raise WorkspaceResolutionError(
+                WorkspaceResolutionFailure.HOST_READ_PERMISSION_REQUIRED
+            ) from exc
+        except OSError as exc:
+            raise WorkspaceResolutionError(
+                WorkspaceResolutionFailure.LOCAL_PROFILE_INVALID
+            ) from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise WorkspaceResolutionError(
+                WorkspaceResolutionFailure.LOCAL_PROFILE_INVALID
+            )
+        return candidate
+    return None
+
+
+def _bounded_registry(budget: ReadBudget):
+    try:
+        return load_registry_bounded(budget)
+    except ReadLimitError as exc:
+        if exc.code is ReadLimitCode.UNSAFE_FILE:
+            raise WorkspaceResolutionError(
+                WorkspaceResolutionFailure.REGISTRY_INVALID
+            ) from exc
+        raise
+    except PermissionError as exc:
+        raise WorkspaceResolutionError(
+            WorkspaceResolutionFailure.HOST_READ_PERMISSION_REQUIRED
+        ) from exc
+    except (OSError, ValidationError) as exc:
+        raise WorkspaceResolutionError(
+            WorkspaceResolutionFailure.REGISTRY_INVALID
+        ) from exc
+
+
+def _registered_profile(record: WorkspaceRecord, budget: ReadBudget) -> LoadedProfile:
+    try:
+        return load_profile_exact(record.root, budget)
+    except ReadLimitError as exc:
+        if exc.code is ReadLimitCode.UNSAFE_FILE:
+            raise WorkspaceResolutionError(
+                WorkspaceResolutionFailure.REGISTERED_ROOT_STALE
+            ) from exc
+        raise
+    except PermissionError as exc:
+        raise WorkspaceResolutionError(
+            WorkspaceResolutionFailure.HOST_READ_PERMISSION_REQUIRED
+        ) from exc
+    except (OSError, ValidationError) as exc:
+        raise WorkspaceResolutionError(
+            WorkspaceResolutionFailure.REGISTERED_ROOT_STALE
+        ) from exc
+
+
+def resolve_workspace_readonly(
+    *,
+    start: str | Path | None,
+    workspace: str | None,
+    cwd: Path,
+    budget: ReadBudget,
+) -> ResolvedWorkspace:
+    """Resolve one workspace without interaction, writes, recovery, or fallback drift."""
+    if workspace is not None:
+        validate_id(workspace, "工作区别名")
+        registry = _bounded_registry(budget)
+        matches = tuple(item for item in registry.workspaces if item.name == workspace)
+        if len(matches) != 1:
+            raise WorkspaceResolutionError(
+                WorkspaceResolutionFailure.WORKSPACE_NOT_REGISTERED
+            )
+        record = matches[0]
+        return ResolvedWorkspace(
+            _registered_profile(record, budget),
+            WorkspaceResolutionSource.EXPLICIT,
+            record.name,
+        )
+
+    location = _readonly_location(start, cwd)
+    local_root = _readonly_local_root(location)
+    if local_root is not None:
+        try:
+            profile = load_profile_exact(local_root, budget)
+        except ReadLimitError as exc:
+            if exc.code is ReadLimitCode.UNSAFE_FILE:
+                raise WorkspaceResolutionError(
+                    WorkspaceResolutionFailure.LOCAL_PROFILE_INVALID
+                ) from exc
+            raise
+        except PermissionError as exc:
+            raise WorkspaceResolutionError(
+                WorkspaceResolutionFailure.HOST_READ_PERMISSION_REQUIRED
+            ) from exc
+        except (OSError, ValidationError) as exc:
+            raise WorkspaceResolutionError(
+                WorkspaceResolutionFailure.LOCAL_PROFILE_INVALID
+            ) from exc
+        return ResolvedWorkspace(profile, WorkspaceResolutionSource.LOCAL, None)
+
+    registry = _bounded_registry(budget)
+    if registry.default:
+        record = next(item for item in registry.workspaces if item.name == registry.default)
+        return ResolvedWorkspace(
+            _registered_profile(record, budget),
+            WorkspaceResolutionSource.DEFAULT,
+            record.name,
+        )
+
+    usable: list[tuple[WorkspaceRecord, LoadedProfile]] = []
+    for record in registry.workspaces:
+        try:
+            profile = _registered_profile(record, budget)
+        except WorkspaceResolutionError as exc:
+            if exc.code is WorkspaceResolutionFailure.REGISTERED_ROOT_STALE:
+                continue
+            raise
+        usable.append((record, profile))
+        if len(usable) > 1:
+            raise WorkspaceResolutionError(
+                WorkspaceResolutionFailure.AMBIGUOUS_WORKSPACE
+            )
+    if not usable:
+        raise WorkspaceResolutionError(WorkspaceResolutionFailure.WORKSPACE_NOT_FOUND)
+    record, profile = usable[0]
+    return ResolvedWorkspace(profile, WorkspaceResolutionSource.UNIQUE, record.name)
 
 
 def _line_from_directory(config: Config, start: Path) -> tuple[Line, ...]:

@@ -75,3 +75,35 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
                 release_tag="v1.2.3",
                 trusted_ref="main",
             )
+
+    def test_publish_workflow_requires_successful_exact_sha_ci_gate(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "pypi-publish.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("actions: read", workflow)
+        self.assertIn("actions/workflows/ci.yml/runs", workflow)
+        self.assertIn('-f "head_sha=${release_sha}"', workflow)
+        self.assertIn("-f event=push", workflow)
+        self.assertIn('"${status}" == "completed"', workflow)
+        self.assertIn('"${conclusion}" != "success"', workflow)
+        self.assertIn("ci-gate-run.tsv", workflow)
+        self.assertNotIn("dyro-bridge-zero-effect-evidence", workflow)
+        self.assertNotIn(
+            "Agent Bridge source/wheel/sdist gate (Ubuntu 24.04)", workflow
+        )
+        self.assertNotIn("bridge-gate-run.tsv", workflow)
+        self.assertIn("dyro-dispatch','SKILL.md", workflow)
+        self.assertIn("dyro-dispatch','agents','openai.yaml", workflow)
+
+    def test_ci_no_longer_ships_agent_bridge_zero_effect_gate(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("bridge-zero-effects", workflow)
+        self.assertNotIn("dyro-bridge-zero-effect-evidence", workflow)
+        self.assertNotIn("verify_bridge_zero_effects.py", workflow)
+        self.assertNotIn("Agent Bridge source/wheel/sdist gate", workflow)
+        self.assertIn("dyro-dispatch','SKILL.md", workflow)
+        self.assertIn("dyro-dispatch','agents','openai.yaml", workflow)

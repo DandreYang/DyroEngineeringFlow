@@ -3,19 +3,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
+import json
 import math
 import os
 from pathlib import Path
 import secrets
 import signal
+import stat
 import time
 from typing import Any, Mapping
 
+from .adapters.registry import (
+    execution_profile_sha256,
+    normalize_execution_profile,
+)
 from .errors import DispatchValidationError
 from .file_lock import exclusive_file_lock, file_lock_is_held
-from .json_store import atomic_write_json, read_json
+from .json_store import atomic_write_json
 from .paths import dispatch_home_path, runs_dir
-from .process_identity import process_identity_is_dead, process_started_at
+from .process_identity import (
+    process_group_has_live_members,
+    process_identity_is_dead,
+    process_started_at,
+)
 from .task_contract import TaskContract
 
 
@@ -26,6 +37,9 @@ TERMINAL_RUN_STATUSES = frozenset(
     {"completed", "failed", "timeout", "cancelled"}
 )
 ASYNC_RESERVATION_GRACE_SECONDS = 10.0
+MAX_CANCEL_REASON_CHARS = 500
+MAX_ORCHESTRATION_ID_CHARS = 256
+MAX_RUN_STATE_BYTES = 2 * 1024 * 1024
 _POSIX_PROCESS_GROUPS = (
     os.name == "posix"
     and hasattr(os, "getpgid")
@@ -57,6 +71,13 @@ class RunRecord:
     backend_pgid: int = 0
     backend_started_at: str = ""
     backend_lock_path: str = ""
+    cancel_requested_at: float = 0.0
+    cancel_reason: str = ""
+    orchestration_id: str = ""
+    planned_context_sha256: str = ""
+    planned_base_head: str = ""
+    planned_execution_profile_sha256: str = ""
+    planned_execution_profile: dict[str, str] | None = None
 
     def to_mapping(self) -> dict[str, object]:
         return {
@@ -82,6 +103,17 @@ class RunRecord:
             "backend_pgid": self.backend_pgid,
             "backend_started_at": self.backend_started_at,
             "backend_lock_path": self.backend_lock_path,
+            "cancel_requested_at": self.cancel_requested_at,
+            "cancel_reason": self.cancel_reason,
+            "orchestration_id": self.orchestration_id,
+            "planned_context_sha256": self.planned_context_sha256,
+            "planned_base_head": self.planned_base_head,
+            "planned_execution_profile_sha256": (
+                self.planned_execution_profile_sha256
+            ),
+            "planned_execution_profile": dict(
+                self.planned_execution_profile or {}
+            ),
         }
 
     @classmethod
@@ -146,6 +178,105 @@ class RunRecord:
             raise DispatchValidationError(
                 "run backend must lead its dedicated process group"
             )
+        cancel_requested_at = payload.get("cancel_requested_at", 0.0)
+        if (
+            isinstance(cancel_requested_at, bool)
+            or not isinstance(cancel_requested_at, (int, float))
+            or not math.isfinite(float(cancel_requested_at))
+            or cancel_requested_at < 0
+        ):
+            raise DispatchValidationError(
+                "run.cancel_requested_at must be a finite non-negative number"
+            )
+        cancel_reason = payload.get("cancel_reason", "")
+        if type(cancel_reason) is not str:
+            raise DispatchValidationError("run.cancel_reason must be a string")
+        if len(cancel_reason) > MAX_CANCEL_REASON_CHARS:
+            raise DispatchValidationError(
+                "run.cancel_reason exceeds the character limit"
+            )
+        if not cancel_requested_at and cancel_reason:
+            raise DispatchValidationError(
+                "run.cancel_reason requires cancel_requested_at"
+            )
+        orchestration_id = payload.get("orchestration_id", "")
+        if type(orchestration_id) is not str:
+            raise DispatchValidationError("run.orchestration_id must be a string")
+        if len(orchestration_id) > MAX_ORCHESTRATION_ID_CHARS:
+            raise DispatchValidationError(
+                "run.orchestration_id exceeds the character limit"
+            )
+        planned_context_sha256 = payload.get("planned_context_sha256", "")
+        if type(planned_context_sha256) is not str or (
+            planned_context_sha256
+            and (
+                len(planned_context_sha256) != 64
+                or any(
+                    char not in "0123456789abcdef"
+                    for char in planned_context_sha256
+                )
+            )
+        ):
+            raise DispatchValidationError(
+                "run.planned_context_sha256 must be empty or a lowercase SHA-256 digest"
+            )
+        planned_base_head = payload.get("planned_base_head", "")
+        if type(planned_base_head) is not str or (
+            planned_base_head
+            and (
+                len(planned_base_head) not in {40, 64}
+                or any(char not in "0123456789abcdef" for char in planned_base_head)
+            )
+        ):
+            raise DispatchValidationError(
+                "run.planned_base_head must be empty or a lowercase Git object ID"
+            )
+        if planned_base_head and (
+            not planned_context_sha256 or contract.get("mode") != "edit"
+        ):
+            raise DispatchValidationError(
+                "run.planned_base_head requires edit mode and a planned context digest"
+            )
+        planned_execution_profile_sha256 = payload.get(
+            "planned_execution_profile_sha256", ""
+        )
+        if type(planned_execution_profile_sha256) is not str or (
+            planned_execution_profile_sha256
+            and (
+                len(planned_execution_profile_sha256) != 64
+                or any(
+                    char not in "0123456789abcdef"
+                    for char in planned_execution_profile_sha256
+                )
+            )
+        ):
+            raise DispatchValidationError(
+                "run.planned_execution_profile_sha256 must be empty or a "
+                "lowercase SHA-256 digest"
+            )
+        raw_execution_profile = payload.get("planned_execution_profile", {})
+        if not isinstance(raw_execution_profile, Mapping):
+            raise DispatchValidationError(
+                "run.planned_execution_profile must be an object"
+            )
+        planned_execution_profile = (
+            normalize_execution_profile(
+                raw_execution_profile,
+                backend=str(payload.get("backend") or ""),
+            )
+            if raw_execution_profile
+            else {}
+        )
+        if bool(planned_execution_profile) != bool(
+            planned_execution_profile_sha256
+        ) or (
+            planned_execution_profile
+            and execution_profile_sha256(planned_execution_profile)
+            != planned_execution_profile_sha256
+        ):
+            raise DispatchValidationError(
+                "run planned execution profile digest does not match its profile"
+            )
         return cls(
             run_id=str(payload["run_id"]),
             status=status,
@@ -168,6 +299,13 @@ class RunRecord:
             backend_pgid=backend_pgid,
             backend_started_at=backend_started_at,
             backend_lock_path=backend_lock_path,
+            cancel_requested_at=float(cancel_requested_at),
+            cancel_reason=cancel_reason,
+            orchestration_id=orchestration_id,
+            planned_context_sha256=planned_context_sha256,
+            planned_base_head=planned_base_head,
+            planned_execution_profile_sha256=planned_execution_profile_sha256,
+            planned_execution_profile=planned_execution_profile,
         )
 
 
@@ -197,6 +335,10 @@ class RunStore:
         backend: str,
         panel_id: str = "",
         thread_id: str = "",
+        planned_context_sha256: str = "",
+        planned_base_head: str = "",
+        planned_execution_profile_sha256: str = "",
+        planned_execution_profile: Mapping[str, str] | None = None,
     ) -> RunRecord:
         now = time.time()
         run_id = f"run-{secrets.token_hex(8)}"
@@ -210,9 +352,175 @@ class RunStore:
             updated_at=now,
             panel_id=panel_id,
             thread_id=thread_id or run_id,
+            planned_context_sha256=planned_context_sha256,
+            planned_base_head=planned_base_head,
+            planned_execution_profile_sha256=(
+                planned_execution_profile_sha256
+            ),
+            planned_execution_profile=dict(planned_execution_profile or {}),
         )
         self.save(record)
         return record
+
+    def ensure_created(
+        self,
+        *,
+        run_id: str,
+        contract: TaskContract,
+        project_root: Path,
+        backend: str,
+        orchestration_id: str,
+        thread_id: str,
+        panel_id: str = "",
+        planned_context_sha256: str = "",
+        planned_base_head: str = "",
+        planned_execution_profile_sha256: str = "",
+        planned_execution_profile: Mapping[str, str] | None = None,
+    ) -> RunRecord:
+        """Create one deterministic run, or verify an identical prior create."""
+        if type(orchestration_id) is not str or not orchestration_id:
+            raise DispatchValidationError("orchestration_id must not be empty")
+        if len(orchestration_id) > MAX_ORCHESTRATION_ID_CHARS:
+            raise DispatchValidationError(
+                "orchestration_id exceeds the character limit"
+            )
+        if (
+            type(planned_context_sha256) is not str
+            or (
+                planned_context_sha256
+                and (
+                    len(planned_context_sha256) != 64
+                    or any(
+                        char not in "0123456789abcdef"
+                        for char in planned_context_sha256
+                    )
+                )
+            )
+        ):
+            raise DispatchValidationError(
+                "planned_context_sha256 must be empty or a lowercase SHA-256 digest"
+            )
+        if (
+            type(planned_base_head) is not str
+            or (
+                planned_base_head
+                and (
+                    len(planned_base_head) not in {40, 64}
+                    or any(
+                        char not in "0123456789abcdef"
+                        for char in planned_base_head
+                    )
+                )
+            )
+        ):
+            raise DispatchValidationError(
+                "planned_base_head must be empty or a lowercase Git object ID"
+            )
+        if planned_base_head and (
+            not planned_context_sha256 or contract.mode != "edit"
+        ):
+            raise DispatchValidationError(
+                "planned_base_head requires edit mode and a planned context digest"
+            )
+        if (
+            type(planned_execution_profile_sha256) is not str
+            or (
+                planned_execution_profile_sha256
+                and (
+                    len(planned_execution_profile_sha256) != 64
+                    or any(
+                        char not in "0123456789abcdef"
+                        for char in planned_execution_profile_sha256
+                    )
+                )
+            )
+        ):
+            raise DispatchValidationError(
+                "planned_execution_profile_sha256 must be empty or a "
+                "lowercase SHA-256 digest"
+            )
+        normalized_execution_profile = (
+            normalize_execution_profile(
+                planned_execution_profile,
+                backend=backend,
+            )
+            if planned_execution_profile
+            else {}
+        )
+        if bool(normalized_execution_profile) != bool(
+            planned_execution_profile_sha256
+        ) or (
+            normalized_execution_profile
+            and execution_profile_sha256(normalized_execution_profile)
+            != planned_execution_profile_sha256
+        ):
+            raise DispatchValidationError(
+                "planned execution profile digest does not match its profile"
+            )
+        expected_contract = contract.to_mapping()
+        expected_project_root = str(Path(project_root).resolve())
+        expected = {
+            "contract": expected_contract,
+            "project_root": expected_project_root,
+            "backend": backend,
+            "orchestration_id": orchestration_id,
+            "thread_id": thread_id,
+            "panel_id": panel_id,
+            "planned_context_sha256": planned_context_sha256,
+            "planned_base_head": planned_base_head,
+            "planned_execution_profile_sha256": (
+                planned_execution_profile_sha256
+            ),
+            "planned_execution_profile": normalized_execution_profile,
+        }
+        path = self._path(run_id)
+        with exclusive_file_lock(self._lock_path(run_id)):
+            if path.exists() or path.is_symlink():
+                record = self.load(run_id)
+                actual = {
+                    "contract": record.contract,
+                    "project_root": record.project_root,
+                    "backend": record.backend,
+                    "orchestration_id": record.orchestration_id,
+                    "thread_id": record.thread_id,
+                    "panel_id": record.panel_id,
+                    "planned_context_sha256": record.planned_context_sha256,
+                    "planned_base_head": record.planned_base_head,
+                    "planned_execution_profile_sha256": (
+                        record.planned_execution_profile_sha256
+                    ),
+                    "planned_execution_profile": dict(
+                        record.planned_execution_profile or {}
+                    ),
+                }
+                if actual != expected:
+                    raise DispatchValidationError(
+                        "existing run conflicts with deterministic create: "
+                        f"{run_id}"
+                    )
+                return record
+
+            now = time.time()
+            record = RunRecord(
+                run_id=run_id,
+                status="accepted",
+                contract=expected_contract,
+                project_root=expected_project_root,
+                backend=backend,
+                created_at=now,
+                updated_at=now,
+                panel_id=panel_id,
+                thread_id=thread_id,
+                orchestration_id=orchestration_id,
+                planned_context_sha256=planned_context_sha256,
+                planned_base_head=planned_base_head,
+                planned_execution_profile_sha256=(
+                    planned_execution_profile_sha256
+                ),
+                planned_execution_profile=normalized_execution_profile,
+            )
+            self._save_unlocked(record)
+            return record
 
     def save(self, record: RunRecord) -> None:
         with exclusive_file_lock(self._lock_path(record.run_id)):
@@ -222,27 +530,87 @@ class RunStore:
         if record.status not in RUN_STATUSES:
             raise DispatchValidationError(f"invalid run status: {record.status}")
         record.updated_at = time.time()
-        atomic_write_json(self._path(record.run_id), record.to_mapping())
+        payload = record.to_mapping()
+        RunRecord.from_mapping(payload)
+        encoded = (
+            json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
+            + "\n"
+        ).encode("utf-8")
+        if len(encoded) > MAX_RUN_STATE_BYTES:
+            raise DispatchValidationError(
+                f"run state exceeds {MAX_RUN_STATE_BYTES} bytes"
+            )
+        atomic_write_json(self._path(record.run_id), payload)
+
+    def _read_payload(self, path: Path) -> dict[str, Any]:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError as exc:
+            raise DispatchValidationError(
+                f"run not found: {path.stem}"
+            ) from exc
+        except OSError as exc:
+            if exc.errno in {errno.ELOOP, errno.EMLINK} or path.is_symlink():
+                raise DispatchValidationError(
+                    f"run state is a symbolic link: {path.stem}"
+                ) from exc
+            raise DispatchValidationError(
+                f"run state cannot be opened safely: {path.stem}"
+            ) from exc
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode):
+                raise DispatchValidationError(
+                    f"run state is not a regular file: {path.stem}"
+                )
+            if opened.st_size > MAX_RUN_STATE_BYTES:
+                raise DispatchValidationError(
+                    f"run state exceeds {MAX_RUN_STATE_BYTES} bytes"
+                )
+            linked = os.stat(path, follow_symlinks=False)
+            if stat.S_ISLNK(linked.st_mode) or not os.path.samestat(opened, linked):
+                raise DispatchValidationError(
+                    f"run state path changed while opening: {path.stem}"
+                )
+            with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                raw = handle.read(MAX_RUN_STATE_BYTES + 1)
+            if len(raw) > MAX_RUN_STATE_BYTES:
+                raise DispatchValidationError(
+                    f"run state exceeds {MAX_RUN_STATE_BYTES} bytes"
+                )
+        except FileNotFoundError as exc:
+            raise DispatchValidationError(
+                f"run state path changed while opening: {path.stem}"
+            ) from exc
+        finally:
+            os.close(descriptor)
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DispatchValidationError(
+                f"run state is corrupt: {path.stem}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise DispatchValidationError(
+                f"run state must be an object: {path.stem}"
+            )
+        return payload
 
     def load(self, run_id: str) -> RunRecord:
         path = self._path(run_id)
-        if path.is_symlink():
-            raise DispatchValidationError(f"run state is a symbolic link: {run_id}")
-        payload = read_json(path)
-        if payload is None:
-            raise DispatchValidationError(f"run not found: {run_id}")
-        return RunRecord.from_mapping(payload)
+        return RunRecord.from_mapping(self._read_payload(path))
 
     def list_runs(self) -> list[RunRecord]:
         items: list[RunRecord] = []
         for path in sorted(self.root.glob("run-*.json")):
-            if path.is_symlink():
-                continue
-            payload = read_json(path)
-            if payload is None:
-                continue
             try:
-                items.append(RunRecord.from_mapping(payload))
+                items.append(self.load(path.stem))
             except DispatchValidationError:
                 continue
         return items
@@ -283,6 +651,10 @@ class RunStore:
                         "run terminal transition rejected: backend cleanup "
                         "is not proven"
                     )
+                if record.cancel_requested_at and status != "cancelled":
+                    raise DispatchValidationError(
+                        "run terminal transition rejected: cancellation requested"
+                    )
             record.status = status
             if error:
                 record.error = error
@@ -295,6 +667,54 @@ class RunStore:
             record.revision += 1
             self._save_unlocked(record)
             return record
+
+    def request_cancel(
+        self,
+        run_id: str,
+        *,
+        reason: str = "cancel requested",
+    ) -> RunRecord:
+        """Persist an idempotent cooperative cancellation request."""
+        if type(reason) is not str:
+            raise DispatchValidationError("cancel reason must be a string")
+        if len(reason) > MAX_CANCEL_REASON_CHARS:
+            raise DispatchValidationError(
+                "cancel reason exceeds the character limit"
+            )
+        with exclusive_file_lock(self._lock_path(run_id)):
+            record = self.load(run_id)
+            if record.status in TERMINAL_RUN_STATUSES:
+                return record
+            if record.cancel_requested_at:
+                return record
+            requested_at = time.time()
+            if not math.isfinite(requested_at) or requested_at <= 0:
+                raise DispatchValidationError(
+                    "cancel request time must be finite and positive"
+                )
+            record.cancel_requested_at = requested_at
+            record.cancel_reason = reason
+            if record.status == "accepted":
+                record.status = "cancelled"
+            record.revision += 1
+            self._save_unlocked(record)
+            return record
+
+    def cancel_requested(
+        self,
+        run_id: str,
+        *,
+        worker_token: str,
+    ) -> bool:
+        """Return cancellation only to the exact active worker generation."""
+        if not worker_token:
+            raise DispatchValidationError("worker token must not be empty")
+        record = self.load(run_id)
+        return bool(
+            record.status == "running"
+            and record.worker_token == worker_token
+            and record.cancel_requested_at
+        )
 
     def reserve_async_worker(
         self,
@@ -433,20 +853,6 @@ class RunStore:
             self._save_unlocked(record)
             return record
 
-    @staticmethod
-    def _process_group_exists(process_group_id: int) -> bool:
-        if not _POSIX_PROCESS_GROUPS:
-            raise DispatchValidationError(
-                "backend cleanup requires POSIX process groups"
-            )
-        try:
-            os.killpg(process_group_id, 0)
-        except ProcessLookupError:
-            return False
-        except (PermissionError, OSError):
-            return True
-        return True
-
     def _backend_cleanup_proven(self, record: RunRecord) -> bool:
         if record.backend_pid <= 0:
             return True
@@ -466,8 +872,10 @@ class RunStore:
         ):
             return False
         lock_held = file_lock_is_held(expected_lock)
-        group_exists = self._process_group_exists(record.backend_pgid)
-        if lock_held is False and not group_exists:
+        group_has_live_members = process_group_has_live_members(
+            record.backend_pgid
+        )
+        if lock_held is False and group_has_live_members is False:
             return True
         if lock_held is not True:
             return False
@@ -488,31 +896,43 @@ class RunStore:
         try:
             os.killpg(record.backend_pgid, signal.SIGTERM)
         except ProcessLookupError:
-            pass
+            term_delivered = False
         except OSError:
             return False
+        else:
+            term_delivered = True
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline:
-            if file_lock_is_held(expected_lock) is False:
-                break
+            lock_held = file_lock_is_held(expected_lock)
+            group_has_live_members = process_group_has_live_members(
+                record.backend_pgid
+            )
+            if lock_held is False and group_has_live_members is False:
+                return True
+            if lock_held is None or group_has_live_members is None:
+                return False
             time.sleep(0.02)
-        try:
-            os.killpg(record.backend_pgid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        except OSError:
-            return False
+        # The trusted wrapper keeps the lifetime lock held for longer than the
+        # TERM grace window. Only escalate while that generation anchor is
+        # still present; after release, a bare PGID is never safe to signal.
+        if term_delivered and file_lock_is_held(expected_lock) is True:
+            try:
+                os.killpg(record.backend_pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                return False
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
             if (
                 file_lock_is_held(expected_lock) is False
-                and not self._process_group_exists(record.backend_pgid)
+                and process_group_has_live_members(record.backend_pgid) is False
             ):
                 return True
             time.sleep(0.02)
         return (
             file_lock_is_held(expected_lock) is False
-            and not self._process_group_exists(record.backend_pgid)
+            and process_group_has_live_members(record.backend_pgid) is False
         )
 
     def cleanup_backend_if_owned(
@@ -625,8 +1045,11 @@ class RunStore:
             record = self.load(run_id)
             if record.status != "accepted" or record.worker_token:
                 return record
-            record.status = "failed"
-            record.error = error
+            if record.cancel_requested_at:
+                record.status = "cancelled"
+            else:
+                record.status = "failed"
+                record.error = error
             record.revision += 1
             self._save_unlocked(record)
             return record
@@ -647,8 +1070,11 @@ class RunStore:
                 or record.backend_pid
             ):
                 return record
-            record.status = "failed"
-            record.error = error
+            if record.cancel_requested_at:
+                record.status = "cancelled"
+            else:
+                record.status = "failed"
+                record.error = error
             record.revision += 1
             self._save_unlocked(record)
             return record
@@ -669,8 +1095,11 @@ class RunStore:
                 or (record.status == "running" and record.backend_pid)
             ):
                 return record
-            record.status = "failed"
-            record.error = error
+            if record.cancel_requested_at:
+                record.status = "cancelled"
+            else:
+                record.status = "failed"
+                record.error = error
             record.revision += 1
             self._save_unlocked(record)
             return record

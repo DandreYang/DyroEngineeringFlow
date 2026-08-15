@@ -8,6 +8,7 @@ from typing import Callable
 
 from .config import Config, load, validate_id
 from .errors import DyroError, ValidationError
+from .read_limits import ReadBudget, ReadLimitCode, ReadLimitError
 from .state import atomic_write_text, exclusive_lock
 
 
@@ -32,6 +33,16 @@ class WorkspaceRegistry:
     workspaces: tuple[WorkspaceRecord, ...] = ()
 
 
+@dataclass(frozen=True)
+class WorkspaceRegistrationPlan:
+    """A read-only preview of adding one workspace to the global entry list."""
+
+    name: str
+    root: Path
+    already_registered: bool
+    becomes_default: bool
+
+
 def registry_home() -> Path:
     override = os.environ.get("DYRO_HOME", "").strip()
     if override:
@@ -54,7 +65,7 @@ def _registry_lock_path() -> Path:
     return registry_home() / REGISTRY_LOCK
 
 
-def _record_from_json(raw: object, *, index: int) -> WorkspaceRecord:
+def _record_from_json(raw: object, *, index: int, expand_home: bool = True) -> WorkspaceRecord:
     if not isinstance(raw, dict):
         raise ValidationError(f"全局工作区记录第 {index} 项必须是对象")
     expected = {"name", "root", "last_kind", "last_target", "last_agent"}
@@ -70,10 +81,13 @@ def _record_from_json(raw: object, *, index: int) -> WorkspaceRecord:
     root_raw = raw.get("root")
     if not isinstance(root_raw, str) or not root_raw or "\x00" in root_raw:
         raise ValidationError(f"全局工作区 {name} 的路径无效")
-    root = Path(root_raw).expanduser()
+    if not expand_home and root_raw.startswith("~"):
+        raise ValidationError(f"全局工作区 {name} 的路径禁止 home expansion")
+    root = Path(root_raw).expanduser() if expand_home else Path(os.path.normpath(root_raw))
     if not root.is_absolute():
         raise ValidationError(f"全局工作区 {name} 必须使用绝对路径")
-    root = root.resolve()
+    if expand_home:
+        root = root.resolve()
     last_kind = raw.get("last_kind", "")
     last_target = raw.get("last_target", "")
     last_agent = raw.get("last_agent", "")
@@ -92,18 +106,13 @@ def _record_from_json(raw: object, *, index: int) -> WorkspaceRecord:
     return WorkspaceRecord(name, root, last_kind, last_target, last_agent)
 
 
-def load_registry() -> WorkspaceRegistry:
-    path = _registry_path()
-    if not path.exists() and not path.is_symlink():
-        return WorkspaceRegistry()
-    if path.is_symlink() or not path.is_file():
-        raise ValidationError(f"全局工作区记录不是安全的普通文件：{path}")
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValidationError(
-            f"无法读取全局工作区记录 {path}；请修复或备份后移走该文件"
-        ) from exc
+def _registry_from_json(
+    raw: object,
+    *,
+    path: Path,
+    expand_home: bool,
+    maximum_records: int | None = None,
+) -> WorkspaceRegistry:
     if (
         not isinstance(raw, dict)
         or raw.get("schema_version") != REGISTRY_SCHEMA_VERSION
@@ -115,8 +124,13 @@ def load_registry() -> WorkspaceRegistry:
     entries = raw.get("workspaces", [])
     if not isinstance(default, str) or not isinstance(entries, list):
         raise ValidationError(f"全局工作区记录结构无效：{path}")
+    if maximum_records is not None and len(entries) > maximum_records:
+        raise ReadLimitError(
+            ReadLimitCode.RECORD_LIMIT_EXCEEDED,
+            "Global workspace registry record limit exceeded",
+        )
     workspaces = tuple(
-        _record_from_json(entry, index=index)
+        _record_from_json(entry, index=index, expand_home=expand_home)
         for index, entry in enumerate(entries, start=1)
     )
     names = [record.name for record in workspaces]
@@ -128,6 +142,52 @@ def load_registry() -> WorkspaceRegistry:
     if default and default not in names:
         raise ValidationError(f"全局默认工作区不存在：{default}")
     return WorkspaceRegistry(default, workspaces)
+
+
+def load_registry() -> WorkspaceRegistry:
+    path = _registry_path()
+    if not path.exists() and not path.is_symlink():
+        return WorkspaceRegistry()
+    if path.is_symlink() or not path.is_file():
+        raise ValidationError(f"全局工作区记录不是安全的普通文件：{path}")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise ValidationError(
+            f"无法读取全局工作区记录 {path}；请修复或备份后移走该文件"
+        ) from exc
+    return _registry_from_json(raw, path=path, expand_home=True)
+
+
+def load_registry_bounded(budget: ReadBudget) -> WorkspaceRegistry:
+    """Load the registry without locks, writes, home expansion, or unbounded I/O."""
+    path = _registry_path()
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return WorkspaceRegistry()
+    try:
+        canonical_home = path.parent.resolve(strict=True)
+        content = budget.read_regular_bytes_at(
+            root=canonical_home,
+            directory=canonical_home,
+            name=path.name,
+            maximum_bytes=budget.limits.registry_bytes,
+            label="global workspace registry",
+        )
+        raw = json.loads(content.decode("utf-8"))
+    except ReadLimitError:
+        raise
+    except PermissionError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise ValidationError("无法读取全局工作区记录") from exc
+    return _registry_from_json(
+        raw,
+        path=path,
+        expand_home=False,
+        maximum_records=budget.limits.registry_records,
+    )
 
 
 def _registry_json(registry: WorkspaceRegistry) -> str:
@@ -166,6 +226,32 @@ def _profile_root(path: str | Path) -> Config:
         raise DyroError(
             f"这里不是可用的 Dyro 工作区：{candidate}；请确认其中存在有效 dyro.toml"
         ) from exc
+
+
+def preview_workspace_registration(
+    path: str | Path, *, name: str, make_default: bool = False
+) -> WorkspaceRegistrationPlan:
+    """Validate and describe a future global workspace registration without writing."""
+
+    root = Path(path).expanduser().absolute().resolve()
+    alias = validate_id(name, "工作区别名")
+    registry = load_registry()
+    same_name = next(
+        (item for item in registry.workspaces if item.name == alias), None
+    )
+    same_root = next(
+        (item for item in registry.workspaces if item.root == root), None
+    )
+    if same_name is not None and same_name.root != root:
+        raise DyroError(f"工作区别名 {alias} 已指向 {same_name.root}")
+    if same_root is not None and same_root.name != alias:
+        raise DyroError(f"工作区路径已经登记为 {same_root.name}：{root}")
+    return WorkspaceRegistrationPlan(
+        name=alias,
+        root=root,
+        already_registered=same_name is not None or same_root is not None,
+        becomes_default=make_default or not registry.default,
+    )
 
 
 def add_workspace(

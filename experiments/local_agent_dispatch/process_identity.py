@@ -88,6 +88,49 @@ def process_state(pid: int) -> str | None:
     return state or None
 
 
+def process_group_has_live_members(process_group_id: int) -> bool | None:
+    """Return whether a process group contains a non-zombie member.
+
+    ``False`` means every observed member has exited (and may only be waiting
+    to be reaped), while ``None`` keeps callers fail-closed when the process
+    table cannot be inspected reliably.
+    """
+    if type(process_group_id) is not int or process_group_id <= 0:
+        return None
+    ps_path = "/bin/ps"
+    if not os.path.isfile(ps_path) or not os.access(ps_path, os.X_OK):
+        return None
+    try:
+        completed = subprocess.run(
+            [ps_path, "-axo", "pgid=,stat="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    parsed_rows = 0
+    for line in completed.stdout.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split()
+        if len(fields) < 2:
+            return None
+        try:
+            member_pgid = int(fields[0])
+        except ValueError:
+            return None
+        parsed_rows += 1
+        if member_pgid != process_group_id:
+            continue
+        if not fields[1].startswith("Z"):
+            return True
+    return False if parsed_rows else None
+
+
 def process_identity_is_dead(*, pid: int, started_at: str) -> bool:
     """
     Return true only with positive evidence that the generation ended.

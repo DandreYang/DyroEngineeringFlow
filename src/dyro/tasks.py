@@ -4,14 +4,26 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import tomllib
 import uuid
 from typing import Any, Iterable
 
-from .config import Config, expand_argv, external_security_errors, strict_bool, validate_id
+from .config import (
+    Config,
+    expand_argv,
+    external_security_errors,
+    strict_bool,
+    validate_id,
+)
 from .evidence_store import (
+    CURRENT_EVIDENCE_FILE,
+    EVIDENCE_GENERATIONS_DIR,
+    GENERATION_PATTERN,
+    MANIFEST_FILE,
     EvidenceGeneration,
     cleanup_evidence_generations,
     list_evidence_generations,
@@ -19,7 +31,13 @@ from .evidence_store import (
     resolve_evidence_path,
 )
 from .errors import DyroError, ValidationError
-from .process import git, require_ok, run
+from .process import git, git_read, require_ok, run
+from .read_limits import (
+    ReadBudget,
+    ReadLimitCode,
+    ReadLimitError,
+    bounded_directory_names,
+)
 from .provenance import (
     ExecutionAttempt,
     begin_execution_attempt,
@@ -34,7 +52,16 @@ from .state import append_text, atomic_write_bytes, atomic_write_text, exclusive
 from .workspace import Line, get_line, line_repository_path, repository_path
 
 
-STATUSES = ("backlog", "assigned", "in_progress", "waiting_answer", "review", "review_pending_signoff", "done", "failed")
+STATUSES = (
+    "backlog",
+    "assigned",
+    "in_progress",
+    "waiting_answer",
+    "review",
+    "review_pending_signoff",
+    "done",
+    "failed",
+)
 QUALITY_GATE_STATUSES = frozenset({"review", "review_pending_signoff", "done"})
 TRANSITIONS = {
     "backlog": {"assigned"},
@@ -48,8 +75,12 @@ TRANSITIONS = {
 }
 RESULT_RE = re.compile(r"^result:\s*(DONE|BLOCKED|QUESTION)\s*$", re.IGNORECASE)
 VERDICT_RE = re.compile(r"^verdict:\s*(PASS|FAIL)\s*$", re.IGNORECASE)
-RECEIPT_SHA_RE = re.compile(r"^receipt_sha256:\s*([0-9a-f]{64})\s*$", re.IGNORECASE | re.MULTILINE)
-TASK_HEADS_SHA_RE = re.compile(r"^task_heads_sha256:\s*([0-9a-f]{64})\s*$", re.IGNORECASE | re.MULTILINE)
+RECEIPT_SHA_RE = re.compile(
+    r"^receipt_sha256:\s*([0-9a-f]{64})\s*$", re.IGNORECASE | re.MULTILINE
+)
+TASK_HEADS_SHA_RE = re.compile(
+    r"^task_heads_sha256:\s*([0-9a-f]{64})\s*$", re.IGNORECASE | re.MULTILINE
+)
 GIT_HEAD_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$", re.IGNORECASE)
 TASK_HEADS_FILE = "task-heads.json"
 REVIEW_IDENTITY_FILE = "review-identity.json"
@@ -103,7 +134,9 @@ def task_dir(config: Config, task_id: str) -> Path:
 
 
 def _strings(raw: Any, label: str) -> tuple[str, ...]:
-    if not isinstance(raw, list) or not all(isinstance(item, str) and item for item in raw):
+    if not isinstance(raw, list) or not all(
+        isinstance(item, str) and item for item in raw
+    ):
         raise ValidationError(f"{label} 必须是字符串数组")
     return tuple(raw)
 
@@ -114,23 +147,36 @@ def _positive_int(raw: Any, label: str, *, maximum: int) -> int:
     return raw
 
 
-def _parse_task(path: Path) -> Task:
+def _string(raw: Any, label: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(raw, str) or (not allow_empty and not raw.strip()):
+        qualifier = "字符串" if allow_empty else "非空字符串"
+        raise ValidationError(f"{label} 必须是{qualifier}")
+    return raw.strip()
+
+
+def _table(raw: Any, label: str) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValidationError(f"{label} 必须是表")
+    return raw
+
+
+def _parse_task_content(path: Path, content: bytes) -> Task:
     try:
-        raw = tomllib.loads((path / "task.toml").read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as exc:
+        raw = tomllib.loads(content.decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
         raise ValidationError(f"任务清单格式错误 {path}: {exc}") from exc
     if raw.get("schema_version") != 1:
         raise ValidationError(f"任务清单必须使用 schema_version = 1：{path}")
-    task_id = validate_id(str(raw.get("id", "")), "任务 ID")
-    title = str(raw.get("title", "")).strip()
-    line = validate_id(str(raw.get("line", "")), "任务开发线")
-    risk = str(raw.get("risk", "write"))
-    if not title or risk not in ("read", "write"):
+    task_id = validate_id(_string(raw.get("id"), "任务 ID"), "任务 ID")
+    title = _string(raw.get("title"), f"任务 {task_id} title")
+    line = validate_id(_string(raw.get("line"), f"任务 {task_id} 开发线"), "任务开发线")
+    risk = _string(raw.get("risk", "write"), f"任务 {task_id} risk")
+    if risk not in ("read", "write"):
         raise ValidationError(f"任务 {task_id} 的 title 或 risk 无效")
-    executor = str(raw.get("executor", {}).get("agent", "")).strip()
-    reviewer = str(raw.get("reviewer", {}).get("agent", "")).strip()
-    if not executor or not reviewer:
-        raise ValidationError(f"任务 {task_id} 必须配置 executor.agent 与 reviewer.agent")
+    executor_raw = _table(raw.get("executor", {}), f"任务 {task_id} executor")
+    reviewer_raw = _table(raw.get("reviewer", {}), f"任务 {task_id} reviewer")
+    executor = _string(executor_raw.get("agent"), f"任务 {task_id} executor.agent")
+    reviewer = _string(reviewer_raw.get("agent"), f"任务 {task_id} reviewer.agent")
     repo_entries = raw.get("repositories", [])
     if not isinstance(repo_entries, list) or not repo_entries:
         raise ValidationError(f"任务 {task_id} 至少包含一个 [[repositories]]")
@@ -138,17 +184,29 @@ def _parse_task(path: Path) -> Task:
     for entry in repo_entries:
         if not isinstance(entry, dict):
             raise ValidationError(f"任务 {task_id} repositories 结构无效")
-        repositories.append(validate_id(str(entry.get("id", "")), "任务仓库 id"))
+        repositories.append(
+            validate_id(
+                _string(entry.get("id"), f"任务 {task_id} repository id"),
+                "任务仓库 id",
+            )
+        )
     if len(set(repositories)) != len(repositories):
         raise ValidationError(f"任务 {task_id} repositories 不能重复")
+    gates_raw = raw.get("gates", [])
+    if not isinstance(gates_raw, list):
+        raise ValidationError(f"任务 {task_id} gates 必须是表数组")
     gates: list[Gate] = []
-    for entry in raw.get("gates", []):
+    for entry in gates_raw:
         if not isinstance(entry, dict):
             raise ValidationError(f"任务 {task_id} gates 结构无效")
-        name = str(entry.get("name", "")).strip()
+        name = _string(entry.get("name"), f"任务 {task_id} gate name")
         argv = entry.get("argv")
-        cwd = str(entry.get("cwd", "."))
-        if not name or not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
+        cwd = _string(entry.get("cwd", "."), f"任务 {task_id} gate {name} cwd")
+        if (
+            not isinstance(argv, list)
+            or not argv
+            or not all(isinstance(item, str) and item for item in argv)
+        ):
             raise ValidationError(f"任务 {task_id} gate 必须包含 name 与 argv 数组")
         cwd_path = Path(cwd)
         if cwd_path.is_absolute() or ".." in cwd_path.parts:
@@ -180,7 +238,11 @@ def _parse_task(path: Path) -> Task:
         repositories=tuple(repositories),
         depends_on=_strings(raw.get("depends_on", []), "depends_on"),
         blocked_on=_strings(raw.get("blocked_on", []), "blocked_on"),
-        conflict_group=str(raw.get("conflict_group", "")),
+        conflict_group=_string(
+            raw.get("conflict_group", ""),
+            f"任务 {task_id} conflict_group",
+            allow_empty=True,
+        ),
         timeout_minutes=_positive_int(
             raw.get("timeout_minutes", 60),
             f"任务 {task_id} timeout_minutes",
@@ -198,21 +260,263 @@ def _parse_task(path: Path) -> Task:
     )
 
 
+def _parse_task(path: Path) -> Task:
+    return _parse_task_content(path, (path / "task.toml").read_bytes())
+
+
 def load_task(config: Config, task_id: str) -> Task:
     task = _parse_task(task_dir(config, task_id))
     if task.id != task_id:
-        raise ValidationError(f"目录任务 ID 与 task.toml 不一致：{task_id} != {task.id}")
-    unknown = [repo_id for repo_id in task.repositories if repo_id not in config.repositories]
+        raise ValidationError(
+            f"目录任务 ID 与 task.toml 不一致：{task_id} != {task.id}"
+        )
+    unknown = [
+        repo_id for repo_id in task.repositories if repo_id not in config.repositories
+    ]
     if unknown:
         raise ValidationError(f"任务 {task.id} 引用了未配置仓库：{', '.join(unknown)}")
     get_line(config, task.line)
     return task
 
 
+def load_task_bounded(
+    config: Config,
+    task_id: str,
+    budget: ReadBudget,
+    *,
+    known_line_ids: frozenset[str],
+) -> Task:
+    """Load one Task manifest without an unbounded line re-scan."""
+    validate_id(task_id, "任务 ID")
+    directory = config.task_specs_dir / task_id
+    try:
+        content = budget.read_regular_bytes_at(
+            root=config.root,
+            directory=directory,
+            name="task.toml",
+            maximum_bytes=budget.limits.task_manifest_bytes,
+            label="task.toml",
+        )
+    except FileNotFoundError as exc:
+        raise ValidationError(f"任务不存在：{task_id}") from exc
+    return _validate_bounded_task(
+        config,
+        task_id,
+        directory,
+        content,
+        known_line_ids=known_line_ids,
+    )
+
+
+def _validate_bounded_task(
+    config: Config,
+    task_id: str,
+    directory: Path,
+    content: bytes,
+    *,
+    known_line_ids: frozenset[str],
+) -> Task:
+    task = _parse_task_content(directory, content)
+    if task.id != task_id:
+        raise ValidationError(
+            f"目录任务 ID 与 task.toml 不一致：{task_id} != {task.id}"
+        )
+    unknown = [
+        repo_id for repo_id in task.repositories if repo_id not in config.repositories
+    ]
+    if unknown:
+        raise ValidationError(f"任务 {task.id} 引用了未配置仓库：{', '.join(unknown)}")
+    if task.line not in known_line_ids:
+        raise ValidationError(f"任务 {task.id} 引用了未登记开发线：{task.line}")
+    return task
+
+
+def load_task_observation_bounded(
+    config: Config,
+    task_id: str,
+    budget: ReadBudget,
+    *,
+    known_line_ids: frozenset[str],
+) -> tuple[Task, str]:
+    """Load one Task manifest and status from the same stable directory FD."""
+
+    task, current, _content = _load_task_observation_details_bounded(
+        config,
+        task_id,
+        budget,
+        known_line_ids=known_line_ids,
+    )
+    return task, current
+
+
+def load_task_planning_bounded(
+    config: Config,
+    task_id: str,
+    budget: ReadBudget,
+    *,
+    known_line_ids: frozenset[str],
+) -> tuple[Task, str, str]:
+    """Load one Task/status pair and bind its exact manifest digest."""
+
+    task, current, content = _load_task_observation_details_bounded(
+        config,
+        task_id,
+        budget,
+        known_line_ids=known_line_ids,
+    )
+    return task, current, hashlib.sha256(content).hexdigest()
+
+
+def _load_task_observation_details_bounded(
+    config: Config,
+    task_id: str,
+    budget: ReadBudget,
+    *,
+    known_line_ids: frozenset[str],
+) -> tuple[Task, str, bytes]:
+    validate_id(task_id, "任务 ID")
+    directory = config.task_specs_dir / task_id
+    try:
+        with budget.open_safe_directory_chain(config.root, directory) as directory_fd:
+            assert directory_fd is not None
+            content = budget.read_regular_bytes_from_directory_fd(
+                directory_fd,
+                name="task.toml",
+                maximum_bytes=budget.limits.task_manifest_bytes,
+                label="task.toml",
+            )
+            try:
+                status_content = budget.read_regular_bytes_from_directory_fd(
+                    directory_fd,
+                    name="status",
+                    maximum_bytes=budget.limits.task_status_bytes,
+                    label="task status",
+                )
+            except FileNotFoundError:
+                status_content = b"backlog"
+    except FileNotFoundError as exc:
+        raise ValidationError(f"任务不存在：{task_id}") from exc
+    task = _validate_bounded_task(
+        config,
+        task_id,
+        directory,
+        content,
+        known_line_ids=known_line_ids,
+    )
+    try:
+        current = status_content.decode("utf-8").strip()
+    except UnicodeError as exc:
+        raise ValidationError(f"任务 {task.id} 状态不是 UTF-8") from exc
+    if current not in STATUSES:
+        raise ValidationError(f"任务 {task.id} 状态非法")
+    return task, current, content
+
+
 def list_tasks(config: Config) -> list[Task]:
     if not config.task_specs_dir.exists():
         return []
-    return [load_task(config, path.parent.name) for path in sorted(config.task_specs_dir.glob("*/task.toml"))]
+    return [
+        load_task(config, path.parent.name)
+        for path in sorted(config.task_specs_dir.glob("*/task.toml"))
+    ]
+
+
+def list_task_ids_bounded(config: Config, budget: ReadBudget) -> tuple[str, ...]:
+    """Enumerate Task directories without following symlinks or exceeding limits."""
+
+    with budget.open_safe_directory_chain(
+        config.root, config.task_specs_dir, allow_missing=True
+    ) as directory_fd:
+        if directory_fd is None:
+            return ()
+        task_ids: list[str] = []
+        for name in sorted(
+            bounded_directory_names(
+                directory_fd,
+                budget,
+                maximum_records=budget.limits.task_records,
+                label="Task",
+            )
+        ):
+            try:
+                info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise ReadLimitError(
+                    ReadLimitCode.UNSAFE_FILE,
+                    "Task root contains an unsafe entry",
+                ) from exc
+            if stat.S_ISLNK(info.st_mode):
+                raise ReadLimitError(
+                    ReadLimitCode.UNSAFE_FILE,
+                    "Task root contains an unsafe entry",
+                )
+            if not stat.S_ISDIR(info.st_mode):
+                continue
+            validate_id(name, "任务 ID")
+            budget.bind_directory_identity(
+                config.task_specs_dir / name, (info.st_dev, info.st_ino)
+            )
+            task_ids.append(name)
+        return tuple(task_ids)
+
+
+def decisions_bounded(config: Config, budget: ReadBudget) -> dict[str, str]:
+    """Read decision facts through the machine-facing bounded reader."""
+
+    try:
+        content = budget.read_regular_bytes_at(
+            root=config.root,
+            directory=config.decisions_file.parent,
+            name=config.decisions_file.name,
+            maximum_bytes=budget.limits.task_manifest_bytes,
+            label="decisions.toml",
+        )
+    except FileNotFoundError:
+        return {}
+    try:
+        raw = tomllib.loads(content.decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
+        raise ValidationError("决策点格式错误") from exc
+    entries = raw.get("decisions", {})
+    if not isinstance(entries, dict):
+        raise ValidationError("decisions.toml 必须使用 [decisions.<id>]")
+    return {
+        str(key): str(value.get("status", "open"))
+        for key, value in entries.items()
+        if isinstance(value, dict)
+    }
+
+
+def external_claim_active_bounded(
+    config: Config,
+    task: Task,
+    budget: ReadBudget,
+    *,
+    now: datetime,
+) -> bool:
+    """Read claim liveness without following a Task-directory symlink."""
+
+    try:
+        content = budget.read_regular_bytes_at(
+            root=config.root,
+            directory=task.directory,
+            name=_claim_path(task).name,
+            maximum_bytes=budget.limits.task_manifest_bytes,
+            label="task claim",
+        )
+    except FileNotFoundError:
+        return False
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise ValidationError(f"任务 {task.id} 领取记录格式错误") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("task_id") != task.id
+        or not isinstance(payload.get("runner"), str)
+    ):
+        raise ValidationError(f"任务 {task.id} 领取记录无效")
+    return not _claim_expired(payload, now=now)
 
 
 def status(config: Config, task: Task) -> str:
@@ -220,6 +524,24 @@ def status(config: Config, task: Task) -> str:
     current = file.read_text(encoding="utf-8").strip() if file.exists() else "backlog"
     if current not in STATUSES:
         raise ValidationError(f"任务 {task.id} 状态非法：{current}")
+    return current
+
+
+def status_bounded(config: Config, task: Task, budget: ReadBudget) -> str:
+    try:
+        current = budget.read_regular_text_at(
+            root=config.root,
+            directory=task.directory,
+            name="status",
+            maximum_bytes=budget.limits.task_status_bytes,
+            label="task status",
+        ).strip()
+    except FileNotFoundError:
+        return "backlog"
+    except UnicodeError as exc:
+        raise ValidationError(f"任务 {task.id} 状态不是 UTF-8") from exc
+    if current not in STATUSES:
+        raise ValidationError(f"任务 {task.id} 状态非法")
     return current
 
 
@@ -256,7 +578,11 @@ def _claim(task: Task) -> dict[str, object] | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ValidationError(f"任务 {task.id} 领取记录格式错误") from exc
-    if not isinstance(payload, dict) or payload.get("task_id") != task.id or not isinstance(payload.get("runner"), str):
+    if (
+        not isinstance(payload, dict)
+        or payload.get("task_id") != task.id
+        or not isinstance(payload.get("runner"), str)
+    ):
         raise ValidationError(f"任务 {task.id} 领取记录无效")
     return payload
 
@@ -304,7 +630,9 @@ def external_claim_active(task: Task, *, now: datetime | None = None) -> bool:
     return claim is not None and not _claim_expired(claim, now=now)
 
 
-def execution_claim_binding(task: Task, *, claim_file: Path | None = None) -> dict[str, object]:
+def execution_claim_binding(
+    task: Task, *, claim_file: Path | None = None
+) -> dict[str, object]:
     if claim_file is None:
         claim = _claim(task)
     else:
@@ -318,7 +646,10 @@ def execution_claim_binding(task: Task, *, claim_file: Path | None = None) -> di
     if (
         not isinstance(claim, dict)
         or claim.get("task_id") != task.id
-        or any(not isinstance(claim.get(field), str) or not claim.get(field) for field in required)
+        or any(
+            not isinstance(claim.get(field), str) or not claim.get(field)
+            for field in required
+        )
         or not isinstance(claim.get("generation"), int)
         or int(claim["generation"]) < 1
     ):
@@ -351,15 +682,22 @@ def claim_task(
         raise ValidationError("执行器标识不能为空")
     require_signed_execution = getattr(config.policy, "require_signed_execution", False)
     if require_signed_execution and not key_id:
-        raise ValidationError("require_signed_execution = true 时 claim 必须提供 --key-id")
+        raise ValidationError(
+            "require_signed_execution = true 时 claim 必须提供 --key-id"
+        )
     if key_id:
         from .signing import trusted_key_ids, trusted_key_principal, validate_key_id
 
         key_id = validate_key_id(key_id)
         if key_id not in trusted_key_ids(config.root, "execution"):
             raise ValidationError(f"execution key ID 尚未受信任：{key_id}")
-        if require_signed_execution and trusted_key_principal(config.root, "execution", key_id) != runner:
-            raise ValidationError("execution claim runner 必须等于 trusted key 的 principal")
+        if (
+            require_signed_execution
+            and trusted_key_principal(config.root, "execution", key_id) != runner
+        ):
+            raise ValidationError(
+                "execution claim runner 必须等于 trusted key 的 principal"
+            )
     lease_seconds = _claim_lease_seconds(lease_seconds)
     with exclusive_lock(_dispatch_lock_path(config)):
         with exclusive_lock(_state_lock_path(task)):
@@ -370,10 +708,14 @@ def claim_task(
             if current not in ("backlog", "assigned", "waiting_answer") and not (
                 current == "in_progress" and expired
             ):
-                raise DyroError(f"仅 backlog、assigned 或 waiting_answer 任务可领取：{task.id}")
+                raise DyroError(
+                    f"仅 backlog、assigned 或 waiting_answer 任务可领取：{task.id}"
+                )
             if existing is not None and not expired:
                 raise DyroError(f"任务 {task.id} 已被领取")
-            target_status = "waiting_answer" if current == "waiting_answer" else "assigned"
+            target_status = (
+                "waiting_answer" if current == "waiting_answer" else "assigned"
+            )
             if dry_run:
                 return target_status
             now = datetime.now(timezone.utc)
@@ -383,10 +725,15 @@ def claim_task(
                 "runner": runner,
                 "execution_key_id": key_id or "",
                 "claimed_at": now.isoformat(timespec="seconds"),
-                "lease_expires_at": (now + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds"),
+                "lease_expires_at": (now + timedelta(seconds=lease_seconds)).isoformat(
+                    timespec="seconds"
+                ),
                 "generation": int(existing.get("generation", 0)) + 1 if existing else 1,
             }
-            atomic_write_text(_claim_path(task), json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+            atomic_write_text(
+                _claim_path(task),
+                json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+            )
             if current in ("backlog", "in_progress"):
                 set_status(config, task, "assigned", force=current == "in_progress")
             ledger(
@@ -395,7 +742,9 @@ def claim_task(
                 "claim_takeover" if expired else "claim",
                 runner=runner,
                 lease_seconds=lease_seconds,
-                previous_runner=existing.get("runner", "") if expired and existing else "",
+                previous_runner=existing.get("runner", "")
+                if expired and existing
+                else "",
                 claim_id=payload["claim_id"],
                 generation=payload["generation"],
                 execution_key_id=payload["execution_key_id"],
@@ -429,10 +778,21 @@ def renew_task_claim(
                 return status(config, task)
             now = datetime.now(timezone.utc)
             renewed = dict(claim)
-            renewed["lease_expires_at"] = (now + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds")
+            renewed["lease_expires_at"] = (
+                now + timedelta(seconds=lease_seconds)
+            ).isoformat(timespec="seconds")
             renewed["renewed_at"] = now.isoformat(timespec="seconds")
-            atomic_write_text(_claim_path(task), json.dumps(renewed, ensure_ascii=False, sort_keys=True) + "\n")
-            ledger(config, task.id, "claim_renew", runner=runner, lease_seconds=lease_seconds)
+            atomic_write_text(
+                _claim_path(task),
+                json.dumps(renewed, ensure_ascii=False, sort_keys=True) + "\n",
+            )
+            ledger(
+                config,
+                task.id,
+                "claim_renew",
+                runner=runner,
+                lease_seconds=lease_seconds,
+            )
             return status(config, task)
 
 
@@ -444,7 +804,9 @@ def release_task_claim(
     dry_run: bool = False,
 ) -> str:
     if config.policy.execution_mode != "external":
-        raise DyroError("task claim release 仅用于 execution_mode = external 的 Profile")
+        raise DyroError(
+            "task claim release 仅用于 execution_mode = external 的 Profile"
+        )
     _require_external_security(config)
     runner = runner.strip()
     with exclusive_lock(_dispatch_lock_path(config)):
@@ -455,13 +817,26 @@ def release_task_claim(
             if claim["runner"] != runner:
                 raise DyroError(f"任务 {task.id} 由其他 runner 领取")
             current = status(config, task)
-            next_status = "backlog" if current == "assigned" else "assigned" if current == "in_progress" else current
+            next_status = (
+                "backlog"
+                if current == "assigned"
+                else "assigned"
+                if current == "in_progress"
+                else current
+            )
             if dry_run:
                 return next_status
             _claim_path(task).unlink()
             if next_status != current:
                 set_status(config, task, next_status, force=True)
-            ledger(config, task.id, "claim_release", runner=runner, from_status=current, to_status=next_status)
+            ledger(
+                config,
+                task.id,
+                "claim_release",
+                runner=runner,
+                from_status=current,
+                to_status=next_status,
+            )
             return next_status
 
 
@@ -485,13 +860,23 @@ def set_status(
         current = status(config, task)
         if current == next_status:
             return
-        if config.policy.require_external_signoff and next_status == "done" and not _valid_external_signoff(config, task):
-            raise DyroError("当前 Profile 要求外部签收；请先使用 task signoff 写入与回执、复核绑定的签收记录")
+        if (
+            config.policy.require_external_signoff
+            and next_status == "done"
+            and not _valid_external_signoff(config, task)
+        ):
+            raise DyroError(
+                "当前 Profile 要求外部签收；请先使用 task signoff 写入与回执、复核绑定的签收记录"
+            )
         if not force and next_status not in TRANSITIONS[current]:
-            raise DyroError(f"拒绝状态跳转 {current} -> {next_status}；如确有人工恢复需求，使用 --force 并留下审计记录")
+            raise DyroError(
+                f"拒绝状态跳转 {current} -> {next_status}；如确有人工恢复需求，使用 --force 并留下审计记录"
+            )
         if not dry_run:
             atomic_write_text(task.directory / "status", next_status + "\n")
-            ledger(config, task.id, "status", from_status=current, to_status=next_status)
+            ledger(
+                config, task.id, "status", from_status=current, to_status=next_status
+            )
 
 
 def _set_quality_gate_status(
@@ -514,9 +899,17 @@ def _set_quality_gate_status(
 
 
 def ledger(config: Config, task_id: str, phase: str, **fields: object) -> None:
-    payload = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "task_id": task_id, "phase": phase, **fields}
+    payload = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "task_id": task_id,
+        "phase": phase,
+        **fields,
+    }
     with exclusive_lock(config.root / ".dyro" / "ledger.lock"):
-        append_text(config.ledger_file, json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        append_text(
+            config.ledger_file,
+            json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+        )
 
 
 def decisions(config: Config) -> dict[str, str]:
@@ -529,7 +922,11 @@ def decisions(config: Config) -> dict[str, str]:
     entries = raw.get("decisions", {})
     if not isinstance(entries, dict):
         raise ValidationError("decisions.toml 必须使用 [decisions.<id>]")
-    return {str(key): str(value.get("status", "open")) for key, value in entries.items() if isinstance(value, dict)}
+    return {
+        str(key): str(value.get("status", "open"))
+        for key, value in entries.items()
+        if isinstance(value, dict)
+    }
 
 
 def _assert_task_graph_valid(config: Config) -> None:
@@ -542,17 +939,25 @@ def _assert_task_graph_valid(config: Config) -> None:
         raise ValidationError(f"任务图结构无效：{details}{suffix}")
 
 
-def check_dispatchable(config: Config, task: Task, *, validate_graph: bool = True) -> None:
+def check_dispatchable(
+    config: Config, task: Task, *, validate_graph: bool = True
+) -> None:
     if validate_graph:
         _assert_task_graph_valid(config)
     states = decisions(config)
-    unresolved = [decision for decision in task.blocked_on if states.get(decision) != "resolved"]
+    unresolved = [
+        decision for decision in task.blocked_on if states.get(decision) != "resolved"
+    ]
     if unresolved:
-        raise DyroError(f"任务 {task.id} 被未 resolved 的决策点阻塞：{', '.join(unresolved)}")
+        raise DyroError(
+            f"任务 {task.id} 被未 resolved 的决策点阻塞：{', '.join(unresolved)}"
+        )
     for dependency in task.depends_on:
         dependency_task = load_task(config, dependency)
         if status(config, dependency_task) != "done":
-            raise DyroError(f"任务 {task.id} 依赖 {dependency}，当前状态为 {status(config, dependency_task)}")
+            raise DyroError(
+                f"任务 {task.id} 依赖 {dependency}，当前状态为 {status(config, dependency_task)}"
+            )
         _assert_dependency_integrated(config, dependency_task)
     if task.conflict_group:
         active = [
@@ -570,7 +975,9 @@ def check_dispatchable(config: Config, task: Task, *, validate_graph: bool = Tru
             )
         ]
         if active:
-            raise DyroError(f"任务 {task.id} 与活跃任务 {', '.join(active)} 共用冲突组 {task.conflict_group}")
+            raise DyroError(
+                f"任务 {task.id} 与活跃任务 {', '.join(active)} 共用冲突组 {task.conflict_group}"
+            )
 
 
 @dataclass(frozen=True)
@@ -785,6 +1192,7 @@ def _reserve_local_execution(
     expected_contract_sha256: str | None = None,
 ) -> None:
     """Check dispatch constraints and atomically reserve the task before starting an Agent."""
+
     def reserve() -> None:
         with exclusive_lock(_state_lock_path(task)):
             _assert_expected_task_contract(task, expected_contract_sha256)
@@ -809,7 +1217,9 @@ def _reserve_local_execution(
         reserve()
 
 
-def _assert_expected_task_contract(task: Task, expected_contract_sha256: str | None) -> None:
+def _assert_expected_task_contract(
+    task: Task, expected_contract_sha256: str | None
+) -> None:
     """Fail closed when a supervised Action's pinned Task contract drifted.
 
     This executes under the Task state lock for execution and immediately
@@ -821,7 +1231,10 @@ def _assert_expected_task_contract(task: Task, expected_contract_sha256: str | N
     if (
         not isinstance(expected_contract_sha256, str)
         or len(expected_contract_sha256) != 64
-        or any(character not in "0123456789abcdef" for character in expected_contract_sha256)
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_contract_sha256
+        )
     ):
         raise ValidationError("受监督 Action 的 Task contract 摘要无效")
     try:
@@ -829,7 +1242,9 @@ def _assert_expected_task_contract(task: Task, expected_contract_sha256: str | N
     except OSError as exc:
         raise ValidationError(f"无法读取任务 {task.id} contract") from exc
     if actual != expected_contract_sha256:
-        raise DyroError("Task contract 已在受监督 Action 确认后变化；请 objective reconcile 后重新确认")
+        raise DyroError(
+            "Task contract 已在受监督 Action 确认后变化；请 objective reconcile 后重新确认"
+        )
 
 
 def worktree_root(config: Config, task: Task) -> Path:
@@ -837,20 +1252,35 @@ def worktree_root(config: Config, task: Task) -> Path:
 
 
 def _resolved_git_common_dir(path: Path) -> Path:
-    raw = require_ok(git(path, "rev-parse", "--git-common-dir"), f"读取 Git common dir：{path}").stdout.strip()
+    raw = require_ok(
+        git(path, "rev-parse", "--git-common-dir"), f"读取 Git common dir：{path}"
+    ).stdout.strip()
     common_dir = Path(raw)
-    return common_dir.resolve() if common_dir.is_absolute() else (path / common_dir).resolve()
+    return (
+        common_dir.resolve()
+        if common_dir.is_absolute()
+        else (path / common_dir).resolve()
+    )
 
 
-def _validate_task_worktree(config: Config, task: Task, repo_id: str, destination: Path, branch: str) -> None:
+def _validate_task_worktree(
+    config: Config, task: Task, repo_id: str, destination: Path, branch: str
+) -> None:
     if git(destination, "rev-parse", "--is-inside-work-tree").stdout.strip() != "true":
         raise DyroError(f"不是有效的任务 Git worktree：{destination}")
-    top_level = require_ok(git(destination, "rev-parse", "--show-toplevel"), f"读取 {repo_id} worktree 根目录").stdout.strip()
+    top_level = require_ok(
+        git(destination, "rev-parse", "--show-toplevel"),
+        f"读取 {repo_id} worktree 根目录",
+    ).stdout.strip()
     if Path(top_level).resolve() != destination.resolve():
         raise DyroError(f"任务 worktree 根目录错误：{destination} 实际为 {top_level}")
-    current = require_ok(git(destination, "branch", "--show-current"), f"读取 {repo_id} 任务分支").stdout.strip()
+    current = require_ok(
+        git(destination, "branch", "--show-current"), f"读取 {repo_id} 任务分支"
+    ).stdout.strip()
     if current != branch:
-        raise DyroError(f"任务 worktree 分支错误：{destination} 当前 {current or 'DETACHED'}，期望 {branch}")
+        raise DyroError(
+            f"任务 worktree 分支错误：{destination} 当前 {current or 'DETACHED'}，期望 {branch}"
+        )
     anchor = repository_path(config, repo_id)
     if _resolved_git_common_dir(destination) != _resolved_git_common_dir(anchor):
         raise DyroError(f"任务 worktree 不属于配置的仓库 anchor：{destination}")
@@ -861,7 +1291,9 @@ def existing_task_workspace(config: Config, task: Task) -> Path:
 
     root = worktree_root(config, task)
     if not root.is_dir():
-        raise DyroError(f"任务 {task.id} 尚未创建可进入的工作区。下一步：dyro task run {task.id}")
+        raise DyroError(
+            f"任务 {task.id} 尚未创建可进入的工作区。下一步：dyro task run {task.id}"
+        )
     branch = f"{config.policy.task_branch_prefix}{task.id}"
     for repo_id in task.repositories:
         destination = root / config.repositories[repo_id].mount
@@ -873,27 +1305,42 @@ def existing_task_workspace(config: Config, task: Task) -> Path:
     return root
 
 
-def _ensure_task_worktrees(config: Config, task: Task, line: Line, *, dry_run: bool = False) -> Path:
+def _ensure_task_worktrees(
+    config: Config, task: Task, line: Line, *, dry_run: bool = False
+) -> Path:
     root = worktree_root(config, task)
     branch = f"{config.policy.task_branch_prefix}{task.id}"
-    not_on_line = [repo_id for repo_id in task.repositories if repo_id not in line.repositories]
+    not_on_line = [
+        repo_id for repo_id in task.repositories if repo_id not in line.repositories
+    ]
     if not_on_line:
-        raise ValidationError(f"任务 {task.id} 引用的仓库不在开发线 {line.id}：{', '.join(not_on_line)}")
+        raise ValidationError(
+            f"任务 {task.id} 引用的仓库不在开发线 {line.id}：{', '.join(not_on_line)}"
+        )
     for repo_id in task.repositories:
         anchor = repository_path(config, repo_id)
         destination = root / config.repositories[repo_id].mount
         if destination.exists():
             _validate_task_worktree(config, task, repo_id, destination, branch)
             continue
-        require_ok(git(anchor, "rev-parse", "--verify", f"{line.branch}^{{commit}}"), f"校验 {repo_id} 开发线基线")
-        branch_exists = git(anchor, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}").code == 0
+        require_ok(
+            git(anchor, "rev-parse", "--verify", f"{line.branch}^{{commit}}"),
+            f"校验 {repo_id} 开发线基线",
+        )
+        branch_exists = (
+            git(anchor, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}").code
+            == 0
+        )
         command: tuple[str, ...] = ("worktree", "add")
         if not branch_exists:
             command += ("-b", branch)
         command += (str(destination), branch if branch_exists else line.branch)
         if not dry_run:
             destination.parent.mkdir(parents=True, exist_ok=True)
-        require_ok(git(anchor, *command, dry_run=dry_run, timeout=300), f"创建任务 worktree {repo_id}")
+        require_ok(
+            git(anchor, *command, dry_run=dry_run, timeout=300),
+            f"创建任务 worktree {repo_id}",
+        )
     return root
 
 
@@ -905,15 +1352,20 @@ def _collect_task_heads(config: Config, task: Task) -> dict[str, str]:
         destination = root / config.repositories[repo_id].mount
         _validate_task_worktree(config, task, repo_id, destination, branch)
         dirty = require_ok(
-            git(destination, "status", "--porcelain=v1", "-uall"), f"读取 {repo_id} 任务 worktree 状态"
+            git(destination, "status", "--porcelain=v1", "-uall"),
+            f"读取 {repo_id} 任务 worktree 状态",
         ).stdout.strip()
         if dirty:
             raise DyroError(f"任务 worktree 不干净，必须先提交全部改动：{destination}")
-        heads[repo_id] = require_ok(git(destination, "rev-parse", "HEAD"), f"读取 {repo_id} 任务 HEAD").stdout.strip()
+        heads[repo_id] = require_ok(
+            git(destination, "rev-parse", "HEAD"), f"读取 {repo_id} 任务 HEAD"
+        ).stdout.strip()
     return heads
 
 
-def _task_heads_payload(config: Config, task: Task, heads: dict[str, str]) -> dict[str, object]:
+def _task_heads_payload(
+    config: Config, task: Task, heads: dict[str, str]
+) -> dict[str, object]:
     return {
         "schema_version": 1,
         "task_id": task.id,
@@ -923,7 +1375,9 @@ def _task_heads_payload(config: Config, task: Task, heads: dict[str, str]) -> di
     }
 
 
-def _validate_task_heads_payload(config: Config, task: Task, payload: object) -> dict[str, str]:
+def _validate_task_heads_payload(
+    config: Config, task: Task, payload: object
+) -> dict[str, str]:
     expected_branch = f"{config.policy.task_branch_prefix}{task.id}"
     if not isinstance(payload, dict):
         raise ValidationError("任务 HEAD 证据必须是 JSON 对象")
@@ -935,7 +1389,9 @@ def _validate_task_heads_payload(config: Config, task: Task, payload: object) ->
         or not isinstance(payload.get("branch"), str)
         or not isinstance(repositories, dict)
     ):
-        raise ValidationError("任务 HEAD 证据的 schema_version、task_id、line、branch 或 repositories 无效")
+        raise ValidationError(
+            "任务 HEAD 证据的 schema_version、task_id、line、branch 或 repositories 无效"
+        )
     if payload["branch"] != expected_branch:
         raise ValidationError(f"任务 HEAD 证据分支错误：期望 {expected_branch}")
     if set(repositories) != set(task.repositories):
@@ -951,7 +1407,9 @@ def _validate_task_heads_payload(config: Config, task: Task, payload: object) ->
 
 def _serialize_task_heads(config: Config, task: Task, heads: dict[str, str]) -> bytes:
     payload = _task_heads_payload(config, task, heads)
-    return (json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
+    return (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode()
 
 
 def _record_task_heads(config: Config, task: Task) -> str:
@@ -970,6 +1428,125 @@ def _load_task_heads(config: Config, task: Task) -> dict[str, str]:
     except json.JSONDecodeError as exc:
         raise ValidationError(f"任务 HEAD 证据不是有效 JSON：{path}") from exc
     return _validate_task_heads_payload(config, task, payload)
+
+
+def _json_object_bounded(content: bytes, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(content)
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise ValidationError(f"{label} 不是有效 JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValidationError(f"{label} 必须是 JSON 对象")
+    return payload
+
+
+def _load_task_heads_bounded(
+    config: Config, task: Task, budget: ReadBudget
+) -> dict[str, str]:
+    """Load legacy or imported task-head evidence through bounded safe reads."""
+
+    try:
+        pointer_content = budget.read_regular_bytes_at(
+            root=config.root,
+            directory=task.directory,
+            name=CURRENT_EVIDENCE_FILE,
+            maximum_bytes=budget.limits.evidence_pointer_bytes,
+            label="Current evidence pointer",
+        )
+    except FileNotFoundError:
+        heads_content = budget.read_regular_bytes_at(
+            root=config.root,
+            directory=task.directory,
+            name=TASK_HEADS_FILE,
+            maximum_bytes=budget.limits.task_heads_bytes,
+            label="Task heads evidence",
+        )
+        return _validate_task_heads_payload(
+            config,
+            task,
+            _json_object_bounded(heads_content, "任务 HEAD 证据"),
+        )
+
+    pointer = _json_object_bounded(pointer_content, "当前证据指针")
+    generation = pointer.get("generation")
+    manifest_sha256 = pointer.get("manifest_sha256")
+    if (
+        pointer.get("schema_version") != 1
+        or not isinstance(generation, str)
+        or GENERATION_PATTERN.fullmatch(generation) is None
+        or not isinstance(manifest_sha256, str)
+        or len(manifest_sha256) != 64
+    ):
+        raise ValidationError("当前证据指针格式无效")
+    generation_directory = (
+        task.directory / EVIDENCE_GENERATIONS_DIR / generation
+    )
+    manifest_content = budget.read_regular_bytes_at(
+        root=config.root,
+        directory=generation_directory,
+        name=MANIFEST_FILE,
+        maximum_bytes=budget.limits.evidence_manifest_bytes,
+        label="Evidence generation manifest",
+    )
+    if hashlib.sha256(manifest_content).hexdigest() != manifest_sha256:
+        raise ValidationError("当前证据世代 manifest 哈希不匹配")
+    manifest = _json_object_bounded(manifest_content, "证据世代 manifest")
+    files = manifest.get("files")
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("generation") != generation
+        or not isinstance(files, dict)
+    ):
+        raise ValidationError("证据世代 manifest 格式无效")
+    heads_content = budget.read_regular_bytes_at(
+        root=config.root,
+        directory=generation_directory,
+        name=TASK_HEADS_FILE,
+        maximum_bytes=budget.limits.task_heads_bytes,
+        label="Task heads evidence",
+    )
+    entry = files.get(TASK_HEADS_FILE)
+    if (
+        not isinstance(entry, dict)
+        or not isinstance(entry.get("sha256"), str)
+        or isinstance(entry.get("size"), bool)
+        or not isinstance(entry.get("size"), int)
+        or len(heads_content) != entry["size"]
+        or hashlib.sha256(heads_content).hexdigest() != entry["sha256"]
+    ):
+        raise ValidationError("不可变任务 HEAD 证据缺失或哈希不匹配")
+    return _validate_task_heads_payload(
+        config,
+        task,
+        _json_object_bounded(heads_content, "任务 HEAD 证据"),
+    )
+
+
+def dependency_integration_state_bounded(
+    config: Config, task: Task, budget: ReadBudget
+) -> str:
+    """Return the real integration state within the shared observation budget."""
+
+    try:
+        line = get_line(config, task.line, read_budget=budget)
+        heads = _load_task_heads_bounded(config, task, budget)
+        for repository_id, task_head in heads.items():
+            destination = line_repository_path(config, line, repository_id)
+            result = git_read(
+                destination,
+                "merge-base",
+                "--is-ancestor",
+                task_head,
+                "HEAD",
+                read_budget=budget,
+            )
+            if result.code != 0:
+                return "pending"
+    except ReadLimitError:
+        raise
+    except (DyroError, OSError, ValidationError):
+        return "pending"
+    return "integrated"
 
 
 def _assert_dependency_integrated(config: Config, task: Task) -> None:
@@ -992,8 +1569,14 @@ def _assert_task_heads_current(config: Config, task: Task) -> dict[str, str]:
     expected = _load_task_heads(config, task)
     current = _collect_task_heads(config, task)
     if current != expected:
-        changed = sorted(repo_id for repo_id in task.repositories if current.get(repo_id) != expected.get(repo_id))
-        raise DyroError(f"任务代码已偏离已记录 HEAD，必须重新执行与复核：{', '.join(changed)}")
+        changed = sorted(
+            repo_id
+            for repo_id in task.repositories
+            if current.get(repo_id) != expected.get(repo_id)
+        )
+        raise DyroError(
+            f"任务代码已偏离已记录 HEAD，必须重新执行与复核：{', '.join(changed)}"
+        )
     return expected
 
 
@@ -1018,7 +1601,11 @@ def _review_decision(task: Task) -> tuple[str, str, str]:
         return "", "", ""
     content = review.read_text(encoding="utf-8")
     lines = content.splitlines()
-    verdict = VERDICT_RE.match(lines[0]).group(1).upper() if lines and VERDICT_RE.match(lines[0]) else ""
+    verdict = (
+        VERDICT_RE.match(lines[0]).group(1).upper()
+        if lines and VERDICT_RE.match(lines[0])
+        else ""
+    )
     receipt_hash = RECEIPT_SHA_RE.search(content)
     task_heads_hash = TASK_HEADS_SHA_RE.search(content)
     return (
@@ -1028,7 +1615,9 @@ def _review_decision(task: Task) -> tuple[str, str, str]:
     )
 
 
-def _external_execution_and_reviewer_principals(config: Config, task: Task) -> tuple[str, str]:
+def _external_execution_and_reviewer_principals(
+    config: Config, task: Task
+) -> tuple[str, str]:
     """Return the independently authenticated execution and review principals."""
     from .signing import trusted_key_principal
 
@@ -1070,10 +1659,19 @@ def _valid_external_signoff(config: Config, task: Task) -> bool:
         signoff = json.loads(signoff_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return False
-    if not isinstance(signoff, dict) or not isinstance(signoff.get("approver"), str) or not signoff["approver"].strip():
+    if (
+        not isinstance(signoff, dict)
+        or not isinstance(signoff.get("approver"), str)
+        or not signoff["approver"].strip()
+    ):
         return False
     try:
-        from .signing import signature_key_id, trusted_key_principal, trusted_keys_directory, verify_record
+        from .signing import (
+            signature_key_id,
+            trusted_key_principal,
+            trusted_keys_directory,
+            verify_record,
+        )
 
         verify_record(
             signoff,
@@ -1085,13 +1683,17 @@ def _valid_external_signoff(config: Config, task: Task) -> bool:
             signoff_key_id = signature_key_id(signoff)
             if signoff_key_id is None:
                 return False
-            approver_principal = trusted_key_principal(config.root, "signoff", signoff_key_id)
+            approver_principal = trusted_key_principal(
+                config.root, "signoff", signoff_key_id
+            )
             if (
                 signoff.get("actor") != signoff["approver"]
                 or approver_principal != signoff["approver"]
             ):
                 return False
-            execution_principal, reviewer_principal = _external_execution_and_reviewer_principals(config, task)
+            execution_principal, reviewer_principal = (
+                _external_execution_and_reviewer_principals(config, task)
+            )
             if approver_principal in (execution_principal, reviewer_principal):
                 return False
     except (DyroError, ValidationError):
@@ -1102,11 +1704,15 @@ def _valid_external_signoff(config: Config, task: Task) -> bool:
     try:
         receipt_hash = _file_sha256(resolve_evidence_path(task.directory, "receipt.md"))
         review_hash = _file_sha256(task.directory / "review.md")
-        task_heads_hash = _file_sha256(resolve_evidence_path(task.directory, TASK_HEADS_FILE))
+        task_heads_hash = _file_sha256(
+            resolve_evidence_path(task.directory, TASK_HEADS_FILE)
+        )
     except DyroError:
         return False
     review_content = (task.directory / "review.md").read_text(encoding="utf-8")
-    binding_matches, expected_binding, _ = validate_review_binding(task.directory, review_content)
+    binding_matches, expected_binding, _ = validate_review_binding(
+        task.directory, review_content
+    )
     if not binding_matches:
         return False
     if config.policy.execution_mode == "local":
@@ -1171,16 +1777,27 @@ def _require_local_execution(config: Config, action: str, *, dry_run: bool) -> N
         )
 
 
-def _adapter_argv(config: Config, agent: str, mode: str, *, workspace: Path, prompt: str, task: Task) -> tuple[str, ...]:
+def _adapter_argv(
+    config: Config, agent: str, mode: str, *, workspace: Path, prompt: str, task: Task
+) -> tuple[str, ...]:
     try:
         adapter = config.adapters[agent]
     except KeyError as exc:
-        raise ValidationError(f"任务 {task.id} 使用的 Agent adapter 未配置：{agent}") from exc
+        raise ValidationError(
+            f"任务 {task.id} 使用的 Agent adapter 未配置：{agent}"
+        ) from exc
     card = getattr(config, "capabilities", {}).get(agent)
     if card is not None and mode == "write" and "execute" not in getattr(card, "intents", ()):
         raise DyroError(f"Capability {agent} 未授予 execute，不能作为任务执行器")
     template = adapter.write if mode == "write" else adapter.read
-    return expand_argv(template, workspace=workspace, root=config.root, prompt=prompt, task=task.id, line=task.line)
+    return expand_argv(
+        template,
+        workspace=workspace,
+        root=config.root,
+        prompt=prompt,
+        task=task.id,
+        line=task.line,
+    )
 
 
 def _prompt(task: Task, phase: str, workspace: Path) -> str:
@@ -1223,7 +1840,9 @@ def _capture(task: Task, filename: str, output: str, *, dry_run: bool = False) -
     return target
 
 
-def _copy_external_evidence(task: Task, source: Path, target_name: str, *, dry_run: bool = False) -> Path:
+def _copy_external_evidence(
+    task: Task, source: Path, target_name: str, *, dry_run: bool = False
+) -> Path:
     if not source.is_file():
         raise DyroError(f"外部证据文件不存在：{source}")
     relative = Path(target_name)
@@ -1235,10 +1854,14 @@ def _copy_external_evidence(task: Task, source: Path, target_name: str, *, dry_r
     return target
 
 
-def _validate_external_gates(task: Task, receipt_sha256: str, gates: Path | None) -> tuple[bytes, tuple[tuple[str, bytes], ...]]:
+def _validate_external_gates(
+    task: Task, receipt_sha256: str, gates: Path | None
+) -> tuple[bytes, tuple[tuple[str, bytes], ...]]:
     if gates is None:
         if task.gates:
-            raise DyroError(f"任务 {task.id} 配置了门禁，导入执行证据时必须提供 --gates")
+            raise DyroError(
+                f"任务 {task.id} 配置了门禁，导入执行证据时必须提供 --gates"
+            )
         return b"", ()
     if not gates.is_file():
         raise DyroError(f"外部门禁证据文件不存在：{gates}")
@@ -1247,7 +1870,11 @@ def _validate_external_gates(task: Task, receipt_sha256: str, gates: Path | None
         payload = json.loads(data)
     except json.JSONDecodeError as exc:
         raise ValidationError(f"外部门禁证据必须是 JSON：{gates}") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1 or payload.get("task_id") != task.id:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or payload.get("task_id") != task.id
+    ):
         raise ValidationError("外部门禁证据的 schema_version 或 task_id 无效")
     if payload.get("receipt_sha256") != receipt_sha256:
         raise DyroError("外部门禁证据未绑定当前回执")
@@ -1259,22 +1886,38 @@ def _validate_external_gates(task: Task, receipt_sha256: str, gates: Path | None
     logs: list[tuple[str, bytes]] = []
     evidence_root = gates.parent.resolve()
     for entry in entries:
-        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or isinstance(entry.get("exit_code"), bool) or not isinstance(entry.get("exit_code"), int):
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("name"), str)
+            or isinstance(entry.get("exit_code"), bool)
+            or not isinstance(entry.get("exit_code"), int)
+        ):
             raise ValidationError("外部门禁条目必须包含 name 和整数 exit_code")
         name = entry["name"]
         if name in observed:
             raise ValidationError(f"外部门禁证据重复声明门禁：{name}")
         log = entry.get("log")
         log_sha256 = entry.get("log_sha256")
-        if not isinstance(log, str) or not log or Path(log).is_absolute() or ".." in Path(log).parts:
-            raise ValidationError(f"外部门禁 {name} 必须提供 gates JSON 相对目录内的 log")
-        if not isinstance(log_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", log_sha256, re.IGNORECASE):
+        if (
+            not isinstance(log, str)
+            or not log
+            or Path(log).is_absolute()
+            or ".." in Path(log).parts
+        ):
+            raise ValidationError(
+                f"外部门禁 {name} 必须提供 gates JSON 相对目录内的 log"
+            )
+        if not isinstance(log_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", log_sha256, re.IGNORECASE
+        ):
             raise ValidationError(f"外部门禁 {name} 必须提供 log_sha256")
         log_path = (gates.parent / log).resolve()
         try:
             log_path.relative_to(evidence_root)
         except ValueError as exc:
-            raise ValidationError(f"外部门禁 {name} 的 log 不得位于 gates JSON 目录外") from exc
+            raise ValidationError(
+                f"外部门禁 {name} 的 log 不得位于 gates JSON 目录外"
+            ) from exc
         if not log_path.is_file():
             raise DyroError(f"外部门禁 {name} 的日志不存在：{log_path}")
         log_bytes = log_path.read_bytes()
@@ -1283,7 +1926,9 @@ def _validate_external_gates(task: Task, receipt_sha256: str, gates: Path | None
         observed[name] = entry["exit_code"]
         logs.append((name, log_bytes))
     if set(observed) != expected:
-        raise DyroError(f"外部门禁集合与任务不一致；期望 {', '.join(sorted(expected)) or '-'}")
+        raise DyroError(
+            f"外部门禁集合与任务不一致；期望 {', '.join(sorted(expected)) or '-'}"
+        )
     failures = [name for name, exit_code in observed.items() if exit_code != 0]
     if failures:
         raise DyroError(f"外部门禁未通过：{', '.join(sorted(failures))}")
@@ -1292,7 +1937,9 @@ def _validate_external_gates(task: Task, receipt_sha256: str, gates: Path | None
 
 def _validate_external_heads(config: Config, task: Task, heads: Path | None) -> bytes:
     if heads is None:
-        raise DyroError(f"任务 {task.id} 完成时必须提供 --heads，绑定执行后的逐仓 Git HEAD")
+        raise DyroError(
+            f"任务 {task.id} 完成时必须提供 --heads，绑定执行后的逐仓 Git HEAD"
+        )
     if not heads.is_file():
         raise DyroError(f"外部任务 HEAD 证据文件不存在：{heads}")
     data = heads.read_bytes()
@@ -1322,14 +1969,90 @@ def run_gates(config: Config, task: Task, *, dry_run: bool = False) -> bool:
     all_passed = True
     for index, gate in enumerate(task.gates, start=1):
         cwd = root / gate.cwd
-        argv = expand_argv(gate.argv, workspace=root, root=config.root, task=task.id, line=task.line)
+        argv = expand_argv(
+            gate.argv, workspace=root, root=config.root, task=task.id, line=task.line
+        )
         result = run(argv, cwd=cwd, timeout=gate.timeout_seconds, dry_run=dry_run)
         _capture(task, f"gate-{index}.log", result.stdout, dry_run=dry_run)
         passed = result.code == 0
         all_passed = all_passed and passed
         if not dry_run:
-            ledger(config, task.id, "gate", name=gate.name, argv=list(argv), passed=passed, exit_code=result.code)
+            ledger(
+                config,
+                task.id,
+                "gate",
+                name=gate.name,
+                argv=list(argv),
+                passed=passed,
+                exit_code=result.code,
+            )
     return all_passed
+
+
+def _resolve_run_executor(task: Task, executor_override: str | None) -> str:
+    from .peer_wave import (
+        AUTO_EXECUTOR,
+        bind_wave_executors,
+        discover_available_write_providers,
+    )
+
+    if executor_override:
+        return executor_override
+    if task.executor != AUTO_EXECUTOR:
+        return task.executor
+    decision = bind_wave_executors((task,), discover_available_write_providers())
+    chosen = decision.executor_for(task.id)
+    if chosen is None:
+        reason = (
+            decision.deferred[0].reason
+            if decision.deferred
+            else "无法绑定 auto executor"
+        )
+        raise ValidationError(reason)
+    return chosen
+
+
+def _execute_task_agent(
+    config: Config,
+    task: Task,
+    *,
+    workspace: Path,
+    prompt: str,
+    log_name: str,
+    dry_run: bool,
+    executor_override: str | None = None,
+) -> object:
+    from .peer_wave import assert_write_executor_allowed
+    from .task_dispatch import is_dispatch_write_ready, run_task_bound_dispatch
+
+    executor = _resolve_run_executor(task, executor_override)
+    if task.risk == "write":
+        assert_write_executor_allowed(executor, risk=task.risk)
+    if is_dispatch_write_ready(executor):
+        result = run_task_bound_dispatch(
+            task,
+            executor=executor,
+            workspace=workspace,
+            prompt=prompt,
+            timeout_seconds=float(task.timeout_minutes * 60),
+            dry_run=dry_run,
+        )
+    elif executor in config.adapters:
+        argv = _adapter_argv(
+            config,
+            executor,
+            "write" if task.risk == "write" else "read",
+            workspace=workspace,
+            prompt=prompt,
+            task=task,
+        )
+        result = run(
+            argv, cwd=workspace, timeout=task.timeout_minutes * 60, dry_run=dry_run
+        )
+    else:
+        raise ValidationError(f"任务 {task.id} 使用的 Agent adapter 未配置：{executor}")
+    _capture(task, log_name, result.stdout, dry_run=dry_run)
+    return result
 
 
 def run_task(
@@ -1339,11 +2062,14 @@ def run_task(
     dry_run: bool = False,
     legacy_scheduler: bool = False,
     expected_contract_sha256: str | None = None,
+    executor_override: str | None = None,
 ) -> str:
     _require_local_execution(config, "任务", dry_run=dry_run)
     if dry_run:
         _assert_expected_task_contract(task, expected_contract_sha256)
-        return _run_task(config, task, dry_run=True)
+        return _run_task(
+            config, task, dry_run=True, executor_override=executor_override
+        )
     with exclusive_lock(_execution_lock_path(task), timeout_seconds=1.0):
         try:
             _reserve_local_execution(
@@ -1368,11 +2094,24 @@ def run_task(
             config,
             task,
             attempt,
-            lambda: _run_task(config, task, dry_run=False, reserved=True),
+            lambda: _run_task(
+                config,
+                task,
+                dry_run=False,
+                reserved=True,
+                executor_override=executor_override,
+            ),
         )
 
 
-def _run_task(config: Config, task: Task, *, dry_run: bool, reserved: bool = False) -> str:
+def _run_task(
+    config: Config,
+    task: Task,
+    *,
+    dry_run: bool,
+    reserved: bool = False,
+    executor_override: str | None = None,
+) -> str:
     if not reserved:
         _reserve_local_execution(
             config,
@@ -1388,11 +2127,24 @@ def _run_task(config: Config, task: Task, *, dry_run: bool, reserved: bool = Fal
         if not dry_run:
             set_status(config, task, "failed")
         raise
-    argv = _adapter_argv(config, task.executor, "write" if task.risk == "write" else "read", workspace=workspace, prompt=_prompt(task, "executor", workspace), task=task)
-    result = run(argv, cwd=workspace, timeout=task.timeout_minutes * 60, dry_run=dry_run)
-    _capture(task, "executor.log", result.stdout, dry_run=dry_run)
+    result = _execute_task_agent(
+        config,
+        task,
+        workspace=workspace,
+        prompt=_prompt(task, "executor", workspace),
+        log_name="executor.log",
+        dry_run=dry_run,
+        executor_override=executor_override,
+    )
     if not dry_run:
-        ledger(config, task.id, "executor", agent=task.executor, argv=list(argv), exit_code=result.code)
+        ledger(
+            config,
+            task.id,
+            "executor",
+            agent=task.executor,
+            argv=list(result.argv),
+            exit_code=result.code,
+        )
     if result.code != 0:
         set_status(config, task, "failed", dry_run=dry_run)
         return "failed"
@@ -1461,14 +2213,22 @@ def _import_execution_evidence(
     if not receipt.is_file():
         raise DyroError(f"外部回执文件不存在：{receipt}")
     if provenance is None and not allow_legacy_provenance:
-        raise DyroError("外部执行证据缺少 provenance；旧证据必须显式使用 --allow-legacy")
+        raise DyroError(
+            "外部执行证据缺少 provenance；旧证据必须显式使用 --allow-legacy"
+        )
     receipt_bytes = receipt.read_bytes()
     receipt_hash = hashlib.sha256(receipt_bytes).hexdigest()
     receipt_lines = receipt_bytes.decode("utf-8").splitlines()
     receipt_match = RESULT_RE.match(receipt_lines[0]) if receipt_lines else None
     result = receipt_match.group(1).upper() if receipt_match else ""
-    gate_bytes, gate_logs = _validate_external_gates(task, receipt_hash, gates) if result == "DONE" else (b"", ())
-    task_heads_bytes = _validate_external_heads(config, task, heads) if result == "DONE" else b""
+    gate_bytes, gate_logs = (
+        _validate_external_gates(task, receipt_hash, gates)
+        if result == "DONE"
+        else (b"", ())
+    )
+    task_heads_bytes = (
+        _validate_external_heads(config, task, heads) if result == "DONE" else b""
+    )
     claim_binding = (
         execution_claim_binding(task)
         if getattr(config.policy, "require_signed_execution", False)
@@ -1489,12 +2249,17 @@ def _import_execution_evidence(
         result=result,
         expected_plan=expected_plan,
         gates_sha256=hashlib.sha256(gate_bytes).hexdigest() if gate_bytes else "",
-        task_heads_sha256=hashlib.sha256(task_heads_bytes).hexdigest() if task_heads_bytes else "",
+        task_heads_sha256=hashlib.sha256(task_heads_bytes).hexdigest()
+        if task_heads_bytes
+        else "",
         trusted_keys_dir=trusted_keys_directory(config.root, "execution"),
         require_signature=getattr(config.policy, "require_signed_execution", False),
         dry_run=True,
     )
-    if claim_binding is not None and signature_key_id(external_attempt) != claim_binding["execution_key_id"]:
+    if (
+        claim_binding is not None
+        and signature_key_id(external_attempt) != claim_binding["execution_key_id"]
+    ):
         raise ValidationError("execution signature key ID 与当前 claim 不匹配")
     if claim_binding is not None:
         execution_principal = trusted_key_principal(
@@ -1502,16 +2267,28 @@ def _import_execution_evidence(
             "execution",
             str(claim_binding["execution_key_id"]),
         )
-        if external_attempt.get("actor") != claim_binding["runner"] or execution_principal != claim_binding["runner"]:
-            raise ValidationError("execution signature actor 必须等于当前 claim runner principal")
+        if (
+            external_attempt.get("actor") != claim_binding["runner"]
+            or execution_principal != claim_binding["runner"]
+        ):
+            raise ValidationError(
+                "execution signature actor 必须等于当前 claim runner principal"
+            )
     if dry_run:
-        return "review" if result == "DONE" else "waiting_answer" if result == "QUESTION" else "failed"
+        return (
+            "review"
+            if result == "DONE"
+            else "waiting_answer"
+            if result == "QUESTION"
+            else "failed"
+        )
     from .provenance import persist_external_execution_attempt
 
     generation_files: dict[str | Path, bytes] = {
         "receipt.md": receipt_bytes,
         "provenance.json": (
-            json.dumps(external_attempt, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+            json.dumps(external_attempt, ensure_ascii=False, sort_keys=True, indent=2)
+            + "\n"
         ).encode("utf-8"),
     }
     if gate_bytes:
@@ -1544,7 +2321,9 @@ def _import_execution_evidence(
         "external_execution_import",
         runner=claim["runner"],
         receipt_sha256=receipt_hash,
-        task_heads_sha256=hashlib.sha256(task_heads_bytes).hexdigest() if task_heads_bytes else "",
+        task_heads_sha256=hashlib.sha256(task_heads_bytes).hexdigest()
+        if task_heads_bytes
+        else "",
         run_id=external_attempt["run_id"],
         attempt_id=external_attempt["attempt_id"],
         plan_sha256=external_attempt["plan_sha256"],
@@ -1560,12 +2339,16 @@ def _import_execution_evidence(
     return "review"
 
 
-def answer_task(config: Config, task: Task, answer: str, *, dry_run: bool = False) -> str:
+def answer_task(
+    config: Config, task: Task, answer: str, *, dry_run: bool = False
+) -> str:
     if config.policy.execution_mode == "external":
         with exclusive_lock(_execution_lock_path(task), timeout_seconds=1.0):
             claim = _require_external_claim(config, task)
             if status(config, task) != "waiting_answer":
-                raise DyroError(f"任务 {task.id} 当前不是 waiting_answer，不能记录外部续跑答案")
+                raise DyroError(
+                    f"任务 {task.id} 当前不是 waiting_answer，不能记录外部续跑答案"
+                )
             if dry_run:
                 return "dry-run"
             atomic_write_text(task.directory / "answers.md", answer.rstrip() + "\n")
@@ -1611,7 +2394,9 @@ def answer_task(config: Config, task: Task, answer: str, *, dry_run: bool = Fals
         )
 
 
-def _answer_task(config: Config, task: Task, answer: str, *, dry_run: bool, reserved: bool = False) -> str:
+def _answer_task(
+    config: Config, task: Task, answer: str, *, dry_run: bool, reserved: bool = False
+) -> str:
     if not reserved:
         _reserve_local_execution(
             config,
@@ -1629,9 +2414,14 @@ def _answer_task(config: Config, task: Task, answer: str, *, dry_run: bool, rese
         if not dry_run:
             set_status(config, task, "failed")
         raise
-    argv = _adapter_argv(config, task.executor, "write" if task.risk == "write" else "read", workspace=workspace, prompt=_prompt(task, "continuation", workspace), task=task)
-    result = run(argv, cwd=workspace, timeout=task.timeout_minutes * 60, dry_run=dry_run)
-    _capture(task, "executor-continuation.log", result.stdout, dry_run=dry_run)
+    result = _execute_task_agent(
+        config,
+        task,
+        workspace=workspace,
+        prompt=_prompt(task, "continuation", workspace),
+        log_name="executor-continuation.log",
+        dry_run=dry_run,
+    )
     if result.code != 0:
         set_status(config, task, "failed", dry_run=dry_run)
         return "failed"
@@ -1657,9 +2447,17 @@ def _answer_task(config: Config, task: Task, answer: str, *, dry_run: bool, rese
 def _apply_review_decision(config: Config, task: Task, *, dry_run: bool = False) -> str:
     verdict, reviewed_receipt_hash, reviewed_task_heads_hash = _review_decision(task)
     receipt_hash = _file_sha256(resolve_evidence_path(task.directory, "receipt.md"))
-    task_heads_hash = _file_sha256(resolve_evidence_path(task.directory, TASK_HEADS_FILE))
-    review_content = (task.directory / "review.md").read_text(encoding="utf-8") if (task.directory / "review.md").is_file() else ""
-    binding_matches, expected_binding, reviewed_binding = validate_review_binding(task.directory, review_content)
+    task_heads_hash = _file_sha256(
+        resolve_evidence_path(task.directory, TASK_HEADS_FILE)
+    )
+    review_content = (
+        (task.directory / "review.md").read_text(encoding="utf-8")
+        if (task.directory / "review.md").is_file()
+        else ""
+    )
+    binding_matches, expected_binding, reviewed_binding = validate_review_binding(
+        task.directory, review_content
+    )
     if verdict in ("PASS", "FAIL") and not binding_matches:
         if not dry_run:
             ledger(
@@ -1674,7 +2472,10 @@ def _apply_review_decision(config: Config, task: Task, *, dry_run: bool = False)
             )
         return "review"
     if verdict == "PASS":
-        if reviewed_receipt_hash != receipt_hash or reviewed_task_heads_hash != task_heads_hash:
+        if (
+            reviewed_receipt_hash != receipt_hash
+            or reviewed_task_heads_hash != task_heads_hash
+        ):
             if not dry_run:
                 ledger(
                     config,
@@ -1687,7 +2488,11 @@ def _apply_review_decision(config: Config, task: Task, *, dry_run: bool = False)
                     reviewed_task_heads_sha256=reviewed_task_heads_hash,
                 )
             return "review"
-        next_status = "review_pending_signoff" if config.policy.require_external_signoff else "done"
+        next_status = (
+            "review_pending_signoff"
+            if config.policy.require_external_signoff
+            else "done"
+        )
         if config.policy.execution_mode == "local":
             _assert_task_heads_current(config, task)
         _set_quality_gate_status(config, task, next_status, dry_run=dry_run)
@@ -1720,9 +2525,19 @@ def review_task(
 ) -> str:
     _require_local_execution(config, "复核", dry_run=dry_run)
     if dry_run:
-        return _review_task(config, task, dry_run=True, expected_contract_sha256=expected_contract_sha256)
+        return _review_task(
+            config,
+            task,
+            dry_run=True,
+            expected_contract_sha256=expected_contract_sha256,
+        )
     with exclusive_lock(_review_lock_path(task), timeout_seconds=1.0):
-        return _review_task(config, task, dry_run=False, expected_contract_sha256=expected_contract_sha256)
+        return _review_task(
+            config,
+            task,
+            dry_run=False,
+            expected_contract_sha256=expected_contract_sha256,
+        )
 
 
 def _review_task(
@@ -1740,16 +2555,34 @@ def _review_task(
         raise DyroError(f"任务 worktree 不存在：{workspace}")
     if not dry_run:
         _assert_task_heads_current(config, task)
-    argv = _adapter_argv(config, task.reviewer, "read", workspace=workspace, prompt=_prompt(task, "reviewer", workspace), task=task)
-    result = run(argv, cwd=workspace, timeout=task.review_timeout_minutes * 60, dry_run=dry_run)
+    argv = _adapter_argv(
+        config,
+        task.reviewer,
+        "read",
+        workspace=workspace,
+        prompt=_prompt(task, "reviewer", workspace),
+        task=task,
+    )
+    result = run(
+        argv, cwd=workspace, timeout=task.review_timeout_minutes * 60, dry_run=dry_run
+    )
     _capture(task, "reviewer.log", result.stdout, dry_run=dry_run)
     if not dry_run:
-        ledger(config, task.id, "review", agent=task.reviewer, argv=list(argv), exit_code=result.code)
+        ledger(
+            config,
+            task.id,
+            "review",
+            agent=task.reviewer,
+            argv=list(argv),
+            exit_code=result.code,
+        )
         try:
             _assert_task_heads_current(config, task)
         except (DyroError, ValidationError) as exc:
             ledger(config, task.id, "review_source_changed", error=str(exc))
-            raise DyroError(f"复核期间任务源码发生变化，拒绝接受复核结果：{exc}") from exc
+            raise DyroError(
+                f"复核期间任务源码发生变化，拒绝接受复核结果：{exc}"
+            ) from exc
     if result.code != 0:
         return "review"
     if dry_run:
@@ -1757,12 +2590,16 @@ def _review_task(
     return _apply_review_decision(config, task)
 
 
-def import_review_evidence(config: Config, task: Task, *, review: Path, dry_run: bool = False) -> str:
+def import_review_evidence(
+    config: Config, task: Task, *, review: Path, dry_run: bool = False
+) -> str:
     with exclusive_lock(_state_lock_path(task)):
         return _import_review_evidence(config, task, review=review, dry_run=dry_run)
 
 
-def _import_review_evidence(config: Config, task: Task, *, review: Path, dry_run: bool = False) -> str:
+def _import_review_evidence(
+    config: Config, task: Task, *, review: Path, dry_run: bool = False
+) -> str:
     """Import a receipt-bound independent review, signed when policy requires it."""
     if status(config, task) != "review":
         raise DyroError(f"仅 review 任务可导入复核证据：{task.id}")
@@ -1777,10 +2614,18 @@ def _import_review_evidence(config: Config, task: Task, *, review: Path, dry_run
     )
     if config.policy.execution_mode == "external":
         claim = _require_external_claim(config, task)
-        if not evidence.signed or evidence.key_id is None or evidence.principal_id is None:
-            raise ValidationError("external review 必须使用带 principal 的 signed review")
+        if (
+            not evidence.signed
+            or evidence.key_id is None
+            or evidence.principal_id is None
+        ):
+            raise ValidationError(
+                "external review 必须使用带 principal 的 signed review"
+            )
         execution_key_id = str(claim.get("execution_key_id", ""))
-        execution_principal = trusted_key_principal(config.root, "execution", execution_key_id)
+        execution_principal = trusted_key_principal(
+            config.root, "execution", execution_key_id
+        )
         if evidence.principal_id == execution_principal:
             raise ValidationError("execution claimant 不得复核自己的结果")
         reviewer = evidence.principal_id
@@ -1791,7 +2636,11 @@ def _import_review_evidence(config: Config, task: Task, *, review: Path, dry_run
     if dry_run:
         return "dry-run"
     atomic_write_bytes(task.directory / "review.md", evidence.content)
-    if evidence.signed and evidence.key_id is not None and evidence.principal_id is not None:
+    if (
+        evidence.signed
+        and evidence.key_id is not None
+        and evidence.principal_id is not None
+    ):
         atomic_write_text(
             task.directory / REVIEW_IDENTITY_FILE,
             json.dumps(
@@ -1858,7 +2707,9 @@ def _signoff_task(
         raise ValidationError("签收人不能为空")
     verdict, reviewed_receipt_hash, reviewed_task_heads_hash = _review_decision(task)
     receipt_hash = _file_sha256(resolve_evidence_path(task.directory, "receipt.md"))
-    task_heads_hash = _file_sha256(resolve_evidence_path(task.directory, TASK_HEADS_FILE))
+    task_heads_hash = _file_sha256(
+        resolve_evidence_path(task.directory, TASK_HEADS_FILE)
+    )
     if (
         verdict != "PASS"
         or reviewed_receipt_hash != receipt_hash
@@ -1866,7 +2717,9 @@ def _signoff_task(
     ):
         raise DyroError("复核结论未通过或未绑定当前回执与任务 HEAD；请重新复核")
     review_content = (task.directory / "review.md").read_text(encoding="utf-8")
-    binding_matches, expected_binding, _ = validate_review_binding(task.directory, review_content)
+    binding_matches, expected_binding, _ = validate_review_binding(
+        task.directory, review_content
+    )
     if not binding_matches:
         raise DyroError("复核结论未绑定当前 execution attempt 与 plan；请重新复核")
     signoff = {
@@ -1882,7 +2735,12 @@ def _signoff_task(
     }
     if (signing_key is None) != (key_id is None):
         raise ValidationError("--signing-key 与 --key-id 必须同时提供")
-    from .signing import sign_record, trusted_key_principal, trusted_keys_directory, verify_record
+    from .signing import (
+        sign_record,
+        trusted_key_principal,
+        trusted_keys_directory,
+        verify_record,
+    )
 
     if signing_key is not None and key_id is not None:
         signoff = sign_record(
@@ -1903,11 +2761,18 @@ def _signoff_task(
         approver_principal = trusted_key_principal(config.root, "signoff", key_id)
         if approver_principal != approver or signoff.get("actor") != approver:
             raise ValidationError("signoff actor 必须等于 signoff key 的 principal")
-        execution_principal, reviewer_principal = _external_execution_and_reviewer_principals(config, task)
+        execution_principal, reviewer_principal = (
+            _external_execution_and_reviewer_principals(config, task)
+        )
         if approver_principal in (execution_principal, reviewer_principal):
-            raise ValidationError("signoff principal 必须独立于 execution 与 review principal")
+            raise ValidationError(
+                "signoff principal 必须独立于 execution 与 review principal"
+            )
     if not dry_run:
-        atomic_write_text(task.directory / "signoff.json", json.dumps(signoff, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+        atomic_write_text(
+            task.directory / "signoff.json",
+            json.dumps(signoff, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        )
         _set_quality_gate_status(config, task, "done")
         ledger(
             config,
@@ -1931,7 +2796,9 @@ def _prepare_merge(
     dry_run: bool,
 ) -> tuple[Line, tuple[MergePlan, ...]]:
     if push and not config.policy.allow_push:
-        raise DyroError("当前 Profile 禁止 push；请在 dyro.toml 的 policy.allow_push 显式开启")
+        raise DyroError(
+            "当前 Profile 禁止 push；请在 dyro.toml 的 policy.allow_push 显式开启"
+        )
     line = get_line(config, task.line)
     task_heads = _assert_task_heads_current(config, task)
     plans: list[MergePlan] = []
@@ -1939,24 +2806,41 @@ def _prepare_merge(
         target = line_repository_path(config, line, repo_id)
         if git(target, "rev-parse", "--is-inside-work-tree").stdout.strip() != "true":
             raise DyroError(f"开发线 worktree 不存在或不是 Git：{target}")
-        dirty = require_ok(git(target, "status", "--porcelain=v1", "-uall"), f"读取 {repo_id} 状态").stdout.strip()
+        dirty = require_ok(
+            git(target, "status", "--porcelain=v1", "-uall"), f"读取 {repo_id} 状态"
+        ).stdout.strip()
         if dirty:
             raise DyroError(f"开发线仓库不干净，拒绝合并：{target}")
-        current = require_ok(git(target, "branch", "--show-current"), f"读取 {repo_id} 分支").stdout.strip()
+        current = require_ok(
+            git(target, "branch", "--show-current"), f"读取 {repo_id} 分支"
+        ).stdout.strip()
         if current != line.branch:
-            raise DyroError(f"开发线仓库分支错误：{target} 当前 {current or 'DETACHED'}，期望 {line.branch}")
-        original_head = require_ok(git(target, "rev-parse", "HEAD"), f"读取 {repo_id} 开发线 HEAD").stdout.strip()
+            raise DyroError(
+                f"开发线仓库分支错误：{target} 当前 {current or 'DETACHED'}，期望 {line.branch}"
+            )
+        original_head = require_ok(
+            git(target, "rev-parse", "HEAD"), f"读取 {repo_id} 开发线 HEAD"
+        ).stdout.strip()
         plans.append(MergePlan(repo_id, target, task_heads[repo_id], original_head))
     if push:
         for plan in plans:
             require_ok(
-                git(plan.target, "push", "--dry-run", "origin", line.branch, dry_run=dry_run),
+                git(
+                    plan.target,
+                    "push",
+                    "--dry-run",
+                    "origin",
+                    line.branch,
+                    dry_run=dry_run,
+                ),
                 f"预检推送 {plan.repository}",
             )
     return line, tuple(plans)
 
 
-def _rollback_merges(plans: Iterable[MergePlan], committed_heads: dict[str, str]) -> list[str]:
+def _rollback_merges(
+    plans: Iterable[MergePlan], committed_heads: dict[str, str]
+) -> list[str]:
     failures: list[str] = []
     for plan in reversed(tuple(plans)):
         merge_head = git(plan.target, "rev-parse", "--verify", "-q", "MERGE_HEAD")
@@ -1971,27 +2855,45 @@ def _rollback_merges(plans: Iterable[MergePlan], committed_heads: dict[str, str]
                 failures.append(f"{plan.repository}: cannot read HEAD during rollback")
                 continue
             if current.stdout.strip() != committed_head:
-                failures.append(f"{plan.repository}: HEAD changed concurrently; manual recovery required")
+                failures.append(
+                    f"{plan.repository}: HEAD changed concurrently; manual recovery required"
+                )
                 continue
             result = git(plan.target, "reset", "--keep", plan.original_head)
         if result.code != 0:
-            failures.append(f"{plan.repository}: {result.stdout.strip() or 'rollback failed'}")
+            failures.append(
+                f"{plan.repository}: {result.stdout.strip() or 'rollback failed'}"
+            )
     return failures
 
 
-def _merge_task_repositories(config: Config, task: Task, *, push: bool, dry_run: bool) -> None:
+def _merge_task_repositories(
+    config: Config, task: Task, *, push: bool, dry_run: bool
+) -> None:
     # Serialize merges into the same delivery line across concurrent dyro processes.
-    with exclusive_lock(_merge_lock_path(config, task.line), timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS):
+    with exclusive_lock(
+        _merge_lock_path(config, task.line), timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS
+    ):
         _merge_task_repositories_locked(config, task, push=push, dry_run=dry_run)
 
 
-def _merge_task_repositories_locked(config: Config, task: Task, *, push: bool, dry_run: bool) -> None:
+def _merge_task_repositories_locked(
+    config: Config, task: Task, *, push: bool, dry_run: bool
+) -> None:
     line, plans = _prepare_merge(config, task, push=push, dry_run=dry_run)
     message = f"merge(task): {task.id} {task.title}"
     if dry_run:
         for plan in plans:
             require_ok(
-                git(plan.target, "merge", "--no-ff", "--no-commit", plan.source_head, dry_run=True, timeout=300),
+                git(
+                    plan.target,
+                    "merge",
+                    "--no-ff",
+                    "--no-commit",
+                    plan.source_head,
+                    dry_run=True,
+                    timeout=300,
+                ),
                 f"合并 {plan.repository}",
             )
         return
@@ -1999,13 +2901,24 @@ def _merge_task_repositories_locked(config: Config, task: Task, *, push: bool, d
     committed_heads: dict[str, str] = {}
     try:
         for plan in plans:
-            result = git(plan.target, "merge", "--no-ff", "--no-commit", plan.source_head, timeout=300)
+            result = git(
+                plan.target,
+                "merge",
+                "--no-ff",
+                "--no-commit",
+                plan.source_head,
+                timeout=300,
+            )
             require_ok(result, f"合并 {plan.repository}")
         for plan in plans:
             if git(plan.target, "rev-parse", "--verify", "-q", "MERGE_HEAD").code == 0:
-                require_ok(git(plan.target, "commit", "-m", message, timeout=300), f"提交 {plan.repository} 合并")
+                require_ok(
+                    git(plan.target, "commit", "-m", message, timeout=300),
+                    f"提交 {plan.repository} 合并",
+                )
                 committed_heads[plan.repository] = require_ok(
-                    git(plan.target, "rev-parse", "HEAD"), f"读取 {plan.repository} 合并提交"
+                    git(plan.target, "rev-parse", "HEAD"),
+                    f"读取 {plan.repository} 合并提交",
                 ).stdout.strip()
     except DyroError as exc:
         recovery_failures = _rollback_merges(plans, committed_heads)
@@ -2018,7 +2931,9 @@ def _merge_task_repositories_locked(config: Config, task: Task, *, push: bool, d
             recovery_failures=recovery_failures,
         )
         if recovery_failures:
-            raise DyroError(f"{exc}\n自动恢复未完全成功：{'; '.join(recovery_failures)}") from exc
+            raise DyroError(
+                f"{exc}\n自动恢复未完全成功：{'; '.join(recovery_failures)}"
+            ) from exc
         raise
 
     pushed: list[str] = []
@@ -2041,7 +2956,9 @@ def _merge_task_repositories_locked(config: Config, task: Task, *, push: bool, d
             pushed.append(plan.repository)
 
     for plan in plans:
-        result_head = require_ok(git(plan.target, "rev-parse", "HEAD"), f"读取 {plan.repository} 合并结果").stdout.strip()
+        result_head = require_ok(
+            git(plan.target, "rev-parse", "HEAD"), f"读取 {plan.repository} 合并结果"
+        ).stdout.strip()
         ledger(
             config,
             task.id,
@@ -2055,7 +2972,9 @@ def _merge_task_repositories_locked(config: Config, task: Task, *, push: bool, d
         )
 
 
-def merge_task(config: Config, task: Task, *, push: bool = False, dry_run: bool = False) -> None:
+def merge_task(
+    config: Config, task: Task, *, push: bool = False, dry_run: bool = False
+) -> None:
     _require_local_execution(config, "合并", dry_run=dry_run)
     if status(config, task) != "done":
         raise DyroError(f"仅 done 任务可合并：{task.id}")
@@ -2063,7 +2982,9 @@ def merge_task(config: Config, task: Task, *, push: bool = False, dry_run: bool 
         raise DyroError(
             "仅具有有效的独立复核、当前回执与任务 HEAD 绑定的 done 任务可合并（PROOF_DECAYED）"
         )
-    if config.policy.require_external_signoff and not _valid_external_signoff(config, task):
+    if config.policy.require_external_signoff and not _valid_external_signoff(
+        config, task
+    ):
         raise DyroError("当前 Profile 要求有效的外部签收后才能合并（PROOF_DECAYED）")
     _merge_task_repositories(config, task, push=push, dry_run=dry_run)
 
@@ -2100,9 +3021,16 @@ def maintain_evidence_generations(
 
 
 def board(config: Config) -> str:
-    rows = ["# DyroEngineeringFlow task board", "", "| Task | Line | Status | Risk | Depends |", "| --- | --- | --- | --- | --- |"]
+    rows = [
+        "# DyroEngineeringFlow task board",
+        "",
+        "| Task | Line | Status | Risk | Depends |",
+        "| --- | --- | --- | --- | --- |",
+    ]
     for task in list_tasks(config):
-        rows.append(f"| {task.id} | {task.line} | {status(config, task)} | {task.risk} | {', '.join(task.depends_on) or '-'} |")
+        rows.append(
+            f"| {task.id} | {task.line} | {status(config, task)} | {task.risk} | {', '.join(task.depends_on) or '-'} |"
+        )
     return "\n".join(rows) + "\n"
 
 
@@ -2118,7 +3046,9 @@ def stats(config: Config) -> dict[str, dict[str, int]]:
         agent = event.get("agent")
         if not agent:
             continue
-        counters = result.setdefault(str(agent), {"executor": 0, "executor_ok": 0, "review": 0, "review_ok": 0})
+        counters = result.setdefault(
+            str(agent), {"executor": 0, "executor_ok": 0, "review": 0, "review_ok": 0}
+        )
         if event.get("phase") == "executor":
             counters["executor"] += 1
             if event.get("exit_code") == 0:
@@ -2151,7 +3081,12 @@ def loop_tasks(config: Config, *, dry_run: bool = False) -> list[tuple[str, str]
         if task.id not in ready_ids:
             continue
         try:
-            outcomes.append((task.id, run_task(config, task, dry_run=dry_run, legacy_scheduler=True)))
+            outcomes.append(
+                (
+                    task.id,
+                    run_task(config, task, dry_run=dry_run, legacy_scheduler=True),
+                )
+            )
         except DyroError as exc:
             outcomes.append((task.id, f"skipped: {exc}"))
     for task in plan_tasks(config).review:
@@ -2162,7 +3097,9 @@ def loop_tasks(config: Config, *, dry_run: bool = False) -> list[tuple[str, str]
     return outcomes
 
 
-def task_template(task_id: str, title: str, line: str, repository: str, mount: str) -> str:
+def task_template(
+    task_id: str, title: str, line: str, repository: str, mount: str
+) -> str:
     quoted_title = json.dumps(title, ensure_ascii=False)
     quoted_mount = json.dumps(mount, ensure_ascii=False)
     return f'''schema_version = 1
@@ -2174,6 +3111,7 @@ timeout_minutes = 60
 review_timeout_minutes = 45
 depends_on = []
 blocked_on = []
+# Overlapping slices must share a conflict_group; distinct slices stay parallel.
 conflict_group = ""
 
 [executor]

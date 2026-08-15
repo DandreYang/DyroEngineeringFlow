@@ -20,25 +20,70 @@ automatic check.
 Use an explicit command to retry or to control the saved preference:
 
 ```bash
-dyro update check
+dyro update          # check, confirm, then install (same as: dyro update now)
+dyro update check    # check only
 dyro update enable
 dyro update disable
 ```
 
+## First-run choice
+
+Interactive `dyro setup` presents these controls as a small, recommendation-led
+choice before its final confirmation. Daily detection is recommended on;
+patch-only automatic updates are recommended off. The preview states the exact
+choice and the final confirmation writes it to the user-level state directory.
+Cancelling setup leaves both project files and update preferences untouched.
+
+`dyro setup --non-interactive` leaves existing update preferences unchanged,
+which keeps scripts and CI free of user-level side effects.
+
 Set `DYRO_NO_UPDATE_CHECK=1` for a process-level opt-out without changing the
-saved preference.
+saved preference. The same gate currently also skips interactive startup repair
+of the managed Skill bundle (they share the daily-update launch filter).
 
 ## Installing an update
 
-`dyro update now` fetches the latest stable `X.Y.Z` version, shows the exact
-plan, and asks before writing. For automation, review the plan first and then
-use `dyro update now --yes`. Dyro recognizes its active `uv tool` or `pipx`
+`dyro update` (or the `now` alias) fetches the latest stable `X.Y.Z` version,
+shows the exact plan, and asks before writing. For automation, review the plan
+first and then use `dyro update --yes`. Dyro recognizes its active `uv tool` or `pipx`
 environment and otherwise uses the active Python interpreter's `pip`. A normal
 virtual environment without pip falls back to `uv pip --python` when uv is
 available. Commands are fixed argument arrays, never shell strings or
 instructions returned by the network. The requirement is pinned to the version
 that was checked and Dyro verifies the installed distribution version after the
 command succeeds.
+
+## First-party Skill bundle
+
+Interactive `dyro setup` can install the first-party Skill bundle during
+personal preferences (preview in the plan, applied only after confirmation).
+After a successful `dyro update` or patch auto-update, Dyro best-effort syncs
+the managed bundle through the fresh `dyro` entry point. Interactive `dyro`,
+`dyro home`, and `dyro start` launches also repair outdated managed Skills.
+The control-plane opt-in covers first-party companions, so an existing managed
+control plane automatically gains `dyro-dispatch`. A machine with no prior Dyro
+Skill ownership remains untouched. Manual control-plane commands are:
+
+```bash
+dyro integration install skill --dry-run
+dyro integration install skill --yes
+dyro integration sync skill --yes   # upgrade-only; skips absent installs
+```
+
+(`codex` is an alias for `skill`.)
+
+The outbound `dyro-dispatch` Skill keeps independent ownership state from the
+read-only control-plane Skill. One `dyro setup` opt-in installs both. An existing
+managed control-plane installation also gains the Dispatch companion on the next
+interactive launch or post-update refresh; after that, both stay synchronized.
+Hosts with no prior Dyro Skill opt-in remain untouched. Manual lifecycle commands
+are still available:
+
+```bash
+dyro integration install dispatch --dry-run
+dyro integration install dispatch --yes
+dyro integration sync dispatch --yes
+```
 
 Editable source installations are deliberately rejected. Update those through
 their Git checkout so a convenience command cannot replace a development
@@ -55,5 +100,5 @@ dyro update auto off
 This preference is off by default. When enabled, only a higher patch within the
 same major and minor line can install automatically, such as `0.5.5` to
 `0.5.6`. A minor or major change still produces a notice and requires
-`dyro update now`. An installation failure is reported but does not prevent the
+`dyro update`. An installation failure is reported but does not prevent the
 current Dyro launch from continuing.

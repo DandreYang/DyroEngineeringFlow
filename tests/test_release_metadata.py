@@ -40,3 +40,8 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_release_tag_rejects_an_unreleased_changelog_entry(self) -> None:
         with self.assertRaisesRegex(AssertionError, "dated changelog"):
             _assert_release_changelog("0.5.3", "Unreleased", "v0.5.3")
+
+    def test_source_distribution_excludes_generated_python_bytecode(self) -> None:
+        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+
+        self.assertIn("global-exclude *.py[cod]", manifest.splitlines())

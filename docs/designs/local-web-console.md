@@ -226,8 +226,9 @@ C04 将真实工作区读取移出 HTTP 请求线程，并补齐概览的单工�
 - `create_console_http_server()` 默认装配 `IsolatedOverviewService` IPC client。它以固定 `python -m`
   argv、最小环境和新 session 启动 inspection process；worker 不继承 bearer、bootstrap、编码工具
   配置或其它宿主环境值，异常 stderr 不会进入 API；
-- inspection outer worker 对单次请求施加 5 秒硬 deadline。它在内部最多运行 4 个 daemon 子进程，
-  每个 workspace 750ms；超时或崩溃只返回该 workspace 的 `unavailable`/`WORKSPACE_TIMEOUT` 卡片，
+- inspection outer worker 对单次请求施加 8 秒硬 deadline。它在内部最多运行 4 个 daemon 子进程，
+  每个 workspace 3 秒、整页内部采集最多 6 秒；超时或崩溃只返回该 workspace 的
+  `unavailable`/`WORKSPACE_TIMEOUT` 卡片，
   并在父 deadline 后终止整个 process group；
 - 当前 process-tree 回收仅在 POSIX 平台启用；Windows 在具备经验证的 Job Object 回收实现前对
   inspection fail closed，不会以“只终止 outer process”的方式留下读取子进程；
@@ -591,7 +592,8 @@ CLI                         Browser                      Server
 
 - registry 结构损坏是一个全局 `registry_unavailable` 状态；Console 保持可打开并提供恢复说明，但绝不覆盖文件。
 - Profile 或 Objective 损坏只影响对应 workspace card。
-- summary 默认最多 4 个 workspace 并行读取，单 workspace 预算 750 ms，总预算 5 秒。
+- summary 默认最多 4 个 workspace 并行读取，单 workspace 预算 3 秒，内部总预算 6 秒，外层
+  inspection process group 硬预算 8 秒。该预算包含隔离 Python 子进程的启动成本。
 - detail 中每个 Git 子进程必须传显式 timeout；超时转换为 `GIT_PROBE_TIMEOUT`。
 - HTTP 主进程把 registry 和 workspace inspection 交给 `exec` 启动的内部 worker process；父进程
   使用单调时钟硬 deadline、有界队列和最多 4 个 worker。协作式 cancellation 只用于普通步骤，

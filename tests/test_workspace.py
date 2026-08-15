@@ -1,14 +1,41 @@
 from pathlib import Path
+import os
 
 from dyro.config import load
 from dyro.errors import DyroError
 from dyro.process import Result
-from dyro.workspace import create_line, doctor, line_repository_path, list_lines
+from dyro.workspace import (
+    create_line,
+    doctor,
+    line_repository_path,
+    list_lines,
+    preflight_line,
+    status_rows,
+)
 
 from .support import WorkspaceCase, shell
 
 
 class WorkspaceTests(WorkspaceCase):
+    def test_control_plane_git_observations_do_not_refresh_the_index(self) -> None:
+        config = load(self.root)
+        tracked = self.anchor / "README.md"
+        tracked_stat = tracked.stat()
+        os.utime(
+            tracked,
+            ns=(tracked_stat.st_atime_ns, tracked_stat.st_mtime_ns + 2_000_000_000),
+        )
+        index = self.anchor / ".git/index"
+        before_bytes = index.read_bytes()
+        before_mtime = index.stat().st_mtime_ns
+
+        status_rows(config)
+        doctor(config)
+
+        self.assertEqual(index.read_bytes(), before_bytes)
+        self.assertEqual(index.stat().st_mtime_ns, before_mtime)
+        self.assertFalse(index.with_name("index.lock").exists())
+
     def test_create_line_and_dynamic_doctor(self) -> None:
         config = load(self.root)
         line = create_line(config, line_id="alpha", branch="feat/alpha", base="main")
@@ -44,6 +71,21 @@ class WorkspaceTests(WorkspaceCase):
                 repository_bases={"web": "missing-ref"},
             )
         self.assertFalse((self.root / "versions/partial-preflight").exists())
+        self.assertEqual(list_lines(config), [])
+
+    def test_public_preflight_detects_a_dirty_anchor_without_mutating(self) -> None:
+        config = load(self.root)
+        self.anchor.joinpath("dirty.txt").write_text("pending\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(DyroError, "仓库不干净"):
+            preflight_line(
+                config,
+                line_id="dirty-anchor",
+                branch="feat/dirty-anchor",
+                base="main",
+            )
+
+        self.assertFalse((self.root / "versions/dirty-anchor").exists())
         self.assertEqual(list_lines(config), [])
 
     def test_create_line_rolls_back_when_a_later_repository_fails(self) -> None:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dyro"
-version = "0.6.0"
+version = "0.6.9"
 description = "DyroEngineeringFlow: local-first automation and delivery control for multi-repository teams"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -52,6 +52,8 @@ packages = [
   "dyro.console.assets",
   "dyro.continuation",
   "dyro.host",
+  "dyro.integrations",
+  "dyro.integrations.assets",
   "dyro.proof",
   "experiments",
   "experiments.local_agent_dispatch",
@@ -60,6 +62,12 @@ packages = [
 
 [tool.setuptools.package-data]
 "dyro.console" = ["assets/*"]
+"dyro.integrations" = [
+  "assets/dyro-control-plane/SKILL.md",
+  "assets/dyro-control-plane/agents/openai.yaml",
+  "assets/dyro-dispatch/SKILL.md",
+  "assets/dyro-dispatch/agents/openai.yaml",
+]
 
 [tool.unittest]
 start-directory = "tests"

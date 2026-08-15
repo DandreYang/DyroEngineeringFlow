@@ -2,13 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 import shutil
+import stat
 from typing import Iterable, Mapping
 
 from .config import Config, external_security_errors, validate_id
 from .errors import DyroError, ValidationError
-from .process import git, require_ok
+from .process import git, git_read, require_ok
+from .read_limits import (
+    ReadBudget,
+    ReadLimitCode,
+    ReadLimitError,
+    bounded_directory_names,
+)
 from .state import atomic_write_text
 
 
@@ -75,12 +83,12 @@ def _write_line(config: Config, line: Line, *, dry_run: bool = False) -> None:
     atomic_write_text(path, "\n".join(chunks))
 
 
-def _parse_line(path: Path) -> Line:
+def _parse_line_content(path: Path, content: bytes) -> Line:
     import tomllib
 
     try:
-        raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as exc:
+        raw = tomllib.loads(content.decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
         raise ValidationError(f"开发线清单格式错误：{path}: {exc}") from exc
     if raw.get("schema_version") not in (1, 2):
         raise ValidationError(f"不支持的开发线清单版本：{path}")
@@ -114,8 +122,96 @@ def _parse_line(path: Path) -> Line:
     return Line(line_id, kind, branch, base, repositories, repository_bases, storage_modes)
 
 
-def list_lines(config: Config, kind: str | None = None) -> list[Line]:
+def _parse_line(path: Path) -> Line:
+    return _parse_line_content(path, path.read_bytes())
+
+
+def load_line_bounded(path: Path, budget: ReadBudget, *, workspace_root: Path) -> Line:
+    content = budget.read_regular_bytes_at(
+        root=workspace_root,
+        directory=path.parent,
+        name=path.name,
+        maximum_bytes=budget.limits.line_manifest_bytes,
+        label="line manifest",
+    )
+    line = _parse_line_content(path, content)
+    if path.stem != line.id:
+        raise ValidationError(f"开发线文件名与清单 ID 不一致：{path.stem} != {line.id}")
+    return line
+
+
+def _list_lines_bounded(
+    config: Config, wanted: tuple[str, ...], budget: ReadBudget
+) -> list[Line]:
+    entries: list[tuple[str, Path, str]] = []
+    records_seen = 0
+    for current_kind in wanted:
+        parent = (
+            config.lines_state_dir
+            if current_kind == "line"
+            else config.hotfixes_state_dir
+        )
+        with budget.open_safe_directory_chain(
+            config.root, parent, allow_missing=True
+        ) as directory_fd:
+            if directory_fd is None:
+                continue
+            names = bounded_directory_names(
+                directory_fd,
+                budget,
+                maximum_records=budget.limits.line_records - records_seen,
+                label="Line manifest",
+            )
+            records_seen += len(names)
+            for name in names:
+                if not name.endswith(".toml"):
+                    continue
+                entries.append((current_kind, parent, name))
+
+    lines: list[Line] = []
+    for current_kind, parent, name in sorted(entries):
+        with budget.open_safe_directory_chain(config.root, parent) as directory_fd:
+            assert directory_fd is not None
+            try:
+                info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise ReadLimitError(
+                    ReadLimitCode.UNSAFE_FILE,
+                    "Line manifest is not a safe regular file",
+                ) from exc
+            if not stat.S_ISREG(info.st_mode):
+                raise ReadLimitError(
+                    ReadLimitCode.UNSAFE_FILE,
+                    "Line manifest is not a safe regular file",
+                )
+            path = parent / name
+            budget.bind_file_identity(path, (info.st_dev, info.st_ino))
+            content = budget.read_regular_bytes_from_directory_fd(
+                directory_fd,
+                name=name,
+                maximum_bytes=budget.limits.line_manifest_bytes,
+                label="line manifest",
+                identity_path=path,
+            )
+        line = _parse_line_content(path, content)
+        if path.stem != line.id or line.kind != current_kind:
+            raise ValidationError(f"开发线文件名或类型与清单不一致：{path}")
+        lines.append(line)
+    return lines
+
+
+def list_lines(
+    config: Config,
+    kind: str | None = None,
+    *,
+    read_budget: ReadBudget | None = None,
+) -> list[Line]:
     wanted = (kind,) if kind else ("line", "hotfix")
+    if read_budget is not None:
+        return sorted(
+            _list_lines_bounded(config, wanted, read_budget),
+            key=lambda line: (line.kind, line.id),
+        )
     lines: list[Line] = []
     for current_kind in wanted:
         parent = config.lines_state_dir if current_kind == "line" else config.hotfixes_state_dir
@@ -124,8 +220,18 @@ def list_lines(config: Config, kind: str | None = None) -> list[Line]:
     return sorted(lines, key=lambda line: (line.kind, line.id))
 
 
-def get_line(config: Config, line_id: str, kind: str | None = None) -> Line:
-    matches = [line for line in list_lines(config, kind) if line.id == line_id]
+def get_line(
+    config: Config,
+    line_id: str,
+    kind: str | None = None,
+    *,
+    read_budget: ReadBudget | None = None,
+) -> Line:
+    matches = [
+        line
+        for line in list_lines(config, kind, read_budget=read_budget)
+        if line.id == line_id
+    ]
     if not matches:
         raise DyroError(f"未登记的开发线：{line_id}")
     if len(matches) > 1:
@@ -150,12 +256,22 @@ def line_repository_path(config: Config, line: Line, repo_id: str) -> Path:
     return line_root(config, line) / repo.mount
 
 
-def _is_git_repo(path: Path) -> bool:
-    return git(path, "rev-parse", "--git-dir").code == 0
+def _is_git_repo(path: Path, *, read_budget: ReadBudget | None = None) -> bool:
+    return (
+        git_read(
+            path,
+            "rev-parse",
+            "--git-dir",
+            read_budget=read_budget,
+        ).code
+        == 0
+    )
 
 
 def _ensure_clean(path: Path) -> None:
-    result = require_ok(git(path, "status", "--porcelain=v1", "-uall"), f"读取 {path} 状态")
+    result = require_ok(
+        git_read(path, "status", "--porcelain=v1", "-uall"), f"读取 {path} 状态"
+    )
     if result.stdout.strip():
         raise DyroError(f"仓库不干净，拒绝创建或合并 worktree：{path}")
 
@@ -206,7 +322,7 @@ def _rollback_line_creations(config: Config, line: Line, created: list[str]) -> 
     return failures
 
 
-def create_line(
+def _build_line(
     config: Config,
     *,
     line_id: str,
@@ -216,9 +332,8 @@ def create_line(
     repository_bases: Mapping[str, str] | None = None,
     storage_modes: Mapping[str, str] | None = None,
     kind: str = "line",
-    dry_run: bool = False,
 ) -> Line:
-    """Create isolated linked worktrees from configured repository anchors."""
+    """Validate line arguments and turn them into one immutable creation plan."""
     validate_id(line_id, "开发线 ID")
     if not branch or not base:
         raise ValidationError("branch 与 base 都必须明确指定")
@@ -244,39 +359,120 @@ def create_line(
     for repo_id, storage_mode in storage_overrides.items():
         if storage_mode not in STORAGE_MODES:
             raise ValidationError(f"{repo_id} 的存储方式必须是：{', '.join(sorted(STORAGE_MODES))}")
-    line = Line(line_id, kind, branch, base, selected, base_overrides, storage_overrides)
+    return Line(line_id, kind, branch, base, selected, base_overrides, storage_overrides)
+
+
+def _plan_line_creation(
+    config: Config, line: Line
+) -> list[tuple[str, Path, tuple[str, ...]]]:
+    """Validate every Git-side prerequisite without creating a worktree."""
     target_root = line_root(config, line)
     if target_root.exists() and any(target_root.iterdir()):
         raise DyroError(f"目标工作区已存在且非空：{target_root}")
 
     # Validate every repository before mutating any worktree so partial creates are rare.
     planned: list[tuple[str, Path, tuple[str, ...]]] = []
-    for repo_id in selected:
+    for repo_id in line.repositories:
         anchor = repository_path(config, repo_id)
         destination = line_repository_path(config, line, repo_id)
         if not _is_git_repo(anchor):
             raise DyroError(f"仓库 anchor 不存在或不是 Git 仓库：{anchor}")
         _ensure_clean(anchor)
         repo_base = line.base_for(repo_id)
-        require_ok(git(anchor, "rev-parse", "--verify", f"{repo_base}^{{commit}}"), f"校验 {repo_id} 基线 {repo_base}")
+        require_ok(
+            git_read(anchor, "rev-parse", "--verify", f"{repo_base}^{{commit}}"),
+            f"校验 {repo_id} 基线 {repo_base}",
+        )
         if destination.exists() or destination.is_symlink():
             raise DyroError(f"worktree 目标已存在：{destination}")
-        branch_check = git(anchor, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
+        branch_check = git_read(
+            anchor, "show-ref", "--verify", "--quiet", f"refs/heads/{line.branch}"
+        )
         if branch_check.code == 0:
-            ancestry = git(anchor, "merge-base", "--is-ancestor", repo_base, branch)
+            ancestry = git_read(
+                anchor, "merge-base", "--is-ancestor", repo_base, line.branch
+            )
             if ancestry.code != 0:
-                raise DyroError(f"{repo_id} 既有分支 {branch} 不包含声明的基线 {repo_base}")
+                raise DyroError(
+                    f"{repo_id} 既有分支 {line.branch} 不包含声明的基线 {repo_base}"
+                )
         if line.storage_for(repo_id) == "anchor-reference":
-            anchor_branch = require_ok(git(anchor, "branch", "--show-current"), f"读取 {repo_id} anchor 分支").stdout.strip()
-            if anchor_branch != branch:
-                raise DyroError(f"{repo_id} 的 anchor-reference 要求 anchor 正位于 {branch}，当前为 {anchor_branch or 'DETACHED'}")
+            anchor_branch = require_ok(
+                git_read(anchor, "branch", "--show-current"),
+                f"读取 {repo_id} anchor 分支",
+            ).stdout.strip()
+            if anchor_branch != line.branch:
+                raise DyroError(
+                    f"{repo_id} 的 anchor-reference 要求 anchor 正位于 {line.branch}，"
+                    f"当前为 {anchor_branch or 'DETACHED'}"
+                )
             planned.append((repo_id, destination, ()))
             continue
         command = ("worktree", "add")
         if branch_check.code != 0:
-            command += ("-b", branch)
-        command += (str(destination), branch if branch_check.code == 0 else repo_base)
+            command += ("-b", line.branch)
+        command += (
+            str(destination), line.branch if branch_check.code == 0 else repo_base
+        )
         planned.append((repo_id, destination, command))
+    return planned
+
+
+def preflight_line(
+    config: Config,
+    *,
+    line_id: str,
+    branch: str,
+    base: str,
+    repositories: Iterable[str] | None = None,
+    repository_bases: Mapping[str, str] | None = None,
+    storage_modes: Mapping[str, str] | None = None,
+    kind: str = "line",
+) -> Line:
+    """Verify that a line can be created without changing Git state.
+
+    The home wizard uses this before asking for confirmation. ``create_line``
+    repeats the check immediately before mutation because repositories can
+    change between the preview and the user's confirmation.
+    """
+    line = _build_line(
+        config,
+        line_id=line_id,
+        branch=branch,
+        base=base,
+        repositories=repositories,
+        repository_bases=repository_bases,
+        storage_modes=storage_modes,
+        kind=kind,
+    )
+    _plan_line_creation(config, line)
+    return line
+
+
+def create_line(
+    config: Config,
+    *,
+    line_id: str,
+    branch: str,
+    base: str,
+    repositories: Iterable[str] | None = None,
+    repository_bases: Mapping[str, str] | None = None,
+    storage_modes: Mapping[str, str] | None = None,
+    kind: str = "line",
+    dry_run: bool = False,
+) -> Line:
+    """Create isolated linked worktrees from configured repository anchors."""
+    line = _build_line(
+        config,
+        line_id=line_id,
+        branch=branch,
+        base=base,
+        repositories=repositories,
+        repository_bases=repository_bases,
+        storage_modes=storage_modes,
+        kind=kind,
+    )
+    planned = _plan_line_creation(config, line)
 
     created: list[str] = []
     try:
@@ -306,57 +502,108 @@ def create_line(
     return line
 
 
-def _short_status(path: Path) -> tuple[str, str, str, int]:
-    branch = require_ok(git(path, "branch", "--show-current"), f"读取 {path} 分支").stdout.strip() or "DETACHED"
-    head = require_ok(git(path, "rev-parse", "--short=12", "HEAD"), f"读取 {path} HEAD").stdout.strip()
-    upstream_result = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+def _short_status(
+    path: Path, *, read_budget: ReadBudget | None = None
+) -> tuple[str, str, str, int]:
+    branch = (
+        require_ok(
+            git_read(
+                path,
+                "branch",
+                "--show-current",
+                read_budget=read_budget,
+            ),
+            f"读取 {path} 分支",
+        ).stdout.strip()
+        or "DETACHED"
+    )
+    head = require_ok(
+        git_read(
+            path,
+            "rev-parse",
+            "--short=12",
+            "HEAD",
+            read_budget=read_budget,
+        ),
+        f"读取 {path} HEAD",
+    ).stdout.strip()
+    upstream_result = git_read(
+        path,
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{upstream}",
+        read_budget=read_budget,
+    )
     upstream = upstream_result.stdout.strip() if upstream_result.code == 0 else "-"
-    dirty = len(require_ok(git(path, "status", "--porcelain=v1", "-uall"), f"读取 {path} 状态").stdout.splitlines())
+    dirty = len(
+        require_ok(
+            git_read(
+                path,
+                "status",
+                "--porcelain=v1",
+                "-uall",
+                read_budget=read_budget,
+            ),
+            f"读取 {path} 状态",
+        ).stdout.splitlines()
+    )
     return branch, head, upstream, dirty
 
 
-def status_rows(config: Config) -> list[tuple[str, str, str, str, str, int]]:
+def status_rows(
+    config: Config, *, read_budget: ReadBudget | None = None
+) -> list[tuple[str, str, str, str, str, int]]:
     rows: list[tuple[str, str, str, str, str, int]] = []
     for repo_id in sorted(config.repositories):
         path = repository_path(config, repo_id)
-        if _is_git_repo(path):
-            branch, head, upstream, dirty = _short_status(path)
+        if _is_git_repo(path, read_budget=read_budget):
+            branch, head, upstream, dirty = _short_status(
+                path, read_budget=read_budget
+            )
             rows.append(("anchor", repo_id, branch, head, upstream, dirty))
         else:
             rows.append(("anchor", repo_id, "MISSING", "-", "-", -1))
-    for line in list_lines(config):
+    for line in list_lines(config, read_budget=read_budget):
         for repo_id in line.repositories:
             path = line_repository_path(config, line, repo_id)
-            if _is_git_repo(path):
-                branch, head, upstream, dirty = _short_status(path)
+            if _is_git_repo(path, read_budget=read_budget):
+                branch, head, upstream, dirty = _short_status(
+                    path, read_budget=read_budget
+                )
                 rows.append((f"{line.kind}:{line.id}", repo_id, branch, head, upstream, dirty))
             else:
                 rows.append((f"{line.kind}:{line.id}", repo_id, "MISSING", "-", "-", -1))
     return rows
 
 
-def doctor(config: Config) -> list[str]:
+def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str]:
     """Return diagnostics.  Callers decide whether any FAIL means non-zero."""
     findings: list[str] = []
     for requirement in external_security_errors(config.policy):
         findings.append(f"FAIL external Profile requires {requirement}")
-    root_git = _is_git_repo(config.root)
+    root_git = _is_git_repo(config.root, read_budget=read_budget)
     findings.append(("WARN" if root_git else "PASS") + " workspace root " + ("is a Git repository" if root_git else "is not a Git repository"))
     for repo_id in sorted(config.repositories):
         anchor = repository_path(config, repo_id)
-        if _is_git_repo(anchor):
+        if _is_git_repo(anchor, read_budget=read_budget):
             findings.append(f"PASS repository {repo_id}: {anchor}")
         else:
             findings.append(f"FAIL repository {repo_id}: missing or not Git: {anchor}")
-    for line in list_lines(config):
+    for line in list_lines(config, read_budget=read_budget):
         for repo_id in line.repositories:
             anchor = repository_path(config, repo_id)
             worktree = line_repository_path(config, line, repo_id)
             storage_mode = line.storage_for(repo_id)
-            if not _is_git_repo(worktree):
+            if not _is_git_repo(worktree, read_budget=read_budget):
                 findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: missing worktree")
                 continue
-            actual_branch = git(worktree, "branch", "--show-current")
+            actual_branch = git_read(
+                worktree,
+                "branch",
+                "--show-current",
+                read_budget=read_budget,
+            )
             if actual_branch.code != 0 or actual_branch.stdout.strip() != line.branch:
                 actual = actual_branch.stdout.strip() if actual_branch.code == 0 else "UNREADABLE"
                 findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: expected {line.branch}, found {actual or 'DETACHED'}")
@@ -372,8 +619,20 @@ def doctor(config: Config) -> list[str]:
             if worktree.is_symlink():
                 findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: linked-worktree cannot be a symlink")
                 continue
-            anchor_common = git(anchor, "rev-parse", "--path-format=absolute", "--git-common-dir")
-            worktree_common = git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
+            anchor_common = git_read(
+                anchor,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+                read_budget=read_budget,
+            )
+            worktree_common = git_read(
+                worktree,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+                read_budget=read_budget,
+            )
             if anchor_common.code == 0 and worktree_common.code == 0 and anchor_common.stdout.strip() == worktree_common.stdout.strip():
                 findings.append(f"PASS {line.kind}:{line.id}/{repo_id}: linked to configured anchor")
             else:

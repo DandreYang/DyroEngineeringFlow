@@ -287,13 +287,36 @@ To upgrade later, run `pipx upgrade dyro`. If your team manages Python packages 
 python3 -m pip install --user --upgrade dyro
 ```
 
+Interactive `dyro setup` can install the first-party Skill bundle during personal
+preferences. That one opt-in installs both `dyro-control-plane` and the separate
+`dyro-dispatch` Skill. Existing managed control-plane installations automatically
+gain the Dispatch companion on the next interactive launch or package refresh, and
+both managed Skills then stay synchronized with Dyro updates. Machines that have
+never opted into a Dyro Skill are not modified silently.
+
+Multi-harness delegation remains separate from the read-only control plane so its
+process/network effects are explicit. Manual installation is still available:
+preview with `dyro integration install dispatch --dry-run`, then install with
+`dyro integration install dispatch --yes`.
+
+For two to four different roles, `dyro dispatch batch-plan` produces a
+side-effect-free, context-bound plan. Review its digest before
+`batch-start --expect-plan-sha256 …`, then recover through `batch-status`,
+`batch-result`, or `batch-cancel`. Batch V1 is advisory independent fan-out with
+at most one scratch edit writer; it is not the delivery write plane, a
+dependency DAG, retry queue, or automatic judge. Simultaneous writes use Core
+peer wave: one executor per task worktree, serialized only by `conflict_group`.
+Use explicit synchronous `panel --members all` only for a full-ready-Provider
+same-task comparison.
+
 Interactive `dyro`, `dyro home`, and `dyro start` launches check the official
 PyPI endpoint at most once per local day. A failed or slow check never blocks
 workspace entry. Updates remain confirmation-first by default:
 
 ```bash
-dyro update check
-dyro update now
+dyro update              # check, confirm, then install (same as: dyro update now)
+dyro update check        # check only
+dyro update now          # alias of dyro update
 dyro update auto on      # opt in to patch-only automatic updates
 dyro update auto off
 dyro update disable      # also disables automatic updates
@@ -388,11 +411,22 @@ dyro bootstrap --yes
 dyro doctor
 ```
 
-After setup, run `dyro`. The first run inside a project registers it in a reversible global home. From then on, the same command can resume a recent development line, hotfix, or existing task worktree from any directory—without remembering `--root`:
+`dyro setup` registers the completed Profile in the reversible global home by default, so it is visible in Console immediately. The first registered workspace becomes the default; later setup runs keep the existing default unless you pass `--default`. Use `--no-register` for CI or temporary workspaces. From then on, bare `dyro` can resume a recent development line, hotfix, or existing task worktree from any directory—without remembering `--root`:
 
 ```bash
 dyro
 ```
+
+Interactive setup also collects a short set of global, reversible personal
+preferences before its final confirmation: daily update detection (recommended
+on), patch-only automatic updates (recommended off), and a default locally
+available coding tool. When Console already has a default project, setup asks
+whether to keep it or make the new project the target of bare `dyro`. These
+preferences never modify a Git repository, do not install a tool, and can be
+changed later with `dyro update …`, `dyro tool default …`, or `dyro workspace
+add … --default`. To keep first-run selection readable, setup shows at most
+three detected tools initially; enter `m` to expand the full list or type a
+tool ID directly.
 
 Interactive home always asks which coding tool to use before launching one,
 even when only a single Profile adapter is configured. Configured adapters
@@ -401,11 +435,16 @@ on the local machine are labeled `open workspace only` and receive no gate,
 review, merge, or push authority. Explicit commands such as
 `dyro open dev --agent codex` continue to launch directly for scripts.
 
-The picker detects Cursor Desktop separately from Cursor CLI and supports
-OpenClaw as a launch-only external runtime. Ready tools appear before tools that
-need setup or installation; the current workspace's last choice, project
-recommendation, personal default, and pinned order provide stable tie-breaking.
-Selecting a missing supported tool opens a confirmation-first guided installer:
+The picker detects Codex App and Claude Code Desktop separately from their
+CLI counterparts, detects Cursor Desktop separately from Cursor CLI, supports
+Antigravity CLI (`agy`) and Qoder CLI (`qodercli`) as launch-only terminal
+tools, opens ZCode as a launch-only desktop tool, and supports OpenClaw as a
+launch-only external runtime. It begins with at most three common choices;
+type `m` for the full catalog or enter a tool ID, label, or command directly.
+Ready tools appear before tools that need setup or installation; the current
+workspace's last choice, project recommendation, personal default, and pinned
+order provide stable tie-breaking. Selecting a missing supported tool opens a
+confirmation-first guided installer:
 
 ```bash
 dyro tool list

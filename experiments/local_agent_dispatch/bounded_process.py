@@ -19,6 +19,7 @@ from .file_lock import open_inherited_lifetime_lock
 
 DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024
 TERMINATION_GRACE_SECONDS = 0.5
+LIFETIME_ANCHOR_GUARD_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -29,11 +30,16 @@ class BoundedCompletedProcess:
     stderr: str
     timed_out: bool = False
     output_limited: bool = False
+    cancelled: bool = False
     stdout_bytes: bytes = b""
     stderr_bytes: bytes = b""
 
 
-def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+def _terminate_process_group(
+    process: subprocess.Popen[bytes],
+    *,
+    grace_seconds: float = TERMINATION_GRACE_SECONDS,
+) -> None:
     if process.returncode is not None:
         return
     try:
@@ -45,7 +51,8 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
         process.terminate()
     # Keep the leader unreaped until both signals have been sent. Its live or
     # zombie pid pins the dedicated pgid, preventing reuse between phases.
-    time.sleep(TERMINATION_GRACE_SECONDS)
+    if grace_seconds:
+        time.sleep(grace_seconds)
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -69,6 +76,7 @@ def run_bounded(
     max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
     on_spawn: Callable[[int], None] | None = None,
     lifetime_lock_path: Path | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> BoundedCompletedProcess:
     if not argv:
         raise ValueError("argv must not be empty")
@@ -102,7 +110,9 @@ def run_bounded(
     }
     timed_out = False
     output_limited = False
+    cancelled = False
     streaming_complete = False
+    process_group_terminated = False
 
     with tempfile.TemporaryFile() as stdin_file:
         stdin_file.write(input_text.encode("utf-8"))
@@ -117,13 +127,18 @@ def run_bounded(
                 gate_read, gate_write = os.pipe()
                 os.set_inheritable(gate_read, True)
                 bootstrap = (
-                    "import os,subprocess,sys;"
+                    "import os,signal,subprocess,sys,time;"
+                    "termination_requested=[False];"
+                    "signal.signal(signal.SIGTERM,lambda *_:"
+                    "termination_requested.__setitem__(0,True));"
                     "fd=int(sys.argv[1]);"
                     "token=os.read(fd,1);"
                     "os.close(fd);"
                     "os._exit(125) if token!=b'1' else None;"
                     "child=subprocess.Popen(sys.argv[2:],close_fds=True);"
                     "returncode=child.wait();"
+                    f"time.sleep({LIFETIME_ANCHOR_GUARD_SECONDS!r}) "
+                    "if termination_requested[0] else None;"
                     "os._exit(returncode if returncode>=0 else 128-returncode)"
                 )
                 process_argv = [
@@ -178,10 +193,16 @@ def run_bounded(
             captured = 0
             deadline = time.monotonic() + timeout_seconds
             while selector.get_map():
+                if cancel_check is not None and cancel_check():
+                    cancelled = True
+                    _terminate_process_group(process)
+                    process_group_terminated = True
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     timed_out = True
                     _terminate_process_group(process)
+                    process_group_terminated = True
                     break
                 events = selector.select(timeout=min(remaining, 0.1))
                 if not events:
@@ -202,6 +223,7 @@ def run_bounded(
                         captured = max_output_bytes
                         output_limited = True
                         _terminate_process_group(process)
+                        process_group_terminated = True
                         break
                     buffers[key.data].extend(chunk)
                     captured += len(chunk)
@@ -215,10 +237,18 @@ def run_bounded(
                 os.close(gate_write)
             if lifetime_handle is not None:
                 lifetime_handle.close()
-            if process is not None and (
-                not streaming_complete or process.poll() is None
-            ):
-                _terminate_process_group(process)
+            if process is not None and not process_group_terminated:
+                # EOF only proves that every descendant closed or redirected
+                # the captured streams.  Always signal the still-pinned
+                # dedicated group before reaping the leader so a daemonized
+                # descendant cannot outlive a successful-looking CLI exit.
+                _terminate_process_group(
+                    process,
+                    grace_seconds=(
+                        0.0 if streaming_complete else TERMINATION_GRACE_SECONDS
+                    ),
+                )
+                process_group_terminated = True
             if selector is not None:
                 for key in list(selector.get_map().values()):
                     try:
@@ -244,6 +274,7 @@ def run_bounded(
         stderr=stderr_bytes.decode("utf-8", errors="replace"),
         timed_out=timed_out,
         output_limited=output_limited,
+        cancelled=cancelled,
         stdout_bytes=stdout_bytes,
         stderr_bytes=stderr_bytes,
     )

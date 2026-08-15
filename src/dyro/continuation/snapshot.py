@@ -21,7 +21,9 @@ from ..config import Config
 from ..errors import DyroError, ValidationError
 from .. import graph as task_graph
 from .. import tasks as task_module
+from ..read_limits import ReadBudget
 from ..tasks import Task
+from ..workspace import list_lines
 from .objective_storage import StoredObjective
 
 
@@ -159,7 +161,9 @@ def _current_scope(
         pending.extend(task.depends_on)
     scope = tuple(sorted(closure))
     try:
-        contracts = tuple((task_id, contract_sha256_by_id[task_id]) for task_id in scope)
+        contracts = tuple(
+            (task_id, contract_sha256_by_id[task_id]) for task_id in scope
+        )
     except KeyError:
         return scope, (), True
     return scope, contracts, invalid
@@ -207,9 +211,12 @@ def build_scheduler_snapshot(
     observed_at = _utc(clock())
     known_tasks = tuple(sorted(graph.known_tasks, key=lambda item: item.id))
     known_by_id = {task.id: task for task in known_tasks}
-    candidate_ids = tuple(sorted(
-        task.id for task in (known_tasks if candidates is None else tuple(candidates))
-    ))
+    candidate_ids = tuple(
+        sorted(
+            task.id
+            for task in (known_tasks if candidates is None else tuple(candidates))
+        )
+    )
     unknown = sorted(set(candidate_ids) - set(known_by_id))
     if unknown:
         raise ValidationError(f"调度候选不在 TaskGraph 中：{', '.join(unknown)}")
@@ -248,7 +255,149 @@ def build_scheduler_snapshot(
         )
         for task in known_tasks
     )
-    decisions = tuple(sorted(graph.decisions.items()))
+    return build_scheduler_snapshot_from_facts(
+        tasks=tasks,
+        decisions=tuple(sorted(graph.decisions.items())),
+        execution_mode=graph.execution_mode,
+        candidate_ids=candidate_ids,
+        objective=objective,
+        observed_at=observed_at,
+        decayed_merge_subjects=_inspect_decayed_merge_subjects(
+            config, tasks, inspect=inspect_proofs
+        ),
+    )
+
+
+def build_scheduler_snapshot_bounded(
+    config: Config,
+    *,
+    objective: StoredObjective,
+    budget: ReadBudget,
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> SchedulerSnapshot:
+    """Sample planner facts through bounded, symlink-safe manifest reads."""
+
+    observed_at = _utc(clock())
+    known_line_ids = frozenset(
+        line.id for line in list_lines(config, read_budget=budget)
+    )
+    sampled = tuple(
+        task_module.load_task_planning_bounded(
+            config,
+            task_id,
+            budget,
+            known_line_ids=known_line_ids,
+        )
+        for task_id in task_module.list_task_ids_bounded(config, budget)
+    )
+    known_tasks = tuple(item[0] for item in sampled)
+    statuses = {task.id: current for task, current, _digest in sampled}
+    digests = {task.id: digest for task, _current, digest in sampled}
+    decisions = task_module.decisions_bounded(config, budget)
+    graph = task_graph.TaskGraph(
+        line=None,
+        tasks=known_tasks,
+        known_tasks=known_tasks,
+        decisions=decisions,
+        execution_mode=config.policy.execution_mode,
+    )
+    issues = task_graph.validate_task_graph(graph)
+    if issues:
+        details = "; ".join(issue.message for issue in issues[:5])
+        raise ValidationError(f"任务图结构无效：{details}")
+
+    integration_required_ids = {
+        dependency for task in known_tasks for dependency in task.depends_on
+    }
+    integration_required_ids.update(objective.objective.targets)
+    facts = tuple(
+        SchedulerTaskSnapshot(
+            task=task,
+            status=statuses[task.id],
+            external_claim_active=(
+                config.policy.execution_mode == "external"
+                and statuses[task.id] == "assigned"
+                and task_module.external_claim_active_bounded(
+                    config, task, budget, now=observed_at
+                )
+            ),
+            integration_state=(
+                task_module.dependency_integration_state_bounded(
+                    config, task, budget
+                )
+                if statuses[task.id] == "done"
+                and task.id in integration_required_ids
+                else "not_required"
+            ),
+            contract_sha256=digests[task.id],
+        )
+        for task in known_tasks
+    )
+    candidate_ids = tuple(task.id for task in known_tasks)
+    return build_scheduler_snapshot_from_facts(
+        tasks=facts,
+        decisions=tuple(sorted(decisions.items())),
+        execution_mode=config.policy.execution_mode,
+        candidate_ids=candidate_ids,
+        objective=objective,
+        observed_at=observed_at,
+    )
+
+
+def _inspect_decayed_merge_subjects(
+    config: Config,
+    tasks: Iterable[SchedulerTaskSnapshot],
+    *,
+    inspect: bool,
+) -> tuple[str, ...]:
+    if not inspect:
+        return ()
+    done_tasks = tuple(item.task for item in tasks if item.status == "done")
+    if not done_tasks:
+        return ()
+    from ..proof.evaluate import decayed_merge_subjects
+
+    return decayed_merge_subjects(config, done_tasks)
+
+
+def build_scheduler_snapshot_from_facts(
+    *,
+    tasks: Iterable[SchedulerTaskSnapshot],
+    decisions: Iterable[tuple[str, str]],
+    execution_mode: str,
+    candidate_ids: Iterable[str],
+    observed_at: datetime,
+    objective: StoredObjective | None = None,
+    decayed_merge_subjects: tuple[str, ...] = (),
+) -> SchedulerSnapshot:
+    """Build a scheduler snapshot from one caller-owned, already sampled fact set.
+
+    Machine-facing readers use this entry point after bounded filesystem and Git
+    observations.  It performs no I/O and therefore cannot silently fall back to
+    the legacy, presentation-oriented loaders.
+    """
+    observed_at = _utc(observed_at)
+    frozen_tasks = tuple(sorted(tasks, key=lambda item: item.task.id))
+    if len({item.task.id for item in frozen_tasks}) != len(frozen_tasks):
+        raise ValidationError("调度快照 Task ID 不能重复")
+    frozen_candidates = tuple(sorted(candidate_ids))
+    known_by_id = {item.task.id: item.task for item in frozen_tasks}
+    unknown = sorted(set(frozen_candidates) - set(known_by_id))
+    if unknown:
+        raise ValidationError(f"调度候选不在 Task facts 中：{', '.join(unknown)}")
+    if len(set(frozen_candidates)) != len(frozen_candidates):
+        raise ValidationError("调度候选不能重复")
+    frozen_decisions = tuple(sorted(decisions))
+    if len({key for key, _value in frozen_decisions}) != len(frozen_decisions):
+        raise ValidationError("调度快照 decision ID 不能重复")
+    if execution_mode not in {"local", "external"}:
+        raise ValidationError("调度快照 execution mode 无效")
+
+    contract_sha256_by_id = {
+        item.task.id: item.contract_sha256
+        for item in frozen_tasks
+        if item.contract_sha256
+    }
     task_contracts: tuple[tuple[str, str], ...] = ()
     objective_drifted = False
     if objective is not None:
@@ -266,37 +415,34 @@ def build_scheduler_snapshot(
         canonical_json_bytes(
             _payload(
                 observed_at=observed_at,
-                tasks=tasks,
-                decisions=decisions,
-                execution_mode=graph.execution_mode,
-                candidate_ids=candidate_ids,
+                tasks=frozen_tasks,
+                decisions=frozen_decisions,
+                execution_mode=execution_mode,
+                candidate_ids=frozen_candidates,
                 objective=objective,
                 task_contracts=task_contracts,
                 objective_drifted=objective_drifted,
             )
         )
     ).hexdigest()
-    decayed_subjects: tuple[str, ...] = ()
-    if inspect_proofs:
-        done_tasks = tuple(item.task for item in tasks if item.status == "done")
-        if done_tasks:
-            from ..proof.evaluate import decayed_merge_subjects
-
-            decayed_subjects = decayed_merge_subjects(config, done_tasks)
     return SchedulerSnapshot(
         observed_at=observed_at,
-        tasks=tasks,
-        decisions=decisions,
-        execution_mode=graph.execution_mode,
-        candidate_ids=candidate_ids,
+        tasks=frozen_tasks,
+        decisions=frozen_decisions,
+        execution_mode=execution_mode,
+        candidate_ids=frozen_candidates,
         snapshot_sha256=digest,
         objective_id="" if objective is None else objective.objective.id,
         objective_revision=0 if objective is None else objective.revision,
         objective_state="" if objective is None else objective.operator_state,
         objective_scope=() if objective is None else objective.scope,
         objective_targets=() if objective is None else objective.objective.targets,
-        objective_requested_mode="" if objective is None else objective.objective.requested_mode.value,
-        objective_operations=() if objective is None else tuple(item.value for item in objective.objective.operations),
+        objective_requested_mode=""
+        if objective is None
+        else objective.objective.requested_mode.value,
+        objective_operations=()
+        if objective is None
+        else tuple(item.value for item in objective.objective.operations),
         objective_drifted=objective_drifted,
-        decayed_merge_subjects=decayed_subjects,
+        decayed_merge_subjects=decayed_merge_subjects,
     )

@@ -191,7 +191,7 @@ DetachedWorker
 ## 9. 异步生命周期与并发
 
 ```text
-accepted → running → completed|failed|timeout
+accepted → running → completed|failed|timeout|cancelled
               ↑
          lease heartbeat
 ```
@@ -204,7 +204,7 @@ accepted → running → completed|failed|timeout
 | 租约 | `pid` + `process_started_at` + 随机 owner token；续租/释放必须匹配所有权 |
 | init grace | 槽位新建后短窗口内禁止判死 |
 | 僵死回收 | rename 抢占 + 删除；失败则下轮重试 |
-| GC | 超龄 run、影子目录、不活跃 thread 可回收 |
+| GC | 活跃/未过期 orchestration 保护成员；终态过期后与 run 一致回收，但保留 request tombstone 防重复计费 |
 
 worker 记录会持久化 `pid + process_started_at + owner token`。短命的派发 CLI
 退出后，新 Supervisor、`result --wait` 与 GC 都会重建监控：只有操作系统证明该
@@ -213,9 +213,47 @@ worker 记录会持久化 `pid + process_started_at + owner token`。短命的�
 
 相对「仅 TTL 锁」：增加 **进程启动时刻** 防 PID 复用；相对「无 grace」：避免 init 竞态误杀。
 
-当前 `run` / `panel` / worker 的进程树监管限定 POSIX（Linux/macOS）；Windows
+当前 `run` / `panel` / worker 的专用进程组监管限定 POSIX（Linux/macOS）。它不是
+OS 容器：主动 `setsid` 脱离该进程组的恶意后代不在终止证明内，因此真实 Provider
+仍必须标记为 unconfined 并由调用方显式确认。Windows
 允许导入与只读 discovery，但执行会 fail-closed，直到提供并验证 Windows 原生
 process-tree 与 pipe 后端。
+
+### 9.1 持久 Batch V1
+
+不同角色或不同仓库切片使用独立的持久编排，而不是让宿主临时维护多个
+`run_id`：
+
+```text
+batch-plan → batch-start → batch-status → batch-result
+                     └──→ batch-cancel
+```
+
+- 请求包含 2–4 个 `strategy=independent` 成员、唯一 `role_id` 和完整
+  TaskContract；最多一个 edit writer。
+- `batch-plan` 不创建状态，也不启动 Provider/鉴权 CLI；它只解析已安装候选。
+  JCS + SHA-256 摘要绑定规范化合同、canonical project root、确定的 Provider、
+  非秘密执行 profile（含适配器内层 Provider/model）、守卫后的 context digest、
+  timeout，以及 edit 成员的 Git HEAD。
+- `batch-start` 必须携带已审阅摘要并重新计划；先主动验证全部登录态，再创建
+  状态。任何 context、HEAD 或 Provider execution profile 漂移都会拒绝启动。
+  全部成员预检并创建确定性 run 后才开始 Provider。
+- 每个 run 继续持有 planned context digest；异步 worker 在调用 Provider 前重新
+  读取并核对，关闭 start 与真正执行之间的 TOCTOU。edit context 必须是已审阅
+  HEAD 中的 clean tracked files，detached worktree 直接固定到该 object ID。
+- `request_id + plan_sha256` 确定 orchestration ID；orchestration ID + member
+  index 确定 run ID。相同请求和计划可幂等续建，不重复启动已运行/终态成员。
+- GC 删除终态过期 manifest/run 后保留有界 request tombstone；旧
+  `request_id` 不得再次启动，显式的新执行必须使用新的 request ID。
+- `batch-status` 只返回小型状态投影；`batch-result` 只在成员终态后聚合有界
+  summary/evidence/warnings/patch_ref，且不会因单个失败抹掉健康结果。
+- `batch-cancel` 先持久化取消意图。accepted 成员可直接取消；running 成员由
+  精确 worker generation 协作终止，只有 backend cleanup 获得证明后才成为
+  cancelled。证明不足时保留 running/attention，不做跨进程猜测式 `killpg`。
+
+Batch V1 不提供依赖 DAG、超过四成员的异步队列、自动 retry/resume、自动
+judge 或多 edit writer。显式 `panel --members all` 仍是同步的全 ready Provider
+同题比较，不能伪装成 Batch 队列。
 
 ## 10. Edit 模式：worktree + patch
 
@@ -238,8 +276,8 @@ process-tree 与 pipe 后端。
 
 安装/刷新时：
 
-1. `dyro dispatch backends` 探测本机命令与登录态；当前受审计、可执行的集成为 `codex` 和 `claude`。
-2. `cursor-agent`、`opencode`、`grok`、`hermes`、`kimi` 会被展示为“已发现但未集成”，不得被自动或手动路由，直到各自拥有经过审计的非交互协议 adapter。
+1. `dyro dispatch --dry-run backends` 仅被动发现本机命令并标记 `authentication_probe=not_run`，不会启动第三方鉴权 CLI；授权执行前再用非 dry-run 的 `dyro dispatch backends` 主动核验登录态。当前受审计、可执行的集成为 `codex`、`claude`、`cursor-agent`、`opencode`、`grok`、`hermes`、`kimi`、`dsh` 和 `pi`。其中 Cursor 仅支持只读派发；其 edit 模式在沙箱进程生命周期获得证明前保持 fail-closed。
+2. 每个 Provider 只有在命令存在、精确鉴权通过且相应非交互 adapter 就绪时才可路由；未登录或运行时布局不受支持时继续展示，但不得进入自动选择。Hermes 额外关闭用户规则、身份、记忆、fallback、后台复核与会话持久化，仅接收 Dyro 投影上下文。Kimi 只绑定一个已选择的 Provider/model 路由；文件型 OAuth 仅复制该路由对应的 token 到单次运行目录，keyring 型 OAuth 因无法证明隔离而 fail-closed。DSH 通过受审查的 headless patch 固定为 `deepseek-official/deepseek-v4-flash`。
 3. 当只有一个已认证 Provider 时，`backend: auto` 可以选择它；当有多个时，用户必须使用 `dyro dispatch route add default <provider>` 选择默认路由；一个也没有时 fail-closed 并给出发现结果。
 4. `echo` 仅用于显式 `--backend echo --allow-offline-simulation` 的确定性测试，输出的 `execution_kind=offline-simulation`、低置信度和非生产警告不得被上游当作真实模型结论。
 5. 渲染 skill 正文只含已准备 Provider、发现但未集成的命令、路由表与上述限制，再分发到各宿主 skills 目录。
@@ -250,7 +288,8 @@ process-tree 与 pipe 后端。
 
 | 场景 | 用哪条路径 |
 | --- | --- |
-| 开发者要第二意见 / 大调研 / patch 竞赛 | ADR-0002 本设计 |
+| 同时改多块交付代码 | Core Peer Wave：多 task + worktree + `conflict_group`；见 [peer-wave-execution.md](peer-wave-execution.md) |
+| 开发者要第二意见 / 大调研 / scratch patch | ADR-0002 本设计 |
 | 高风险设计评审 | 本设计 panel + 对抗评审板 |
 | 生产 evidence / merge | 仅 Dyro 控制面；派发 harness 不可越权 |
 
@@ -262,6 +301,7 @@ process-tree 与 pipe 后端。
 | **L1** | `RunStore` + 双层槽位租约 + strict 影子接入 | 单测绿 |
 | **L2** | `echo`/`codex`/`claude` 适配器 + CLI `run`/`result` | 单测（echo）+ 本机可选真 CLI |
 | **L3** | `panel`、skill 渲染、routes、`gc` | 单测绿 |
+| **L4** | 持久 Batch V1：plan/start/status/result/cancel | 单测 + 对抗生命周期绿 |
 
 ## 15. 测试矩阵（L0）
 

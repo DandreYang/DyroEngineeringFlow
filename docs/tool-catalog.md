@@ -75,17 +75,41 @@ user can inspect and choose the platform-specific installer. This applies to
 Cursor CLI and Hermes; Cursor Desktop likewise opens the official download
 page.
 
-Current catalog entries include Codex, Claude Code, Cursor Desktop, Cursor CLI,
-Grok, OpenCode, OpenClaw, Hermes, Kimi Code, and Shell. An entry can be known
-without having an audited installation recipe; such entries fail closed with
-an actionable message.
+Current catalog entries include Antigravity CLI, Codex CLI, Codex App, Claude
+Code CLI, Claude Code Desktop, Cursor Desktop, Cursor CLI, Grok, OpenCode,
+OpenClaw, Hermes, Kimi Code, DeepSeek Harness, Pi, Qoder CLI, ZCode, and Shell. Antigravity uses the
+official `agy` command; Qoder uses `qodercli`; ZCode is opened as a desktop
+workspace tool. An entry can be known without having an audited installation
+recipe; such entries fail closed with an actionable message.
 
-## Cursor Desktop and OpenClaw
+DeepSeek Harness and Pi remain Home launch-only tools and are not offered as
+Profile presets until their non-interactive task adapters have been audited.
+Pi also requires Node.js 22.19.0 or newer; discovery and guided installation
+fail closed when the local runtime does not satisfy that requirement.
+
+## Compact Home picker
+
+Home starts by showing at most three common choices: the most recent or
+default tool, project recommendation, user pins, and available Dyro adapters.
+This keeps everyday startup short while retaining the full catalog. Enter a
+tool ID, label, or command directly, or type `m` to expand the full list,
+including guided-install choices. The shorter display does not change launch
+authority: launch-only tools still only open the selected workspace.
+
+## Desktop apps and OpenClaw
 
 Cursor Desktop is distinct from Cursor CLI. Dyro detects the `cursor` command,
 the standard macOS application bundle, or the standard per-user Windows
 application path, then opens the selected workspace as a launch-only desktop
 tool.
+
+Codex App and Claude Code Desktop are likewise separate from their terminal
+tools. On macOS, Dyro detects their application bundles before offering them,
+including the ChatGPT app's Codex entry and Claude Code's URL-handler bundle.
+Codex uses `codex app <workspace>` when the CLI is available. Claude uses its
+official Code deep link with the selected folder; Claude Desktop still asks the
+user to confirm that folder before it is adopted. Neither desktop launch path
+turns into a Dyro adapter.
 
 OpenClaw is treated as an external runtime, not a Dyro adapter. A configured
 installation receives the selected path through `OPENCLAW_WORKSPACE_DIR`. A

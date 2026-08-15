@@ -44,8 +44,13 @@ PyPI Trusted Publishing 将 GitHub Actions 的 OIDC 身份绑定到这个仓库�
    uv run python -m twine check --strict dist/dyro-*.whl dist/dyro-*.tar.gz
    ```
 
+   Release 工作流还会通过 GitHub Actions API 查询 `ci.yml`，严格要求当前
+   tag SHA 对应的 main push run 已 `completed + success`；缺失、仍在运行、
+   失败、取消或 SHA 不匹配都会阻止发布。制品冒烟会确认 wheel/sdist 含
+   Codex Skill 资产，且不再提供 `dyro-bridge` / `dyro-mcp` 入口。
+
 4. 提交并推送版本变更，创建与版本严格匹配的 tag，例如 `vX.Y.Z`。
-5. 在 GitHub 基于该 tag 创建并发布 Release。工作流会验证 checkout 恰为该 tag、tag commit 是 `origin/main` 的祖先、`uv.lock` 未漂移，再测试、构建、检查 metadata；通过 `pypi` Environment 的人工批准后才上传 PyPI。
+5. 在 GitHub 基于该 tag 创建并发布 Release。工作流会验证 checkout 恰为该 tag、tag commit 是 `origin/main` 的祖先、同一 SHA 的完整 CI 成功、`uv.lock` 未漂移，再测试、构建、检查 metadata；通过 `pypi` Environment 的人工批准后才上传 PyPI。
 6. 发布完成后验证：
 
    ```bash

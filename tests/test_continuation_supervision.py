@@ -70,7 +70,7 @@ class SupervisedContinuationTests(WorkspaceCase):
     def test_action_start_precedes_task_api_and_success_receipt_is_bound(self) -> None:
         wave = self._wave()
 
-        def invoke(config, task, *, expected_contract_sha256):
+        def invoke(config, task, *, expected_contract_sha256, **_unused):
             records = list_objective_actions(config, "release")
             self.assertEqual(len(records), 1)
             self.assertIsNotNone(records[0].start)

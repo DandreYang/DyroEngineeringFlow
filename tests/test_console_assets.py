@@ -60,6 +60,20 @@ class ConsoleAssetTests(unittest.TestCase):
         self.assertNotIn(b"dyro.toml", body)
         self.assertNotIn(b"bootstrap=", body)
 
+    def test_shell_exposes_a_semantic_command_center(self) -> None:
+        shell = load_asset("index.html")
+
+        self.assertIn(b'id="primary-command"', shell.body)
+        self.assertIn(b'aria-live="polite"', shell.body)
+        self.assertIn(b'class="workspace-column-headings"', shell.body)
+        script = load_asset("app.js")
+        self.assertIn(b"AVAILABILITY_LABELS", script.body)
+        self.assertIn("任务总数".encode(), script.body)
+        self.assertIn(b"function workspaceCount", script.body)
+        self.assertIn("仓库".encode(), script.body)
+        self.assertIn("状态不完整".encode(), script.body)
+        self.assertIn("—".encode(), script.body)
+
 
 if __name__ == "__main__":
     unittest.main()
