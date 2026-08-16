@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dyro"
-version = "0.6.9"
+version = "0.7.0"
 description = "DyroEngineeringFlow: local-first automation and delivery control for multi-repository teams"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "cryptography>=44.0.0",
+  "cryptography>=50.0.0",
   "rfc8785>=0.1.4",
 ]
 authors = [{ name = "DandreYang" }]
@@ -47,11 +47,14 @@ dev = ["build==1.3.0", "ruff==0.15.2", "twine==6.2.0"]
 [tool.setuptools]
 packages = [
   "dyro",
+  "dyro.capability",
   "dyro.console",
   "dyro.console.assets",
   "dyro.continuation",
+  "dyro.host",
   "dyro.integrations",
   "dyro.integrations.assets",
+  "dyro.proof",
   "experiments",
   "experiments.local_agent_dispatch",
   "experiments.local_agent_dispatch.adapters",

@@ -12,6 +12,7 @@ import tomllib
 import uuid
 from typing import Any, Iterable
 
+from .capability.cards import assert_capability_allows_write
 from .config import (
     Config,
     expand_argv,
@@ -1036,6 +1037,8 @@ def _schedule_block_reason(reason: str, facts: dict[str, str]) -> str:
         return f"任务与活跃任务 {facts.get('active_task_ids', '')} 共用冲突组 {facts.get('conflict_group', '')}"
     if reason == "EXTERNAL_CLAIM_ACTIVE":
         return "任务已有有效的外部执行 claim"
+    if reason == "PROOF_DECAYED":
+        return "任务的 merge 绑定已衰减（PROOF_DECAYED），当前工作区无法按原复核合并"
     return reason
 
 
@@ -1784,6 +1787,8 @@ def _adapter_argv(
         raise ValidationError(
             f"任务 {task.id} 使用的 Agent adapter 未配置：{agent}"
         ) from exc
+    if mode == "write":
+        assert_capability_allows_write(config, agent)
     template = adapter.write if mode == "write" else adapter.read
     return expand_argv(
         template,
@@ -1984,7 +1989,9 @@ def run_gates(config: Config, task: Task, *, dry_run: bool = False) -> bool:
     return all_passed
 
 
-def _resolve_run_executor(task: Task, executor_override: str | None) -> str:
+def _resolve_run_executor(
+    config: Config, task: Task, executor_override: str | None
+) -> str:
     from .peer_wave import (
         AUTO_EXECUTOR,
         bind_wave_executors,
@@ -1995,7 +2002,11 @@ def _resolve_run_executor(task: Task, executor_override: str | None) -> str:
         return executor_override
     if task.executor != AUTO_EXECUTOR:
         return task.executor
-    decision = bind_wave_executors((task,), discover_available_write_providers())
+    decision = bind_wave_executors(
+        (task,),
+        discover_available_write_providers(),
+        capabilities=getattr(config, "capabilities", None),
+    )
     chosen = decision.executor_for(task.id)
     if chosen is None:
         reason = (
@@ -2020,9 +2031,10 @@ def _execute_task_agent(
     from .peer_wave import assert_write_executor_allowed
     from .task_dispatch import is_dispatch_write_ready, run_task_bound_dispatch
 
-    executor = _resolve_run_executor(task, executor_override)
+    executor = _resolve_run_executor(config, task, executor_override)
     if task.risk == "write":
         assert_write_executor_allowed(executor, risk=task.risk)
+        assert_capability_allows_write(config, executor)
     if is_dispatch_write_ready(executor):
         result = run_task_bound_dispatch(
             task,
@@ -2967,6 +2979,21 @@ def _merge_task_repositories_locked(
         )
 
 
+def _review_evidence_present(task: Task) -> bool:
+    if not (task.directory / "review.md").is_file():
+        return False
+    try:
+        resolve_evidence_path(task.directory, "receipt.md")
+        resolve_evidence_path(task.directory, TASK_HEADS_FILE)
+    except DyroError:
+        return False
+    return True
+
+
+def _signoff_evidence_present(task: Task) -> bool:
+    return (task.directory / "signoff.json").is_file()
+
+
 def merge_task(
     config: Config, task: Task, *, push: bool = False, dry_run: bool = False
 ) -> None:
@@ -2974,13 +3001,16 @@ def merge_task(
     if status(config, task) != "done":
         raise DyroError(f"仅 done 任务可合并：{task.id}")
     if not _valid_review_acceptance(config, task):
+        suffix = "" if not _review_evidence_present(task) else "（PROOF_DECAYED）"
         raise DyroError(
             "仅具有有效的独立复核、当前回执与任务 HEAD 绑定的 done 任务可合并"
+            + suffix
         )
     if config.policy.require_external_signoff and not _valid_external_signoff(
         config, task
     ):
-        raise DyroError("当前 Profile 要求有效的外部签收后才能合并")
+        suffix = "" if not _signoff_evidence_present(task) else "（PROOF_DECAYED）"
+        raise DyroError("当前 Profile 要求有效的外部签收后才能合并" + suffix)
     _merge_task_repositories(config, task, push=push, dry_run=dry_run)
 
 

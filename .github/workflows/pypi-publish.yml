@@ -105,6 +105,11 @@ jobs:
               raise SystemExit(f"release tag {actual!r} must equal {expected!r}")
           PY
 
+      - name: Refuse 1.0.0 without delivery-physics gates
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: uv run python tools/verify_release_gates.py --release-tag "$RELEASE_TAG"
+
       - name: Build distributions
         run: uv run python -m build
 
@@ -162,6 +167,7 @@ jobs:
           test ! -e "$smoke_root/sdist-venv/bin/dyro-mcp"
           DYRO_LOCAL_AGENT_DISPATCH_HOME="$smoke_root/sdist-dispatch-home" "$smoke_root/sdist-venv/bin/dyro" dispatch doctor >"$smoke_root/sdist-doctor.json"
           uv run python -c "import json; json.load(open('$smoke_root/sdist-doctor.json'))"
+          "$smoke_root/sdist-venv/bin/python" "$GITHUB_WORKSPACE/tools/verify_bundle_stranger.py" "$smoke_root/sdist-venv/bin/dyro"
 
       - name: Validate distribution metadata
         run: uv run python -m twine check --strict dist/dyro-*.whl dist/dyro-*.tar.gz

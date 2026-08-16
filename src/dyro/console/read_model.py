@@ -36,6 +36,11 @@ def _data(snapshot: WorkspaceReadSnapshot) -> dict[str, object]:
             "name": safe_title(snapshot.workspace_name),
             "workspace_revision": safe_sha256(snapshot.workspace_revision),
             "completeness": snapshot.completeness if snapshot.completeness in {"complete", "partial", "unavailable"} else "unavailable",
+            "proof_inspection": (
+                snapshot.proof_inspection
+                if snapshot.proof_inspection in {"not_inspected", "inspected"}
+                else "not_inspected"
+            ),
         },
         "task_status_counts": dict(sorted(status_counts.items())),
         "lines": [

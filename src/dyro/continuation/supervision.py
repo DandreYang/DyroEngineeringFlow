@@ -382,7 +382,11 @@ def _dispatch(config: Config, action: PlannedAction, task: Task, *, expected_con
     if action.kind is ActionKind.EXECUTE_TASK:
         from ..peer_wave import bind_wave_executors, discover_available_write_providers
 
-        decision = bind_wave_executors((task,), discover_available_write_providers())
+        decision = bind_wave_executors(
+            (task,),
+            discover_available_write_providers(),
+            capabilities=getattr(config, "capabilities", None),
+        )
         return run_task(
             config,
             task,
@@ -418,6 +422,10 @@ def apply_supervised_wave(
         or current.actions != wave.actions
     ):
         raise DyroError("确认后的 wave 已发生语义变化；请重新运行 objective apply --dry-run")
+
+    from ..host.doctor import assert_projections_allow_mutation
+
+    assert_projections_allow_mutation(config)
 
     acquired_at = _utc(clock())
     grant = acquire_objective_owner_lease(

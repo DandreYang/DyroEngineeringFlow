@@ -98,6 +98,7 @@ jobs:
           test -x "$smoke_root/sdist-venv/bin/dyro"
           test ! -e "$smoke_root/sdist-venv/bin/dyro-bridge"
           test ! -e "$smoke_root/sdist-venv/bin/dyro-mcp"
+          "$smoke_root/sdist-venv/bin/python" "$GITHUB_WORKSPACE/tools/verify_bundle_stranger.py" "$smoke_root/sdist-venv/bin/dyro"
 
   windows-dispatch-import:
     name: Windows dispatch import / fail-closed smoke

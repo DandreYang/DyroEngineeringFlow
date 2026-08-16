@@ -82,7 +82,7 @@ def build_bound_contract(
             "backend": executor,
             "mode": "edit" if task.risk == "write" else "read-only",
             "strict": False,
-            "allow_unconfined_provider": executor != "echo",
+            "allow_unconfined_provider": False,
             "allow_offline_simulation": executor == "echo",
             "files": list(files),
             "task": {

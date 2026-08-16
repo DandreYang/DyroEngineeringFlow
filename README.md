@@ -4,11 +4,15 @@
 
 **DyroEngineeringFlow · `dyro` CLI** is a local-first engineering automation and delivery control platform for multi-repository teams. It brings development lines, Git worktrees, agent launchers, task gates, independent review, and merge audit into versioned workspace configuration.
 
+**Dyro is a local-first multi-repository delivery physics engine: it decides what can become true, when that truth decays, and who may change the world.**
+
+`dyro proof verify` rebinds the current workspace. `dyro proof verify-bundle` checks portable integrity only: the caller must pass every `--git-dir` that contains the pinned objects (union search, not a repo map). Missing objects are `inconclusive`. Integrity `live` is not merge.
+
 **Keep engineering moving from task to delivery.**
 
 ![Dyro — multi-repository delivery control](docs/assets/dyro-github-cover-long-running-work-v5.png)
 
-DyroEngineeringFlow is not coupled to Codex, Claude, or any business domain. Each team supplies a `dyro.toml` Profile for repositories, layouts, agent adapters, and delivery policy; business rules, model cost, and release practices stay in that Profile.
+Each team supplies a `dyro.toml` Profile for repositories, layouts, agent adapters, and delivery policy; business rules, model cost, and release practices stay in that Profile.
 
 ## Local web Console
 

@@ -4,9 +4,13 @@
 
 **DyroEngineeringFlow · `dyro` CLI** 是面向多仓团队的本地优先工程自动化与交付控制平台。它将开发线、Git worktree、Agent 启动、任务门禁、独立复核和合并审计统一到可版本化的工作区配置中。
 
+**Dyro 是本地优先的多仓交付物理引擎：决定什么能变成真，真值何时衰减，以及谁有权改世界。**
+
+`dyro proof verify` 重绑当前工作区。`dyro proof verify-bundle` 只核便携完整性：调用方必须传入包含已钉对象的每个 `--git-dir`（并集查找，不是仓库映射）。缺对象为 `inconclusive`。完整性 `live` 不是 merge。
+
 **让工程从任务到交付持续流转。**
 
-DyroEngineeringFlow 不绑定 Codex、Claude 或任何业务领域。每个团队通过 `dyro.toml` Profile 定义仓库、目录布局、Agent adapter 与交付策略；业务规则、模型成本和发布实践始终留在各自的 Profile 中。
+每个团队通过 `dyro.toml` Profile 定义仓库、目录布局、Agent adapter 与交付策略；业务规则、模型成本和发布实践始终留在各自的 Profile 中。
 
 ## 本地 Web 控制台
 

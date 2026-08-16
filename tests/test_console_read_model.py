@@ -157,6 +157,23 @@ max_parallel = 1
             snapshot.objectives[0].blocked_actions[0].reason,
             "TASK_INTEGRATION_PENDING",
         )
+        self.assertEqual(snapshot.proof_inspection, "not_inspected")
+        envelope = workspace_envelope(snapshot)
+        self.assertEqual(envelope["data"]["workspace"]["proof_inspection"], "not_inspected")
+
+    def test_summary_capture_does_not_evaluate_proofs(self) -> None:
+        self._objective()
+        with patch(
+            "dyro.proof.evaluate.evaluate_proofs",
+            side_effect=AssertionError("Console summary must not evaluate Proofs"),
+        ) as evaluate:
+            snapshot = capture_workspace_read_snapshot(
+                self.config,
+                clock=lambda: datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc),
+            )
+        self.assertFalse(evaluate.called)
+        self.assertEqual(snapshot.proof_inspection, "not_inspected")
+        self.assertFalse(any(item.reason == "PROOF_DECAYED" for item in snapshot.objectives[0].attention))
 
     def test_envelope_returns_a_deeply_fresh_json_value(self) -> None:
         envelope = ConsoleEnvelope(

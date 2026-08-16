@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.7.0 - 2026-08-16
+
+- First delivery-physics release: Proof objects, Capability Cards, the Host
+  Compiler, and `verify-bundle`. This is not the published `0.6.9` Peer Wave
+  train and is not `1.0.0`.
+- A Card without `execute` refuses write dispatch, Peer Wave binding, and
+  `task run`. PATH discovery is not a Card. A dispatch-ready provider without a
+  Card remains the explicit second write door from 0.6.9.
+- Core bound contracts no longer silently set `allow_unconfined_provider`.
+- `merge_task` still refuses missing review or signoff files, but only a failed
+  complete predicate is labeled `PROOF_DECAYED`.
+- Console summary stays `proof_inspection=not_inspected`; `dyro objective
+  attention` is the Proof-rebinding entry.
+
 ## 0.6.9 - 2026-08-15
 
 - Make multi-harness writes a Core peer wave: each task worktree has one

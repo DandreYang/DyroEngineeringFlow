@@ -2,7 +2,7 @@
 
 Status: Enforced Linux source/wheel/sdist release gate
 
-Authority: [ADR 0006](../adr/0006-agent-bridge-phase-0.md)
+Authority: [ADR 0007](../adr/0007-agent-bridge-phase-0.md)
 
 Protocol: [Agent Bridge Phase 0 Protocol](agent-bridge-protocol.md)
 
@@ -102,7 +102,7 @@ network, or filesystem effects.
 The Linux gate requires Landlock ABI 3 or newer and a real test whose Git
 executable reaches the denied write syscall. SHA-1 repositories are the Phase 0
 surface; SHA-256 object format and other repository extensions must fail closed
-before Git starts. Consistent with ADR 0006, these gates do not claim an
+before Git starts. Consistent with ADR 0007, these gates do not claim an
 immutable snapshot against an actively malicious same-identity process.
 
 macOS 15 combines in-process traps, read-only roots, before/after filesystem and

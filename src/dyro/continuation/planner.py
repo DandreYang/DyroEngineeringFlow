@@ -293,6 +293,17 @@ def build_continuation_plan(snapshot: SchedulerSnapshot) -> ContinuationPlan:
             snapshot, PlanCompletion.INCOMPLETE, (action,), attention=(attention,)
         )
     by_id = snapshot.tasks_by_id
+    decayed_attention = tuple(
+        AttentionItem(
+            id=f"proof-decayed:{task_id}",
+            kind=AttentionKind.NEEDS_USER,
+            subject_id=task_id,
+            reason=ReasonCode.PROOF_DECAYED,
+            facts=_facts(status="decayed"),
+        )
+        for task_id in snapshot.decayed_merge_subjects
+        if task_id in snapshot.objective_scope or task_id in snapshot.objective_targets
+    )
     target_complete = all(
         target in by_id
         and by_id[target].status == "done"
@@ -303,12 +314,12 @@ def build_continuation_plan(snapshot: SchedulerSnapshot) -> ContinuationPlan:
         action = _action(
             ActionKind.COMPLETE, snapshot.objective_id, ReasonCode.TARGETS_INTEGRATED
         )
-        return _build_plan(snapshot, PlanCompletion.COMPLETE, (action,))
+        return _build_plan(snapshot, PlanCompletion.COMPLETE, (action,), attention=decayed_attention)
     scope = tuple(sorted(set(snapshot.objective_scope) & set(snapshot.candidate_ids)))
     readiness = build_task_readiness(snapshot, candidate_ids=scope)
     selected: list[PlannedAction] = []
     blocked = list(readiness.blocked)
-    attention: list[AttentionItem] = []
+    attention: list[AttentionItem] = list(decayed_attention)
     execute_allowed = (
         snapshot.objective_requested_mode != "observe"
         and "execute" in snapshot.objective_operations

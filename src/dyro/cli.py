@@ -1837,6 +1837,155 @@ def cmd_agent_discover(args: argparse.Namespace) -> None:
     print_agent_discovery(_config(args))
 
 
+def cmd_capability_list(args: argparse.Namespace) -> None:
+    from .capability import card_payload, discover_unintegrated, runtime_cards
+
+    config = _config(args)
+    cards = []
+    for card in runtime_cards(config).values():
+        payload = card_payload(card)
+        payload["hook_surface_declared"] = payload.get("hook_surface", "")
+        payload["hook_proven"] = False
+        cards.append(payload)
+    discovered = [
+        {"id": item.id, "command": item.command, "state": item.state}
+        for item in discover_unintegrated(config)
+    ]
+    if args.format == "json":
+        print(
+            json.dumps(
+                {"schema_version": 1, "cards": cards, "discovered_unintegrated": discovered},
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+        )
+        return
+    if not cards and not discovered:
+        print("暂无 Capability Card")
+        return
+    for card in cards:
+        print(
+            f"{card['id']:16} {card['kind']:10} {card['source']:14} "
+            f"isolation={card['attested_isolation']} cannot_prove={','.join(card['cannot_prove'])}"
+        )
+    for item in discovered:
+        print(f"{item['id']:16} discovered  {item['state']}  command={item['command']}")
+
+
+def cmd_capability_add(args: argparse.Namespace) -> None:
+    from .capability import append_capability, card_from_command, card_from_preset
+
+    config = _config(args)
+    if args.preset:
+        card = card_from_preset(args.id, args.preset)
+    else:
+        try:
+            command = shlex.split(args.command)
+        except ValueError as exc:
+            raise DyroError(f"Capability command 解析失败：{exc}") from exc
+        card = card_from_command(args.id, command)
+    append_capability(config, card, dry_run=args.dry_run)
+    print(f"{'DRY RUN: 将添加' if args.dry_run else '已添加'} Capability Card：{card.id}")
+
+
+def cmd_capability_test(args: argparse.Namespace) -> None:
+    from .capability import test_capability
+
+    report = test_capability(_config(args), args.id)
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "id": report.id,
+                    "source": report.source,
+                    "executable": report.executable,
+                    "logged_in": report.logged_in,
+                    "hook_surface": report.hook_surface,
+                    "attested_isolation": report.attested_isolation,
+                    "cannot_prove": list(report.cannot_prove),
+                    "checks": [
+                        {"mode": mode, "available": available, "executable": executable}
+                        for mode, available, executable in report.checks
+                    ],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+        )
+    else:
+        print(f"{report.id} source={report.source} executable={report.executable}")
+        print(f"isolation={report.attested_isolation} hook_surface={report.hook_surface or '-'}")
+        for mode, available, executable in report.checks:
+            print(f"{'PASS' if available else 'FAIL'} {report.id}.{mode}: {executable}")
+    if not report.executable:
+        raise DyroError(f"Capability 不可用：{report.id}")
+
+
+def _host_projection_payload(item) -> dict[str, object]:
+    return {
+        "authority_projection": item.authority_projection,
+        "hook_installed_on_surface": False,
+        "hook_note": "deny hook 写在投影树 SKILL.md 旁，未安装到 hook_surface，不是宿主拦截",
+        "hook_relpath": item.hook_relpath,
+        "hook_sha256": item.hook_sha256,
+        "host": item.host,
+        "input_sha256": item.input_sha256,
+        "manifest_relpath": item.manifest_relpath,
+        "scope": item.scope,
+        "skill_relpath": item.skill_relpath,
+        "skill_sha256": item.skill_sha256,
+    }
+
+
+def cmd_host_compile(args: argparse.Namespace) -> None:
+    from .host import compile_hosts
+
+    projections = compile_hosts(_config(args), user=args.user, dry_run=args.dry_run)
+    prefix = "DRY RUN: " if args.dry_run else ""
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "dry_run": args.dry_run,
+                    "projections": [_host_projection_payload(item) for item in projections],
+                    "schema_version": 1,
+                    "scope": "user" if args.user else "workspace",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+        )
+        return
+    print(f"{prefix}已编译宿主投影 scope={'user' if args.user else 'workspace'}")
+    for item in projections:
+        print(f"{item.host} {item.authority_projection}")
+
+
+def cmd_host_status(args: argparse.Namespace) -> None:
+    from .host import doctor_payload, inspect_projections, render_doctor_text
+
+    report = inspect_projections(_config(args), user=args.user)
+    if args.format == "json":
+        print(json.dumps(doctor_payload(report), ensure_ascii=False, sort_keys=True, indent=2))
+        return
+    print(render_doctor_text(report), end="")
+
+
+def cmd_host_doctor(args: argparse.Namespace) -> None:
+    from .host import doctor_payload, inspect_projections, render_doctor_text
+
+    report = inspect_projections(_config(args), user=args.user)
+    if args.format == "json":
+        print(json.dumps(doctor_payload(report), ensure_ascii=False, sort_keys=True, indent=2))
+    else:
+        print(render_doctor_text(report), end="")
+    if not report.ok:
+        raise DyroError("宿主投影过期或被手改")
+
+
 def cmd_tool_list(args: argparse.Namespace) -> None:
     resolved = resolve_home_config(
         root=getattr(args, "root", None),
@@ -3014,6 +3163,87 @@ def cmd_task_merge(args: argparse.Namespace) -> None:
     )
 
 
+def _proofs_from_args(args: argparse.Namespace, *, proof_id: str | None = None):
+    from .proof import list_proofs
+
+    config = _config(args)
+    proofs = list_proofs(
+        config,
+        task_id=getattr(args, "task", None),
+        objective_id=getattr(args, "objective", None),
+        line_id=getattr(args, "line", None),
+    )
+    if proof_id:
+        matched = tuple(proof for proof in proofs if proof.id == proof_id)
+        if not matched:
+            raise DyroError(f"Proof 不存在：{proof_id}")
+        return matched
+    return proofs
+
+
+def _print_proofs(args: argparse.Namespace, proofs, *, mode: str = "") -> None:
+    from .proof import render_proofs_json, render_proofs_text
+
+    if getattr(args, "format", "text") == "json":
+        print(render_proofs_json(proofs, mode=mode or "rebind"))
+        return
+    print(render_proofs_text(proofs, mode=mode), end="")
+
+
+def cmd_proof_list(args: argparse.Namespace) -> None:
+    _print_proofs(args, _proofs_from_args(args))
+
+
+def cmd_proof_show(args: argparse.Namespace) -> None:
+    _print_proofs(args, _proofs_from_args(args, proof_id=args.proof_id))
+
+
+def cmd_proof_verify(args: argparse.Namespace) -> None:
+    from .proof import verify_exit_code
+
+    if getattr(args, "rerun_procedure", False):
+        raise DyroError(
+            "--rerun-procedure 必须在隔离 runner 中重放；0.7 未提供隔离重跑，"
+            "未 replay 不得声称 procedure_reproduced"
+        )
+    proofs = _proofs_from_args(args, proof_id=getattr(args, "proof_id", None))
+    _print_proofs(args, proofs, mode="rebind")
+    code = verify_exit_code(proofs)
+    if code:
+        raise SystemExit(code)
+
+
+def cmd_proof_export(args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from .proof import export_bundle
+
+    if bool(args.proof_id) == bool(args.task):
+        raise ValidationError("proof export 的位置参数 proof-id 与 --task 互斥，且必须提供其一")
+    proofs = _proofs_from_args(args, proof_id=args.proof_id)
+    if not proofs:
+        raise DyroError("没有可导出的 Proof")
+    path = export_bundle(proofs, Path(args.bundle))
+    print(f"已导出 {len(proofs)} 条 Proof 到 {path}")
+
+
+def cmd_proof_verify_bundle(args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from .proof import load_current_heads, verify_bundle, verify_exit_code
+    from .proof.bundle import INTEGRITY_MODE
+
+    if not args.bundle:
+        raise DyroError("verify-bundle 需要 Proof Bundle 路径")
+    heads = load_current_heads(Path(args.current_heads)) if args.current_heads else None
+    git_dirs = tuple(Path(item) for item in (args.git_dir or ()))
+    proofs = verify_bundle(Path(args.bundle), git_dirs=git_dirs, current_heads=heads)
+    _print_proofs(args, proofs, mode=INTEGRITY_MODE)
+    code = verify_exit_code(proofs)
+    if code:
+        raise SystemExit(code)
+
+
 def cmd_task_decisions(args: argparse.Namespace) -> None:
     items = decisions(_config(args))
     if not items:
@@ -3206,7 +3436,13 @@ def cmd_objective_tick(args: argparse.Namespace) -> None:
             record.objective.budget.max_parallel, len(available_write)
         ),
     )
-    overlay = annotate_objective_tick(snapshot, plan, tick, available_write)
+    overlay = annotate_objective_tick(
+        snapshot,
+        plan,
+        tick,
+        available_write,
+        capabilities=getattr(config, "capabilities", None),
+    )
     if args.format == "json":
         payload = scheduler_tick_payload(tick)
         payload.update(overlay)
@@ -3231,13 +3467,9 @@ def cmd_objective_attention(args: argparse.Namespace) -> None:
         recover=False,
         read_budget=_control_plane_budget(args) if args.format == "json" else None,
     )
-    snapshot = (
-        build_scheduler_snapshot(config, objective=record)
-        if args.format != "json"
-        else build_scheduler_snapshot_bounded(
-            config, objective=record, budget=_control_plane_budget(args)
-        )
-    )
+    # Attention must rebind merge proofs.  Bounded JSON snapshots stay
+    # Git-free for plan/tick/graph; this command is the decay surface.
+    snapshot = build_scheduler_snapshot(config, objective=record)
     plan = build_continuation_plan(snapshot)
     scheduler = build_scheduler_projection(snapshot, plan)
     projection = build_attention_projection(
@@ -3486,6 +3718,7 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
         bound, decision = apply_harness_bindings(
             ScheduleWave(tasks=tuple(queued), deferred=()),
             available_write,
+            capabilities=getattr(config, "capabilities", None),
         )
         for note in decision.warnings:
             print(f"warning: {note}")
@@ -3792,7 +4025,8 @@ def build_parser() -> argparse.ArgumentParser:
         "discover", help="检测本机 Agent，并区分已配置与尚未集成"
     ).set_defaults(func=cmd_agent_discover)
     agent_add = agent_sub.add_parser(
-        "add", help="通过预设或命令登记 Agent，无需编辑 TOML"
+        "add",
+        help="写入 [adapters.*]；运行时升级为 Card，不写 [[capabilities]]",
     )
     agent_add.add_argument("id")
     agent_source = agent_add.add_mutually_exclusive_group(required=True)
@@ -3801,6 +4035,62 @@ def build_parser() -> argparse.ArgumentParser:
         "--command", help="作为 launch/read/write 的 argv 命令行；不会经 shell 执行"
     )
     agent_add.set_defaults(func=cmd_agent_add)
+    capability = sub.add_parser(
+        "capability",
+        help="审计后的 Capability Card；PATH 发现不是 Card；无 Card 的 dispatch 就绪是第二扇门；有 Card 无 execute 一律拒绝",
+    )
+    capability_sub = capability.add_subparsers(dest="capability_command", required=True)
+    capability_list = capability_sub.add_parser("list", help="列出已审计 Card 与 discovered_unintegrated")
+    capability_list.add_argument("--format", choices=("text", "json"), default="text")
+    capability_list.set_defaults(func=cmd_capability_list)
+    capability_add = capability_sub.add_parser("add", help="写入 [[capabilities]]，不写 PATH 发现")
+    capability_add.add_argument("id")
+    capability_source = capability_add.add_mutually_exclusive_group(required=True)
+    capability_source.add_argument("--preset", choices=("codex", "noop"))
+    capability_source.add_argument("--command", help="作为 launch/read/write 的 argv；不会经 shell 执行")
+    capability_add.set_defaults(func=cmd_capability_add)
+    capability_test = capability_sub.add_parser("test", help="探测可执行/登录，不启动交付")
+    capability_test.add_argument("id")
+    capability_test.add_argument("--format", choices=("text", "json"), default="text")
+    capability_test.set_defaults(func=cmd_capability_test)
+
+    host = sub.add_parser(
+        "host",
+        help="编译并核验宿主投影（skill；deny hook 不是沙箱，只挡受监督 apply）",
+    )
+    host_sub = host.add_subparsers(dest="host_command", required=True)
+    host_compile = host_sub.add_parser(
+        "compile",
+        help="把定律与已审计 Card 编译为工作区 skill；deny hook 不是沙箱。--user 才写用户级",
+    )
+    host_compile.add_argument(
+        "--user",
+        action="store_true",
+        help="写入用户级 host-projections；默认只写当前工作区",
+    )
+    host_compile.add_argument("--dry-run", action="store_true")
+    host_compile.add_argument("--format", choices=("text", "json"), default="text")
+    host_compile.set_defaults(func=cmd_host_compile)
+    host_status = host_sub.add_parser("status", help="查看已编译投影是否仍与当前 Card 一致")
+    host_status.add_argument(
+        "--user",
+        action="store_true",
+        help="核验用户级投影",
+    )
+    host_status.add_argument("--format", choices=("text", "json"), default="text")
+    host_status.set_defaults(func=cmd_host_status)
+    host_doctor = host_sub.add_parser(
+        "doctor",
+        help="重算投影哈希；手改或过期则失败。只挡受监督 apply，不管 task run / merge。deny hook 不是隔离边界",
+    )
+    host_doctor.add_argument(
+        "--user",
+        action="store_true",
+        help="核验用户级投影",
+    )
+    host_doctor.add_argument("--format", choices=("text", "json"), default="text")
+    host_doctor.set_defaults(func=cmd_host_doctor)
+
     agent_test = agent_sub.add_parser(
         "test", help="仅检查 adapter 可执行文件是否可用，不启动 Agent"
     )
@@ -4276,6 +4566,53 @@ def build_parser() -> argparse.ArgumentParser:
     )
     trigger_signal.add_argument("--format", choices=("text", "json"), default="text")
     trigger_signal.set_defaults(func=cmd_trigger_signal)
+
+    proof = sub.add_parser("proof", help="只读派生并核验交付 Proof（rebind，不是 replay）")
+    proof_sub = proof.add_subparsers(dest="proof_command", required=True)
+    proof_list = proof_sub.add_parser("list", help="从当前工作区全量重派生 Proof")
+    proof_list.add_argument("--task")
+    proof_list.add_argument("--objective")
+    proof_list.add_argument("--line")
+    proof_list.add_argument("--format", choices=("text", "json"), default="text")
+    proof_list.set_defaults(func=cmd_proof_list)
+    proof_show = proof_sub.add_parser("show", help="显示一条重派生的 Proof")
+    proof_show.add_argument("proof_id")
+    proof_show.add_argument("--format", choices=("text", "json"), default="text")
+    proof_show.set_defaults(func=cmd_proof_show)
+    proof_verify = proof_sub.add_parser("verify", help="对当前工作区做衰减与绑定重算，不重跑 gate")
+    proof_verify.add_argument("proof_id", nargs="?")
+    proof_verify.add_argument("--task")
+    proof_verify.add_argument("--objective")
+    proof_verify.add_argument("--line")
+    proof_verify.add_argument("--format", choices=("text", "json"), default="text")
+    proof_verify.add_argument(
+        "--rerun-procedure",
+        action="store_true",
+        help="0.7 拒绝：隔离 replay 尚未提供",
+    )
+    proof_verify.set_defaults(func=cmd_proof_verify)
+    proof_export = proof_sub.add_parser("export", help="导出 Proof Bundle（schema_version=1，不含 git 对象）")
+    proof_export.add_argument("proof_id", nargs="?")
+    proof_export.add_argument("--task")
+    proof_export.add_argument("--bundle", required=True, help="输出 .zip 路径")
+    proof_export.set_defaults(func=cmd_proof_export)
+    proof_verify_bundle = proof_sub.add_parser(
+        "verify-bundle",
+        help="核验 bundle 完整性；需要调用方 --git-dir，不是当前工作区 verify，也不是身份证明，不是 merge",
+    )
+    proof_verify_bundle.add_argument("bundle")
+    proof_verify_bundle.add_argument(
+        "--git-dir",
+        action="append",
+        default=[],
+        help="调用方必须传入包含已钉 SHA 的对象库；可重复，按并集查找，不是 repo_id 映射。缺省或无 pin 不得报 live",
+    )
+    proof_verify_bundle.add_argument(
+        "--current-heads",
+        help="可选 JSON：提供后才允许衰减结论，不得与 merge 混称",
+    )
+    proof_verify_bundle.add_argument("--format", choices=("text", "json"), default="text")
+    proof_verify_bundle.set_defaults(func=cmd_proof_verify_bundle)
 
     task = sub.add_parser("task", help="任务编排")
     task_sub = task.add_subparsers(dest="task_command", required=True)

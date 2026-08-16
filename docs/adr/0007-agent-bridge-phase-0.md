@@ -1,4 +1,4 @@
-# ADR 0006: Agent Bridge Phase 0
+# ADR 0007: Agent Bridge Phase 0
 
 ## Status
 

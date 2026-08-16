@@ -4,9 +4,13 @@
 
 **DyroEngineeringFlow · `dyro` CLI** est une plateforme local-first d'automatisation d'ingénierie et de contrôle de livraison pour les équipes multi-dépôts. Elle regroupe lignes de développement, Git worktrees, lanceurs d'agents, portes de tâches, revue indépendante et audit de fusion dans une configuration d'espace de travail versionnée.
 
+**Dyro est un moteur de physique de livraison local-first pour dépôts multiples : il décide ce qui peut devenir vrai, quand cette vérité se dégrade, et qui peut changer le monde.**
+
+`dyro proof verify` relie l'espace de travail courant. `dyro proof verify-bundle` ne vérifie que l'intégrité portable : l'appelant doit fournir chaque `--git-dir` contenant les objets épinglés (recherche en union, pas une carte de dépôts). Sans objets le résultat est `inconclusive`. Integrity `live` n'est pas merge.
+
 **Faire avancer l'ingénierie de la tâche à la livraison.**
 
-Non couplé à Codex, Claude ou un domaine métier. Chaque équipe fournit un Profile `dyro.toml` pour les dépôts, layouts, adaptateurs d'agent et politique de livraison ; les règles métier, le coût des modèles et les pratiques de release restent dans ce Profile.
+Chaque équipe fournit un Profile `dyro.toml` pour les dépôts, layouts, adaptateurs d'agent et politique de livraison ; les règles métier, le coût des modèles et les pratiques de release restent dans ce Profile.
 
 ## Ce qu'il impose
 

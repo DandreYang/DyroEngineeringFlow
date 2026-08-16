@@ -7,7 +7,7 @@ inspect-and-plan interface for coding agents without exposing Dyro mutation.
 
 Authority:
 
-- [ADR 0006](../docs/adr/0006-agent-bridge-phase-0.md)
+- [ADR 0007](../docs/adr/0007-agent-bridge-phase-0.md)
 - [Operation inventory](../docs/designs/agent-bridge-operation-inventory.md)
 - [Protocol](../docs/designs/agent-bridge-protocol.md)
 - [Acceptance matrix](../docs/designs/agent-bridge-phase-0-acceptance.md)

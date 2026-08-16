@@ -7,6 +7,7 @@ import threading
 import time
 from typing import Iterable, Mapping, Sequence
 
+from .capability.cards import card_forbids_execute
 from .errors import ValidationError
 from .tasks import ScheduleBlock, ScheduleWave, Task
 
@@ -135,6 +136,7 @@ def bind_wave_executors(
     ready_write: Sequence[str],
     *,
     max_per_backend: int = MAX_PER_BACKEND,
+    capabilities: Mapping[str, object] | None = None,
 ) -> HarnessDecision:
     if type(max_per_backend) is not int or max_per_backend < 1:
         raise ValidationError("max_per_backend 必须是正整数")
@@ -143,13 +145,27 @@ def bind_wave_executors(
     counts: dict[str, int] = {}
     bindings: list[ExecutorBinding] = []
     deferred: list[ScheduleBlock] = []
-    auto_pool = [provider for provider in ready if provider != CURSOR_WRITE_PROVIDER]
+    cards = capabilities or {}
+    auto_pool = [
+        provider
+        for provider in ready
+        if provider != CURSOR_WRITE_PROVIDER
+        and not card_forbids_execute(cards.get(provider))
+    ]
 
     for task in tasks:
         try:
             assert_write_executor_allowed(task.executor, risk=task.risk)
         except ValidationError as exc:
             deferred.append(ScheduleBlock(task=task, reason=str(exc)))
+            continue
+        if task.risk == "write" and card_forbids_execute(cards.get(task.executor)):
+            deferred.append(
+                ScheduleBlock(
+                    task=task,
+                    reason=f"Capability {task.executor} 未授予 execute，不能作为任务执行器",
+                )
+            )
             continue
         if task.executor == AUTO_EXECUTOR:
             chosen = _take_idle(auto_pool, counts, max_per_backend)
@@ -215,9 +231,13 @@ def apply_harness_bindings(
     ready_write: Sequence[str],
     *,
     max_per_backend: int = MAX_PER_BACKEND,
+    capabilities: Mapping[str, object] | None = None,
 ) -> tuple[tuple[Task, ...], HarnessDecision]:
     decision = bind_wave_executors(
-        wave.tasks, ready_write, max_per_backend=max_per_backend
+        wave.tasks,
+        ready_write,
+        max_per_backend=max_per_backend,
+        capabilities=capabilities,
     )
     bound_ids = set(decision.bound_tasks)
     bound_tasks = tuple(task for task in wave.tasks if task.id in bound_ids)
@@ -272,6 +292,8 @@ def annotate_objective_tick(
     plan: object,
     tick: object,
     ready_write: Sequence[str],
+    *,
+    capabilities: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     from .continuation.models import ActionKind
 
@@ -291,7 +313,9 @@ def annotate_objective_tick(
         item = tasks_by_id.get(action.subject_id)
         if item is not None:
             wave_tasks.append(item.task)
-    decision = bind_wave_executors(wave_tasks, ready_write)
+    decision = bind_wave_executors(
+        wave_tasks, ready_write, capabilities=capabilities
+    )
     return peer_wave_overlay(
         tasks=execute_tasks or wave_tasks,
         max_parallel=int(getattr(tick, "max_parallel", 1)),

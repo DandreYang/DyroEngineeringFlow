@@ -4,9 +4,13 @@
 
 **DyroEngineeringFlow · `dyro` CLI**는 여러 저장소를 사용하는 팀을 위한 로컬 우선 엔지니어링 자동화 및 배포 제어 플랫폼입니다. 개발 라인, Git worktree, Agent 실행, 작업 게이트, 독립 검토, 병합 감사를 버전 관리 가능한 워크스페이스 설정으로 통합합니다.
 
+**Dyro는 로컬 우선 멀티 저장소 전달 물리 엔진입니다. 무엇이 참이 될 수 있는지, 그 참이 언제 감쇠하는지, 누가 세계를 바꿀 수 있는지를 결정합니다.**
+
+`dyro proof verify`는 현재 워크스페이스를 다시 묶습니다. `dyro proof verify-bundle`은 이식 가능한 무결성만 검사합니다. 호출자는 고정된 객체가 있는 모든 `--git-dir`을 넘겨야 합니다(합집합 검색, repo 맵 아님). 객체가 없으면 `inconclusive`입니다. 무결성 `live`는 merge가 아닙니다.
+
 **작업에서 배포까지 엔지니어링이 계속 흐르게 합니다.**
 
-Codex, Claude 또는 특정 비즈니스 도메인에 종속되지 않습니다. 각 팀은 `dyro.toml` Profile에서 저장소, 레이아웃, Agent adapter, 배포 정책을 정의하며, 비즈니스 규칙·모델 비용·릴리스 관행은 Profile에 둡니다.
+각 팀은 `dyro.toml` Profile에서 저장소, 레이아웃, Agent adapter, 배포 정책을 정의하며, 비즈니스 규칙·모델 비용·릴리스 관행은 Profile에 둡니다.
 
 ## 강제하는 것
 
