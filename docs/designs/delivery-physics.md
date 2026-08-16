@@ -258,7 +258,7 @@ read   = ["codex", "exec", "--sandbox", "workspace-write", "{prompt}"]
 write  = ["codex", "exec", "--sandbox", "workspace-write", "{prompt}"]
 
 attested_isolation = "cwd"          # none | cwd | worktree | os_sandbox | external_runner
-trusted_usage      = false          # 不能证明用量则禁止硬限额自动跑
+trusted_usage      = false          # 0.7 解析该字段；不接入生产 BudgetUsage
 can_prove          = []             # 只能填 Proof kind；空表示输出不能当完成证据
 cannot_prove       = ["done", "merge", "security", "product_acceptance"]
 intents            = ["observe", "execute"]
@@ -274,10 +274,10 @@ hosts              = ["cli"]        # cli = Dyro 启动的 adapter；不是宿�
 | `can_prove` | 它的输出里，哪些可以变成 Proof。只填 Proof kind，不填 dispatch 词汇。 |
 | `cannot_prove` | 即使它写了「已完成」，Core 也不得采信。 |
 | `intents` | 它可请求的操作格：`observe` `execute` `review` `sign` `integrate` `publish`。 |
-| `trusted_usage` | 是否能返回可核验用量。false 时 hard-limit 自动执行 fail-closed。 |
+| `trusted_usage` | 是否能返回可核验用量。0.7 解析并默认 `false`，不接入生产 `BudgetUsage` / 硬限额自动跑。 |
 | `hosts` | 允许被编译到哪些宿主表面。 |
 
-兼容：`0.7` 仍只读 `[adapters.*]`，不解析 `[[capabilities]]`。`0.8` 才运行时升级为 Card，缺省 `cannot_prove = ["done","merge"]`，`attested_isolation = "cwd"`。`dyro agent add` 在 0.8 继续工作，内部写 Card。
+兼容：本 `0.7.0` 已解析 `[[capabilities]]`，并把 `[adapters.*]` 升级为 Card。缺省 `cannot_prove` 至少包含 `done` 与 `merge`，`attested_isolation = "cwd"`。`dyro agent add` 继续工作，内部写 Card。
 
 未审计的本机命令可以出现在 `dyro tool list` 和 Host Compiler 的「已发现未集成」区，**不能**获得 `execute` intent。
 
@@ -340,7 +340,7 @@ publish   →  push / 发布；第一版仍显式，且默认关
 | TaskGraph / 状态机 | 唯一交付图 | Proof 投影；0.7 衰减与现有 merge / 祖先检查同真值，只多 reason code |
 | Objective / Continuation | 快照、计划、租约、预算 | `SchedulerSnapshot` 纳入 live/decayed Proof 投影；reason code `PROOF_DECAYED`（attention / 人话，默认不 block 下游）。journal 不存 proofs 当 PASS |
 | dispatch | 建议、locator、租约 | Card 的 `attested_isolation` 替代口头 strict |
-| Console / Home | 只读；summary 零新 git I/O | `0.8` 起展示 Proof 状态与衰减原因，不展示 argv/路径。`0.7` 用 `dyro proof list` 与 `dyro objective attention` |
+| Console / Home | 只读；summary 零新 git I/O | Console summary 不探 Git / Proof，`proof_inspection=not_inspected`。`dyro objective attention` 走完整快照，可报 `PROOF_DECAYED`。两套入口不得写成同一套 Proof 展示。`0.8` 起 Console 只读字段可展示已投影的 Proof 状态，不展示 argv/路径。`0.7` 用 `dyro proof list` 与 `dyro objective attention` |
 | Witness | 追加哈希链 | Proof export 与 ledger 事件对齐；不把 Witness 当完成证据 |
 | Blueprint / join | SHA 钉死的线 | 新队友得到的投影由本机 Card 编译，不携带源机工具清单 |
 | Tool catalog | 打开工作区 ≠ 执行权 | 发现结果喂给 Compiler，不喂给 scheduler |

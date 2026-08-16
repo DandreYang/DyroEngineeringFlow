@@ -274,7 +274,7 @@ def render_skill(
         lines.append("这些不是已审计 Card，不能当作执行器。")
         lines.append("")
         for item in discovered:
-            lines.append(f"- {item.id}")
+            lines.append(f"- {_skill_cell(item.id)}")
     else:
         lines.append("无。")
     lines.extend(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 import hashlib
 import unittest
 
@@ -9,7 +10,14 @@ from dyro.config import load
 from dyro.continuation.budgets import ProgressFacts, progress_fingerprint
 from dyro.continuation.models import ActionKind, AttentionKind, PlanCompletion, ReasonCode
 from dyro.continuation.planner import build_continuation_plan, build_task_readiness
-from dyro.continuation.snapshot import SchedulerSnapshot, SchedulerTaskSnapshot
+from dyro.continuation.snapshot import (
+    SchedulerSnapshot,
+    SchedulerTaskSnapshot,
+    build_scheduler_snapshot_bounded,
+    build_scheduler_snapshot_from_facts,
+)
+from dyro.continuation.store import create_objective
+from dyro.read_limits import ObservationLimits, ReadBudget
 from dyro.errors import DyroError
 from dyro.graph import explain_task
 from dyro.proof.decay import (
@@ -297,6 +305,10 @@ class ProofDecayWorkspaceTests(WorkspaceCase):
         review = next(proof for proof in listed if proof.kind is ProofKind.REVIEW_VERDICT)
         self.assertEqual(review.status, ProofStatus.INCONCLUSIVE)
         self.assertIsNot(review.status, ProofStatus.DECAYED)
+        with self.assertRaises(DyroError) as raised:
+            merge_task(config, task)
+        self.assertIn("有效的独立复核", str(raised.exception))
+        self.assertNotIn("PROOF_DECAYED", str(raised.exception))
 
     def test_dirty_task_worktree_without_head_change_still_refuses_merge(self) -> None:
         config, task = self._reviewed_task("TASK-DIRTY-HEAD")
@@ -373,6 +385,52 @@ class ProofDecayWorkspaceTests(WorkspaceCase):
         self.assertTrue(torn["dispatchable"])
         with self.assertRaisesRegex(DyroError, "PROOF_DECAYED"):
             merge_task(config, load_task(config, "TASK-INT"))
+
+    def test_from_facts_does_not_inspect_proofs(self) -> None:
+        with patch("dyro.proof.evaluate.decayed_merge_subjects") as inspect:
+            snapshot = build_scheduler_snapshot_from_facts(
+                tasks=(),
+                decisions=(),
+                execution_mode="local",
+                candidate_ids=(),
+                observed_at=CLOCK,
+            )
+        inspect.assert_not_called()
+        self.assertEqual(snapshot.decayed_merge_subjects, ())
+
+    def test_bounded_snapshot_does_not_inspect_proofs(self) -> None:
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-BOUND"
+        task_path.mkdir(parents=True)
+        task_path.joinpath("task.toml").write_text(
+            task_template("TASK-BOUND", "bounded", "alpha", "api", "services/api").replace(
+                'agent = "codex"', 'agent = "noop"'
+            ),
+            encoding="utf-8",
+        )
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        record = create_objective(
+            config,
+            '''schema_version = 1
+id = "bounded"
+title = "Bounded snapshot"
+line = "alpha"
+targets = ["TASK-BOUND"]
+
+[continuation]
+requested_mode = "supervised"
+operations = ["execute", "review"]
+''',
+        )
+        with patch("dyro.proof.evaluate.decayed_merge_subjects") as inspect:
+            snapshot = build_scheduler_snapshot_bounded(
+                config,
+                objective=record,
+                budget=ReadBudget(ObservationLimits()),
+            )
+        inspect.assert_not_called()
+        self.assertEqual(snapshot.decayed_merge_subjects, ())
 
 
 if __name__ == "__main__":

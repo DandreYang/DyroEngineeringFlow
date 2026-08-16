@@ -5,13 +5,32 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from ..config import Adapter, validate_id
-from ..errors import ValidationError
+from ..errors import DyroError, ValidationError
 from .models import (
     DEFAULT_CANNOT_PROVE,
     CapabilityCard,
     CapabilityKind,
     Isolation,
 )
+
+
+def card_forbids_execute(card: object | None) -> bool:
+    """True only when a Card exists and does not grant execute."""
+    return card is not None and "execute" not in getattr(card, "intents", ())
+
+
+def write_capability_denied(
+    capabilities: Mapping[str, object] | None, executor: str
+) -> bool:
+    if not capabilities:
+        return False
+    return card_forbids_execute(capabilities.get(executor))
+
+
+def assert_capability_allows_write(config: object, executor: str) -> None:
+    cards = getattr(config, "capabilities", None)
+    if write_capability_denied(cards, executor):
+        raise DyroError(f"Capability {executor} 未授予 execute，不能作为任务执行器")
 
 
 def card_from_adapter(adapter: Adapter) -> CapabilityCard:

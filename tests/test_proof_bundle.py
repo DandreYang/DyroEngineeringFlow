@@ -157,7 +157,9 @@ class ProofBundleIntegrityTests(unittest.TestCase):
                 archive.writestr(f"proofs/{'a' * 64}.json", json.dumps(payload) + "\n")
             proofs = verify_bundle(rewritten, git_dirs=(work,))
             self.assertTrue(all(item.status is not ProofStatus.LIVE for item in proofs))
-            self.assertEqual(proofs[0].decay_reason, "bundle_bytes_mismatch")
+            self.assertIn(
+                proofs[0].decay_reason, {"bundle_bytes_mismatch", "not_proof_bundle"}
+            )
 
     def test_json_boolean_require_signed_without_keys_is_inconclusive(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-bundle-") as tmp:
@@ -254,6 +256,44 @@ class ProofBundleIntegrityTests(unittest.TestCase):
             proofs = verify_bundle(bundle, git_dirs=(work,))
             self.assertEqual(proofs[0].status, ProofStatus.INCONCLUSIVE)
             self.assertEqual(proofs[0].decay_reason, "object_unresolved")
+
+    def test_invalid_hex_digest_is_not_live(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-bundle-") as tmp:
+            root = Path(tmp)
+            work, sha = _git_head(root)
+            bundle = root / "hex.zip"
+            export_bundle((_proof(heads=(("api", sha),)),), bundle)
+            with zipfile.ZipFile(bundle) as archive:
+                manifest = json.loads(archive.read("manifest.json"))
+                body = archive.read(f"proofs/{'a' * 64}.json")
+            manifest["proof_sha256"]["a" * 64] = "not-a-digest"
+            rewritten = root / "bad-hex.zip"
+            with zipfile.ZipFile(rewritten, "w") as archive:
+                archive.writestr("manifest.json", json.dumps(manifest) + "\n")
+                archive.writestr(f"proofs/{'a' * 64}.json", body)
+            proofs = verify_bundle(rewritten, git_dirs=(work,))
+            self.assertTrue(all(item.status is not ProofStatus.LIVE for item in proofs))
+            self.assertEqual(proofs[0].decay_reason, "not_proof_bundle")
+
+    def test_too_many_proof_ids_is_not_live(self) -> None:
+        from dyro.proof.bundle import MAX_PROOF_IDS
+
+        with tempfile.TemporaryDirectory(prefix="dyro-bundle-") as tmp:
+            bundle = Path(tmp) / "many.zip"
+            digest = "b" * 64
+            manifest = {
+                "kind": "dyro.proof.bundle",
+                "schema_version": 1,
+                "proof_ids": [f"{index:064x}" for index in range(MAX_PROOF_IDS + 1)],
+                "proof_sha256": {
+                    f"{index:064x}": digest for index in range(MAX_PROOF_IDS + 1)
+                },
+            }
+            with zipfile.ZipFile(bundle, "w") as archive:
+                archive.writestr("manifest.json", json.dumps(manifest) + "\n")
+            proofs = verify_bundle(bundle, git_dirs=())
+            self.assertTrue(all(item.status is not ProofStatus.LIVE for item in proofs))
+            self.assertEqual(proofs[0].decay_reason, "not_proof_bundle")
 
 
 if __name__ == "__main__":

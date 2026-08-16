@@ -146,6 +146,9 @@ class ProofCliTests(WorkspaceCase):
         code, missing_out, _ = self._run(["proof", "verify-bundle", str(bundle), "--format", "json"])
         self.assertEqual(code, VERIFY_EXIT_INCONCLUSIVE)
         missing = json.loads(missing_out)
+        self.assertEqual(missing["mode"], "integrity")
+        self.assertEqual(missing["conclusion"], "integrity")
+        self.assertFalse(missing["merge_equivalent"])
         self.assertTrue(any(item["status"] == "inconclusive" for item in missing["proofs"]))
         self.assertFalse(any(item["status"] == "decayed" for item in missing["proofs"]))
 
@@ -240,6 +243,8 @@ class ProofCliTests(WorkspaceCase):
         self.assertEqual(code, VERIFY_EXIT_OK)
         integrity = json.loads(bundle_out)
         self.assertEqual(integrity["mode"], "integrity")
+        self.assertEqual(integrity["conclusion"], "integrity")
+        self.assertFalse(integrity["merge_equivalent"])
         self.assertFalse(any(item["status"] == "decayed" for item in integrity["proofs"]))
         self.assertTrue(all(item["status"] == "live" for item in integrity["proofs"]))
 

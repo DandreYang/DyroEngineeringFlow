@@ -27,13 +27,14 @@
 1. Dyro 的产品身份锁定为 **本地优先的多仓交付物理引擎**，不是 agent、不是舰队、不是 skill 超市。
 2. 抽出 **Proof Object** 作为已验证事实的统一投影。它不取代 `task.toml`、receipt、review 绑定或 Continuation journal。
 3. 每个 Proof 带 **衰减函数**。substrate 变化后事实死亡；不确定不得写成通过。`decay(review_verdict)` 全量等于 `_valid_review_acceptance`；`decay(signoff)` 全量等于 `_valid_external_signoff`。`SchedulerSnapshot` 只把 merge 相关的 `live` Proof 投影进已有进展字段，不计入 trigger；journal 不把 proofs 当 PASS。生产 `BudgetUsage` 在 `0.7` 不因 Proof 新开 no-progress 耗尽。
-4. 用 **Capability Card** 统一 agent / gate / reviewer / trigger / tool。`0.7` 仍只读 `[adapters.*]`；`0.8` 才运行时升级为 Card，缺省 `cannot_prove` 至少包含 `done` 与 `merge`。
+4. 用 **Capability Card** 统一 agent / gate / reviewer / trigger / tool。`0.7.0` 解析 `[[capabilities]]` 并升级 `[adapters.*]`，缺省 `cannot_prove` 至少包含 `done` 与 `merge`。
 5. 增加 **Host Compiler**：把定律与本机可用 Card 编译为宿主投影（`SKILL.md` 与可选拦截文件）。编译器只收缩权威，不扩大权威。
 6. 所有 mutation 落入操作格 `observe | execute | review | sign | integrate | publish`。有效权威仍是策略 ∩ 合约 ∩ 租约 ∩ 任务权限 ∩ 图约束。
 7. 议题跟踪器若接入，只能作为 Trigger provider，不能成为交付原子，也不能完成 Task。
 8. **权威投影锁定为 B**：所有宿主必编译 skill / 规则；仅当宿主 Card 能证明拦截表面时，再投影由操作格编译的 deny hook。没有拦截表面不得拒绝 compile。Hook 不得宣传为 OS 隔离。详见设计第 8 节。
 9. **`0.7` 衰减锁定为 A1**：对 merge / 下游释放的接受与拒绝，必须与 `0.6.0` 现有绑定检查同真值。Proof 只提供投影与 `PROOF_DECAYED` reason code，不是第二套门。`merge_task` / `check_dispatchable` 不读 Proof store。下游只投影 `_assert_dependency_integrated`；decayed review 不加严 ready set。任务仓 dirty：`0.6` 已拒绝，`0.7` 保持拒绝，不放松、不叠门。开发线 dirty / 错分支保持 `_prepare_merge` 现有错，不得标成 `PROOF_DECAYED`。不把 `git revert` 当成祖先断裂。
 10. **`1.0` 可携带核验锁定为 B1**：`verify-bundle` 核验完整性，不核验身份，也不承诺与当前工作区 `proof verify` / `task merge` 同一套 `live` / `decayed`。输入是 Proof Bundle + 调用方提供的 git 对象。捆内不塞 git 对象库。缺 procedure、缺 substrate、缺 git 对象、或缺已声明的签名密钥 → `inconclusive`，不得写成 `live`。无 `--current-heads` 时不得报与 merge 相同的衰减结论。
+11. **写路径两扇门**：有 Card 时，argv adapter、`run_task_bound_dispatch` 与 Peer Wave 写绑定必须同受 `execute` 门。无 Card 的 dispatch 就绪是 0.6.9 已存在的第二扇门（显式允许），不是已审计 Card。PATH / 发现不是 Card。不得同时声称「PATH 发现不能执行」与「dispatch 就绪即可写」。
 
 ## 否决项
 
@@ -45,6 +46,8 @@
 - 因宿主缺少拦截表面而拒绝 `host compile`。
 - 用命令名黑名单代替操作格来生成 deny hook。
 - 未审计命令自动获得 `execute` intent。
+- 有 Card 无 `execute` 时，仍允许 dispatch / Peer Wave 写。
+- 把无 Card 的 dispatch 就绪写成已审计 Card，或同时写「PATH 发现不能执行」与「第二扇门可写」。
 - 在 Proof Bundle 中写入绝对路径、凭据、prompt、adapter 环境或 git 对象库。
 - 把 `0.7` 衰减做成与现有 merge / 下游检查不同真值的第二套门。
 - 把 `0.7` 写成「不拒绝任务仓 dirty」（那是放松 `0.6`，不是「不加严」）。
@@ -59,10 +62,8 @@
 ## 后果
 
 - 产品叙事从「启动 agent」转为「核验完成」。
-- `0.7` 起增加 `dyro proof list/show/verify` 与衰减 reason code，不要求用户改 Task 清单。Console Proof 展示默认进 `0.8`。`export` 可在 `0.7` 以 experimental 提供；`verify-bundle` 硬门禁与 `schema_version = 1` 锁在 `1.0`。
-- `0.8` 起 adapter 配置向 Card 迁移，旧 Profile 仍可加载。
-- `0.9` 起宿主投影可重算、可 doctor；过期投影阻断自动 mutation。默认只写当前工作区；`--user` 才写用户级目录。`tools.json` / PATH 发现不是可执行 Card。
-- `1.0` 的对外承诺是：陌生人拿着 Proof Bundle 和自己提供的 git 对象，能得到与源机**相同的完整性结论**（字节仍在、钉死 SHA 可解析）。这不是身份证明，也不是「现在工作区还能 merge」。
+- `0.7.0` 落地 Proof、Capability Card、Host Compiler 与 `verify-bundle`。`trusted_usage` 只解析、默认 `false`，不接入生产 `BudgetUsage`。Console summary 保持 `proof_inspection=not_inspected`，不探 Git / Proof；`dyro objective attention` 走完整快照，可报 `PROOF_DECAYED`。两套入口不得写成同一套 Proof 展示。
+- `1.0` 的对外承诺仍是：陌生人拿着 Proof Bundle 和自己提供的 git 对象，能得到与源机**相同的完整性结论**（字节仍在、钉死 SHA 可解析）。这不是身份证明，也不是「现在工作区还能 merge」。`schema_version = 1` 的可携带合同在 1.0 冻结。
 - 实施成本是新的投影层与兼容层，而不是第二套调度器。
 
 ## 兼容

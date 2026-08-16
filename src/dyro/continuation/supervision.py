@@ -382,7 +382,11 @@ def _dispatch(config: Config, action: PlannedAction, task: Task, *, expected_con
     if action.kind is ActionKind.EXECUTE_TASK:
         from ..peer_wave import bind_wave_executors, discover_available_write_providers
 
-        decision = bind_wave_executors((task,), discover_available_write_providers())
+        decision = bind_wave_executors(
+            (task,),
+            discover_available_write_providers(),
+            capabilities=getattr(config, "capabilities", None),
+        )
         return run_task(
             config,
             task,

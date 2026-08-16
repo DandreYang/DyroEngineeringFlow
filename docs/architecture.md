@@ -241,6 +241,6 @@ Dyro 的交付拓扑与之**实质相近**：TaskGraph（`depends_on` / conflict
 
 未来的 adapter、通知、签名规则、发布平台与审批系统应使用 Python entry point 或独立 Profile 扩展包接入；不要把某个组织的策略加入 core 默认行为。
 
-`0.7` 起先把已有证据物理学抽成可复验的 Proof（衰减与现有 merge / 下游检查同真值；`proof verify` 看当前工作区，`verify-bundle` 只核完整性，两套结论不得混称）。`0.8` 再把 argv adapter 升级为 Capability Card，并做 Console Proof 只读展示。`0.9` 把定律编译为只收缩权威的宿主投影。`1.0` 的可携带核验是 Proof Bundle 加调用方提供的 git 对象，核验完整性而不是身份，也不承诺与当前 merge 同一套 `live`。这不另造 TaskGraph 或完成状态机；见 [`交付物理学`](designs/delivery-physics.md) 与 [`ADR-0006`](adr/0006-delivery-physics-and-capability-plane.md)。
+`0.7.0` 把已有证据物理学抽成可复验的 Proof，并把 argv adapter 升级为 Capability Card，再把定律编译为只收缩权威的宿主投影。衰减与现有 merge / 下游检查同真值；`proof verify` 看当前工作区，`verify-bundle` 只核完整性，两套结论不得混称。Console summary 与 `dyro objective attention` 不是同一套 Proof 展示。`1.0` 的可携带核验是 Proof Bundle 加调用方提供的 git 对象，核验完整性而不是身份，也不承诺与当前 merge 同一套 `live`。这不另造 TaskGraph 或完成状态机；见 [`交付物理学`](designs/delivery-physics.md) 与 [`ADR-0006`](adr/0006-delivery-physics-and-capability-plane.md)。
 
 开发者侧的可选本地多 Agent 派发（五段式任务契约、注入前机密守卫、locator 核验、隔离 patch）与上述控制面分层并列，随 `dyro` 安装包分发（`dyro dispatch` / `import experiments.local_agent_dispatch`），但**不**替代 gates/合并。同时写多块走 Core Peer Wave（task worktree + `conflict_group`），见 [`peer-wave-execution.md`](designs/peer-wave-execution.md)、[`ADR-0002`](adr/0002-optional-local-agent-dispatch.md)、[`多智能体编排纪律`](agent-orchestration-discipline.md) 与 [`可选本地 Agent 派发设计`](designs/optional-local-agent-dispatch.md)。

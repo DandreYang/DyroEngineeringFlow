@@ -22,6 +22,7 @@ EVIDENCE_MARKERS = frozenset({"receipt.md", "provenance.json", "gates.json", "ta
 _SHA_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _HEX_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_MEMBER_BYTES = 8 * 1024 * 1024
+MAX_PROOF_IDS = 256
 
 MISSING_GIT = "missing_git_objects"
 MISSING_PROCEDURE = "missing_procedure"
@@ -271,10 +272,18 @@ def _valid_manifest(raw: object) -> bool:
         return False
     ids = raw.get("proof_ids")
     digests = raw.get("proof_sha256")
-    if not isinstance(ids, list) or not all(isinstance(item, str) and item for item in ids):
+    if not isinstance(ids, list) or not ids or len(ids) > MAX_PROOF_IDS:
+        return False
+    if len(set(ids)) != len(ids):
+        return False
+    if not all(isinstance(item, str) and item for item in ids):
         return False
     if not isinstance(digests, dict):
         return False
+    for proof_id in ids:
+        digest = digests.get(proof_id)
+        if not isinstance(digest, str) or not _HEX_DIGEST_RE.fullmatch(digest):
+            return False
     return True
 
 

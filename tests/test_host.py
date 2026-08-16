@@ -23,7 +23,8 @@ from dyro.host import (
     inspect_projections,
     projection_root,
 )
-from dyro.host.compile import HOOK_NAME, SKILL_NAME
+from dyro.host.compile import HOOK_NAME, SKILL_NAME, _skill_cell
+from dyro.host.models import HOOK_SIDECAR_NOTE
 from dyro.tasks import task_template
 from dyro.workspace import create_line
 
@@ -76,6 +77,22 @@ class HostCompilerTests(WorkspaceCase):
     def _skill(self, host: str = "cli", *, user: bool = False) -> str:
         root = projection_root(load(self.root), user=user)
         return (root / host / SKILL_NAME).read_text(encoding="utf-8")
+
+    def test_skill_cell_escapes_table_and_rejects_forbidden_commands(self) -> None:
+        self.assertEqual(_skill_cell("a|b"), "a/b")
+        self.assertEqual(_skill_cell("x`y"), "x'y")
+        with self.assertRaisesRegex(DyroError, "未批准命令"):
+            _skill_cell("dyro task")
+
+    def test_doctor_json_declares_projection_sidecar(self) -> None:
+        compile_hosts(load(self.root))
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            main(["--root", str(self.root), "host", "doctor", "--format", "json"])
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["hook_enforcement"], "projection_sidecar")
+        self.assertEqual(payload["hook_note"], HOOK_SIDECAR_NOTE)
+        self.assertIn("未安装到 hook_surface", payload["hook_note"])
 
     def test_compile_writes_workspace_skill_without_execute_commands(self) -> None:
         stdout = StringIO()

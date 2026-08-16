@@ -2,7 +2,7 @@
 
 Status: Proposed
 
-Authority: [ADR 0006](../adr/0006-agent-bridge-phase-0.md)
+Authority: [ADR 0007](../adr/0007-agent-bridge-phase-0.md)
 
 Operation allowlist:
 [Agent Bridge Operation Inventory](agent-bridge-operation-inventory.md)
@@ -307,7 +307,7 @@ response schemas. It rejects unavailable, excluded, and mutation operations.
 `unique`. Phase 0 does not return registry file paths, Profile absolute roots,
 remote URLs, adapter argv, or environment values.
 
-The opaque ID implements ADR 0006 `WorkspaceIdentityV1`: it is stable only while
+The opaque ID implements ADR 0007 `WorkspaceIdentityV1`: it is stable only while
 the canonical Profile root and validated Profile name are unchanged. Moving or
 renaming a workspace intentionally changes it. `ConfigRevisionV1` hashes the
 bounded exact `dyro.toml` bytes with its domain separator. Neither identifier is
@@ -348,7 +348,7 @@ directory objects, lazy fetch, replace objects, and more than 100 Git process
 starts per request fail closed.
 
 This is a bounded cooperative-state observation, not a filesystem attestation.
-As defined by ADR 0006, an actively malicious process with the same operating-
+As defined by ADR 0007, an actively malicious process with the same operating-
 system identity can still replace a ref or object during the read and restore
 it afterward; defending that case requires an immutable filesystem snapshot or
 external broker and is outside Phase 0. Plan digests do not upgrade this trust

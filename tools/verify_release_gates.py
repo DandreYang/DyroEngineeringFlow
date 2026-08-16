@@ -1,7 +1,7 @@
-"""Refuse a 1.0.0 release tag when P6-export / P12 / verify-bundle evidence is missing.
+"""Refuse a physics-train release that is missing Proof / Card / Compiler evidence.
 
-A 0.6.x tag of this physics train is also refused: the tree already contains
-Proof / Card / Compiler / verify-bundle.
+A 0.6.x tag of this train is refused. A 0.7.0 tag must pass 0.7 gates and must
+not be narrated as a 1.0 release. 1.0.0 keeps the stricter stranger contract.
 """
 
 from __future__ import annotations
@@ -29,6 +29,13 @@ GATES = (
     ("P0-missing-git", Path("src/dyro/proof/bundle.py"), "if not git_dirs:"),
 )
 
+SEVEN_GATES = GATES + (
+    ("P0-F5-helper", Path("src/dyro/capability/cards.py"), "def assert_capability_allows_write"),
+    ("P0-F5-run", Path("src/dyro/tasks.py"), "assert_capability_allows_write(config, executor)"),
+    ("P0-second-door", Path("src/dyro/capability/__init__.py"), "second write door"),
+    ("P0-unconfined", Path("src/dyro/task_dispatch.py"), '"allow_unconfined_provider": False'),
+)
+
 
 def _version(root: Path) -> str:
     metadata = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
@@ -40,15 +47,19 @@ def _is_physics_train(root: Path) -> bool:
     return bundle.is_file() and "def verify_bundle" in bundle.read_text(encoding="utf-8")
 
 
-def missing_gates(root: Path) -> list[str]:
+def missing_gates(root: Path, gates: tuple[tuple[str, Path, str], ...] = GATES) -> list[str]:
     missing: list[str] = []
-    for name, path, marker in GATES:
+    for name, path, marker in gates:
         target = root / path
         if not target.is_file() or marker not in target.read_text(encoding="utf-8"):
             missing.append(name)
     if (root / "src/dyro/proof/bundle.py").read_text(encoding="utf-8").find("def refuse_verify_bundle") >= 0:
         missing.append("P13-refuse-removed")
     return missing
+
+
+def _tag_name(tag: str) -> str:
+    return tag[1:] if tag.startswith("v") else tag
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -59,10 +70,17 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.root).resolve()
     version = _version(root)
     tag = args.release_tag.strip()
-    if version.startswith("0.6") and _is_physics_train(root):
-        if tag.startswith("v0.6") or tag.startswith("0.6"):
-            raise SystemExit("拒绝：本树已含 Proof/Card/Compiler，不得作为 0.6.x 发布")
-        print(f"skip 1.0 gates: version={version} tag={tag or '-'}; do not publish this tree as 0.6.x")
+    if _is_physics_train(root) and (
+        tag.startswith("v0.6") or tag.startswith("0.6")
+    ):
+        raise SystemExit("拒绝：本树已含 Proof/Card/Compiler，不得作为 0.6.x 发布")
+    if tag and _tag_name(tag) != version:
+        raise SystemExit(f"拒绝：release tag {tag!r} 必须等于 v{version}")
+    if version == "0.7.0" or tag in {"v0.7.0", "0.7.0"}:
+        missing = missing_gates(root, SEVEN_GATES)
+        if missing:
+            raise SystemExit("拒绝 0.7.0：缺少 " + ", ".join(missing))
+        print("0.7 gates present")
         return 0
     if version != "1.0.0" and tag not in {"v1.0.0", "1.0.0"}:
         print(f"skip 1.0 gates: version={version} tag={tag or '-'}")

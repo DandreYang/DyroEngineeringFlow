@@ -58,7 +58,7 @@ ADR：[`docs/adr/0006-delivery-physics-and-capability-plane.md`](../docs/adr/000
 | 版本 | 主题 | 对用户可见 | 关闭条件未满足时 |
 | --- | --- | --- | --- |
 | `0.6.x` | 身份冻结 | 文档 + ADR + 术语扫描 | 不合并 Proof/Card/Compiler 代码 |
-| `0.7.0` | Proof 与衰减 | `dyro proof list/show/verify`；可选 experimental `export`；`dyro objective attention` 可含 `PROOF_DECAYED` | 不改 adapter schema；`verify-bundle` 不是 0.7 硬门禁 |
+| `0.7.0` | Proof / Card / Compiler / `verify-bundle` | `dyro proof list/show/verify`；`export`；`verify-bundle`；`dyro capability *`；`dyro host compile`；`dyro objective attention` 可含 `PROOF_DECAYED` | 不把本树当 `0.6.x` 或 `1.0.0` 发；`trusted_usage` 不接入 BudgetUsage |
 | `0.8.0` | Capability Card + Console Proof | `dyro capability *`；`agent add` 写 Card；Console 只读展示 Proof | 不编译宿主文件 |
 | `0.9.0` | Host Compiler | `dyro host compile/status/doctor` | 不承诺 1.0 对外核验 |
 | `1.0.0` | 可携带核验 | Proof Bundle `schema_version = 1`；`verify-bundle` 硬门禁；叙事锁死 | 缺一项不得标 1.0 |

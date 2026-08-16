@@ -11,7 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 TASKS = ROOT / "src" / "dyro" / "tasks.py"
 BANNED_MODULES = {"dyro.proof"}
 BANNED_NAMES = {"list_proofs", "evaluate_proofs", "evaluate_proof", "verify_bundle"}
-PROTECTED = {"merge_task", "check_dispatchable", "_prepare_merge"}
+PROTECTED = {
+    "merge_task",
+    "check_dispatchable",
+    "_prepare_merge",
+    "_merge_task_repositories",
+    "_merge_task_repositories_locked",
+}
 
 
 def _function_nodes(tree: ast.AST) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:

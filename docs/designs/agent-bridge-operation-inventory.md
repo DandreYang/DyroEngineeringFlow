@@ -2,9 +2,9 @@
 
 Status: Linux Ubuntu 24.04 Mandatory Core Surface promoted at S5
 
-Decision source: [ADR 0006](../adr/0006-agent-bridge-phase-0.md)
+Decision source: [ADR 0007](../adr/0007-agent-bridge-phase-0.md)
 
-Review outcomes are incorporated into ADR 0006 and the Phase 0 acceptance
+Review outcomes are incorporated into ADR 0007 and the Phase 0 acceptance
 matrix; point-in-time review exports are not part of the product documentation.
 
 ## 1. Purpose
@@ -26,7 +26,7 @@ Status vocabulary:
 - `excluded`: prohibited from Phase 0;
 - `future-review`: a mutation candidate requiring a separate ADR and review.
 
-Risk vocabulary follows ADR 0006: `R0`, `PLAN`, `R1`, `R2`, and `R3`.
+Risk vocabulary follows ADR 0007: `R0`, `PLAN`, `R1`, `R2`, and `R3`.
 
 ## 2. Phase 0 declared surface
 

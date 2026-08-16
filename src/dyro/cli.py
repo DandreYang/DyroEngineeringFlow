@@ -3436,7 +3436,13 @@ def cmd_objective_tick(args: argparse.Namespace) -> None:
             record.objective.budget.max_parallel, len(available_write)
         ),
     )
-    overlay = annotate_objective_tick(snapshot, plan, tick, available_write)
+    overlay = annotate_objective_tick(
+        snapshot,
+        plan,
+        tick,
+        available_write,
+        capabilities=getattr(config, "capabilities", None),
+    )
     if args.format == "json":
         payload = scheduler_tick_payload(tick)
         payload.update(overlay)
@@ -3712,6 +3718,7 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
         bound, decision = apply_harness_bindings(
             ScheduleWave(tasks=tuple(queued), deferred=()),
             available_write,
+            capabilities=getattr(config, "capabilities", None),
         )
         for note in decision.warnings:
             print(f"warning: {note}")
@@ -4028,7 +4035,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--command", help="作为 launch/read/write 的 argv 命令行；不会经 shell 执行"
     )
     agent_add.set_defaults(func=cmd_agent_add)
-    capability = sub.add_parser("capability", help="审计后的 Capability Card；PATH 发现不能执行")
+    capability = sub.add_parser(
+        "capability",
+        help="审计后的 Capability Card；PATH 发现不是 Card；无 Card 的 dispatch 就绪是第二扇门；有 Card 无 execute 一律拒绝",
+    )
     capability_sub = capability.add_subparsers(dest="capability_command", required=True)
     capability_list = capability_sub.add_parser("list", help="列出已审计 Card 与 discovered_unintegrated")
     capability_list.add_argument("--format", choices=("text", "json"), default="text")

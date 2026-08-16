@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 import json
 import os
 import stat
@@ -13,6 +14,7 @@ from dyro.capability import discover_unintegrated, runtime_cards
 from dyro.cli import main
 from dyro.config import load
 from dyro.errors import DyroError, ValidationError
+from dyro.process import Result
 from dyro.tasks import load_task, run_task, task_template
 from dyro.workspace import create_line, doctor
 
@@ -163,8 +165,12 @@ can_prove = ["dispatch"]
                 task_path.joinpath("task.toml").write_text(spec, encoding="utf-8")
                 task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
                 task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
-                with self.assertRaisesRegex(ValidationError, "未配置"):
-                    run_task(config, load_task(config, "TASK-OPEN"))
+                with patch(
+                    "dyro.task_dispatch.is_dispatch_write_ready",
+                    return_value=False,
+                ):
+                    with self.assertRaisesRegex(ValidationError, "未配置"):
+                        run_task(config, load_task(config, "TASK-OPEN"))
             finally:
                 if previous is None:
                     os.environ.pop("PATH", None)
@@ -198,6 +204,62 @@ intents = ["observe"]
         task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
         with self.assertRaisesRegex(DyroError, "未授予 execute"):
             run_task(config, load_task(config, "TASK-WATCH"))
+
+    def test_observe_only_dispatch_ready_same_id_cannot_execute(self) -> None:
+        path = self.root / "dyro.toml"
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + """
+
+[[capabilities]]
+id = "codex"
+kind = "agent"
+launch = ["/usr/bin/true"]
+read = ["/usr/bin/true"]
+write = ["/usr/bin/true"]
+intents = ["observe"]
+""",
+            encoding="utf-8",
+        )
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-CODEX"
+        task_path.mkdir(parents=True)
+        spec = task_template("TASK-CODEX", "observe only dispatch", "alpha", "api", "services/api")
+        task_path.joinpath("task.toml").write_text(spec, encoding="utf-8")
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
+        with (
+            patch("dyro.task_dispatch.is_dispatch_write_ready", return_value=True),
+            patch("dyro.task_dispatch.run_task_bound_dispatch") as dispatch,
+        ):
+            with self.assertRaisesRegex(DyroError, "未授予 execute"):
+                run_task(config, load_task(config, "TASK-CODEX"))
+            dispatch.assert_not_called()
+
+    def test_dispatch_ready_without_card_is_explicit_second_door(self) -> None:
+        config = load(self.root)
+        self.assertNotIn("codex", getattr(config, "capabilities", {}))
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-DOOR"
+        task_path.mkdir(parents=True)
+        spec = task_template("TASK-DOOR", "second door", "alpha", "api", "services/api")
+        task_path.joinpath("task.toml").write_text(spec, encoding="utf-8")
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
+        result = Result(("dyro", "task-dispatch", "codex", "TASK-DOOR"), 0, "")
+        with (
+            patch("dyro.task_dispatch.is_dispatch_write_ready", return_value=True),
+            patch(
+                "dyro.task_dispatch.run_task_bound_dispatch",
+                return_value=result,
+            ) as dispatch,
+        ):
+            self.assertEqual(
+                run_task(config, load_task(config, "TASK-DOOR"), dry_run=True),
+                "dry-run",
+            )
+            dispatch.assert_called_once()
 
 
 if __name__ == "__main__":
