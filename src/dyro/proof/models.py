@@ -17,6 +17,7 @@ class ProofKind(str, Enum):
     SIGNOFF = "signoff"
     INTEGRATION_HEADS = "integration_heads"
     ACTION_RECEIPT = "action_receipt"
+    TRIGGER_OBSERVATION = "trigger_observation"
     BUNDLE_FAILURE = "bundle_failure"
 
 

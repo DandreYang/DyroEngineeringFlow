@@ -1,13 +1,13 @@
 # Dyro 交付物理学与能力平面
 
-状态：提案；2026-08-15 锁定 A1 / B1  
-目标版本：`0.7.0` 起分阶段落地，`1.0.0` 收口产品身份  
+状态：提案；2026-08-15 锁定 A1 / B1；2026-08-16 版本列车收口为 `0.7.x`  
+目标版本：`0.7.0` 起在 `0.7.x` 内收口全部交付物理功能；不另开 `0.8.0` / `0.9.0` / `1.0.0` 功能号。`1.0.0` 只是身份冻结，未显式要求不得打。  
 适用范围：Dyro Core、Profile、Host Compiler、Witness；不改写已发布的 TaskGraph / Objective / Console 权威语义
 
 已锁定：
 
 - **A1**：`0.7` 衰减是现有 merge / 下游绑定检查的投影。接受与拒绝与 `0.6.0` **同真值**，只多 `PROOF_DECAYED`。任务仓 dirty：`0.6` 已拒绝（`_collect_task_heads`），`0.7` 保持拒绝；不叠第二道 Proof 门，也不放松。不把 `git revert` 当祖先断裂。
-- **B1**：`1.0` 的 `verify-bundle` 核验完整性：Proof Bundle + **调用方提供的** git 对象。捆内不塞对象库。核验完整性，不核验身份，**不承诺**与当前工作区 `proof verify` / `task merge` 得到同一套 `live` / `decayed`。缺 procedure、缺 substrate、缺 git 对象、或缺已声明的签名密钥 → `inconclusive`。
+- **B1**：`verify-bundle` 核验完整性：Proof Bundle + **调用方提供的** git 对象。捆内不塞对象库。核验完整性，不核验身份，**不承诺**与当前工作区 `proof verify` / `task merge` 得到同一套 `live` / `decayed`。缺 procedure、缺 substrate、缺 git 对象、或缺已声明的签名密钥 → `inconclusive`。该能力在 `0.7.x` 发布，不另开 `1.0.0` 功能号。
 
 关联：
 
@@ -83,7 +83,7 @@
 - 开发线 dirty 与错分支由 `_prepare_merge` 硬编码拒绝。`policy.require_clean_merge` 只能为 true，是 schema 不变量，不是运行时开关。这两类错误**不得**标成 `PROOF_DECAYED`。
 - 下游释放只投影 `_assert_dependency_integrated`（`git merge-base --is-ancestor`）。decayed review、任务仓 dirty、开发线 dirty **都不**加严 ready set。
 - `gate_log` 在 gate argv 哈希或被测树内容哈希变化后**展示**为 `decayed`。`0.7` merge **不**因这条新拒绝；现有 merge 本来就不重跑 gate。
-- Trigger 观察有 TTL（`0.8+` 才派生）；过期只唤醒规划，不解除依赖，也不进入 `progress_fingerprint`。
+- Trigger 观察有 TTL（`0.7.x` 已派生 `trigger_observation`）；过期只唤醒规划，不解除依赖，也不进入 `progress_fingerprint`。
 - Objective 在 Task 合约或依赖闭包漂移后必须 reconcile，才能再 mutation。
 
 衰减不是 cron。衰减是证据上的熵。续航引擎的时钟首先用来**宣布死亡**，其次才用来唤醒。展示衰减 ≠ 新的 merge 拒绝。
@@ -180,7 +180,7 @@ Proof
 | 依赖 HEAD 已是线 HEAD 祖先 | `integration_heads` | 0.7 派生 |
 | Continuation Action receipt | `action_receipt` | 0.7 派生；不进 `proof list --task` |
 | 外部 evidence ZIP 世代 | `external_bundle` | 已有证据包的投影，不是 P6 Proof Bundle 的别名 |
-| TriggerObservation | `trigger_observation` | 0.8+；字段跟 `next_probe_at`，不发明 `valid_until` |
+| TriggerObservation | `trigger_observation` | `0.7.x` 已派生；字段跟 `next_probe_at`，不发明 `valid_until` |
 
 源路径、id 公式、substrate 与 `produced_at` 规则见实施计划**附录 A**。
 
@@ -234,7 +234,7 @@ decay(proof, current_substrate, clock) -> live | decayed | inconclusive
 1. 开发线 dirty / 错分支保持 `_prepare_merge` 现有错。禁止标成 `PROOF_DECAYED`。`require_clean_merge` 只是加载期不变量。
 2. `0.6` **已经**拒绝任务仓 dirty；`0.7` 保持。Proof 可把该失败投影为 `review_verdict` 的 `decayed` / `inconclusive`，不得改为 accept，也不得再叠第二道门。
 3. `git revert` 仍留下后代提交，`integration_heads` **不**因此衰减。
-4. `trigger_observation`：`0.8+` 才派生。若派生，用现有 `next_probe_at`，只影响唤醒，不影响完成，也不进入 `progress_fingerprint`。
+4. `trigger_observation`：`0.7.x` 已派生。用现有 `next_probe_at`，只影响唤醒，不影响完成，也不进入 `progress_fingerprint`。
 5. 用户或策略显式撤销 → `revoked`。这不是 `decay()` 的返回值。
 
 planner 在构造 **`SchedulerSnapshot`** 时评估衰减（不是未使用的 `ContinuationSnapshot`）。`progress_fingerprint` 的纯函数契约继续忽略 trigger；该函数已锁，但生产 `_budget_usage` **尚未**接线 `decide_no_progress`。`0.7` 不把 Proof 接入生产 `BudgetUsage`，不新开 no-progress 自动耗尽。merge 相关 live Proof 若投影，只进已有 `effective_evidence` / `integration_heads`，不并排再加一层。
@@ -340,7 +340,7 @@ publish   →  push / 发布；第一版仍显式，且默认关
 | TaskGraph / 状态机 | 唯一交付图 | Proof 投影；0.7 衰减与现有 merge / 祖先检查同真值，只多 reason code |
 | Objective / Continuation | 快照、计划、租约、预算 | `SchedulerSnapshot` 纳入 live/decayed Proof 投影；reason code `PROOF_DECAYED`（attention / 人话，默认不 block 下游）。journal 不存 proofs 当 PASS |
 | dispatch | 建议、locator、租约 | Card 的 `attested_isolation` 替代口头 strict |
-| Console / Home | 只读；summary 零新 git I/O | Console summary 不探 Git / Proof，`proof_inspection=not_inspected`。`dyro objective attention` 走完整快照，可报 `PROOF_DECAYED`。两套入口不得写成同一套 Proof 展示。`0.8` 起 Console 只读字段可展示已投影的 Proof 状态，不展示 argv/路径。`0.7` 用 `dyro proof list` 与 `dyro objective attention` |
+| Console / Home | 只读；summary 零新 git I/O | Console summary 不探 Git / Proof，`proof_inspection=not_inspected`。`dyro objective attention` 走完整快照，可报 `PROOF_DECAYED`。两套入口不得写成同一套 Proof 展示。`0.7.x` 用独立 inspect 让 Console 只读字段展示已投影的 Proof 状态，不展示 argv/路径。`0.7.0` 已用 `dyro proof list` 与 `dyro objective attention` |
 | Witness | 追加哈希链 | Proof export 与 ledger 事件对齐；不把 Witness 当完成证据 |
 | Blueprint / join | SHA 钉死的线 | 新队友得到的投影由本机 Card 编译，不携带源机工具清单 |
 | Tool catalog | 打开工作区 ≠ 执行权 | 发现结果喂给 Compiler，不喂给 scheduler |
@@ -431,7 +431,7 @@ Core 仍是唯一 mutation 权。Hook 挡不住的越权，仍由 dirty / HEAD �
 - 不把容器或云沙箱做成 Core 依赖。隔离后端继续走 Card 声明与 entry point。
 - 不在仓库内保存「我们学了谁 / 对标谁」的对照附录。反模式用机制描述即可。
 - 不把 `git revert` 当成祖先断裂。祖先检查只回答「提交是否仍在历史上」。
-- 不把 Proof Bundle 做成自含 git 对象库。1.0 核验完整性，不核验身份。
+- 不把 Proof Bundle 做成自含 git 对象库。`0.7.x` 核验完整性，不核验身份。
 - 不把 `verify-bundle` 的完整性结论说成与当前工作区 `proof verify` / `task merge` 同一套 `live` / `decayed`。
 - 不把 `0.7` 写成「不拒绝任务仓 dirty」。那是对 `0.6` 的假描述；保持拒绝即可。
 - 不把 `task evidence` ZIP 当作 Proof Bundle。

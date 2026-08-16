@@ -320,6 +320,11 @@ def main(argv: list[str] | None = None) -> int:
             if not isinstance(alias, str):
                 raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID")
             payload = _isolated_workspace(service, alias)
+        elif operation == "inspect_proofs":
+            alias = request.get("alias")
+            if not isinstance(alias, str):
+                raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID")
+            payload = service.inspect_proofs(alias)
         else:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         return _response(payload)

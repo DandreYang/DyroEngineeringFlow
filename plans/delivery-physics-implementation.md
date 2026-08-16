@@ -1,11 +1,11 @@
 # Dyro 交付物理学实施计划
 
-状态：待批准；2026-08-15 锁定 A1 / B1；同日对抗评审仲裁已收口契约  
+状态：待批准；2026-08-15 锁定 A1 / B1；同日对抗评审仲裁已收口契约；2026-08-16 版本列车收口为 `0.7.x`  
 设计：[`docs/designs/delivery-physics.md`](../docs/designs/delivery-physics.md)  
 ADR：[`docs/adr/0006-delivery-physics-and-capability-plane.md`](../docs/adr/0006-delivery-physics-and-capability-plane.md)  
 仲裁：[`docs/superpowers/reviews/2026-08-15-delivery-physics-adversarial-review-board.md`](../docs/superpowers/reviews/2026-08-15-delivery-physics-adversarial-review-board.md)  
-基线：`0.6.0` 已发布的 TaskGraph、证据绑定、Objective、只读 Console  
-默认策略：先抽出投影，再衰减进调度，再换 Card，最后编译宿主；每一阶段未绿之前，下一阶段保持关闭
+基线：`0.6.0` 已发布的 TaskGraph、证据绑定、Objective、只读 Console；`0.7.0` 已发布 Proof / Card / Compiler / `verify-bundle`  
+默认策略：先抽出投影，再衰减进调度，再换 Card，最后编译宿主；每一阶段未绿之前，下一阶段保持关闭。功能全部在 `0.7.x` 发布，不另开 `0.8.0` / `0.9.0` / `1.0.0` 功能号。
 
 已锁定：
 
@@ -19,7 +19,8 @@ ADR：[`docs/adr/0006-delivery-physics-and-capability-plane.md`](../docs/adr/000
 | # | 决议 |
 | --- | --- |
 | 1 | `proof verify` 默认 decay + rebind，不重跑 gate。`--rerun-procedure` 仅诊断，须 dry-run/隔离。 |
-| 2 | Console P7 **滑到 0.8**。`0.7` 出口 = P1–P5 + P3 CLI。P6 `export` 可选、experimental。 |
+| 2 | Console P7 留在 `0.7.x`，不另开 `0.8`。`0.7.0` 已发 P1–P6 + P8–P12a。P7 / `trigger_observation` / P13 走后续 `0.7.x`。 |
+| 6 | 交付物理功能全部在 `0.7.x` 发布。取消 `0.8.0` / `0.9.0` 列车。`1.0.0` 只是身份冻结，不是本系列功能号；未显式要求不得打 `1.0.0`。 |
 | 3 | 宿主投影默认当前工作区。`tools.json` / PATH = `discovered_unintegrated`。`--user` 才写用户级 skill。 |
 | 4 | `contract_hash` 按 subject 拆：task 面 kind → attempt `task_contract_sha256`（缺则空）；`action_receipt` → Objective `contract_sha256`。 |
 | 5 | `proof list` / `verify` 每次全量重派生。store 可丢弃，不是展示真源。 |
@@ -28,7 +29,7 @@ ADR：[`docs/adr/0006-delivery-physics-and-capability-plane.md`](../docs/adr/000
 
 ## 1. 最终交付结果
 
-完成本计划后，Dyro `1.0.0` 对外可证明：
+完成本计划后，Dyro `0.7.x` 对外可证明：
 
 1. 已有 receipt / review / heads / signoff / action receipt 可被列为 Proof，且不复制真源；
 2. `dyro proof verify` 对**当前工作区**做衰减与绑定重算（rebind，不是 replay）；`verify-bundle` 用 bundle + 调用方 git 对象做**完整性**复验，两套结论不得混称；
@@ -36,7 +37,7 @@ ADR：[`docs/adr/0006-delivery-physics-and-capability-plane.md`](../docs/adr/000
 4. Capability Card 取代「只有 argv 的 adapter」，旧 Profile 仍能加载；
 5. Host Compiler 只把本机已审计能力投影为宿主 `SKILL.md`；过期投影阻断自动 mutation；
 6. README 与术语扫描把产品身份锁在 Delivery Physics，而不是 agent 编排；
-7. Console / Home 在 `0.8` 显示 Proof 状态与衰减原因，仍无写权；`0.7` 用 `dyro proof list` 与 `dyro objective attention`。
+7. Console / Home 在 `0.7.x` 用独立 inspect 显示已投影的 Proof 状态与衰减原因，仍无写权。summary 保持 `proof_inspection=not_inspected`，与 `dyro objective attention` 不是同一套 Proof 展示。
 
 ---
 
@@ -57,13 +58,12 @@ ADR：[`docs/adr/0006-delivery-physics-and-capability-plane.md`](../docs/adr/000
 
 | 版本 | 主题 | 对用户可见 | 关闭条件未满足时 |
 | --- | --- | --- | --- |
-| `0.6.x` | 身份冻结 | 文档 + ADR + 术语扫描 | 不合并 Proof/Card/Compiler 代码 |
-| `0.7.0` | Proof / Card / Compiler / `verify-bundle` | `dyro proof list/show/verify`；`export`；`verify-bundle`；`dyro capability *`；`dyro host compile`；`dyro objective attention` 可含 `PROOF_DECAYED` | 不把本树当 `0.6.x` 或 `1.0.0` 发；`trusted_usage` 不接入 BudgetUsage |
-| `0.8.0` | Capability Card + Console Proof | `dyro capability *`；`agent add` 写 Card；Console 只读展示 Proof | 不编译宿主文件 |
-| `0.9.0` | Host Compiler | `dyro host compile/status/doctor` | 不承诺 1.0 对外核验 |
-| `1.0.0` | 可携带核验 | Proof Bundle `schema_version = 1`；`verify-bundle` 硬门禁；叙事锁死 | 缺一项不得标 1.0 |
+| `0.6.x` | 已发布维护 | 只接受与本计划不冲突的修复 | 不回写 `0.7` 物理列车 |
+| `0.7.0` | 已发布：Proof / Card / Compiler / `verify-bundle` | `dyro proof list/show/verify`；`export`；`verify-bundle`；`dyro capability *`；`dyro host compile`；`dyro objective attention` 可含 `PROOF_DECAYED` | 已关闭。不得改号为 `0.6.x` 或 `1.0.0`；`trusted_usage` 不接入 BudgetUsage |
+| `0.7.x` | 本系列剩余全部功能 | P7：Console 独立 inspect 展示已投影 Proof；`trigger_observation`；P13：陌生人核验与叙事锁。summary 仍 `not_inspected` | 不另开 `0.8.0` / `0.9.0` / `1.0.0` 功能号 |
+| `1.0.0` | 身份冻结，不是本系列功能号 | 仅当产品显式要求时才打 | 未显式要求不得标 `1.0.0` |
 
-`0.6.x` 继续只接受维护修复。本计划的实现从独立开发线切入，不回写 `0.6.0` 的已发布语义。
+`0.6.x` 继续只接受维护修复。本计划的剩余实现继续走 `0.7.x`，不回写 `0.6.0` 的已发布语义，也不把同一批功能改标成 `0.8` / `0.9` / `1.0`。
 
 ---
 
@@ -95,7 +95,7 @@ src/dyro/host/
   continuation/snapshot.py + budgets.py                  SchedulerSnapshot / ProgressFacts
   continuation/models.py                                 ReasonCode.PROOF_DECAYED；ContinuationSnapshot 保持死类型
   continuation/attention.py                              PROOF_DECAYED → AttentionKind.NEEDS_USER
-  console/read_model.py                                  0.8 只读展示；summary 零新 git I/O
+  console/read_model.py                                  0.7.x 独立 inspect 只读展示；summary 零新 git I/O
   tooling.py                                             发现结果供给 Compiler；不得当 Card
   profile.py / config.py                                 加载旧 adapters
 ```
@@ -121,7 +121,7 @@ P5  交付门 decay 投影（A1）
  │
 P6  Proof Bundle export（0.7 experimental）
  │
-P7  Console/Home 只读展示（默认 0.8）
+P7  Console/Home 独立 inspect 只读展示（0.7.x）
  │
 P8  Capability 模型 + adapters 迁移
  │
@@ -135,16 +135,16 @@ P12 host doctor + 过期投影阻断自动 mutation
  │
 P12a 可选 deny hook（仅已证明 hook 表面的宿主）
  │
-P13 1.0 叙事、schema 冻结、verify-bundle 硬门禁
+P13 0.7.x 叙事、schema 冻结、verify-bundle 可作为后续 0.7.x 门禁（仍不打 1.0.0）
 ```
 
 并行允许：
 
 - P2 可在 P1 模型冻结后与 P3 的 CLI 骨架并行，但 P3 的 verify 必须等 P2。
-- P7 不得早于 P2/P5 同真值落地；默认等 0.8，不得等待 P6。
+- P7 不得早于 P2/P5 同真值落地；走 `0.7.x`，不得等待 P6，也不得另开 `0.8`。
 - P8 不得早于 P5：先保证旧 adapter 世界里衰减已经生效。
 - P11 不得早于 P9。P12a 不得早于 P12；无 hook 宿主上 P12a 必须仍使 compile 成功。
-- P6 `verify-bundle` 实现可与 P6 export 同文件，但 0.7 tag **不**以其为硬门禁。
+- P6 `verify-bundle` 实现可与 P6 export 同文件。`0.7.0` tag **不**以其为硬门禁；后续 `0.7.x` 才可把它加成发布门，且仍不因此打 `1.0.0`。
 
 ---
 
@@ -162,7 +162,7 @@ P13 1.0 叙事、schema 冻结、verify-bundle 硬门禁
 ### P1 · Proof 派生
 
 - 只读扫描现有任务目录，派生 `gate_log` / `review_verdict` / `signoff` / `integration_heads` / `action_receipt`。这是 `0.7` 的 kind 闭集。算法见**附录 A**。
-- 不派生 `trigger_observation`（0.8+）或把 `external_bundle` 当成新 ZIP；后者若出现，只是已有 evidence ZIP 世代的投影。
+- `0.7.0` 未派生 `trigger_observation`。后续 `0.7.x` 已从 `objectives/<id>/triggers/<trigger-id>.json` 派生该 kind，只用 `next_probe_at`，不另开 `0.8`。不把 `external_bundle` 当成新 ZIP；后者若出现，只是已有 evidence ZIP 世代的投影。
 - 不改写 `review.md`、receipt、ledger。**不**把 ledger 当 gate PASS。
 - `produced_at` 只取记录内字段；`generation` 用证据世代或 attempt 世代。身份哈希不含「现在」、mtime、`produced_at`。
 - 缺绑定字段 → `inconclusive`，不伪造 live。
@@ -226,15 +226,15 @@ dyro proof export --task ID --bundle PATH
 - 拒绝 `task evidence build` 的 ZIP 布局：对其跑 `verify-bundle` → `inconclusive`，不是 `live`。
 - `verify-bundle` 必须由调用方提供 git 对象（`--git-dir` 或测试夹具里的 bare repo）。无 `--current-heads` 不得报与 merge 相同的衰减结论。
 - 缺 procedure、缺 substrate、缺 git 对象、或缺已声明的签名密钥 → `inconclusive`，不得 `live`。
-- **列车：** `export` 可进 0.7，标 experimental。`verify-bundle` 硬门禁与 `schema_version = 1` 归 1.0 / P13。
+- **列车：** `export` 已进 `0.7.0`，标 experimental。`verify-bundle` 硬门禁与叙事锁是后续 `0.7.x` / P13，不另开 `1.0.0` 功能号。
 - 验收：单任务多 proof 导出有表驱动测试；干净环境带固定 git 夹具得到与源机相同的**完整性**结论（不是「现在能否 merge」）；不提供 git 对象时为 `inconclusive`；机密扫描零命中。
 
-### P7 · 只读展示（默认 0.8）
+### P7 · 只读展示（`0.7.x` 独立 inspect）
 
-- `dyro objective attention <id>` 与 Console read_model 显示 Proof 状态与稳定 reason。**无**顶层 `dyro attention`。
+- `dyro objective attention <id>` 与 Console **独立 inspect** 显示 Proof 状态与稳定 reason。**无**顶层 `dyro attention`。
 - 不展示 argv、绝对路径、日志正文。
-- 若产品坚持 0.7 做 Console：`capture_workspace_read_snapshot` / summary **零新 git I/O**；衰减展示走 `not_inspected` 或独立 inspect。打破 `test_console_read_model.py` 的「summary 不探 Git」即为回归。
-- 验收：既有 Console 只读攻击夹具仍绿；浏览器无新写入口；`dyro objective attention` JSON 在 merge 相关 decay 时可含 `PROOF_DECAYED`。
+- `capture_workspace_read_snapshot` / summary **零新 git I/O**，保持 `proof_inspection=not_inspected`。衰减展示只走独立 inspect，不得把 summary 写成与 `objective attention` 同一套 Proof 入口。打破 `test_console_read_model.py` 的「summary 不探 Git」即为回归。
+- 验收：既有 Console 只读攻击夹具仍绿；浏览器无新写入口；独立 inspect 可展示已投影 Proof；`dyro objective attention` JSON 在 merge 相关 decay 时可含 `PROOF_DECAYED`。
 
 ### P8 · Capability 迁移
 
@@ -259,7 +259,7 @@ dyro capability test <id>
 
 - 探测 `opencode`、`cursor-agent` 等，标记 `discovered_unintegrated`。
 - Objective / `task run` 不得因探测成功而选中它们。
-- `dyro tool list` / `tool install` / `tool default` / `dyro open` 不得写入可执行 Card，也不得被 Objective 选中。0.8 Card 只包 adapters。
+- `dyro tool list` / `tool install` / `tool default` / `dyro open` 不得写入可执行 Card，也不得被 Objective 选中。`0.7.x` Card 只包 adapters。
 - 验收：PATH 里有假 `opencode` 可执行文件时，自动执行仍 fail-closed。
 
 ### P11 · Host Compiler
@@ -285,12 +285,12 @@ dyro capability test <id>
 - 文档与 CLI 帮助不得把 hook 写成沙箱或隔离。
 - 验收：假 hook 表面不得触发 hook 文件；无 hook 的 OpenCode 夹具仍能 compile。
 
-### P13 · 1.0 门禁
+### P13 · `0.7.x` 可携带核验与叙事锁
 
 - Bundle schema 锁 `schema_version = 1`。
 - 发布工件含「陌生人核验」CI：从 sdist 安装的干净环境，用夹具 git 对象跑 `verify-bundle`，断言**完整性**结论，不断言与源机当前 HEAD 的 merge 对错相同。
 - README 各语言同步身份句，术语扫描覆盖翻译文件。
-- 验收：缺 P5/P6-export/P12 任一证据，发布工作流拒绝打 `1.0.0` 标签。`verify-bundle` 是 1.0 硬门禁。
+- 验收：缺 P5/P6-export/P12 任一证据，后续 `0.7.x` 发布工作流可以拒绝打新 tag。这是 `0.7.x` 门禁，不是改打 `1.0.0` 的理由。未显式要求不得标 `1.0.0`。
 
 ---
 
@@ -302,13 +302,11 @@ dyro capability test <id>
 | 把 hook 做成所有宿主的强制门槛 | 已否决（选项 C）；P12a 保持可选 |
 | CI / Linear Trigger provider | 已有 Trigger 扩展点；观察不得完成任务 |
 | HMAC 审计链 | Witness 已有哈希链；重复造链没有产品增量 |
-| 自动 push / 发布 | 1.0 仍显式 |
+| 自动 push / 发布 | 仍显式；不因 `0.7.x` 收口而自动发布 |
 | Skill 投影评测 | 先有稳定投影，再谈评测 |
 | 沙箱 backend entry point | Card 先能声明 isolation，再插拔实现 |
-| Console Proof 展示（P7） | 默认 0.8；不破坏 A1 |
 | 检测 revert 是否撤掉了变更 | 不是祖先问题；另立规则后再做 |
 | Bundle 自含 git 对象库 | B2，已否决；调用方提供对象 |
-| `trigger_observation` 派生 | 0.8+；字段用 `next_probe_at` |
 | 生产接线 `decide_no_progress` | 0.7 只保证纯函数契约 |
 | 放松任务仓 dirty 拒绝 | 会改 0.6 对错；除非产品显式改口 |
 
@@ -331,13 +329,11 @@ dyro capability test <id>
 
 ## 9. 阶段出口
 
-**0.7 可发布：** P1–P5 + P3 绿；P6 `export` 可选且标 experimental；P7 **不是**硬依赖。旧工作区不改 toml 即可 `proof list`；merge / 下游对错与 0.6 相同，merge 错误路径只多 `PROOF_DECAYED` 人话。0.7 tag 检查**不含** `verify-bundle` 硬门禁。
+**0.7.0 已发布：** P1–P6 + P8–P12a 绿。旧工作区不改 toml 即可 `proof list`；merge / 下游对错与 0.6 相同，merge 错误路径只多 `PROOF_DECAYED` 人话。`0.7.0` tag 检查**不含** `verify-bundle` 硬门禁。
 
-**0.8 可发布：** P7–P10 绿；旧 adapters 仍跑；未审计命令不能进自动执行；Console 只读展示 Proof 且 summary 无新 git probe。
+**0.7.x 剩余实现已落地：** P7 独立 inspect 展示 Proof，summary 无新 git probe；`trigger_observation` 已派生；P13 陌生人核验与 `0.7.x` 叙事锁。旧 adapters 仍跑；未审计命令不能进自动执行；手改投影不能偷偷继续自动跑。全部打 `0.7.x`，不另开 `0.8.0` / `0.9.0` / `1.0.0`。未要求前不发 `0.7.1`。
 
-**0.9 可发布：** P11–P12a 绿；换机器重编译后 doctor 通过；手改投影不能偷偷继续自动跑；无 hook 宿主仍能 compile，且文案不把 hook 写成隔离。
-
-**1.0 可发布：** P13 绿；干净环境用调用方 git 夹具复验 bundle，**完整性**结论与源机导出时一致；缺 git 对象为 `inconclusive`；身份句在所有 README 语言中一致。
+**1.0.0：** 不是本系列功能出口。未显式要求不得标 `1.0.0`。
 
 任一出口的「绿」指：单测、现有 unittest 全量、ruff 基线、术语扫描、以及该阶段新增的 fail-closed 夹具。
 
@@ -356,6 +352,6 @@ dyro capability test <id>
 | `review_verdict` | `review.md` + `receipt.md` + `task-heads.json` + attempt/plan 绑定 | `task_id` | receipt SHA、`task-heads.json` SHA、`attempt_id`、`plan_sha256`、local 当前 heads | 空（`review.md` 无时间字段）。signed review JSON 的 `created_at` 仅可展示，不进身份哈希 | 绑定的 attempt | `_valid_review_acceptance` 全量 |
 | `signoff` | `signoff.json` | `task_id` | `review_sha256`、receipt、heads、attempt、plan | `signed_at` | 同 attempt | `_valid_external_signoff` 全量 |
 | `integration_heads` | **无持久文件**。即时 `git merge-base --is-ancestor <task_head> HEAD`，与 `_assert_dependency_integrated` 同一调用 | 被检查的依赖 `task_id`。列下游任务时按 `depends_on` 展开 | 当前线 HEADs + 依赖 `task-heads.json` | 空 | derive / verify 时物化，不写盘当真源。缺 git → `inconclusive` | 祖先成立 → `live`；reset / 换历史 → `decayed`；`git revert` 不衰减。三态与 scheduler `integration_state` 一致 |
-| `action_receipt` | Objective 目录 `action-receipts/`（`action_journal.py`），**不是** task 目录 | `objective_id` | intent / authority / budget 字段 | `created_at` | journal 世代 | 字段或世代被替换 → `decayed`。`proof list --task` **不返回**；`--objective` 或 0.8+ 再暴露 CLI |
+| `action_receipt` | Objective 目录 `action-receipts/`（`action_journal.py`），**不是** task 目录 | `objective_id` | intent / authority / budget 字段 | `created_at` | journal 世代 | 字段或世代被替换 → `decayed`。`proof list --task` **不返回**；`--objective` 或后续 `0.7.x` 再暴露 CLI |
 
 缺文件、缺工具、不可解析 → `inconclusive`，不得 `live`。

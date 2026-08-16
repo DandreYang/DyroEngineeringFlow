@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.7.1 - 2026-08-16
+
+- Console opens an independent Proof inspect at
+  `GET /api/v1/workspaces/{alias}/proofs`. Summary stays
+  `proof_inspection=not_inspected` and does not evaluate Proofs.
+- Derive `trigger_observation` from Objective trigger files using
+  `next_probe_at` only. Expired probes are display-decayed and stay out of
+  `progress_fingerprint` and merge kinds.
+- Every `0.7.x` release gate now requires the inspect and trigger markers and
+  still refuses to narrate the train as `1.0.0`.
+
 ## 0.7.0 - 2026-08-16
 
 - First delivery-physics release: Proof objects, Capability Cards, the Host

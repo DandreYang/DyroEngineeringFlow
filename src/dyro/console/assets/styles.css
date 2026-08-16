@@ -211,6 +211,11 @@ code {
 .detail-grid div { border-top: 1px solid var(--border); padding-top: .75rem; }
 .detail-grid dt { color: var(--subtle); font-size: .8rem; }
 .detail-grid dd { font-weight: 750; margin: .25rem 0 0; }
+.proof-inspect { border-top: 1px solid var(--border); margin-top: 1.15rem; padding-top: 1rem; }
+.proof-inspect h3 { font-size: .95rem; margin: 0 0 .5rem; }
+.proof-inspect p, .proof-inspect ul { color: var(--subtle); font-size: .86rem; margin: 0; }
+.proof-inspect ul { padding-left: 1.1rem; }
+.proof-inspect li { margin: .2rem 0; }
 .command { align-items: center; background: var(--surface-muted); border: 1px solid var(--border); border-radius: var(--radius-medium); display: flex; gap: .75rem; margin-top: 1rem; padding: .9rem; }
 .command code { flex: 1; }
 .command button { background: var(--accent); color: var(--accent-contrast); flex: 0 0 auto; }
