@@ -7,7 +7,7 @@ import hashlib
 from ..canonical import canonical_json_bytes
 from ..observations import WorkspaceReadSnapshot
 from .models import ConsoleEnvelope
-from .redaction import safe_branch, safe_id, safe_sha256, safe_title
+from .redaction import REDACTED, safe_branch, safe_id, safe_sha256, safe_title
 
 
 def _action_payload(action: object) -> dict[str, str]:
@@ -92,6 +92,52 @@ def _data(snapshot: WorkspaceReadSnapshot) -> dict[str, object]:
             for objective in snapshot.objectives
         ],
     }
+
+
+def proof_inspect_data(snapshot: WorkspaceReadSnapshot) -> dict[str, object]:
+    """Whitelisted inspect facts. No argv, paths, logs, or procedure text."""
+    return {
+        "proof_inspection": (
+            snapshot.proof_inspection
+            if snapshot.proof_inspection in {"not_inspected", "inspected"}
+            else "not_inspected"
+        ),
+        "proofs": [
+            {
+                "id": safe_sha256(item.id),
+                "kind": safe_id(item.kind),
+                "subject": safe_id(item.subject),
+                "status": safe_id(item.status),
+                "decay_reason": safe_id(item.decay_reason) if item.decay_reason else "",
+            }
+            for item in snapshot.proofs
+            if safe_sha256(item.id) != REDACTED
+        ],
+        "objectives": [
+            {
+                "id": safe_id(objective.id),
+                "attention": [_attention_payload(item) for item in objective.attention],
+            }
+            for objective in snapshot.objectives
+            if safe_id(objective.id) != REDACTED
+        ],
+    }
+
+
+def proof_inspect_envelope(snapshot: WorkspaceReadSnapshot) -> dict[str, object]:
+    """Path-free Proof inspect DTO. Separate from summary workspace_envelope."""
+    data = proof_inspect_data(snapshot)
+    digest = hashlib.sha256(canonical_json_bytes(data)).hexdigest()
+    warnings = tuple(sorted({failure.code for failure in snapshot.failures}))
+    partial = snapshot.completeness != "complete"
+    return ConsoleEnvelope(
+        captured_at=snapshot.observed_at,
+        snapshot_sha256=digest,
+        freshness_state="partial" if partial else "fresh",
+        partial=partial,
+        warnings=warnings,
+        data=data,
+    ).to_payload()
 
 
 def workspace_envelope(snapshot: WorkspaceReadSnapshot) -> dict[str, object]:

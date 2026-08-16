@@ -75,6 +75,15 @@ class ObjectiveAttentionObservation:
 
 
 @dataclass(frozen=True)
+class WorkspaceProofObservation:
+    id: str
+    kind: str
+    subject: str
+    status: str
+    decay_reason: str
+
+
+@dataclass(frozen=True)
 class WorkspaceObjectiveObservation:
     id: str
     title: str
@@ -114,6 +123,7 @@ class WorkspaceReadSnapshot:
     lines: tuple[WorkspaceLineObservation, ...]
     tasks: tuple[WorkspaceTaskObservation, ...]
     objectives: tuple[WorkspaceObjectiveObservation, ...]
+    proofs: tuple[WorkspaceProofObservation, ...] = ()
     failures: tuple[ReadFailure, ...] = ()
 
 
@@ -143,12 +153,18 @@ def _task_observation(item: object) -> WorkspaceTaskObservation:
     )
 
 
-def _objective_observation(config: Config, record: object, *, clock: Callable[[], datetime]) -> WorkspaceObjectiveObservation:
+def _objective_observation(
+    config: Config,
+    record: object,
+    *,
+    clock: Callable[[], datetime],
+    inspect_proofs: bool = False,
+) -> WorkspaceObjectiveObservation:
     snapshot = build_scheduler_snapshot(
         config,
         objective=record,
         clock=clock,
-        inspect_integration=False,
+        inspect_integration=inspect_proofs,
     )
     plan = build_continuation_plan(snapshot)
     scheduler = build_scheduler_projection(snapshot, plan)
@@ -201,11 +217,15 @@ def _revision_payload(
     tasks: tuple[WorkspaceTaskObservation, ...],
     objectives: tuple[WorkspaceObjectiveObservation, ...],
     failures: tuple[ReadFailure, ...],
+    proof_inspection: str = "not_inspected",
+    proofs: tuple[WorkspaceProofObservation, ...] = (),
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "schema_version": READ_SNAPSHOT_SCHEMA_VERSION,
         "workspace_name": workspace_name,
-        "proof_inspection": "not_inspected",
+        "proof_inspection": (
+            proof_inspection if proof_inspection in {"not_inspected", "inspected"} else "not_inspected"
+        ),
         "lines": [
             {
                 "id": item.id,
@@ -256,6 +276,18 @@ def _revision_payload(
         ],
         "failures": [failure.__dict__ for failure in failures],
     }
+    if proof_inspection == "inspected":
+        payload["proofs"] = [
+            {
+                "id": item.id,
+                "kind": item.kind,
+                "subject": item.subject,
+                "status": item.status,
+                "decay_reason": item.decay_reason,
+            }
+            for item in proofs
+        ]
+    return payload
 
 
 def capture_workspace_read_snapshot(
@@ -327,7 +359,7 @@ def capture_workspace_read_snapshot(
     try:
         records = list_objectives(config, recover=False)
         objectives = tuple(
-            _objective_observation(config, record, clock=sample_clock)
+            _objective_observation(config, record, clock=sample_clock, inspect_proofs=False)
             for record in records
         )
         source_digests.extend(
@@ -359,5 +391,145 @@ def capture_workspace_read_snapshot(
         lines=lines,
         tasks=tasks,
         objectives=objectives,
+        proofs=(),
+        failures=frozen_failures,
+    )
+
+
+def inspect_workspace_read_snapshot(
+    config: Config,
+    *,
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> WorkspaceReadSnapshot:
+    """Independent Proof inspect. Must not be used by Console summary."""
+    observed_at = _utc(clock())
+
+    def sample_clock() -> datetime:
+        return observed_at
+
+    failures: list[ReadFailure] = []
+    source_digests: list[tuple[str, str]] = []
+
+    try:
+        scheduler_snapshot = build_scheduler_snapshot(
+            config,
+            clock=sample_clock,
+            inspect_integration=True,
+        )
+        tasks = tuple(_task_observation(item) for item in scheduler_snapshot.tasks)
+        source_digests.append(("tasks", scheduler_snapshot.snapshot_sha256))
+    except (DyroError, ValidationError, OSError, UnicodeError):
+        tasks = ()
+        failures.append(ReadFailure("tasks", "TASKS_UNAVAILABLE"))
+
+    try:
+        lines = tuple(
+            WorkspaceLineObservation(
+                id=line.id,
+                kind=line.kind,
+                branch=line.branch,
+                base=line.base,
+                repository_count=len(line.repositories),
+            )
+            for line in list_lines(config)
+        )
+        source_digests.append(
+            (
+                "lines",
+                hashlib.sha256(
+                    canonical_json_bytes(
+                        [
+                            {
+                                "id": item.id,
+                                "kind": item.kind,
+                                "branch": item.branch,
+                                "base": item.base,
+                                "repository_count": item.repository_count,
+                            }
+                            for item in lines
+                        ]
+                    )
+                ).hexdigest(),
+            )
+        )
+    except (DyroError, ValidationError, OSError, UnicodeError):
+        lines = ()
+        failures.append(ReadFailure("lines", "LINES_UNAVAILABLE"))
+
+    objectives: tuple[WorkspaceObjectiveObservation, ...]
+    try:
+        records = list_objectives(config, recover=False)
+        objectives = tuple(
+            _objective_observation(config, record, clock=sample_clock, inspect_proofs=True)
+            for record in records
+        )
+        source_digests.extend(
+            (f"objective:{item.id}", item.event_sha256) for item in objectives
+        )
+    except (DyroError, ValidationError, OSError, UnicodeError):
+        objectives = ()
+        failures.append(ReadFailure("objectives", "OBJECTIVES_UNAVAILABLE"))
+
+    proofs: tuple[WorkspaceProofObservation, ...]
+    try:
+        from .proof import list_proofs
+
+        proofs = tuple(
+            WorkspaceProofObservation(
+                id=proof.id,
+                kind=proof.kind.value,
+                subject=proof.subject,
+                status=proof.status.value,
+                decay_reason=proof.decay_reason,
+            )
+            for proof in list_proofs(config)
+        )
+        source_digests.append(
+            (
+                "proofs",
+                hashlib.sha256(
+                    canonical_json_bytes(
+                        [
+                            {
+                                "id": item.id,
+                                "kind": item.kind,
+                                "status": item.status,
+                                "decay_reason": item.decay_reason,
+                            }
+                            for item in proofs
+                        ]
+                    )
+                ).hexdigest(),
+            )
+        )
+    except (DyroError, ValidationError, OSError, UnicodeError):
+        proofs = ()
+        failures.append(ReadFailure("proofs", "PROOFS_UNAVAILABLE"))
+
+    frozen_failures = tuple(sorted(failures, key=lambda item: (item.component, item.code)))
+    payload = _revision_payload(
+        workspace_name=config.name,
+        lines=lines,
+        tasks=tasks,
+        objectives=objectives,
+        failures=frozen_failures,
+        proof_inspection="inspected",
+        proofs=proofs,
+    )
+    revision = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+    frozen_sources = tuple(sorted(source_digests))
+    return WorkspaceReadSnapshot(
+        schema_version=READ_SNAPSHOT_SCHEMA_VERSION,
+        workspace_name=config.name,
+        observed_at=observed_at,
+        capture_id=f"capture-{revision[:24]}",
+        workspace_revision=revision,
+        source_digests=frozen_sources,
+        completeness="complete" if not frozen_failures else "partial",
+        proof_inspection="inspected",
+        lines=lines,
+        tasks=tasks,
+        objectives=objectives,
+        proofs=proofs,
         failures=frozen_failures,
     )

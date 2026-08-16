@@ -1,6 +1,6 @@
 # ADR-0006：交付物理学、能力卡与宿主编译
 
-- 状态：提案（2026-08-15）；权威投影锁定为 B；衰减语义锁定为 A1；可携带核验锁定为 B1
+- 状态：提案（2026-08-15）；权威投影锁定为 B；衰减语义锁定为 A1；可携带核验锁定为 B1；2026-08-16 版本列车收口为 `0.7.x`
 - 决策者：产品选择 B / A1 / B1 已写入本 ADR；其余条目仍待维护者确认合并
 - 关联：
   - [交付物理学设计](../designs/delivery-physics.md)
@@ -33,8 +33,9 @@
 7. 议题跟踪器若接入，只能作为 Trigger provider，不能成为交付原子，也不能完成 Task。
 8. **权威投影锁定为 B**：所有宿主必编译 skill / 规则；仅当宿主 Card 能证明拦截表面时，再投影由操作格编译的 deny hook。没有拦截表面不得拒绝 compile。Hook 不得宣传为 OS 隔离。详见设计第 8 节。
 9. **`0.7` 衰减锁定为 A1**：对 merge / 下游释放的接受与拒绝，必须与 `0.6.0` 现有绑定检查同真值。Proof 只提供投影与 `PROOF_DECAYED` reason code，不是第二套门。`merge_task` / `check_dispatchable` 不读 Proof store。下游只投影 `_assert_dependency_integrated`；decayed review 不加严 ready set。任务仓 dirty：`0.6` 已拒绝，`0.7` 保持拒绝，不放松、不叠门。开发线 dirty / 错分支保持 `_prepare_merge` 现有错，不得标成 `PROOF_DECAYED`。不把 `git revert` 当成祖先断裂。
-10. **`1.0` 可携带核验锁定为 B1**：`verify-bundle` 核验完整性，不核验身份，也不承诺与当前工作区 `proof verify` / `task merge` 同一套 `live` / `decayed`。输入是 Proof Bundle + 调用方提供的 git 对象。捆内不塞 git 对象库。缺 procedure、缺 substrate、缺 git 对象、或缺已声明的签名密钥 → `inconclusive`，不得写成 `live`。无 `--current-heads` 时不得报与 merge 相同的衰减结论。
+10. **可携带核验锁定为 B1**：`verify-bundle` 核验完整性，不核验身份，也不承诺与当前工作区 `proof verify` / `task merge` 同一套 `live` / `decayed`。输入是 Proof Bundle + 调用方提供的 git 对象。捆内不塞 git 对象库。缺 procedure、缺 substrate、缺 git 对象、或缺已声明的签名密钥 → `inconclusive`，不得写成 `live`。无 `--current-heads` 时不得报与 merge 相同的衰减结论。该能力在 `0.7.x` 发布，不另开 `1.0.0` 功能号。
 11. **写路径两扇门**：有 Card 时，argv adapter、`run_task_bound_dispatch` 与 Peer Wave 写绑定必须同受 `execute` 门。无 Card 的 dispatch 就绪是 0.6.9 已存在的第二扇门（显式允许），不是已审计 Card。PATH / 发现不是 Card。不得同时声称「PATH 发现不能执行」与「dispatch 就绪即可写」。
+12. **版本列车收口为 `0.7.x`**：交付物理功能全部在 `0.7.x` 发布。取消 `0.8.0` / `0.9.0` 功能列车。`1.0.0` 只是身份冻结，未显式要求不得打。
 
 ## 否决项
 
@@ -63,7 +64,8 @@
 
 - 产品叙事从「启动 agent」转为「核验完成」。
 - `0.7.0` 落地 Proof、Capability Card、Host Compiler 与 `verify-bundle`。`trusted_usage` 只解析、默认 `false`，不接入生产 `BudgetUsage`。Console summary 保持 `proof_inspection=not_inspected`，不探 Git / Proof；`dyro objective attention` 走完整快照，可报 `PROOF_DECAYED`。两套入口不得写成同一套 Proof 展示。
-- `1.0` 的对外承诺仍是：陌生人拿着 Proof Bundle 和自己提供的 git 对象，能得到与源机**相同的完整性结论**（字节仍在、钉死 SHA 可解析）。这不是身份证明，也不是「现在工作区还能 merge」。`schema_version = 1` 的可携带合同在 1.0 冻结。
+- 剩余功能（Console 独立 inspect、`trigger_observation`、陌生人核验与叙事锁）继续走 `0.7.x`，不另开 `0.8.0` / `0.9.0` / `1.0.0`。
+- 可携带核验的对外承诺仍是：陌生人拿着 Proof Bundle 和自己提供的 git 对象，能得到与源机**相同的完整性结论**（字节仍在、钉死 SHA 可解析）。这不是身份证明，也不是「现在工作区还能 merge」。`schema_version = 1` 的合同在 `0.7.x` 锁住语义；冻结成 `1.0.0` 身份号须另做产品决定。
 - 实施成本是新的投影层与兼容层，而不是第二套调度器。
 
 ## 兼容

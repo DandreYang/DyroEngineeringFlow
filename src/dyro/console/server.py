@@ -331,7 +331,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 return
             if self._authorized_session() is None:
                 return
-            self._workspace_summary(parsed.path)
+            self._workspace_resource(parsed.path)
             return
         if parsed.path.startswith("/api/"):
             self._error(401, "UNAUTHORIZED")
@@ -362,17 +362,19 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         self._json(200, payload, etag=str(payload.get("snapshot_sha256", "")))
 
-    def _workspace_summary(self, path: str) -> None:
+    def _workspace_resource(self, path: str) -> None:
         service = self.console.overview_service
         if service is None:
             self._error(404, "NOT_FOUND")
             return
-        alias = path.removeprefix("/api/v1/workspaces/")
+        remainder = path.removeprefix("/api/v1/workspaces/")
+        inspect = remainder.endswith("/proofs")
+        alias = remainder[: -len("/proofs")] if inspect else remainder
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", alias):
             self._error(400, "WORKSPACE_ALIAS_INVALID")
             return
         try:
-            payload = service.workspace(alias)
+            payload = service.inspect_proofs(alias) if inspect else service.workspace(alias)
         except ConsoleOverviewError as exc:
             self._error(self._overview_error_status(exc.code), exc.code)
             return

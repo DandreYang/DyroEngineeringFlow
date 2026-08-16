@@ -28,6 +28,7 @@ from dyro.proof.decay import (
     GATE_ARGV,
     GATE_BYTES,
     LINE_PREPARE_NOT_DECAY,
+    NEXT_PROBE_AT,
     PREDICATE_INCONCLUSIVE,
     REVIEW_ACCEPTANCE,
     STILL_BOUND,
@@ -179,6 +180,37 @@ class ProofDecayPureTests(unittest.TestCase):
         )
         self.assertNotEqual(progress_fingerprint(base), progress_fingerprint(with_live))
         self.assertEqual(progress_fingerprint(base), progress_fingerprint(with_decayed))
+
+    def test_trigger_next_probe_at_is_display_decay_only(self) -> None:
+        proof = _proof(ProofKind.TRIGGER_OBSERVATION)
+        live = decay(proof, None, clock=CLOCK, probe_due=False)
+        dead = decay(proof, None, clock=CLOCK, probe_due=True)
+        unknown = decay(proof, None, clock=CLOCK, probe_due=None)
+        self.assertEqual(live.status, ProofStatus.LIVE)
+        self.assertEqual(live.reason, STILL_BOUND)
+        self.assertEqual(dead.status, ProofStatus.DECAYED)
+        self.assertEqual(dead.reason, NEXT_PROBE_AT)
+        self.assertEqual(unknown.status, ProofStatus.INCONCLUSIVE)
+        trigger = Proof(
+            id="e" * 64,
+            kind=ProofKind.TRIGGER_OBSERVATION,
+            subject="ci-watch",
+            substrate=ProofSubstrate(extra=(("next_probe_at", "2026-08-15T00:00:00Z"),)),
+            procedure="objective triggers/ci-watch.json; next_probe_at",
+            bytes_sha256="aa",
+            generation="g1",
+            status=ProofStatus.LIVE,
+        )
+        self.assertEqual(live_merge_evidence((trigger,)), ())
+        base = ProgressFacts(
+            task_states=(("TASK-A", "done"),),
+            trigger_observations=(("ci-watch", "waiting"),),
+        )
+        churned = ProgressFacts(
+            task_states=(("TASK-A", "done"),),
+            trigger_observations=(("ci-watch", "due"),),
+        )
+        self.assertEqual(progress_fingerprint(base), progress_fingerprint(churned))
 
     def test_planner_emits_proof_decayed_attention_without_blocking_downstream(self) -> None:
         with self._temp_snapshot() as snapshot:

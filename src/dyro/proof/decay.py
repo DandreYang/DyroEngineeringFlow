@@ -13,6 +13,7 @@ DEPENDENCY_INTEGRATED = "dependency_integrated"
 GATE_BYTES = "gate_bytes"
 GATE_ARGV = "gate_argv"
 ACTION_RECEIPT_BYTES = "action_receipt_bytes"
+NEXT_PROBE_AT = "next_probe_at"
 CURRENT_SUBSTRATE_MISSING = "current_substrate_missing"
 PREDICATE_INCONCLUSIVE = "predicate_inconclusive"
 STILL_BOUND = "still_bound"
@@ -46,6 +47,7 @@ def decay(
     signoff_ok: bool | None = None,
     integration_ok: bool | None = None,
     line_prepare_ok: bool | None = None,
+    probe_due: bool | None = None,
 ) -> DecayDecision:
     """Project live/decayed/inconclusive from injected facts.
 
@@ -92,6 +94,13 @@ def decay(
         )
     if proof.kind is ProofKind.ACTION_RECEIPT:
         return _bytes_kind(proof, current, clock=clock, mismatch_reason=ACTION_RECEIPT_BYTES)
+    if proof.kind is ProofKind.TRIGGER_OBSERVATION:
+        return _from_predicate(
+            None if probe_due is None else (not probe_due),
+            live_reason=STILL_BOUND,
+            decay_reason=NEXT_PROBE_AT,
+            clock=clock,
+        )
     return _decision(ProofStatus.INCONCLUSIVE, PREDICATE_INCONCLUSIVE, clock)
 
 

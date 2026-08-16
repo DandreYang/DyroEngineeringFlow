@@ -2,7 +2,7 @@
 
 from .bundle import export_bundle, load_current_heads, verify_bundle
 from .decay import decay
-from .derive import derive_objective_proofs, derive_task_proofs, list_proofs
+from .derive import derive_objective_proofs, derive_task_proofs, derive_trigger_proofs, list_proofs
 from .evaluate import decayed_merge_subjects, evaluate_proof, evaluate_proofs, live_merge_evidence
 from .models import (
     DecayDecision,
@@ -32,6 +32,7 @@ __all__ = (
     "decayed_merge_subjects",
     "derive_objective_proofs",
     "derive_task_proofs",
+    "derive_trigger_proofs",
     "evaluate_proof",
     "evaluate_proofs",
     "export_bundle",

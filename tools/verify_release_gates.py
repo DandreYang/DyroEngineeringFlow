@@ -1,7 +1,9 @@
 """Refuse a physics-train release that is missing Proof / Card / Compiler evidence.
 
-A 0.6.x tag of this train is refused. A 0.7.0 tag must pass 0.7 gates and must
-not be narrated as a 1.0 release. 1.0.0 keeps the stricter stranger contract.
+A 0.6.x tag of this train is refused. Remaining delivery-physics features ship
+as 0.7.x, not 0.8 / 0.9 / 1.0. A 0.7.x tag must pass 0.7 gates and must not be
+narrated as a 1.0 release. 1.0.0 is an identity freeze, not this series' feature
+number; if that tag is ever cut, it still keeps the stricter stranger contract.
 """
 
 from __future__ import annotations
@@ -34,6 +36,14 @@ SEVEN_GATES = GATES + (
     ("P0-F5-run", Path("src/dyro/tasks.py"), "assert_capability_allows_write(config, executor)"),
     ("P0-second-door", Path("src/dyro/capability/__init__.py"), "second write door"),
     ("P0-unconfined", Path("src/dyro/task_dispatch.py"), '"allow_unconfined_provider": False'),
+)
+
+SEVEN_X_GATES = (
+    ("P7-inspect", Path("src/dyro/observations.py"), "def inspect_workspace_read_snapshot"),
+    ("P7-console", Path("src/dyro/console/overview.py"), "def inspect_proofs"),
+    ("P7-route", Path("src/dyro/console/server.py"), "/proofs"),
+    ("trigger-kind", Path("src/dyro/proof/models.py"), "TRIGGER_OBSERVATION"),
+    ("trigger-derive", Path("src/dyro/proof/derive.py"), "def derive_trigger_proofs"),
 )
 
 
@@ -76,10 +86,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("拒绝：本树已含 Proof/Card/Compiler，不得作为 0.6.x 发布")
     if tag and _tag_name(tag) != version:
         raise SystemExit(f"拒绝：release tag {tag!r} 必须等于 v{version}")
-    if version == "0.7.0" or tag in {"v0.7.0", "0.7.0"}:
-        missing = missing_gates(root, SEVEN_GATES)
+    if version.startswith("0.7."):
+        missing = missing_gates(root, SEVEN_GATES + SEVEN_X_GATES)
         if missing:
-            raise SystemExit("拒绝 0.7.0：缺少 " + ", ".join(missing))
+            raise SystemExit(f"拒绝 {version}：缺少 " + ", ".join(missing))
         print("0.7 gates present")
         return 0
     if version != "1.0.0" and tag not in {"v1.0.0", "1.0.0"}:

@@ -12,6 +12,7 @@ from dyro.observations import (
     ObjectiveAttentionObservation,
     WorkspaceLineObservation,
     WorkspaceObjectiveObservation,
+    WorkspaceProofObservation,
     WorkspaceReadSnapshot,
     WorkspaceTaskObservation,
 )
@@ -25,6 +26,8 @@ def _snapshot(
     reason: str = "TASK_READY",
     partial: bool = False,
     failure_code: str = "OBJECTIVES_UNAVAILABLE",
+    proof_inspection: str = "not_inspected",
+    proofs: tuple[WorkspaceProofObservation, ...] = (),
 ) -> WorkspaceReadSnapshot:
     observed_at = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
     failures = ()
@@ -40,7 +43,8 @@ def _snapshot(
         workspace_revision="a" * 64,
         source_digests=(("tasks", "b" * 64),),
         completeness="partial" if partial else "complete",
-        proof_inspection="not_inspected",
+        proof_inspection=proof_inspection,
+        proofs=proofs,
         lines=(
             WorkspaceLineObservation(
                 id="alpha",
@@ -228,6 +232,42 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
             self.service.workspace("%2fprivate")
         with self.assertRaisesRegex(ConsoleOverviewError, "WORKSPACE_NOT_FOUND"):
             self.service.workspace("missing")
+
+    def test_inspect_proofs_does_not_use_summary_loader_and_can_show_decay(self) -> None:
+        inspected = _snapshot(
+            name="Alpha Project",
+            attention_kind="needs_user",
+            reason="PROOF_DECAYED",
+            proof_inspection="inspected",
+            proofs=(
+                WorkspaceProofObservation(
+                    id="a" * 64,
+                    kind="review_verdict",
+                    subject="TASK-A",
+                    status="decayed",
+                    decay_reason="review_acceptance",
+                ),
+            ),
+        )
+
+        def summary_loader(config: object) -> WorkspaceReadSnapshot:
+            raise AssertionError("summary snapshot_loader must not run during inspect")
+
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            config_loader=self.service._config_loader,
+            snapshot_loader=summary_loader,
+            inspect_loader=lambda config: inspected,
+            clock=lambda: datetime(2026, 8, 4, 12, 5, tzinfo=timezone.utc),
+            cursor_secret=b"k" * 32,
+        )
+        payload = service.inspect_proofs("alpha")
+        self.assertEqual(payload["data"]["proof_inspection"], "inspected")
+        self.assertEqual(payload["data"]["proofs"][0]["status"], "decayed")
+        self.assertEqual(payload["data"]["objectives"][0]["attention"][0]["reason"], "PROOF_DECAYED")
+        self.assertNotIn("procedure", repr(payload))
+        with self.assertRaisesRegex(ConsoleOverviewError, "WORKSPACE_ALIAS_INVALID"):
+            service.inspect_proofs("%2fprivate")
 
 
 if __name__ == "__main__":

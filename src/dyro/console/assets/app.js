@@ -283,6 +283,48 @@ function renderOverview(payload) {
   for (const summary of data.workspaces) list.append(renderWorkspaceCard(summary));
 }
 
+function renderProofInspect(inspect) {
+  const inspection = text(inspect && inspect.proof_inspection);
+  const section = element("div");
+  section.className = "proof-inspect";
+  section.append(element("h3", inspection === "inspected" ? "Proof 已检查" : "Proof 未检查"));
+  if (inspection !== "inspected") {
+    section.append(element("p", "摘要保持未检查。独立检查失败时不会把摘要标成已检查。"));
+    return section;
+  }
+  const proofs = Array.isArray(inspect.proofs) ? inspect.proofs : [];
+  if (!proofs.length) {
+    section.append(element("p", "没有可展示的 Proof。"));
+    return section;
+  }
+  const list = element("ul");
+  for (const proof of proofs) {
+    const kind = text(proof.kind);
+    const status = text(proof.status);
+    const reason = text(proof.decay_reason);
+    list.append(element("li", reason ? `${kind} · ${status} · ${reason}` : `${kind} · ${status}`));
+  }
+  section.append(list);
+  const decayed = [];
+  for (const objective of Array.isArray(inspect.objectives) ? inspect.objectives : []) {
+    for (const item of objective.attention || []) {
+      if (text(item.reason) === "PROOF_DECAYED") decayed.push(text(objective.id));
+    }
+  }
+  if (decayed.length) section.append(element("p", `已投影衰减：${decayed.join("、")}`));
+  return section;
+}
+
+async function loadProofInspect(alias) {
+  try {
+    const payload = await request(`/api/v1/workspaces/${encodeURIComponent(alias)}/proofs`, `proofs:${alias}`);
+    if (payload && payload.data) return renderProofInspect(payload.data);
+  } catch (error) {
+    if (error && error.message === "SESSION_EXPIRED") throw error;
+  }
+  return renderProofInspect({ proof_inspection: "not_inspected", proofs: [], objectives: [] });
+}
+
 function definition(label, value) {
   const wrapper = element("div");
   wrapper.append(element("dt", label), element("dd", value));
@@ -312,6 +354,7 @@ async function loadWorkspace(alias, silent = false) {
     content.replaceChildren(grid);
     const command = text(summary.recommendation && summary.recommendation.command);
     if (command) content.append(commandRow(command));
+    content.append(await loadProofInspect(alias));
     detail.hidden = false;
     $("detail-heading").focus();
   } catch (error) {

@@ -46,6 +46,7 @@ def evaluate_proof(
     review_ok: bool | None = None
     signoff_ok: bool | None = None
     integration_ok: bool | None = None
+    probe_due: bool | None = None
     current: ObservedSubstrate | None = None
 
     if proof.kind is ProofKind.REVIEW_VERDICT:
@@ -56,6 +57,8 @@ def evaluate_proof(
         integration_ok = _integration_ok(config, proof)
     elif proof.kind in {ProofKind.GATE_LOG, ProofKind.ACTION_RECEIPT}:
         current = _current_bytes(config, proof)
+    elif proof.kind is ProofKind.TRIGGER_OBSERVATION:
+        probe_due = _probe_due(proof, observed_at)
 
     decision = decay(
         proof,
@@ -64,6 +67,7 @@ def evaluate_proof(
         review_ok=review_ok,
         signoff_ok=signoff_ok,
         integration_ok=integration_ok,
+        probe_due=probe_due,
     )
     updated = replace(proof, status=decision.status, decay_reason=decision.reason, observed_at=decision.observed_at)
     return _refresh_integration_state(updated)
@@ -177,6 +181,19 @@ def _integration_ok(config: Config, proof: Proof) -> bool | None:
         return None
     except (ValidationError, OSError):
         return None
+
+
+def _probe_due(proof: Proof, observed_at: datetime) -> bool | None:
+    raw = dict(proof.substrate.extra).get("next_probe_at", "")
+    if not raw:
+        return None
+    try:
+        due = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if due.tzinfo is None:
+        return None
+    return observed_at >= due.astimezone(timezone.utc)
 
 
 def _current_bytes(config: Config, proof: Proof) -> ObservedSubstrate | None:

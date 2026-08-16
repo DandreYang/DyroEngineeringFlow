@@ -40,13 +40,17 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
 
         overview = service.page(limit=1)
         workspace = service.workspace("demo")
+        inspect = service.inspect_proofs("demo")
 
         self.assertEqual(overview["data"]["workspaces"][0]["alias"], "demo")
         self.assertEqual(workspace["data"]["workspace"]["alias"], "demo")
         self.assertEqual(overview["data"]["workspaces"][0]["availability"], "available")
         self.assertEqual(workspace["data"]["workspace"]["availability"], "available")
+        self.assertEqual(inspect["data"]["proof_inspection"], "inspected")
+        self.assertNotIn("procedure", repr(inspect))
         self.assertNotIn(str(self.root), repr(overview))
         self.assertNotIn(str(self.root), repr(workspace))
+        self.assertNotIn(str(self.root), repr(inspect))
 
     def test_default_workspace_budget_tolerates_process_startup_overhead(self) -> None:
         clock = [0.0]
@@ -176,6 +180,28 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
                 raw = json.dumps({"ok": True, "payload": payload}).encode("utf-8")
                 with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE"):
                     service._parse_worker_output(raw, expected_operation="overview")
+
+    def test_parent_rejects_inspect_payload_with_procedure_or_paths(self) -> None:
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+        )
+        valid = service.inspect_proofs("demo")
+        payload = deepcopy(valid)
+        payload["data"]["procedure"] = "git merge-base --is-ancestor"
+        payload["snapshot_sha256"] = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "schema_version": 1,
+                    "freshness": payload["freshness"],
+                    "data": payload["data"],
+                }
+            )
+        ).hexdigest()
+        raw = json.dumps({"ok": True, "payload": payload}).encode("utf-8")
+        with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE"):
+            service._parse_worker_output(raw, expected_operation="inspect_proofs")
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ import re
 from typing import Iterable
 
 from ..canonical import canonical_json_bytes
-from ..config import Config
+from ..config import Config, validate_id
 from ..errors import DyroError, ValidationError
 from ..evidence_store import current_evidence_directory, resolve_evidence_path
 from ..process import run
@@ -45,6 +45,8 @@ def list_proofs(
         proofs: list[Proof] = []
         for task in tasks:
             proofs.extend(derive_task_proofs(config, task))
+        if not line_id:
+            proofs.extend(derive_trigger_proofs(config))
         derived = tuple(_dedupe(proofs))
     if not evaluate:
         return derived
@@ -126,6 +128,7 @@ def derive_objective_proofs(config: Config, objective_id: str) -> tuple[Proof, .
                 produced_at=produced_at,
             )
         )
+    proofs.extend(derive_trigger_proofs(config, objective_id=objective_id))
     return tuple(proofs)
 
 
@@ -302,6 +305,95 @@ def _derive_signoff(config: Config, task: Task) -> Proof | None:
         ),
         produced_at=produced_at,
         declared_key_ids=(key_id,) if key_id else (),
+    )
+
+
+def derive_trigger_proofs(
+    config: Config,
+    *,
+    objective_id: str | None = None,
+) -> tuple[Proof, ...]:
+    """Read ``objectives/<id>/triggers/<trigger-id>.json``. Uses ``next_probe_at`` only."""
+    root = getattr(config, "objectives_dir", None)
+    if root is None or not Path(root).is_dir():
+        return ()
+    proofs: list[Proof] = []
+    names: Iterable[str]
+    if objective_id:
+        try:
+            validate_id(objective_id, "Objective ID")
+        except ValidationError:
+            return ()
+        names = (objective_id,)
+    else:
+        names = tuple(path.name for path in Path(root).iterdir() if path.is_dir())
+    for name in names:
+        try:
+            validate_id(name, "Objective ID")
+        except ValidationError:
+            continue
+        directory = Path(root) / name / "triggers"
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.json")):
+            proof = _derive_trigger_observation(config, name, path)
+            if proof is not None:
+                proofs.append(proof)
+    return tuple(_dedupe(proofs))
+
+
+def _derive_trigger_observation(config: Config, objective_id: str, path: Path) -> Proof | None:
+    trigger_id = path.stem
+    try:
+        validate_id(trigger_id, "Trigger ID")
+    except ValidationError:
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return _inconclusive(
+            config,
+            kind=ProofKind.TRIGGER_OBSERVATION,
+            subject=trigger_id,
+            generation="",
+            identity={"objective_id": objective_id},
+            procedure="objective triggers/<id>.json; next_probe_at",
+            extra=(("unparseable", "trigger.json"),),
+        )
+    if not isinstance(payload, dict):
+        return _inconclusive(
+            config,
+            kind=ProofKind.TRIGGER_OBSERVATION,
+            subject=trigger_id,
+            generation="",
+            identity={"objective_id": objective_id},
+            procedure="objective triggers/<id>.json; next_probe_at",
+            extra=(("unparseable", "trigger.json"),),
+        )
+    state = str(payload.get("state", "") or "")
+    summary = str(payload.get("summary", "") or "")
+    evidence_ref = str(payload.get("evidence_ref", "") or "")
+    next_probe_at = str(payload.get("next_probe_at", "") or "")
+    produced_at = str(payload.get("observed_at", "") or "")
+    extras: list[tuple[str, str]] = [("state", state)]
+    if next_probe_at:
+        extras.append(("next_probe_at", next_probe_at))
+    if evidence_ref and "/" not in evidence_ref and "\\" not in evidence_ref and not evidence_ref.startswith("~"):
+        extras.append(("evidence_ref", evidence_ref))
+    generation = _sha256_json({"state": state, "summary": summary, "evidence_ref": evidence_ref})
+    return _build(
+        config,
+        kind=ProofKind.TRIGGER_OBSERVATION,
+        subject=trigger_id,
+        generation=generation,
+        identity={"objective_id": objective_id},
+        procedure="objective triggers/<id>.json; next_probe_at",
+        bytes_sha256=_sha256_bytes(path.read_bytes()),
+        substrate=ProofSubstrate(
+            contract_hash="",
+            extra=tuple(extras),
+        ),
+        produced_at=produced_at,
     )
 
 

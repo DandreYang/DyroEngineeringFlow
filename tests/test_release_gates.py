@@ -5,6 +5,7 @@ from io import StringIO
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "tools"))
@@ -30,7 +31,7 @@ class ReleaseGateTests(unittest.TestCase):
     def test_0_7_release_runs_gates_without_claiming_1_0(self) -> None:
         stdout = StringIO()
         with redirect_stdout(stdout):
-            code = main(["--root", str(ROOT), "--release-tag", "v0.7.0"])
+            code = main(["--root", str(ROOT), "--release-tag", "v0.7.1"])
         self.assertEqual(code, 0)
         self.assertIn("0.7 gates present", stdout.getvalue())
         self.assertNotIn("1.0 gates present", stdout.getvalue())
@@ -43,3 +44,13 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("0.7 gates present", stdout.getvalue())
         self.assertNotIn("1.0 gates present", stdout.getvalue())
+
+    def test_later_0_7_x_runs_0_7_gates_without_claiming_1_0(self) -> None:
+        stdout = StringIO()
+        with patch("verify_release_gates._version", return_value="0.7.1"):
+            with redirect_stdout(stdout):
+                code = main(["--root", str(ROOT), "--release-tag", "v0.7.1"])
+        self.assertEqual(code, 0)
+        self.assertIn("0.7 gates present", stdout.getvalue())
+        self.assertNotIn("1.0 gates present", stdout.getvalue())
+        self.assertNotIn("skip 1.0 gates", stdout.getvalue())
