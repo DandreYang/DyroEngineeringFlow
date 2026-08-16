@@ -22,9 +22,13 @@ from ..canonical import canonical_json_bytes
 from ..config import Config, load, validate_id
 from ..errors import DyroError, ValidationError
 from ..hub import WorkspaceRegistry, load_registry
-from ..observations import WorkspaceReadSnapshot, capture_workspace_read_snapshot
+from ..observations import (
+    WorkspaceReadSnapshot,
+    capture_workspace_read_snapshot,
+    inspect_workspace_read_snapshot,
+)
 from .models import ConsoleEnvelope
-from .read_model import workspace_envelope
+from .read_model import proof_inspect_data, workspace_envelope
 from .redaction import REDACTED, safe_id, safe_title
 
 
@@ -85,6 +89,7 @@ class ConsoleOverviewService:
         registry_loader: Callable[[], WorkspaceRegistry] = load_registry,
         config_loader: Callable[[Path], Config] = load,
         snapshot_loader: Callable[[Config], WorkspaceReadSnapshot] = capture_workspace_read_snapshot,
+        inspect_loader: Callable[[Config], WorkspaceReadSnapshot] = inspect_workspace_read_snapshot,
         clock: Callable[[], datetime] = _utc_now,
         cursor_secret: bytes | None = None,
         summary_loader: Callable[
@@ -99,6 +104,7 @@ class ConsoleOverviewService:
         self._registry_loader = registry_loader
         self._config_loader = config_loader
         self._snapshot_loader = snapshot_loader
+        self._inspect_loader = inspect_loader
         self._clock = clock
         self._cursor_secret = cursor_secret or secrets.token_bytes(32)
         self._summary_loader = summary_loader
@@ -162,6 +168,33 @@ class ConsoleOverviewService:
             record.name, record.root, record.name == registry.default
         )
         return self._envelope({"workspace": summary}, warning_codes)
+
+    def inspect_proofs(self, alias: str) -> dict[str, object]:
+        """Independent Proof inspect. Must not use the summary snapshot_loader."""
+        try:
+            alias = validate_id(alias, "工作区别名")
+        except ValidationError:
+            raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID") from None
+        registry = self._load_registry()
+        try:
+            record = next(item for item in registry.workspaces if item.name == alias)
+        except StopIteration:
+            raise ConsoleOverviewError("WORKSPACE_NOT_FOUND") from None
+        try:
+            config = self._config_loader(record.root)
+            snapshot = self._inspect_loader(config)
+            warning_codes = {_safe_code(failure.code) for failure in snapshot.failures}
+            warning_codes.discard("REDACTED")
+            return self._envelope(proof_inspect_data(snapshot), warning_codes)
+        except (DyroError, ValidationError, OSError, UnicodeError):
+            return self._envelope(
+                {
+                    "proof_inspection": "not_inspected",
+                    "proofs": [],
+                    "objectives": [],
+                },
+                {"WORKSPACE_UNAVAILABLE"},
+            )
 
     def _envelope(
         self, data: dict[str, object], warning_codes: set[str]

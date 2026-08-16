@@ -5,11 +5,11 @@ import unittest
 from unittest.mock import patch
 
 from dyro.config import load
-from dyro.console.read_model import workspace_envelope
+from dyro.console.read_model import proof_inspect_envelope, workspace_envelope
 from dyro.console.models import ConsoleEnvelope
 from dyro.console.redaction import safe_branch, safe_id, safe_title
 from dyro.continuation.store import create_objective
-from dyro.observations import capture_workspace_read_snapshot
+from dyro.observations import capture_workspace_read_snapshot, inspect_workspace_read_snapshot
 from dyro.tasks import task_template
 from dyro.workspace import create_line
 
@@ -174,6 +174,27 @@ max_parallel = 1
         self.assertFalse(evaluate.called)
         self.assertEqual(snapshot.proof_inspection, "not_inspected")
         self.assertFalse(any(item.reason == "PROOF_DECAYED" for item in snapshot.objectives[0].attention))
+
+    def test_inspect_evaluates_proofs_and_can_project_decayed_attention(self) -> None:
+        self._objective()
+        with patch("dyro.proof.evaluate.evaluate_proofs") as evaluate:
+            evaluate.side_effect = lambda config, proofs, **kwargs: tuple(proofs)
+            snapshot = inspect_workspace_read_snapshot(
+                self.config,
+                clock=lambda: datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc),
+            )
+        self.assertTrue(evaluate.called)
+        self.assertEqual(snapshot.proof_inspection, "inspected")
+        envelope = proof_inspect_envelope(snapshot)
+        self.assertEqual(envelope["data"]["proof_inspection"], "inspected")
+        self.assertIn("proofs", envelope["data"])
+        self.assertNotIn("procedure", repr(envelope))
+        summary = capture_workspace_read_snapshot(
+            self.config,
+            clock=lambda: datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(summary.proof_inspection, "not_inspected")
+        self.assertEqual(summary.proofs, ())
 
     def test_envelope_returns_a_deeply_fresh_json_value(self) -> None:
         envelope = ConsoleEnvelope(

@@ -20,7 +20,14 @@ from dyro.continuation.models import ActionKind
 from dyro.continuation.objective_storage import open_objective_directory
 from dyro.continuation.store import create_objective
 from dyro.evidence_store import publish_evidence_generation
-from dyro.proof.derive import derive_objective_proofs, derive_task_proofs, list_proofs
+from dyro.proof.decay import NEXT_PROBE_AT
+from dyro.proof.derive import (
+    derive_objective_proofs,
+    derive_task_proofs,
+    derive_trigger_proofs,
+    list_proofs,
+)
+from dyro.proof.evaluate import evaluate_proofs
 from dyro.proof.models import ProofKind, ProofStatus
 from dyro.provenance import review_binding
 from dyro.tasks import answer_task, load_task, review_task, run_task, task_template
@@ -249,6 +256,48 @@ class ProofDeriveTests(WorkspaceCase):
         self.assertEqual(receipt.substrate.contract_hash, record.contract_sha256)
         self.assertTrue(receipt.produced_at)
         self.assertNotIn(receipt, list_proofs(config, task_id="TASK-A"))
+
+    def test_trigger_file_derives_stable_identity_and_is_excluded_from_task_filter(self) -> None:
+        config, _task = self._reviewed_task("TASK-A")
+        create_objective(config, _objective_contract("release", "TASK-A"))
+        trigger_dir = config.objectives_dir / "release" / "triggers"
+        trigger_dir.mkdir(parents=True)
+        payload = {
+            "schema_version": 1,
+            "state": "waiting",
+            "summary": "probe later",
+            "evidence_ref": "obs-1",
+            "next_probe_at": "2026-08-15T00:00:00Z",
+            "observed_at": "2026-08-14T00:00:00Z",
+        }
+        trigger_dir.joinpath("ci-watch.json").write_text(json.dumps(payload), encoding="utf-8")
+        first = derive_trigger_proofs(config, objective_id="release")
+        second = derive_trigger_proofs(config, objective_id="release")
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0].id, second[0].id)
+        self.assertEqual(first[0].kind, ProofKind.TRIGGER_OBSERVATION)
+        self.assertEqual(first[0].subject, "ci-watch")
+        self.assertEqual(dict(first[0].substrate.extra)["next_probe_at"], "2026-08-15T00:00:00Z")
+        self.assertFalse(
+            any(proof.kind is ProofKind.TRIGGER_OBSERVATION for proof in list_proofs(config, task_id="TASK-A"))
+        )
+        self.assertTrue(
+            any(proof.kind is ProofKind.TRIGGER_OBSERVATION for proof in list_proofs(config, objective_id="release"))
+        )
+        self.assertTrue(any(proof.kind is ProofKind.TRIGGER_OBSERVATION for proof in list_proofs(config)))
+        due = evaluate_proofs(
+            config,
+            first,
+            clock=lambda: datetime(2026, 8, 16, tzinfo=timezone.utc),
+        )
+        early = evaluate_proofs(
+            config,
+            first,
+            clock=lambda: datetime(2026, 8, 14, tzinfo=timezone.utc),
+        )
+        self.assertEqual(due[0].status, ProofStatus.DECAYED)
+        self.assertEqual(due[0].decay_reason, NEXT_PROBE_AT)
+        self.assertEqual(early[0].status, ProofStatus.LIVE)
 
     def test_polyrepo_example_lists_empty_without_crash(self) -> None:
         root = Path(__file__).resolve().parents[1] / "examples" / "polyrepo"

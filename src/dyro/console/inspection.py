@@ -98,6 +98,9 @@ class IsolatedOverviewService:
     def workspace(self, alias: str) -> dict[str, object]:
         return self._request({"op": "workspace", "alias": alias})
 
+    def inspect_proofs(self, alias: str) -> dict[str, object]:
+        return self._request({"op": "inspect_proofs", "alias": alias})
+
     def _request(self, request: Mapping[str, object]) -> dict[str, object]:
         worker_request = dict(request)
         if self._target_root is not None:
@@ -267,6 +270,9 @@ class IsolatedOverviewService:
     def _validate_data(
         cls, data: dict[str, object], *, expected_operation: str | None
     ) -> None:
+        if expected_operation == "inspect_proofs":
+            cls._validate_inspect(data)
+            return
         if set(data) == {"workspace"}:
             if expected_operation == "overview":
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
@@ -310,6 +316,60 @@ class IsolatedOverviewService:
                 or not cls._safe_code(highest.get("reason"))
             ):
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_inspect(cls, data: dict[str, object]) -> None:
+        if set(data) != {"proof_inspection", "proofs", "objectives"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if data.get("proof_inspection") not in {"not_inspected", "inspected"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        proofs = data["proofs"]
+        if not isinstance(proofs, list) or len(proofs) > 1000:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in proofs:
+            if not isinstance(item, dict) or set(item) != {
+                "id",
+                "kind",
+                "subject",
+                "status",
+                "decay_reason",
+            }:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if safe_sha256(item.get("id")) != item.get("id"):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if (
+                not cls._safe_code(item.get("kind"))
+                or not cls._safe_code(item.get("subject"))
+                or not cls._safe_code(item.get("status"))
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            reason = item.get("decay_reason")
+            if reason != "" and not cls._safe_code(reason):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        objectives = data["objectives"]
+        if not isinstance(objectives, list) or len(objectives) > 1000:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for objective in objectives:
+            if not isinstance(objective, dict) or set(objective) != {"id", "attention"}:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if not cls._safe_alias(objective.get("id")):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            attention = objective.get("attention")
+            if not isinstance(attention, list) or len(attention) > 1000:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            for item in attention:
+                if not isinstance(item, dict) or set(item) != {
+                    "kind",
+                    "subject_id",
+                    "reason",
+                }:
+                    raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+                if (
+                    item.get("kind") not in _ATTENTION_KINDS
+                    or not cls._safe_code(item.get("subject_id"))
+                    or not cls._safe_code(item.get("reason"))
+                ):
+                    raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
 
     @classmethod
     def _validate_summary(cls, value: object) -> None:
