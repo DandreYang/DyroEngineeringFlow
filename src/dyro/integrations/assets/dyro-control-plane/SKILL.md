@@ -13,13 +13,13 @@ When the request already supplies a workspace alias, skip global discovery and u
 
 - Git state: `dyro --workspace <alias> status --format json`
 - Health: `dyro --workspace <alias> doctor --format json`
-- One safe next step: `dyro --workspace <alias> next --format json`
+- One safe next step: `dyro --workspace <alias> next --format json`. If `briefing` is present, that is the switch-tool opening. `briefing.command` is a read (`tick`, `attention`, `explain`, or `list`), not a mutation, and not a resume of another harness conversation.
 - Lines or hotfixes: `dyro --workspace <alias> line list [--kind line|hotfix] --format json`
 - Change Sets: `dyro --workspace <alias> changeset list --format json` or `dyro --workspace <alias> changeset verify <id> --format json`
 - Installed control-plane Skill health: `dyro integration status skill --format json`
 - Installed dispatch Skill health: `dyro integration status dispatch --format json`
 - Objective inventory or facts: `dyro --workspace <alias> objective list --format json` or `dyro --workspace <alias> objective status <id> --format json`
-- Objective explanation: `dyro --workspace <alias> objective explain <id> --format json`
+- Objective explanation: `dyro --workspace <alias> objective explain <id> --format json`. JSON may include `briefing` (human matter plus one read-only command).
 - Objective blockers or human attention: `dyro --workspace <alias> objective attention <id> --format json`
 - Objective dependency graph: `dyro --workspace <alias> objective graph <id> --format json`
 - Objective next-wave preview: `dyro --workspace <alias> objective tick <id> --format json`. Treat `peer_wave.executor_bindings` as the intended peer executors for that wave, and `peer_wave.warnings` as missing `conflict_group` or harness-capacity notes. A wave member is an executor, not a live supervisor.

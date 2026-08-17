@@ -355,7 +355,7 @@ publish   →  push / 发布；第一版仍显式，且默认关
 
 ```text
 dyro                 看见线、目标、一条安全下一步
-dyro next            打印唯一安全命令
+dyro next            打印唯一安全命令；已有目标时先给换工具开场白
 dyro continue        按租约推进（已有）
 dyro proof verify    需要争辩「到底做没做完」时
 dyro host compile    换机器或换工具后

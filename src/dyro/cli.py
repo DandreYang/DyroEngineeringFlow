@@ -34,6 +34,13 @@ from .continuation.attention import (
     render_attention_json,
     render_attention_text,
 )
+from .continuation.briefing import (
+    briefing_payload,
+    follow_up_argv,
+    inventory_briefing,
+    render_briefing_text,
+    unread_briefing,
+)
 from .continuation.engine import (
     build_scheduler_tick,
     render_scheduler_tick_text,
@@ -551,6 +558,74 @@ def _scoped_command(
     args: argparse.Namespace, config: Config, *command: str
 ) -> str:
     return shlex.join((*_workspace_selector_argv(args, config), *command))
+
+
+def _briefing_command(
+    args: argparse.Namespace, config: Config, *command: str
+) -> str:
+    """Scope a read-only briefing command without embedding --root paths."""
+    alias = getattr(args, "workspace_alias", None) or config.name
+    return shlex.join(("dyro", "--workspace", str(alias), *command))
+
+
+def _workspace_ready_briefing(
+    args: argparse.Namespace,
+    config: Config,
+    read_budget: ReadBudget | None,
+) -> tuple[dict[str, object] | None, list[str]]:
+    """Attach a switch-tool opening when live Objectives exist.
+
+    `next.commands` stays empty. The briefing command is a read, not a mutation.
+    """
+    try:
+        records = [
+            record
+            for record in list_objectives(
+                config, recover=False, read_budget=read_budget
+            )
+            if record.operator_state != "stopped"
+        ]
+    except (DyroError, ValidationError, OSError, ReadLimitError):
+        command = _briefing_command(args, config, "objective", "list")
+        return unread_briefing(command), [command]
+    if not records:
+        return None, []
+    if len(records) > 1:
+        command = _briefing_command(args, config, "objective", "list")
+        return inventory_briefing(command, len(records)), [command]
+    record = records[0]
+    explain = _briefing_command(
+        args, config, "objective", "explain", record.objective.id
+    )
+    try:
+        _, _, plan = _read_objective_plan(
+            config, record.objective.id, read_budget=read_budget
+        )
+    except (DyroError, ValidationError, OSError, ReadLimitError):
+        return unread_briefing(explain), [explain]
+    command = _briefing_command(args, config, *follow_up_argv(plan))
+    return (
+        briefing_payload(
+            plan, command=command, title=record.objective.title
+        ),
+        [command],
+    )
+
+
+def _ready_next_summary(briefing: dict[str, object] | None) -> str:
+    if briefing is None:
+        return "工作区已就绪。"
+    if briefing.get("available") is not True:
+        return "工作区已就绪，但目标简报未读到。"
+    objective_id = briefing.get("objective_id")
+    if isinstance(objective_id, str) and objective_id:
+        lines = briefing.get("lines")
+        if isinstance(lines, list) and lines and isinstance(lines[0], str):
+            return lines[0]
+    matter = briefing.get("matter")
+    if isinstance(matter, str) and matter:
+        return matter
+    return "工作区已就绪。"
 
 
 def _objective_payload(
@@ -2435,16 +2510,25 @@ def cmd_next(args: argparse.Namespace) -> None:
             + _scoped_command(args, config, "agent", "add", "<id>", "--command", "…")
         )
         return
+    briefing, diagnostic_commands = _workspace_ready_briefing(
+        args, config, budget
+    )
     if args.format == "json":
-        _print_control_plane_json(
-            "next_step",
-            state="ready",
-            summary="工作区已就绪。",
-            commands=[],
-            mutation_available=False,
-        )
+        payload: dict[str, object] = {
+            "state": "ready",
+            "summary": _ready_next_summary(briefing),
+            "commands": [],
+            "mutation_available": False,
+        }
+        if briefing is not None:
+            payload["briefing"] = briefing
+            payload["diagnostic_commands"] = diagnostic_commands
+        _print_control_plane_json("next_step", **payload)
         return
-    print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。")
+    if briefing is None:
+        print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。")
+        return
+    print(render_briefing_text(briefing))
 
 
 def cmd_line_list(args: argparse.Namespace) -> None:
@@ -3380,21 +3464,31 @@ def cmd_objective_plan(args: argparse.Namespace) -> None:
 
 
 def cmd_objective_explain(args: argparse.Namespace) -> None:
-    _, _, plan = _read_objective_plan(
-        _config(args),
+    config = _config(args)
+    record, _, plan = _read_objective_plan(
+        config,
         args.id,
         read_budget=_control_plane_budget(args) if args.format == "json" else None,
     )
+    briefing = briefing_payload(
+        plan,
+        command=_briefing_command(args, config, *follow_up_argv(plan)),
+        title=record.objective.title,
+    )
     if args.format == "json":
+        payload = continuation_plan_payload(plan)
+        payload["briefing"] = briefing
         print(
             json.dumps(
-                continuation_plan_payload(plan),
+                payload,
                 ensure_ascii=False,
                 sort_keys=True,
                 indent=2,
             )
         )
         return
+    print(render_briefing_text(briefing))
+    print()
     print(render_plan_text(plan))
 
 
@@ -4354,7 +4448,10 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--agent")
     start.add_argument("--prompt", default="")
     start.set_defaults(func=cmd_start)
-    next_parser = sub.add_parser("next", help="根据当前状态给出新手的唯一安全下一步")
+    next_parser = sub.add_parser(
+        "next",
+        help="给出唯一安全下一步；已有目标时打印换工具开场白，不续另一家会话",
+    )
     next_parser.add_argument(
         "--format", choices=("text", "json"), default="text"
     )
@@ -4469,7 +4566,8 @@ def build_parser() -> argparse.ArgumentParser:
     objective_plan.add_argument("--format", choices=("text", "json"), default="text")
     objective_plan.set_defaults(func=cmd_objective_plan)
     objective_explain = objective_sub.add_parser(
-        "explain", help="解释 Objective 当前的可推进项与阻塞原因"
+        "explain",
+        help="用人话解释当前事项，并给出一条只读下一步；不续另一家会话",
     )
     objective_explain.add_argument("id")
     objective_explain.add_argument("--format", choices=("text", "json"), default="text")

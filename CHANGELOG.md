@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `objective explain` and a ready `next` now lead with a three-line
+  switch-tool briefing: human matter plus one path-free read command.
+  A single live Objective makes `next` emit `tick` or `attention`
+  directly. `next.commands` stays empty. Empty attention stays unread,
+  not idle. This is not a cross-harness chat resume.
 - Console workspace detail now projects already-captured lines, tasks, and
   objectives from the same summary snapshot. Overview polling stays
   count-only. Summary Proof and task integration stay `not_inspected`;
