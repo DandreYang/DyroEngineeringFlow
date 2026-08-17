@@ -7,6 +7,7 @@ import unittest
 
 from dyro.console.overview import ConsoleOverviewError, ConsoleOverviewService
 from dyro.errors import ValidationError
+from dyro.updates import UpdateState
 from dyro.hub import WorkspaceRecord, WorkspaceRegistry
 from dyro.observations import (
     ObjectiveAttentionObservation,
@@ -320,6 +321,64 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         self.assertNotIn("procedure", repr(payload))
         with self.assertRaisesRegex(ConsoleOverviewError, "WORKSPACE_ALIAS_INVALID"):
             service.inspect_proofs("%2fprivate")
+
+    def test_system_reads_cached_update_without_probing_tools(self) -> None:
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            update_loader=lambda: UpdateState(
+                check_enabled=True,
+                last_checked_on="2026-08-16",
+                latest_version="0.7.2",
+            ),
+            version_loader=lambda: "0.7.1",
+            clock=lambda: datetime(2026, 8, 17, 3, 0, tzinfo=timezone.utc),
+            cursor_secret=b"k" * 32,
+        )
+
+        payload = service.system()
+
+        self.assertEqual(payload["data"]["tool_inspection"], "not_inspected")
+        self.assertEqual(payload["data"]["tools"], [])
+        self.assertEqual(payload["data"]["update"]["kind"], "patch")
+        self.assertEqual(payload["data"]["update"]["latest_version"], "0.7.2")
+        self.assertNotIn("/private", repr(payload))
+
+    def test_invalid_update_state_is_unread_and_path_free(self) -> None:
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            update_loader=lambda: (_ for _ in ()).throw(
+                ValidationError("/private/state/updates.json malformed")
+            ),
+            cursor_secret=b"k" * 32,
+        )
+
+        payload = service.system()
+
+        self.assertEqual(payload["data"]["tool_inspection"], "not_inspected")
+        self.assertEqual(payload["data"]["tools"], [])
+        self.assertEqual(payload["data"]["update"]["kind"], "none")
+        self.assertIn("UPDATE_STATE_UNAVAILABLE", payload["freshness"]["warnings"][0]["code"])
+        self.assertNotIn("/private", repr(payload))
+
+    def test_system_sanitizes_unreadable_update_fields(self) -> None:
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            update_loader=lambda: UpdateState(
+                check_enabled=True,
+                last_checked_on="Tuesday",
+                latest_version="not-a-version",
+            ),
+            version_loader=lambda: "0.7.1",
+            clock=lambda: datetime(2026, 8, 17, 3, 0, tzinfo=timezone.utc),
+            cursor_secret=b"k" * 32,
+        )
+
+        payload = service.system()
+
+        self.assertEqual(payload["data"]["update"]["last_checked_on"], "")
+        self.assertEqual(payload["data"]["update"]["latest_version"], "")
+        self.assertEqual(payload["data"]["update"]["kind"], "none")
+        self.assertEqual(payload["data"]["tools"], [])
 
 
 if __name__ == "__main__":

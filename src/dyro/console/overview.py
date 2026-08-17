@@ -15,13 +15,16 @@ import hashlib
 import hmac
 import json
 from pathlib import Path
+import re
 import secrets
 from typing import Any
 
+from .. import __version__
 from ..canonical import canonical_json_bytes
 from ..config import Config, load, validate_id
 from ..errors import DyroError, ValidationError
 from ..hub import WorkspaceRegistry, load_registry
+from ..updates import UpdateState, classify_update, load_update_state
 from ..observations import (
     WorkspaceReadSnapshot,
     capture_workspace_read_snapshot,
@@ -113,6 +116,34 @@ def _inventory_from_envelope(data: dict[str, object]) -> dict[str, list[dict[str
     }
 
 
+def _empty_update() -> dict[str, object]:
+    return {
+        "check_enabled": False,
+        "last_checked_on": "",
+        "latest_version": "",
+        "kind": "none",
+    }
+
+
+def _update_payload(state: UpdateState, *, current: str) -> dict[str, object]:
+    latest = state.latest_version if isinstance(state.latest_version, str) else ""
+    checked = state.last_checked_on if isinstance(state.last_checked_on, str) else ""
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", latest):
+        latest = ""
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", checked):
+        checked = ""
+    try:
+        kind = classify_update(current, latest).value if latest else "none"
+    except ValidationError:
+        kind = "none"
+    return {
+        "check_enabled": bool(state.check_enabled),
+        "last_checked_on": checked,
+        "latest_version": latest,
+        "kind": kind,
+    }
+
+
 class ConsoleOverviewService:
     """Read and project registered workspaces without changing their state."""
 
@@ -129,6 +160,8 @@ class ConsoleOverviewService:
             [WorkspaceRegistry], tuple[list[dict[str, object]], set[str]]
         ]
         | None = None,
+        update_loader: Callable[[], UpdateState] = load_update_state,
+        version_loader: Callable[[], str] = lambda: __version__,
     ) -> None:
         if cursor_secret is not None and (
             not isinstance(cursor_secret, bytes) or len(cursor_secret) < 32
@@ -141,6 +174,8 @@ class ConsoleOverviewService:
         self._clock = clock
         self._cursor_secret = cursor_secret or secrets.token_bytes(32)
         self._summary_loader = summary_loader
+        self._update_loader = update_loader
+        self._version_loader = version_loader
 
     def page(
         self,
@@ -206,6 +241,23 @@ class ConsoleOverviewService:
             record.name, record.root, record.name == registry.default
         )
         return self._envelope({"workspace": summary, **inventory}, warning_codes)
+
+    def system(self) -> dict[str, object]:
+        """Return cached update facts. Do not probe PATH or start a network check."""
+        warnings: set[str] = set()
+        try:
+            update = _update_payload(self._update_loader(), current=self._version_loader())
+        except (DyroError, ValidationError, OSError, UnicodeError):
+            update = _empty_update()
+            warnings.add("UPDATE_STATE_UNAVAILABLE")
+        return self._envelope(
+            {
+                "tool_inspection": "not_inspected",
+                "tools": [],
+                "update": update,
+            },
+            warnings,
+        )
 
     def inspect_proofs(self, alias: str) -> dict[str, object]:
         """Independent Proof inspect. Must not use the summary snapshot_loader."""

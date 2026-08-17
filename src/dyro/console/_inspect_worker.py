@@ -311,6 +311,8 @@ def main(argv: list[str] | None = None) -> int:
             # Inspect is its own exec-worker request. Keep git descendants in
             # this process group so the parent's 8s killpg can reap them.
             payload = service.inspect_proofs(alias)
+        elif operation == "system":
+            payload = service.system()
         else:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         return _response(payload)

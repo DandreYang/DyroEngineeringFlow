@@ -65,6 +65,7 @@ class ConsoleAssetTests(unittest.TestCase):
 
         self.assertIn(b'id="primary-command"', shell.body)
         self.assertIn(b'id="task-status-counts"', shell.body)
+        self.assertIn(b'id="system-panel"', shell.body)
         self.assertIn(b'aria-live="polite"', shell.body)
         self.assertIn(b'class="workspace-column-headings"', shell.body)
         script = load_asset("app.js")
@@ -84,6 +85,11 @@ class ConsoleAssetTests(unittest.TestCase):
         self.assertIn("仓库".encode(), script.body)
         self.assertIn("状态不完整".encode(), script.body)
         self.assertIn("—".encode(), script.body)
+        self.assertIn("摘要未探测".encode(), script.body)
+        self.assertIn("不探测 PATH".encode(), script.body)
+        self.assertIn("includeSystem".encode(), script.body)
+        self.assertIn("UPDATE_KIND_LABELS".encode(), script.body)
+        self.assertNotIn("没有工具".encode(), script.body)
 
 
 if __name__ == "__main__":

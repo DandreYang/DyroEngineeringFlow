@@ -1,6 +1,6 @@
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const TOKEN_KEY = "dyro.console.bearer";
-const state = { bearer: "", etags: new Map(), timer: null, focus: "", partial: false, surfaces: [] };
+const state = { bearer: "", etags: new Map(), timer: null, focus: "", partial: false, surfaces: [], system: null };
 const HEALTH_LABELS = { healthy: "健康", degraded: "需关注", unavailable: "不可用" };
 const FRESHNESS_LABELS = { fresh: "新鲜", partial: "部分可用", stale: "待更新" };
 const AVAILABILITY_LABELS = { available: "可用", unavailable: "不可用" };
@@ -68,6 +68,12 @@ const ERROR_LABELS = {
   OVERVIEW_UNAVAILABLE: "工作区概览暂时不可读取",
   WORKSPACE_UNAVAILABLE: "工作区当前不可用",
   SESSION_REJECTED: "本地会话未建立",
+};
+const UPDATE_KIND_LABELS = {
+  none: "无已缓存更新",
+  patch: "有补丁更新",
+  minor: "有次版本更新",
+  major: "有主版本更新",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -479,6 +485,68 @@ function definition(label, value) {
   return wrapper;
 }
 
+function firstWarning(payload) {
+  const warnings = payload && payload.freshness && payload.freshness.warnings;
+  if (!Array.isArray(warnings) || !warnings.length) return "";
+  return text(warnings[0] && warnings[0].code);
+}
+
+function updateKindLabel(kind, latest) {
+  if (kind === "patch" || kind === "minor" || kind === "major") {
+    return displayLabel(kind, UPDATE_KIND_LABELS);
+  }
+  return text(latest) ? "无更高版本" : "无已缓存更新";
+}
+
+function renderSystem(payload, failed = false) {
+  const panel = $("system-panel");
+  const note = $("system-note");
+  const update = $("system-update");
+  if (!panel || !note || !update) return;
+  if (!hasSurface("system")) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  if (failed || !payload) {
+    note.textContent = failed
+      ? "本机系统暂时不可读取。本页不探测 PATH，也不发起网络检查。"
+      : "本机系统尚未读取。点刷新后只读已缓存的更新记录，不探测 PATH。";
+    update.replaceChildren();
+    return;
+  }
+  const warning = firstWarning(payload);
+  const unread = warning === "UPDATE_STATE_UNAVAILABLE";
+  note.textContent = unread
+    ? "更新缓存不可读。本页不探测 PATH，也不发起网络检查。"
+    : "本页只读已缓存的更新记录，不探测 PATH，也不发起网络检查。";
+  const cached = payload.data && payload.data.update ? payload.data.update : {};
+  update.replaceChildren(
+    definition("检查开关", unread ? "—" : (cached.check_enabled ? "已启用" : "已关闭")),
+    definition("上次检查", unread ? "—" : (text(cached.last_checked_on) || "—")),
+    definition("缓存最新版", unread ? "—" : (text(cached.latest_version) || "—")),
+    definition("相对当前版本", unread ? "—" : updateKindLabel(cached.kind, cached.latest_version)),
+    definition("本机工具", "摘要未探测"),
+  );
+}
+
+async function loadSystem() {
+  if (!hasSurface("system")) {
+    state.system = null;
+    renderSystem(null);
+    return;
+  }
+  try {
+    const payload = await request("/api/v1/system", "system");
+    if (payload) state.system = payload;
+    renderSystem(state.system);
+  } catch (error) {
+    if (error && error.message === "SESSION_EXPIRED") throw error;
+    state.system = null;
+    renderSystem(null, true);
+  }
+}
+
 async function loadWorkspace(alias, silent = false) {
   if (!SAFE_ID.test(alias)) return;
   try {
@@ -527,12 +595,17 @@ function showError(error) {
   list.append(notice);
 }
 
-async function refresh() {
+async function refresh({ includeSystem = false } = {}) {
   try {
     const payload = await request("/api/v1/overview?limit=100", "overview");
     if (payload) {
       renderOverview(payload);
       state.partial = Boolean(payload.freshness && payload.freshness.partial);
+    }
+    if (includeSystem) {
+      await loadSystem();
+    } else {
+      renderSystem(state.system);
     }
     setStatus(
       state.partial ? "本地会话已就绪；部分工作区状态未能读取，页面只读。" : "本地会话已就绪；页面只读。",
@@ -556,7 +629,7 @@ function scheduleRefresh() {
 }
 
 async function start() {
-  $("refresh").addEventListener("click", async () => { await refresh(); scheduleRefresh(); });
+  $("refresh").addEventListener("click", async () => { await refresh({ includeSystem: true }); scheduleRefresh(); });
   $("primary-copy").addEventListener("click", () => {
     const button = $("primary-copy");
     const command = text(button.dataset.command);
@@ -583,7 +656,7 @@ async function start() {
         : [];
       if (!state.focus) state.focus = text(meta.data && meta.data.initial_workspace);
     }
-    await refresh();
+    await refresh({ includeSystem: true });
     scheduleRefresh();
   } catch (error) {
     if (error && error.message === "SESSION_EXPIRED") {

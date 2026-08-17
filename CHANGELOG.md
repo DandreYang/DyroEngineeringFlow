@@ -9,6 +9,11 @@
 - Console overview now rolls up `task_status_counts` from readable
   workspaces only. Unreadable workspaces stay unknown and are not counted
   as zero.
+- Console `GET /api/v1/system` reads the cached update record only.
+  `tools` stays empty and `tool_inspection=not_inspected`. The shell
+  fetches it on start and manual refresh, not on the 5s overview poll.
+  A broken cache is unread and path-free. Empty tools means unprobed,
+  not "no tools".
 - Console meta advertises `proofs`. The shell fetches
   `GET /api/v1/workspaces/{alias}/proofs` only when that capability is present.
 - Overview summary cards now carry `proof_inspection=not_inspected`. Isolated

@@ -140,6 +140,9 @@ class IsolatedOverviewService:
     def inspect_proofs(self, alias: str) -> dict[str, object]:
         return self._request({"op": "inspect_proofs", "alias": alias})
 
+    def system(self) -> dict[str, object]:
+        return self._request({"op": "system"})
+
     def _request(self, request: Mapping[str, object]) -> dict[str, object]:
         worker_request = dict(request)
         if self._target_root is not None:
@@ -312,6 +315,9 @@ class IsolatedOverviewService:
         if expected_operation == "inspect_proofs":
             cls._validate_inspect(data)
             return
+        if expected_operation == "system":
+            cls._validate_system(data)
+            return
         if expected_operation == "workspace":
             if set(data) != {"workspace", "lines", "tasks", "objectives"}:
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
@@ -358,6 +364,37 @@ class IsolatedOverviewService:
                 or not cls._safe_code(highest.get("reason"))
             ):
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_system(cls, data: dict[str, object]) -> None:
+        if set(data) != {"tool_inspection", "tools", "update"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if data.get("tool_inspection") != "not_inspected":
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if data.get("tools") != []:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        update = data["update"]
+        if not isinstance(update, dict) or set(update) != {
+            "check_enabled",
+            "last_checked_on",
+            "latest_version",
+            "kind",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if type(update.get("check_enabled")) is not bool:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        checked = update.get("last_checked_on")
+        latest = update.get("latest_version")
+        if checked != "" and not (
+            isinstance(checked, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", checked)
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if latest != "" and not (
+            isinstance(latest, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", latest)
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if update.get("kind") not in {"none", "patch", "minor", "major"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
 
     @classmethod
     def _validate_inspect(cls, data: dict[str, object]) -> None:

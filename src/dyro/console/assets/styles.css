@@ -208,6 +208,7 @@ code {
 .workspace-action { justify-self: end; }
 .workspace-action button { font-size: .84rem; padding: .48rem .72rem; }
 
+.system-panel,
 .workspace-detail {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -215,6 +216,8 @@ code {
   margin-top: 1.5rem;
   padding: 0 1.35rem 1.35rem;
 }
+.system-note,
+#system-note { color: var(--muted); font-size: .86rem; }
 .detail-grid { display: grid; gap: .75rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .detail-grid div { border-top: 1px solid var(--border); padding-top: .75rem; }
 .detail-grid dt { color: var(--subtle); font-size: .8rem; }

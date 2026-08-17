@@ -62,6 +62,12 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         self.assertNotIn(str(self.root), repr(overview))
         self.assertNotIn(str(self.root), repr(workspace))
         self.assertNotIn(str(self.root), repr(inspect))
+        system = service.system()
+        self.assertEqual(system["data"]["tool_inspection"], "not_inspected")
+        self.assertEqual(system["data"]["tools"], [])
+        self.assertIn(system["data"]["update"]["kind"], {"none", "patch", "minor", "major"})
+        self.assertNotIn(str(self.root), repr(system))
+        self.assertNotIn("/usr/", repr(system))
 
     def test_default_workspace_budget_tolerates_process_startup_overhead(self) -> None:
         clock = [0.0]
@@ -393,6 +399,35 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
             with self.subTest(keys=sorted(payload["data"])):
                 with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE"):
                     service._parse_worker_output(raw, expected_operation="workspace")
+
+    def test_parent_rejects_system_tool_probe_leak(self) -> None:
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+        )
+        valid = service.system()
+        inspected = deepcopy(valid)
+        inspected["data"]["tool_inspection"] = "inspected"
+        probed = deepcopy(valid)
+        probed["data"]["tools"] = [{"name": "git", "argv": ["git"]}]
+        for payload in (inspected, probed):
+            payload["snapshot_sha256"] = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "schema_version": 1,
+                        "freshness": payload["freshness"],
+                        "data": payload["data"],
+                    }
+                )
+            ).hexdigest()
+            raw = json.dumps({"ok": True, "payload": payload}).encode("utf-8")
+            with self.subTest(keys=sorted(payload["data"])):
+                with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE") as error:
+                    service._parse_worker_output(raw, expected_operation="system")
+                self.assertNotIn("git", str(error.exception))
+                self.assertNotIn("argv", str(error.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

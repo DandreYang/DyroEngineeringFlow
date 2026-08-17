@@ -475,9 +475,9 @@ title 和 branch 是明确的展示字段，但仍受长度、Unicode 控制字�
 
 | 方法与路径 | 返回 |
 | --- | --- |
-| `GET /api/v1/meta` | 版本、`surfaces`（`overview` 与 `proofs`；`capabilities` 为兼容别名）、session expiry |
+| `GET /api/v1/meta` | 版本、`surfaces`（`overview`、`proofs`、`system`；`capabilities` 为兼容别名）、session expiry |
 | `GET /api/v1/overview?cursor=...&limit=...` | 已登记 workspace 的分页轻量摘要 |
-| `GET /api/v1/system` | 本机工具状态与已缓存更新状态 |
+| `GET /api/v1/system` | 只读 `updates.json` 缓存。`tools` 恒为空，`tool_inspection=not_inspected` 表示未探测，不得写成没有工具。不探测 PATH，不发起网络检查。5 秒 overview 轮询不拉此接口。 |
 | `GET /api/v1/workspaces/{alias}` | 单 workspace 摘要卡，加上同一次 summary 快照的线 / 任务 / 目标清单 |
 | `GET /api/v1/workspaces/{alias}/proofs` | 独立 Proof inspect；摘要保持未检查 |
 | `GET /api/v1/workspaces/{alias}/lines/{kind}/{line}` | 单 line 或 hotfix 详情 |
