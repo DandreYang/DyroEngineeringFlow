@@ -93,13 +93,14 @@ dyro console
 
 ### 3.3 工作区详情
 
-工作区详情按“需要关注 → 正在推进 → 其余状态”排序，而不是先展示仓库内部结构。开发线表格提供 Task 分布、dirty 或 missing 摘要和最近活动。仓库 Git 深度检查异步加载，不阻塞页面基本信息。
+工作区详情按“需要关注 → 正在推进 → 其余状态”排序，而不是先展示仓库内部结构。首屏关注列表只投影同一次 summary 快照里的 Objective attention，并去掉 `PROOF_DECAYED`。空列表写成「摘要未列出关注项」；工作区不可读时写成未知，不得按 0 或「没有事项」展示。开发线表格提供 Task 分布、dirty 或 missing 摘要和最近活动。仓库 Git 深度检查异步加载，不阻塞页面基本信息。
 
 绝对根路径和 remote URL 默认不进入 API。所有恢复命令优先使用安全别名，例如：
 
 ```text
 dyro --workspace example doctor
-dyro --workspace example objective explain --objective release-readiness
+dyro --workspace example objective tick release-readiness
+dyro --workspace example objective attention release-readiness
 dyro --workspace example task open API-101
 ```
 
@@ -234,8 +235,16 @@ C04 将真实工作区读取移出 HTTP 请求线程，并补齐概览的单工�
   inspection fail closed，不会以“只终止 outer process”的方式留下读取子进程；
 - worker 到 listener 只返回有大小上限的规范 JSON。父进程重新校验 schema、digest、freshness 和
   payload 形状；无效输出、超时或 worker 失败全部 fail closed 为稳定 code；
-- `GET /api/v1/workspaces/{alias}` 需要 bearer，只接收单段安全 alias，复用同一 summary DTO 与
-  ETag。未知 alias、编码 traversal 或双段路径不会落入 workspace 读取；
+- `GET /api/v1/workspaces/{alias}` 需要 bearer，只接收单段安全 alias。响应复用同一
+  summary DTO，并附带同一次 summary 快照里已经捕获的 `lines` / `tasks` /
+  `objectives`。这不是独立 inspect：摘要卡必须带 `proof_inspection=not_inspected`，
+  任务 `integration_state` 必须是 `not_inspected`，不得带 `proofs`，也不得把
+  `PROOF_DECAYED` 写进这张详情。未知 alias、编码 traversal 或双段路径不会落入
+  workspace 读取；
+- `GET /api/v1/workspaces/{alias}/proofs` 是独立 inspect，不改写 summary。摘要卡必须带
+  `proof_inspection=not_inspected`；父进程若看到 `inspected` 会拒收该卡。inspect 与
+  summary 共用同一 exec worker 与进程组回收；超时由父进程 `killpg`，只回报未检查，
+  不把摘要标成已检查。不得在 worker 内再 spawn 一层后成功退出，留下 hung git；
 - overview 和 workspace 的 ETag 覆盖 data 以及 `freshness.state`、`partial` 和 warnings，排除仅
   表示采样时刻的 `captured_at`，因此 warning-only 变化也会使条件请求重新获得 200。
 
@@ -269,8 +278,10 @@ C06 将已认证的总览接口接入无框架浏览器界面，优先让使用�
 - 可点击卡片查看当前 C04 summary，支持条件 ETag 刷新。页面在后台时暂停轮询，恢复可见时只恢复
   单一轮询定时器；会话过期或本地读取失败显示一条恢复说明，不猜测数据或修改项目。
 
-C06 仅消费已发布的 overview/workspace 只读 DTO；Objective、Task 证据链、图和活动的深度 API
-仍须在对应 Core 投影准备完成后通过单独的只读扩展交付，不能由浏览器自行推导。
+C06 仅消费已发布的 overview/workspace 只读 DTO。工作区详情可以展示同一次
+summary 快照里的线、任务和目标清单；overview 轮询不得带上这些列表。独立 Proof
+inspect 只在 meta 声明 `proofs` 能力后由详情页按需请求，不得在 overview 轮询里打开。
+单条 line / Objective / Task 证据链、图和活动的深度 API 仍须在对应 Core 投影准备完成后通过单独的只读扩展交付，不能由浏览器自行推导。
 
 ## 5. 模块设计
 
@@ -372,11 +383,11 @@ argv、环境值和原始解析内容不得直接进入 `facts` 或 recovery com
 
 `ConsoleOverview`：
 
-- Dyro 版本和 API capabilities；
+- Dyro 版本和 API surfaces（`overview` / `proofs` / `system`；`capabilities` 仍是兼容别名，不是 Capability Card）；
 - registry 状态、默认或当前别名；
 - `WorkspaceSummary[]`；
-- 全局 attention 计数和最高优先级事项；
-- 缓存更新状态。
+- 全局 attention 计数、可读工作区的 Task 状态分布，以及最高优先级事项；
+- 缓存更新状态。不可读工作区的任务数不得按 0 计入状态分布。
 
 `WorkspaceSummary`：
 
@@ -385,7 +396,8 @@ argv、环境值和原始解析内容不得直接进入 `facts` 或 recovery com
 - repository、line、Objective、Task 计数；
 - Task 状态分布；
 - attention 计数和单一推荐动作；
-- workspace snapshot digest。
+- workspace snapshot digest；
+- `proof_inspection`，且只能是 `not_inspected`。独立 inspect 不写进这张卡。
 
 `ConsoleWorkspace`：
 
@@ -464,10 +476,11 @@ title 和 branch 是明确的展示字段，但仍受长度、Unicode 控制字�
 
 | 方法与路径 | 返回 |
 | --- | --- |
-| `GET /api/v1/meta` | 版本、capabilities、session expiry |
+| `GET /api/v1/meta` | 版本、`surfaces`（`overview`、`proofs`、`system`；`capabilities` 为兼容别名）、session expiry |
 | `GET /api/v1/overview?cursor=...&limit=...` | 已登记 workspace 的分页轻量摘要 |
-| `GET /api/v1/system` | 本机工具状态与已缓存更新状态 |
-| `GET /api/v1/workspaces/{alias}` | 单 workspace 详情和 health 摘要 |
+| `GET /api/v1/system` | 只读 `updates.json` 缓存。`tools` 恒为空，`tool_inspection=not_inspected` 表示未探测，不得写成没有工具。不探测 PATH，不发起网络检查。5 秒 overview 轮询不拉此接口。 |
+| `GET /api/v1/workspaces/{alias}` | 单 workspace 摘要卡，加上同一次 summary 快照的线 / 任务 / 目标清单 |
+| `GET /api/v1/workspaces/{alias}/proofs` | 独立 Proof inspect；摘要保持未检查 |
 | `GET /api/v1/workspaces/{alias}/lines/{kind}/{line}` | 单 line 或 hotfix 详情 |
 | `GET /api/v1/workspaces/{alias}/graph?kind=...&line=...` | 组合图投影 |
 | `GET /api/v1/workspaces/{alias}/objectives` | Objective 摘要列表 |

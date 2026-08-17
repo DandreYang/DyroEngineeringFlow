@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dyro.config import load
+from dyro.errors import ValidationError
 from dyro.continuation.actions import (
     ActionIntent,
     ActionReceipt,
@@ -285,6 +286,20 @@ class ProofDeriveTests(WorkspaceCase):
             any(proof.kind is ProofKind.TRIGGER_OBSERVATION for proof in list_proofs(config, objective_id="release"))
         )
         self.assertTrue(any(proof.kind is ProofKind.TRIGGER_OBSERVATION for proof in list_proofs(config)))
+        self.assertTrue(
+            any(
+                proof.kind is ProofKind.TRIGGER_OBSERVATION
+                for proof in list_proofs(config, line_id="alpha")
+            )
+        )
+        self.assertFalse(
+            any(
+                proof.kind is ProofKind.TRIGGER_OBSERVATION
+                for proof in list_proofs(config, line_id="other")
+            )
+        )
+        with self.assertRaisesRegex(ValidationError, "--task 与 --line"):
+            list_proofs(config, task_id="TASK-A", line_id="alpha")
         due = evaluate_proofs(
             config,
             first,

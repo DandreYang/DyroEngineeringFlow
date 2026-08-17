@@ -31,6 +31,7 @@ class CapabilityCardTests(WorkspaceCase):
         self.assertEqual(card.attested_isolation.value, "cwd")
         self.assertEqual(card.cannot_prove, ("done", "merge"))
         self.assertIn("execute", card.intents)
+        self.assertFalse(card.trusted_usage)
 
     def test_capabilities_table_parses_and_synthesizes_adapter(self) -> None:
         path = self.root / "dyro.toml"
@@ -55,6 +56,7 @@ can_prove = ["review_verdict"]
         self.assertIn("done", card.cannot_prove)
         self.assertIn("merge", card.cannot_prove)
         self.assertEqual(card.can_prove, ("review_verdict",))
+        self.assertFalse(card.trusted_usage)
 
     def test_adapter_and_capability_id_conflict_is_fail_closed(self) -> None:
         path = self.root / "dyro.toml"
@@ -260,6 +262,94 @@ intents = ["observe"]
                 "dry-run",
             )
             dispatch.assert_called_once()
+
+    def test_bound_dispatch_refuses_observe_only_card_without_outer_gate(self) -> None:
+        from types import SimpleNamespace
+
+        from dyro.task_dispatch import run_task_bound_dispatch
+
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-BOUND"
+        task_path.mkdir(parents=True)
+        spec = task_template("TASK-BOUND", "bound card", "alpha", "api", "services/api")
+        task_path.joinpath("task.toml").write_text(spec, encoding="utf-8")
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task = load_task(config, "TASK-BOUND")
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            with self.assertRaisesRegex(ValidationError, "write dispatch 必须提供"):
+                run_task_bound_dispatch(
+                    task,
+                    executor="echo",
+                    workspace=workspace,
+                    prompt="no",
+                    timeout_seconds=1.0,
+                )
+            with self.assertRaisesRegex(ValidationError, "未授予 execute"):
+                run_task_bound_dispatch(
+                    task,
+                    executor="echo",
+                    workspace=workspace,
+                    prompt="no",
+                    timeout_seconds=1.0,
+                    capabilities={"echo": SimpleNamespace(intents=("observe",))},
+                )
+
+    def test_trusted_usage_reaches_production_budget_lookup(self) -> None:
+        from types import SimpleNamespace
+
+        from dyro.continuation.models import ActionKind
+        from dyro.continuation.store import (
+            _budget_request,
+            _budget_usage,
+            _trusted_usage_for_subject,
+        )
+
+        path = self.root / "dyro.toml"
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + """
+
+[[capabilities]]
+id = "metered"
+kind = "agent"
+launch = ["/usr/bin/true"]
+read = ["/usr/bin/true"]
+write = ["/usr/bin/true"]
+trusted_usage = true
+""",
+            encoding="utf-8",
+        )
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        task_path = config.task_specs_dir / "TASK-METER"
+        task_path.mkdir(parents=True)
+        spec = task_template("TASK-METER", "metered usage", "alpha", "api", "services/api")
+        spec = spec.replace('agent = "codex"', 'agent = "metered"')
+        task_path.joinpath("task.toml").write_text(spec, encoding="utf-8")
+        task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+
+        self.assertTrue(config.capabilities["metered"].trusted_usage)
+        self.assertTrue(_trusted_usage_for_subject(config, "TASK-METER"))
+        self.assertFalse(_trusted_usage_for_subject(config, "TASK-MISSING"))
+        self.assertTrue(_budget_usage((), objective_id=None).provider_usage_trusted)
+        request = _budget_request(
+            config,
+            SimpleNamespace(operation=ActionKind.EXECUTE_TASK, subject_id="TASK-METER"),
+        )
+        self.assertTrue(request.provider_usage_trusted)
+        adapter_task = config.task_specs_dir / "TASK-NOOP"
+        adapter_task.mkdir(parents=True)
+        adapter_spec = task_template("TASK-NOOP", "adapter usage", "alpha", "api", "services/api")
+        adapter_spec = adapter_spec.replace('agent = "codex"', 'agent = "noop"')
+        adapter_task.joinpath("task.toml").write_text(adapter_spec, encoding="utf-8")
+        adapter_task.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        adapter_request = _budget_request(
+            config,
+            SimpleNamespace(operation=ActionKind.REVIEW_TASK, subject_id="TASK-NOOP"),
+        )
+        self.assertFalse(adapter_request.provider_usage_trusted)
 
 
 if __name__ == "__main__":

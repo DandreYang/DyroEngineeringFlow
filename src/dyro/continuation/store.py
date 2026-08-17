@@ -13,8 +13,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Mapping, Sequence
 
+from ..capability.cards import card_trusted_usage
 from ..config import Config, validate_id
 from ..errors import DyroError, ValidationError
 from ..graph import build_task_graph, validate_task_graph
@@ -58,7 +59,7 @@ from .budgets import (
     BudgetUsage,
     decide_budget,
 )
-from .models import ActionKind, Objective, Operation, RequestedMode
+from .models import ActionKind, Objective, Operation, PlannedAction, RequestedMode
 from .objective_storage import (
     OBJECTIVE_STORE_SCHEMA_VERSION,
     OPERATOR_STATES,
@@ -700,7 +701,8 @@ def _budget_usage(
     when its terminal receipt is still missing.  Only not-started intents are
     treated as reservations by the caller.  ``uncertain`` deliberately counts
     as a failure: it may have produced a side effect and must never make the
-    next Action look safer than it is.
+    next Action look safer than it is.  Empty usage is vacuously trusted;
+    any started Action still lacks a Card-backed meter, so it stays untrusted.
     """
     selected = tuple(
         record
@@ -744,6 +746,8 @@ def _budget_usage(
             for record in started
             if record.receipt is None
         ),
+        provider_usage=0,
+        provider_usage_trusted=not started,
         attempts_by_task=tuple(sorted(attempts.items())),
     )
 
@@ -758,7 +762,11 @@ def _reserved_budgets(records: Iterable[ActionRecord]) -> tuple[BudgetReservatio
 
 
 def _all_action_records_unlocked(config: Config) -> tuple[ActionRecord, ...]:
-    """Read every durable Action Journal while the workspace Objective lock is held."""
+    """Read every durable Action Journal.
+
+    Reservation holds the workspace Objective lock. Preview may call this
+    without that lock and must tolerate a dirty read.
+    """
     actions: list[ActionRecord] = []
     for stored in _list_objectives_unlocked(config, recover=False):
         with open_objective_directory(config, stored.objective.id) as directory:
@@ -766,17 +774,119 @@ def _all_action_records_unlocked(config: Config) -> tuple[ActionRecord, ...]:
     return tuple(actions)
 
 
-def _budget_request(intent: ActionIntent) -> BudgetRequest:
-    """Fix the conservative charge for each supported supervised operation."""
-    if intent.operation is ActionKind.EXECUTE_TASK:
+def _trusted_usage_for_subject(config: Config, task_id: str) -> bool:
+    """Card.trusted_usage only. Missing task or Card stays untrusted."""
+    try:
+        task = next(item for item in list_tasks(config) if item.id == task_id)
+    except (StopIteration, DyroError, OSError, ValidationError):
+        return False
+    return card_trusted_usage(getattr(config, "capabilities", None), task.executor)
+
+
+def _workspace_budget_caps(config: Config) -> BudgetCaps:
+    """Workspace metering only. Missing cap means untrusted usage will not hard-stop."""
+    return BudgetCaps(max_provider_usage=getattr(config, "max_provider_usage", None))
+
+
+def _budget_request_for(
+    config: Config, operation: ActionKind, subject_id: str
+) -> BudgetRequest:
+    """Fix the conservative charge for each supported mutating operation."""
+    trusted = _trusted_usage_for_subject(config, subject_id)
+    if operation is ActionKind.EXECUTE_TASK:
         return BudgetRequest(
-            intent.subject_id, actions=1, attempts=1, failures=1, parallel=1
+            subject_id,
+            actions=1,
+            attempts=1,
+            failures=1,
+            parallel=1,
+            provider_usage_trusted=trusted,
         )
-    if intent.operation is ActionKind.REVIEW_TASK:
+    if operation is ActionKind.REVIEW_TASK:
         return BudgetRequest(
-            intent.subject_id, actions=1, attempts=0, failures=1, parallel=1
+            subject_id,
+            actions=1,
+            attempts=0,
+            failures=1,
+            parallel=1,
+            provider_usage_trusted=trusted,
         )
     raise DyroError("受监督执行当前只支持 execute_task 与 review_task")
+
+
+def _budget_request(config: Config, intent: ActionIntent) -> BudgetRequest:
+    return _budget_request_for(config, intent.operation, intent.subject_id)
+
+
+_PREVIEWABLE_ACTIONS = frozenset({ActionKind.EXECUTE_TASK, ActionKind.REVIEW_TASK})
+
+
+def preview_objective_wave_budgets(
+    config: Config,
+    *,
+    objective: Objective,
+    actions: Sequence[PlannedAction],
+    now: datetime,
+    workspace: BudgetCaps | None = None,
+) -> dict[str, object]:
+    """Read-only budget preview. Never reserves and never starts an Action."""
+    automatic = objective.requested_mode is RequestedMode.AUTOMATIC
+    caps = workspace if workspace is not None else _workspace_budget_caps(config)
+    all_records = _all_action_records_unlocked(config)
+    usage = _budget_usage(all_records, objective_id=objective.id)
+    workspace_usage = _budget_usage(all_records, objective_id=None)
+    reservations = _reserved_budgets(all_records)
+    previews: list[dict[str, object]] = []
+    for action in actions:
+        if action.kind not in _PREVIEWABLE_ACTIONS:
+            continue
+        decision = decide_budget(
+            BudgetDecisionInput(
+                objective_id=objective.id,
+                requested=objective.budget,
+                workspace=caps,
+                activation=None,
+                usage=usage,
+                workspace_usage=workspace_usage,
+                reservations=reservations,
+                now=now,
+                request=_budget_request_for(config, action.kind, action.subject_id),
+                automatic=automatic,
+            )
+        )
+        previews.append(
+            {
+                "subject_id": action.subject_id,
+                "operation": action.kind.value,
+                "allowed": decision.allowed,
+                "reasons": [reason.value for reason in decision.reasons],
+            }
+        )
+    return {
+        "schema_version": 1,
+        "automatic": automatic,
+        "provider_cap": caps.max_provider_usage,
+        "reserved": False,
+        "actions": previews,
+    }
+
+
+def render_budget_preview_text(preview: Mapping[str, object]) -> tuple[str, ...]:
+    """Human tick lines. Preview only; never imply a reservation was taken."""
+    lines: list[str] = []
+    if preview.get("automatic") and preview.get("provider_cap") is None:
+        lines.append(
+            "预算：自动预览没有工作区 provider cap；未信任用量不会硬停"
+        )
+    for item in preview.get("actions", ()):
+        if not isinstance(item, Mapping) or item.get("allowed"):
+            continue
+        reasons = ", ".join(str(reason) for reason in item.get("reasons", ()))
+        lines.append(
+            f"预算：{item.get('operation')} {item.get('subject_id')} "
+            f"若自动执行将被拒绝（{reasons}）"
+        )
+    return tuple(lines)
 
 
 def reserve_supervised_objective_action(
@@ -786,6 +896,7 @@ def reserve_supervised_objective_action(
     intent: ActionIntent,
     grant: OwnerLeaseGrant,
     now: datetime,
+    automatic: bool = False,
 ) -> tuple[ActionRecord, BudgetDecision]:
     """Atomically recheck durable budgets and reserve one supervised Action.
 
@@ -806,19 +917,19 @@ def reserve_supervised_objective_action(
                 raise DyroError(
                     "Action intent owner_generation 与当前 Scheduler lease 不匹配"
                 )
-            request = _budget_request(intent)
+            request = _budget_request(config, intent)
             decision = decide_budget(
                 BudgetDecisionInput(
                     objective_id=objective_id,
                     requested=record.objective.budget,
-                    workspace=BudgetCaps(),
+                    workspace=_workspace_budget_caps(config),
                     activation=None,
                     usage=_budget_usage(all_records, objective_id=objective_id),
                     workspace_usage=_budget_usage(all_records, objective_id=None),
                     reservations=_reserved_budgets(all_records),
                     now=now,
                     request=request,
-                    automatic=False,
+                    automatic=automatic,
                 )
             )
             if intent.budget_reservation != decision.reservation:

@@ -1030,6 +1030,7 @@ class ObjectiveCliTests(WorkspaceCase):
         self.assertEqual(next_payload["state"], "ready")
         self.assertEqual(next_payload["commands"], [])
         self.assertFalse(next_payload["mutation_available"])
+        self.assertNotIn("briefing", next_payload)
 
         lines_payload = self._read_json("line", "list")
         self.assertEqual(lines_payload["kind"], "line_list")
@@ -1584,7 +1585,10 @@ class ObjectiveCliTests(WorkspaceCase):
         explain_output = StringIO()
         with redirect_stdout(explain_output):
             main(["--root", root, "objective", "explain", "release"])
-        self.assertIn("Objective: release", explain_output.getvalue())
+        explain_text = explain_output.getvalue()
+        self.assertIn("Objective: release", explain_text)
+        self.assertIn("下一步：", explain_text)
+        self.assertNotIn(str(self.root.resolve()), explain_text)
         graph_output = StringIO()
         with redirect_stdout(graph_output):
             main(
@@ -1617,6 +1621,128 @@ class ObjectiveCliTests(WorkspaceCase):
             if path.is_file()
         }
         self.assertEqual(before, after)
+
+    def test_objective_explain_json_includes_path_free_briefing(self) -> None:
+        self._start_release_objective()
+        payload = self._read_json("objective", "explain", "release")
+        briefing = payload["briefing"]
+        blob = json.dumps(payload)
+        self.assertTrue(briefing["available"])
+        self.assertEqual(briefing["objective_id"], "release")
+        self.assertIn("--workspace test-workspace", briefing["command"])
+        self.assertNotIn("--root", briefing["command"])
+        self.assertNotIn(str(self.root.resolve()), blob)
+        self.assertNotIn("session", blob.lower())
+        self.assertIn("plan_sha256", payload)
+        self.assertIn("下一步：", "\n".join(briefing["lines"]))
+
+    def test_next_with_one_live_objective_points_to_follow_up(self) -> None:
+        self._start_release_objective()
+        explain = self._read_json("objective", "explain", "release")
+        payload = self._read_json("next")
+        briefing = payload["briefing"]
+        self.assertEqual(payload["kind"], "next_step")
+        self.assertEqual(payload["state"], "ready")
+        self.assertEqual(payload["commands"], [])
+        self.assertFalse(payload["mutation_available"])
+        self.assertEqual(
+            briefing["command"],
+            "dyro --workspace test-workspace objective tick release",
+        )
+        self.assertEqual(briefing["command"], explain["briefing"]["command"])
+        self.assertEqual(payload["diagnostic_commands"], [briefing["command"]])
+        self.assertNotIn("objective apply", json.dumps(payload))
+        self.assertNotIn(str(self.root.resolve()), json.dumps(payload))
+
+    def test_bare_dyro_prints_the_same_follow_up_before_the_home_menu(self) -> None:
+        self._start_release_objective()
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=False),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+        text = output.getvalue()
+        self.assertRegex(text, r"dyro --workspace \S+ objective tick release")
+        self.assertIn("今天做什么", text)
+        self.assertIn("做下一步，不打开编码工具", text)
+        self.assertNotIn("objective apply", text)
+
+    def test_bare_dyro_without_objectives_does_not_invent_a_briefing(self) -> None:
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=False),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+        text = output.getvalue()
+        self.assertIn("今天做什么", text)
+        self.assertNotIn("objective tick", text)
+        self.assertNotIn("objective attention", text)
+
+    def test_next_with_two_live_objectives_does_not_pick_one(self) -> None:
+        self._start_release_objective()
+        directory = self.config.task_specs_dir / "TASK-B"
+        directory.mkdir(parents=True)
+        directory.joinpath("task.toml").write_text(
+            task_template("TASK-B", "Task B", "alpha", "api", "services/api").replace(
+                'agent = "codex"', 'agent = "noop"'
+            ),
+            encoding="utf-8",
+        )
+        directory.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        main(
+            [
+                "--root",
+                str(self.root),
+                "objective",
+                "start",
+                "--id",
+                "hotfix",
+                "--title",
+                "Hotfix",
+                "--line",
+                "alpha",
+                "--targets",
+                "TASK-B",
+                "--yes",
+            ]
+        )
+        payload = self._read_json("next")
+        self.assertEqual(payload["commands"], [])
+        self.assertFalse(payload["mutation_available"])
+        self.assertEqual(payload["briefing"]["objective_id"], "")
+        self.assertIn("objective list", payload["briefing"]["command"])
+        self.assertIn("多个未停止的目标", payload["briefing"]["matter"])
+
+    def test_objective_tick_text_leads_with_human_arrival(self) -> None:
+        self._start_release_objective()
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", str(self.root), "objective", "tick", "release"])
+        text = output.getvalue()
+        self.assertIn("Release · 未完成", text)
+        self.assertIn("这是预览，还没有执行。当前窗口可以接着做。", text)
+        self.assertIn("本轮可以推进：", text)
+        self.assertIn("执行 · 有任务可以继续做（TASK-A）", text)
+        self.assertIn("Tick SHA-256", text)
+        self.assertNotIn("objective apply", text)
+        payload = self._read_json("objective", "tick", "release")
+        self.assertNotIn("briefing", payload)
+        self.assertIn("tick_sha256", payload)
+
+    def test_objective_attention_text_leads_with_human_arrival(self) -> None:
+        self._start_release_objective()
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", str(self.root), "objective", "attention", "release"])
+        text = output.getvalue()
+        self.assertIn("Release · 未完成", text)
+        self.assertIn("这些事项需要你处理。当前窗口可以接着做。", text)
+        self.assertIn("Attention SHA-256", text)
+        payload = self._read_json("objective", "attention", "release")
+        self.assertNotIn("briefing", payload)
+        self.assertIn("attention_sha256", payload)
 
     def test_objective_apply_dry_run_shows_the_exact_wave_without_writing(self) -> None:
         root = str(self.root)

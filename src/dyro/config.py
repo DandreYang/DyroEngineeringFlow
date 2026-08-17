@@ -73,6 +73,7 @@ class Config:
     policy: Policy
     recommended_tool: str = ""
     capabilities: dict[str, object] = field(default_factory=dict)
+    max_provider_usage: int | None = None
 
     @property
     def task_specs_dir(self) -> Path:
@@ -196,6 +197,17 @@ def _parse_config(workspace: Path, profile_bytes: bytes) -> Config:
     recommended_tool = recommended_tool_raw.strip()
     if recommended_tool:
         validate_id(recommended_tool, "workspace.recommended_tool")
+    max_provider_usage_raw = workspace_raw.get("max_provider_usage")
+    if max_provider_usage_raw is None:
+        max_provider_usage = None
+    elif (
+        isinstance(max_provider_usage_raw, bool)
+        or not isinstance(max_provider_usage_raw, int)
+        or max_provider_usage_raw < 1
+    ):
+        raise ValidationError("workspace.max_provider_usage 必须是正整数")
+    else:
+        max_provider_usage = max_provider_usage_raw
     layout_raw = table("layout")
     layout = Layout(
         anchors=_relative(
@@ -337,6 +349,7 @@ def _parse_config(workspace: Path, profile_bytes: bytes) -> Config:
         policy,
         recommended_tool,
         cards,
+        max_provider_usage,
     )
 
 

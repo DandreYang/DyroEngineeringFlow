@@ -9,6 +9,8 @@ import sys
 from urllib.parse import urlencode
 
 from .config import CONFIG_NAME, Config, expand_argv, load, validate_id
+from .continuation.briefing import render_briefing_text
+from .continuation.ready_briefing import build_ready_briefing
 from .errors import DyroError, ValidationError
 from .hub import (
     WorkspaceRecord,
@@ -962,13 +964,28 @@ def _targets(config: Config, record: WorkspaceRecord | None) -> list[HomeTarget]
     return targets
 
 
+def _follow_up_command(briefing: dict[str, object] | None) -> str:
+    if not isinstance(briefing, dict):
+        return ""
+    command = briefing.get("command")
+    return command.strip() if isinstance(command, str) else ""
+
+
 def _choose_action(
-    targets: list[HomeTarget], *, can_switch: bool
+    targets: list[HomeTarget],
+    *,
+    can_switch: bool,
+    briefing: dict[str, object] | None = None,
 ) -> tuple[str, str] | None:
+    follow_up = _follow_up_command(briefing)
+    offset = 1 if follow_up else 0
     print("\n" + title("━━ 今天做什么 ━━"))
+    if follow_up:
+        print("\n" + muted("现在需要你"))
+        print("  1) 做下一步，不打开编码工具")
     if targets:
         print("\n" + muted("继续工作"))
-    for index, target in enumerate(targets, start=1):
+    for index, target in enumerate(targets, start=1 + offset):
         prefix, delimiter, target_value = target.label.partition("：")
         rendered_target = (
             f"{prefix}{delimiter}{value(target_value)}"
@@ -976,7 +993,7 @@ def _choose_action(
             else value(target.label)
         )
         print(f"  {index}) {rendered_target}")
-    status_index = len(targets) + 1
+    status_index = len(targets) + 1 + offset
     print("\n" + muted("查看与管理"))
     print(f"  {status_index}) 查看当前项目状态")
     console_index = status_index + 1
@@ -995,7 +1012,7 @@ def _choose_action(
             "\n在交互终端运行 dyro 可选择并直接进入；也可使用 dyro open 或 dyro task open。"
         )
         return None
-    default = "1" if targets else str(new_line_index)
+    default = "1" if (follow_up or targets) else str(new_line_index)
     while True:
         raw = (
             input(f"\n输入编号（回车={default}，q=退出）：").strip().lower() or default
@@ -1006,8 +1023,10 @@ def _choose_action(
             print(warning("请输入菜单编号，或输入 q 退出。"))
             continue
         selected = int(raw)
-        if 1 <= selected <= len(targets):
-            target = targets[selected - 1]
+        if follow_up and selected == 1:
+            return "briefing", follow_up
+        if offset < selected <= len(targets) + offset:
+            target = targets[selected - 1 - offset]
             return target.kind, target.id
         if selected == status_index:
             return "status", ""
@@ -2127,6 +2146,21 @@ def _create_hotfix_from_home(config: Config, dry_run: bool) -> Line | None:
         return line
 
 
+def _print_ready_briefing(
+    config: Config, record: WorkspaceRecord | None
+) -> dict[str, object] | None:
+    """Show the same switch-tool opening as `next`, then the home menu."""
+    alias = record.name if record is not None else config.name
+    briefing, _ = build_ready_briefing(config, alias=alias)
+    if briefing is None:
+        return None
+    text = render_briefing_text(briefing)
+    if text:
+        print()
+        print(text)
+    return briefing
+
+
 def _run_config_home(
     config: Config, record: WorkspaceRecord | None, dry_run: bool
 ) -> None:
@@ -2138,12 +2172,19 @@ def _run_config_home(
             f"\n检测到 {len(failures)} 个结构问题；只会阻止进入受影响的目标。"
             "运行 dyro doctor 查看详情。"
         )
+    briefing = _print_ready_briefing(config, record)
     action = _choose_action(
-        _targets(config, record), can_switch=len(load_registry().workspaces) > 1
+        _targets(config, record),
+        can_switch=len(load_registry().workspaces) > 1,
+        briefing=briefing,
     )
     if action is None:
         return
     kind, target_id = action
+    if kind == "briefing":
+        if target_id:
+            print(target_id)
+        return
     if kind == "status":
         print_status(config)
         return

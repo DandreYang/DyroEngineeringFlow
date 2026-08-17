@@ -34,6 +34,17 @@ from .continuation.attention import (
     render_attention_json,
     render_attention_text,
 )
+from .continuation.briefing import (
+    ATTENTION_CLOSER,
+    TICK_CLOSER,
+    arrival_lines,
+    briefing_payload,
+    follow_up_argv,
+    render_briefing_text,
+    render_human_attention,
+    render_human_wave,
+)
+from .continuation.ready_briefing import briefing_command, build_ready_briefing
 from .continuation.engine import (
     build_scheduler_tick,
     render_scheduler_tick_text,
@@ -68,8 +79,10 @@ from .continuation.store import (
     get_objective,
     list_objectives,
     pause_objective,
+    preview_objective_wave_budgets,
     reconcile_objective,
     remove_objective_target,
+    render_budget_preview_text,
     resume_objective,
     stop_objective,
 )
@@ -549,6 +562,43 @@ def _scoped_command(
     args: argparse.Namespace, config: Config, *command: str
 ) -> str:
     return shlex.join((*_workspace_selector_argv(args, config), *command))
+
+
+def _briefing_command(
+    args: argparse.Namespace, config: Config, *command: str
+) -> str:
+    """Scope a read-only briefing command without embedding --root paths."""
+    alias = getattr(args, "workspace_alias", None) or config.name
+    return briefing_command(str(alias), *command)
+
+
+def _workspace_ready_briefing(
+    args: argparse.Namespace,
+    config: Config,
+    read_budget: ReadBudget | None,
+) -> tuple[dict[str, object] | None, list[str]]:
+    """Attach a switch-tool opening when live Objectives exist.
+
+    `next.commands` stays empty. The briefing command is a read, not a mutation.
+    """
+    alias = getattr(args, "workspace_alias", None) or config.name
+    return build_ready_briefing(config, alias=str(alias), read_budget=read_budget)
+
+
+def _ready_next_summary(briefing: dict[str, object] | None) -> str:
+    if briefing is None:
+        return "工作区已就绪。"
+    if briefing.get("available") is not True:
+        return "工作区已就绪，但目标简报未读到。"
+    objective_id = briefing.get("objective_id")
+    if isinstance(objective_id, str) and objective_id:
+        lines = briefing.get("lines")
+        if isinstance(lines, list) and lines and isinstance(lines[0], str):
+            return lines[0]
+    matter = briefing.get("matter")
+    if isinstance(matter, str) and matter:
+        return matter
+    return "工作区已就绪。"
 
 
 def _objective_payload(
@@ -2278,6 +2328,12 @@ def cmd_start(args: argparse.Namespace) -> None:
         raise DyroError(
             "工作区尚未就绪；先修复 doctor 失败项，或运行 dyro bootstrap --yes"
         )
+    alias = getattr(args, "workspace_alias", None) or config.name
+    briefing, _ = build_ready_briefing(config, alias=str(alias))
+    text = render_briefing_text(briefing) if briefing else ""
+    if text:
+        print(text)
+        print()
     line_id = args.line or _choose("开发线", [line.id for line in list_lines(config)])
     line, workspace = existing_line_workspace(config, line_id, args.kind)
     record = _record_for_root(config.root)
@@ -2433,16 +2489,25 @@ def cmd_next(args: argparse.Namespace) -> None:
             + _scoped_command(args, config, "agent", "add", "<id>", "--command", "…")
         )
         return
+    briefing, diagnostic_commands = _workspace_ready_briefing(
+        args, config, budget
+    )
     if args.format == "json":
-        _print_control_plane_json(
-            "next_step",
-            state="ready",
-            summary="工作区已就绪。",
-            commands=[],
-            mutation_available=False,
-        )
+        payload: dict[str, object] = {
+            "state": "ready",
+            "summary": _ready_next_summary(briefing),
+            "commands": [],
+            "mutation_available": False,
+        }
+        if briefing is not None:
+            payload["briefing"] = briefing
+            payload["diagnostic_commands"] = diagnostic_commands
+        _print_control_plane_json("next_step", **payload)
         return
-    print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。")
+    if briefing is None:
+        print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。")
+        return
+    print(render_briefing_text(briefing))
 
 
 def cmd_line_list(args: argparse.Namespace) -> None:
@@ -3351,49 +3416,63 @@ def _read_objective_plan(
             config, objective=record, budget=read_budget
         )
     )
-    return snapshot, build_continuation_plan(snapshot)
+    return record, snapshot, build_continuation_plan(snapshot)
 
 
 def cmd_objective_plan(args: argparse.Namespace) -> None:
-    _, plan = _read_objective_plan(
-        _config(args),
+    config = _config(args)
+    record, _, plan = _read_objective_plan(
+        config,
         args.id,
         read_budget=_control_plane_budget(args) if args.format == "json" else None,
     )
+    preview = preview_objective_wave_budgets(
+        config,
+        objective=record.objective,
+        actions=plan.selected_actions,
+        now=datetime.now(timezone.utc),
+    )
     if args.format == "json":
-        print(
-            json.dumps(
-                continuation_plan_payload(plan),
-                ensure_ascii=False,
-                sort_keys=True,
-                indent=2,
-            )
-        )
+        payload = continuation_plan_payload(plan)
+        payload["budget_preview"] = preview
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
         return
     print(render_plan_text(plan))
+    for note in render_budget_preview_text(preview):
+        print(note)
 
 
 def cmd_objective_explain(args: argparse.Namespace) -> None:
-    _, plan = _read_objective_plan(
-        _config(args),
+    config = _config(args)
+    record, _, plan = _read_objective_plan(
+        config,
         args.id,
         read_budget=_control_plane_budget(args) if args.format == "json" else None,
     )
+    briefing = briefing_payload(
+        plan,
+        command=_briefing_command(args, config, *follow_up_argv(plan)),
+        title=record.objective.title,
+    )
     if args.format == "json":
+        payload = continuation_plan_payload(plan)
+        payload["briefing"] = briefing
         print(
             json.dumps(
-                continuation_plan_payload(plan),
+                payload,
                 ensure_ascii=False,
                 sort_keys=True,
                 indent=2,
             )
         )
         return
+    print(render_briefing_text(briefing))
+    print()
     print(render_plan_text(plan))
 
 
 def cmd_objective_graph(args: argparse.Namespace) -> None:
-    snapshot, plan = _read_objective_plan(
+    _, snapshot, plan = _read_objective_plan(
         _config(args),
         args.id,
         read_budget=_control_plane_budget(args) if args.format == "json" else None,
@@ -3443,11 +3522,29 @@ def cmd_objective_tick(args: argparse.Namespace) -> None:
         available_write,
         capabilities=getattr(config, "capabilities", None),
     )
+    overlay["budget_preview"] = preview_objective_wave_budgets(
+        config,
+        objective=record.objective,
+        actions=tick.wave,
+        now=datetime.now(timezone.utc),
+    )
     if args.format == "json":
         payload = scheduler_tick_payload(tick)
         payload.update(overlay)
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
         return
+    print(
+        render_briefing_text(
+            {
+                "lines": arrival_lines(
+                    plan, record.objective.title, TICK_CLOSER
+                )
+            }
+        )
+    )
+    print()
+    print("\n".join(render_human_wave(tick.wave)))
+    print()
     print(render_scheduler_tick_text(tick))
     for note in overlay.get("peer_wave", {}).get("warnings", []):
         print(f"Warning: {note}")
@@ -3456,6 +3553,8 @@ def cmd_objective_tick(args: argparse.Namespace) -> None:
             f"Harness: {binding['task_id']} -> {binding['executor']} "
             f"({binding['source']})"
         )
+    for note in render_budget_preview_text(overlay["budget_preview"]):
+        print(note)
 
 
 def cmd_objective_attention(args: argparse.Namespace) -> None:
@@ -3481,6 +3580,24 @@ def cmd_objective_attention(args: argparse.Namespace) -> None:
     if args.format == "json":
         print(render_attention_json(projection))
         return
+    print(
+        render_briefing_text(
+            {
+                "lines": arrival_lines(
+                    plan, record.objective.title, ATTENTION_CLOSER
+                )
+            }
+        )
+    )
+    print()
+    print(
+        "\n".join(
+            render_human_attention(
+                tuple((item.reason, item.subject_id) for item in projection.items)
+            )
+        )
+    )
+    print()
     print(render_attention_text(projection))
 
 
@@ -4340,7 +4457,10 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--agent")
     start.add_argument("--prompt", default="")
     start.set_defaults(func=cmd_start)
-    next_parser = sub.add_parser("next", help="根据当前状态给出新手的唯一安全下一步")
+    next_parser = sub.add_parser(
+        "next",
+        help="给出唯一安全下一步；已有目标时打印换工具开场白，不续另一家会话",
+    )
     next_parser.add_argument(
         "--format", choices=("text", "json"), default="text"
     )
@@ -4455,7 +4575,8 @@ def build_parser() -> argparse.ArgumentParser:
     objective_plan.add_argument("--format", choices=("text", "json"), default="text")
     objective_plan.set_defaults(func=cmd_objective_plan)
     objective_explain = objective_sub.add_parser(
-        "explain", help="解释 Objective 当前的可推进项与阻塞原因"
+        "explain",
+        help="用人话解释当前事项，并给出一条只读下一步；不续另一家会话",
     )
     objective_explain.add_argument("id")
     objective_explain.add_argument("--format", choices=("text", "json"), default="text")
@@ -4469,7 +4590,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     objective_graph.set_defaults(func=cmd_objective_graph)
     objective_tick = objective_sub.add_parser(
-        "tick", help="预览下一组有界 Objective Action；不创建 intent 或执行任务"
+        "tick",
+        help="预览下一组有界 Objective Action 与预算；不创建 intent 或执行任务",
     )
     objective_tick.add_argument("id")
     objective_tick.add_argument("--format", choices=("text", "json"), default="text")
@@ -4569,7 +4691,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     proof = sub.add_parser("proof", help="只读派生并核验交付 Proof（rebind，不是 replay）")
     proof_sub = proof.add_subparsers(dest="proof_command", required=True)
-    proof_list = proof_sub.add_parser("list", help="从当前工作区全量重派生 Proof")
+    proof_list = proof_sub.add_parser(
+        "list",
+        help="从当前工作区全量重派生 Proof（含 trigger_observation；--task 不含；--line 只含该线 Objective 的 trigger）",
+    )
     proof_list.add_argument("--task")
     proof_list.add_argument("--objective")
     proof_list.add_argument("--line")

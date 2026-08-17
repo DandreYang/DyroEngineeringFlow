@@ -12,6 +12,7 @@ from unittest.mock import patch
 from dyro.cli import _route_experiment_surface, build_parser, main
 from dyro.config import load
 from dyro.home import (
+    HomeTarget,
     HomeTool,
     _choose_action,
     _choose_tool,
@@ -245,6 +246,30 @@ class HubCliTests(WorkspaceCase):
 
         self.assertIn("DRY RUN: 将启动只读本地 Console", output.getvalue())
         server_factory.assert_not_called()
+
+    def test_home_enter_defaults_to_briefing_instead_of_opening_a_tool(self) -> None:
+        briefing = {
+            "command": "dyro --workspace demo objective tick release",
+            "available": True,
+        }
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(output),
+        ):
+            action = _choose_action(
+                [HomeTarget("line", "alpha", "进入开发线：alpha")],
+                can_switch=False,
+                briefing=briefing,
+            )
+
+        self.assertEqual(
+            action, ("briefing", "dyro --workspace demo objective tick release")
+        )
+        rendered = output.getvalue()
+        self.assertIn("做下一步，不打开编码工具", rendered)
+        self.assertIn("进入开发线：alpha", rendered)
 
     def test_home_lists_safe_new_work_entrypoints(self) -> None:
         output = StringIO()

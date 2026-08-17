@@ -27,6 +27,13 @@ def write_capability_denied(
     return card_forbids_execute(capabilities.get(executor))
 
 
+def card_trusted_usage(capabilities: Mapping[str, object] | None, executor: str) -> bool:
+    """True only when a Card exists and declares verifiable provider usage."""
+    if not capabilities or not executor:
+        return False
+    return bool(getattr(capabilities.get(executor), "trusted_usage", False))
+
+
 def assert_capability_allows_write(config: object, executor: str) -> None:
     cards = getattr(config, "capabilities", None)
     if write_capability_denied(cards, executor):

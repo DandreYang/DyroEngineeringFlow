@@ -20,7 +20,7 @@ from typing import Any
 from ..canonical import canonical_json_bytes
 from ..hub import registry_home
 from .overview import ConsoleOverviewError
-from .redaction import REDACTED, safe_id, safe_sha256, safe_title
+from .redaction import REDACTED, safe_branch, safe_id, safe_sha256, safe_title
 
 
 _CURSOR_SECRET_ENV = "DYRO_CONSOLE_CURSOR_SECRET"
@@ -31,6 +31,44 @@ _WARNING_CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,79}$")
 _ATTENTION_KINDS = frozenset(
     {"repair_required", "needs_user", "ready", "paused", "waiting"}
 )
+_LINE_KEYS = frozenset({"id", "kind", "branch", "base", "repository_count"})
+_TASK_KEYS = frozenset(
+    {
+        "id",
+        "title",
+        "line",
+        "status",
+        "risk",
+        "depends_on",
+        "blocked_on",
+        "conflict_group",
+        "executor",
+        "reviewer",
+        "integration_state",
+        "external_claim_active",
+    }
+)
+_OBJECTIVE_KEYS = frozenset(
+    {
+        "id",
+        "title",
+        "line",
+        "revision",
+        "operator_state",
+        "derived_result",
+        "requested_mode",
+        "operations",
+        "scope_count",
+        "budget",
+        "selected_actions",
+        "blocked_actions",
+        "attention",
+        "contract_sha256",
+        "scope_sha256",
+        "event_sha256",
+    }
+)
+_ACTION_KEYS = frozenset({"kind", "subject_id", "reason"})
 _SUMMARY_KEYS = frozenset(
     {
         "alias",
@@ -48,6 +86,7 @@ _SUMMARY_KEYS = frozenset(
         "attention_counts",
         "recommendation",
         "snapshot_sha256",
+        "proof_inspection",
     }
 )
 
@@ -100,6 +139,9 @@ class IsolatedOverviewService:
 
     def inspect_proofs(self, alias: str) -> dict[str, object]:
         return self._request({"op": "inspect_proofs", "alias": alias})
+
+    def system(self) -> dict[str, object]:
+        return self._request({"op": "system"})
 
     def _request(self, request: Mapping[str, object]) -> dict[str, object]:
         worker_request = dict(request)
@@ -273,12 +315,16 @@ class IsolatedOverviewService:
         if expected_operation == "inspect_proofs":
             cls._validate_inspect(data)
             return
-        if set(data) == {"workspace"}:
-            if expected_operation == "overview":
-                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
-            cls._validate_summary(data["workspace"])
+        if expected_operation == "system":
+            cls._validate_system(data)
             return
         if expected_operation == "workspace":
+            if set(data) != {"workspace", "lines", "tasks", "objectives"}:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            cls._validate_summary(data["workspace"])
+            cls._validate_inventory(data)
+            return
+        if set(data) == {"workspace"}:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         expected = {
             "default_workspace",
@@ -286,6 +332,7 @@ class IsolatedOverviewService:
             "workspaces",
             "next_cursor",
             "attention_counts",
+            "task_status_counts",
             "highest_priority",
         }
         if set(data) != expected:
@@ -306,6 +353,7 @@ class IsolatedOverviewService:
         ):
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         cls._validate_attention_counts(data["attention_counts"])
+        cls._validate_status_counts(data["task_status_counts"])
         highest = data["highest_priority"]
         if highest is not None:
             if not isinstance(highest, dict) or set(highest) != {"alias", "kind", "reason"}:
@@ -316,6 +364,37 @@ class IsolatedOverviewService:
                 or not cls._safe_code(highest.get("reason"))
             ):
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_system(cls, data: dict[str, object]) -> None:
+        if set(data) != {"tool_inspection", "tools", "update"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if data.get("tool_inspection") != "not_inspected":
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if data.get("tools") != []:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        update = data["update"]
+        if not isinstance(update, dict) or set(update) != {
+            "check_enabled",
+            "last_checked_on",
+            "latest_version",
+            "kind",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if type(update.get("check_enabled")) is not bool:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        checked = update.get("last_checked_on")
+        latest = update.get("latest_version")
+        if checked != "" and not (
+            isinstance(checked, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", checked)
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if latest != "" and not (
+            isinstance(latest, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", latest)
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if update.get("kind") not in {"none", "patch", "minor", "major"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
 
     @classmethod
     def _validate_inspect(cls, data: dict[str, object]) -> None:
@@ -398,12 +477,7 @@ class IsolatedOverviewService:
         ):
             if not cls._count(value.get(key)):
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
-        statuses = value.get("task_status_counts")
-        if not isinstance(statuses, dict):
-            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
-        for status, count in statuses.items():
-            if not cls._safe_code(status) or not cls._count(count):
-                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        cls._validate_status_counts(value.get("task_status_counts"))
         cls._validate_attention_counts(value.get("attention_counts"))
         recommendation = value.get("recommendation")
         if not isinstance(recommendation, dict) or set(recommendation) != {"reason", "command"}:
@@ -415,6 +489,123 @@ class IsolatedOverviewService:
         digest = value.get("snapshot_sha256")
         if digest != "" and safe_sha256(digest) != digest:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if value.get("proof_inspection") != "not_inspected":
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_inventory(cls, data: dict[str, object]) -> None:
+        cls._validate_lines(data["lines"])
+        cls._validate_tasks(data["tasks"])
+        cls._validate_objectives(data["objectives"])
+
+    @classmethod
+    def _validate_lines(cls, value: object) -> None:
+        if not isinstance(value, list) or len(value) > 1000:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in value:
+            if not isinstance(item, dict) or set(item) != _LINE_KEYS:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if (
+                not cls._safe_alias(item.get("id"))
+                or not cls._safe_code(item.get("kind"))
+                or safe_branch(item.get("branch")) != item.get("branch")
+                or safe_branch(item.get("base")) != item.get("base")
+                or not cls._count(item.get("repository_count"))
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_tasks(cls, value: object) -> None:
+        if not isinstance(value, list) or len(value) > 1000:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in value:
+            if not isinstance(item, dict) or set(item) != _TASK_KEYS:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            title = item.get("title")
+            if title != REDACTED and safe_title(title) != title:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if (
+                not cls._safe_alias(item.get("id"))
+                or not cls._safe_code(item.get("line"))
+                or not cls._safe_code(item.get("status"))
+                or not cls._safe_code(item.get("risk"))
+                or not cls._id_list(item.get("depends_on"))
+                or not cls._id_list(item.get("blocked_on"))
+                or not cls._optional_id(item.get("conflict_group"))
+                or not cls._safe_code(item.get("executor"))
+                or not cls._safe_code(item.get("reviewer"))
+                or item.get("integration_state") != "not_inspected"
+                or type(item.get("external_claim_active")) is not bool
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_objectives(cls, value: object) -> None:
+        if not isinstance(value, list) or len(value) > 1000:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in value:
+            if not isinstance(item, dict) or set(item) != _OBJECTIVE_KEYS:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            title = item.get("title")
+            if title != REDACTED and safe_title(title) != title:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if (
+                not cls._safe_alias(item.get("id"))
+                or not cls._safe_code(item.get("line"))
+                or not cls._count(item.get("revision"))
+                or not cls._safe_code(item.get("operator_state"))
+                or not cls._safe_code(item.get("derived_result"))
+                or not cls._safe_code(item.get("requested_mode"))
+                or not cls._id_list(item.get("operations"))
+                or not cls._count(item.get("scope_count"))
+                or not cls._budget(item.get("budget"))
+                or not cls._action_list(item.get("selected_actions"), attention=False)
+                or not cls._action_list(item.get("blocked_actions"), attention=False)
+                or not cls._action_list(item.get("attention"), attention=True)
+                or safe_sha256(item.get("contract_sha256")) != item.get("contract_sha256")
+                or safe_sha256(item.get("scope_sha256")) != item.get("scope_sha256")
+                or safe_sha256(item.get("event_sha256")) != item.get("event_sha256")
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _action_list(cls, value: object, *, attention: bool) -> bool:
+        if not isinstance(value, list) or len(value) > 1000:
+            return False
+        for item in value:
+            if not isinstance(item, dict) or set(item) != _ACTION_KEYS:
+                return False
+            if item.get("reason") == "PROOF_DECAYED":
+                return False
+            if attention and item.get("kind") not in _ATTENTION_KINDS:
+                return False
+            if (
+                not cls._safe_code(item.get("kind"))
+                or not cls._safe_code(item.get("subject_id"))
+                or not cls._safe_code(item.get("reason"))
+            ):
+                return False
+        return True
+
+    @classmethod
+    def _id_list(cls, value: object) -> bool:
+        if not isinstance(value, list) or len(value) > 1000:
+            return False
+        return all(cls._safe_code(item) for item in value)
+
+    @staticmethod
+    def _optional_id(value: object) -> bool:
+        return value == "" or IsolatedOverviewService._safe_code(value)
+
+    @staticmethod
+    def _budget(value: object) -> bool:
+        if not isinstance(value, dict) or len(value) > 32:
+            return False
+        return all(
+            IsolatedOverviewService._safe_code(key)
+            and IsolatedOverviewService._count(count)
+            for key, count in value.items()
+        )
 
     @staticmethod
     def _count(value: object) -> bool:
@@ -435,7 +626,7 @@ class IsolatedOverviewService:
         escaped_alias = re.escape(alias)
         return bool(
             re.fullmatch(
-                rf"dyro --workspace {escaped_alias}(?: (?:doctor|task next|objective explain [A-Za-z0-9][A-Za-z0-9._-]{{0,79}}))?",
+                rf"dyro --workspace {escaped_alias}(?: (?:doctor|task next|objective (?:explain|tick|attention) [A-Za-z0-9][A-Za-z0-9._-]{{0,79}}))?",
                 command,
             )
         )
@@ -446,3 +637,11 @@ class IsolatedOverviewService:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         if not all(IsolatedOverviewService._count(item) for item in value.values()):
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_status_counts(cls, value: object) -> None:
+        if not isinstance(value, dict) or len(value) > 32:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for status, count in value.items():
+            if not cls._safe_code(status) or not cls._count(count):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")

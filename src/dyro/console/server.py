@@ -304,7 +304,16 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     "schema_version": 1,
                     "data": {
                         "version": __version__,
-                        "capabilities": ["overview"] if self.console.overview_service else [],
+                        "surfaces": (
+                            ["overview", "proofs", "system"]
+                            if self.console.overview_service
+                            else []
+                        ),
+                        "capabilities": (
+                            ["overview", "proofs", "system"]
+                            if self.console.overview_service
+                            else []
+                        ),
                         "initial_workspace": self.console.initial_workspace,
                         "session_expires_at": session.expires_at.isoformat(),
                     },
@@ -321,6 +330,17 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             if self._authorized_session() is None:
                 return
             self._overview(parsed.query)
+            return
+        if parsed.path == "/api/v1/system":
+            if self.command != "GET":
+                self._method_not_allowed()
+                return
+            if self._has_body():
+                self._error(400, "BAD_REQUEST")
+                return
+            if self._authorized_session() is None:
+                return
+            self._system()
             return
         if parsed.path.startswith("/api/v1/workspaces/"):
             if self.command != "GET":
@@ -357,6 +377,18 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         try:
             cursor, limit = self._overview_parameters(query)
             payload = service.page(cursor=cursor, limit=limit)
+        except ConsoleOverviewError as exc:
+            self._error(self._overview_error_status(exc.code), exc.code)
+            return
+        self._json(200, payload, etag=str(payload.get("snapshot_sha256", "")))
+
+    def _system(self) -> None:
+        service = self.console.overview_service
+        if service is None:
+            self._error(404, "NOT_FOUND")
+            return
+        try:
+            payload = service.system()
         except ConsoleOverviewError as exc:
             self._error(self._overview_error_status(exc.code), exc.code)
             return

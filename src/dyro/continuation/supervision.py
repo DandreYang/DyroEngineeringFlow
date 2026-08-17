@@ -410,6 +410,7 @@ def apply_supervised_wave(
     Task API compatibility while still enforcing the planner's resource and
     parallel bounds.  Future automatic execution needs a separate process
     barrier and must not change this explicit-confirmation path.
+    ``reserve_supervised_objective_action`` stays ``automatic=False`` here.
     """
     # Rebuild the whole semantic wave before writing an owner lease.  This
     # closes both the preview-to-apply race and a direct API caller trying to

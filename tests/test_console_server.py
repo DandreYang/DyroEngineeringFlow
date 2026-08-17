@@ -112,7 +112,8 @@ class ConsoleServerTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
         payload = json.loads(body)
         self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(payload["data"]["capabilities"], ["overview"])
+        self.assertEqual(payload["data"]["surfaces"], ["overview", "proofs", "system"])
+        self.assertEqual(payload["data"]["capabilities"], ["overview", "proofs", "system"])
         self.assertEqual(payload["data"]["initial_workspace"], "")
         self.assertIn("session_expires_at", payload["data"])
 
@@ -244,6 +245,22 @@ class ConsoleOverviewServerTests(unittest.TestCase):
             "freshness": {"state": "partial", "partial": True, "warnings": []},
             "data": {"workspace": {"alias": "alpha", "availability": "available"}},
         }
+        self.overview.system.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "c" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {
+                "tool_inspection": "not_inspected",
+                "tools": [],
+                "update": {
+                    "check_enabled": True,
+                    "last_checked_on": "2026-08-16",
+                    "latest_version": "",
+                    "kind": "none",
+                },
+            },
+        }
         self.overview.inspect_proofs.return_value = {
             "schema_version": 1,
             "captured_at": "2026-08-04T12:00:00+00:00",
@@ -353,6 +370,25 @@ class ConsoleOverviewServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["data"]["proof_inspection"], "inspected")
         self.overview.inspect_proofs.assert_called_once_with("alpha")
         self.overview.workspace.assert_not_called()
+
+    def test_system_is_authenticated_get_only(self) -> None:
+        unauthorized, _, body = self._request("GET", "/api/v1/system")
+        self.assertEqual(unauthorized, 401)
+        self.assertEqual(json.loads(body)["error"]["code"], "UNAUTHORIZED")
+
+        rejected, _, rejected_body = self._request("POST", "/api/v1/system")
+        self.assertEqual(rejected, 405)
+        self.assertEqual(json.loads(rejected_body)["error"]["code"], "METHOD_NOT_ALLOWED")
+        self.overview.system.assert_not_called()
+
+        bearer = self._bearer()
+        headers = {"Authorization": f"Bearer {bearer}", "Origin": self.origin}
+        status, response_headers, body = self._request("GET", "/api/v1/system", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(response_headers["ETag"], '"' + "c" * 64 + '"')
+        self.assertEqual(json.loads(body)["data"]["tool_inspection"], "not_inspected")
+        self.assertEqual(json.loads(body)["data"]["tools"], [])
+        self.overview.system.assert_called_once_with()
 
 
 if __name__ == "__main__":

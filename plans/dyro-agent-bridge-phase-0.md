@@ -48,10 +48,12 @@ other steps are serial gates.
 
 ## 3. Step S1 — Core contracts and Exposure Catalog
 
-Implementation status: Complete on 2026-08-06 for the source-tree unit gates.
-At that milestone all operations remained deny-by-default; S5 has since
-promoted only the seven Linux Mandatory Core Surface records after adding the
-installed-artifact gate.
+Implementation status: S1 source contracts were restored in this `0.7.x`
+tree as `src/dyro/bridge/` without adding the package to the default wheel.
+S2–S4 observation, plan, and source transport IDs are `implemented_testable`
+everywhere. S5 promotes the seven Mandatory IDs to `public_available` only
+on Linux. S6 is a source-only Skill plus `python -m dyro.bridge`. The
+installable `dyro-bridge` extra and S7 MCP/Plugin are not started here.
 
 ### Context brief
 
@@ -111,9 +113,12 @@ should require rollback.
 
 ## 4. Step S2 — Typed workspace resolution and observations
 
-Implementation status (2026-08-06): source-tree Core work is complete and the
-four S2 services are `implemented_testable`. They remain unavailable to public
-Bridge callers until the S4 transport and S5 zero-effect/artifact gates pass.
+Implementation status (2026-08-16): this `0.7.x` tree now has source-only
+Bridge DTO adapters in `src/dyro/bridge/observations.py`. Catalog marks the
+S2 observation IDs `implemented_testable`. They remain unavailable to public
+Bridge callers: no transport, and the default wheel still omits `dyro.bridge`.
+Authoritative Git observations (`task.explain`, `task.graph`) stay
+`OPERATION_UNAVAILABLE` until B05.
 
 ### Context brief
 
@@ -183,12 +188,13 @@ their own tests and do not alter human CLI semantics.
 
 ## 5. Step S3 — Typed deterministic plans
 
-Implementation status (2026-08-07): the platform-gated source-tree Core and all
-five Objective PLAN services are `implemented_testable`. Authoritative Git facts
-are enabled only through a Linux `/proc/self/fd` boundary that binds the
-worktree, Git directory, common directory, and object store. Other hosts fail
-closed. The services remain unavailable to public Bridge callers until S4 and
-the Linux S5 zero-effect/artifact/real-host gates pass.
+Implementation status (2026-08-16): this `0.7.x` tree now has source-only
+non-executable plan adapters in `src/dyro/bridge/plans.py`. The five Objective
+PLAN services are `implemented_testable`. Plans set `executable=false` and
+`authorization=none`, inspect neither integration nor Proofs, and do not
+discover PATH providers. Authoritative Git-dependent facts stay unavailable
+(no Linux `/proc/self/fd` adapter in this tree). The default wheel still
+omits the package.
 
 ### Context brief
 
@@ -259,11 +265,11 @@ remains intact.
 
 ## 6. Step S4 — One-shot JSON transport
 
-Implementation status (2026-08-07): complete in the source tree. The package
-entry point, bounded parser, static router, fixed error surface, fail-closed
-PLAN handling, and broken-pipe behavior have focused tests. S5 has since made
-the seven Linux Mandatory Core Surface operations publicly available; all
-other operations and platforms remain fail-closed.
+Implementation status (2026-08-16): this `0.7.x` tree now has a source-only
+one-shot JSON transport in `src/dyro/bridge/transport.py`. Tests call
+`handle_request` / `serve_once` with `exposure=testable`. Public exposure
+stays empty. There is still no `dyro-bridge` console script and the default
+wheel still omits `dyro.bridge`.
 
 ### Context brief
 
@@ -319,11 +325,11 @@ and Plan services remain available to the Console/CLI if independently useful.
 
 ## 7. Step S5 — Zero-effect, artifact, and real-sandbox gates
 
-Implementation status (2026-08-07): the catalog promotes exactly the seven
-Mandatory Core Surface operations on Linux Ubuntu 24.04 and retains fail-closed
-macOS/Windows metadata. The required CI gate runs the same 43-case corpus
-against the internal candidate and installed public process from source, wheel,
-and sdist; the exact-commit Docker evidence remains authoritative for Go.
+Implementation status (2026-08-16): this `0.7.x` tree now platform-gates the
+source catalog. Linux marks exactly the seven Mandatory Core Surface
+operations `public_available`; darwin/Windows keep an empty public surface.
+In-process zero-effect traps cover hello. There is still no `dyro-bridge`
+script, no default-wheel package, and no CI/strace/Landlock artifact gate.
 
 ### Context brief
 
@@ -380,6 +386,13 @@ property cannot be proven. Keep the harness as a regression tool.
 
 ## 8. Step S6 — Host-neutral Skill beta
 
+Implementation status (2026-08-16): this `0.7.x` tree now has a source-only
+Skill at `src/dyro/bridge/skill/` and a public process at
+`python -m dyro.bridge`. The Skill is not registered with the integration
+manager, not listed in package-data, and not installable. The published
+wheel still omits `dyro.bridge` and does not grow `dyro-bridge` /
+`dyro-mcp`. S7 MCP/Plugin is not started.
+
 ### Context brief
 
 The Skill is progressive-disclosure guidance over a proven Phase 0 transport.
@@ -417,6 +430,10 @@ Uninstall only files owned by the manifest and restore any atomically retained
 prior version. Never delete an unowned same-name Skill.
 
 ## 9. Step S7 — Codex typed read-only MCP/Plugin
+
+Implementation status (2026-08-17): not started. `0.7.x` will not add
+`dyro-mcp`, an `[mcp]` extra, or MCP tools to the default wheel. That
+matches the `0.6.3` shipping-surface removal.
 
 ### Context brief
 

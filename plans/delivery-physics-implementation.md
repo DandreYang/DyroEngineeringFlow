@@ -5,7 +5,7 @@
 ADR：[`docs/adr/0006-delivery-physics-and-capability-plane.md`](../docs/adr/0006-delivery-physics-and-capability-plane.md)  
 仲裁：[`docs/superpowers/reviews/2026-08-15-delivery-physics-adversarial-review-board.md`](../docs/superpowers/reviews/2026-08-15-delivery-physics-adversarial-review-board.md)  
 基线：`0.6.0` 已发布的 TaskGraph、证据绑定、Objective、只读 Console；`0.7.0` 已发布 Proof / Card / Compiler / `verify-bundle`  
-默认策略：先抽出投影，再衰减进调度，再换 Card，最后编译宿主；每一阶段未绿之前，下一阶段保持关闭。功能全部在 `0.7.x` 发布，不另开 `0.8.0` / `0.9.0` / `1.0.0` 功能号。
+默认策略：先抽出投影，再衰减进调度，再换 Card，最后编译宿主；每一阶段未绿之前，下一阶段保持关闭。功能和发版继续往前，版本号保持 `0.7.x`，不另开 `0.8.0` / `0.9.0` / `1.0.0` 功能号。
 
 已锁定：
 
@@ -20,7 +20,7 @@ ADR：[`docs/adr/0006-delivery-physics-and-capability-plane.md`](../docs/adr/000
 | --- | --- |
 | 1 | `proof verify` 默认 decay + rebind，不重跑 gate。`--rerun-procedure` 仅诊断，须 dry-run/隔离。 |
 | 2 | Console P7 留在 `0.7.x`，不另开 `0.8`。`0.7.0` 已发 P1–P6 + P8–P12a。P7 / `trigger_observation` / P13 走后续 `0.7.x`。 |
-| 6 | 交付物理功能全部在 `0.7.x` 发布。取消 `0.8.0` / `0.9.0` 列车。`1.0.0` 只是身份冻结，不是本系列功能号；未显式要求不得打 `1.0.0`。 |
+| 6 | 功能和发版继续往前，版本号保持 `0.7.x`。不另开 `0.8.0` / `0.9.0` / `1.0.0` 功能号。`1.0.0` 只是以后的身份冻结，不是下一列功能车。 |
 | 3 | 宿主投影默认当前工作区。`tools.json` / PATH = `discovered_unintegrated`。`--user` 才写用户级 skill。 |
 | 4 | `contract_hash` 按 subject 拆：task 面 kind → attempt `task_contract_sha256`（缺则空）；`action_receipt` → Objective `contract_sha256`。 |
 | 5 | `proof list` / `verify` 每次全量重派生。store 可丢弃，不是展示真源。 |
@@ -59,8 +59,8 @@ ADR：[`docs/adr/0006-delivery-physics-and-capability-plane.md`](../docs/adr/000
 | 版本 | 主题 | 对用户可见 | 关闭条件未满足时 |
 | --- | --- | --- | --- |
 | `0.6.x` | 已发布维护 | 只接受与本计划不冲突的修复 | 不回写 `0.7` 物理列车 |
-| `0.7.0` | 已发布：Proof / Card / Compiler / `verify-bundle` | `dyro proof list/show/verify`；`export`；`verify-bundle`；`dyro capability *`；`dyro host compile`；`dyro objective attention` 可含 `PROOF_DECAYED` | 已关闭。不得改号为 `0.6.x` 或 `1.0.0`；`trusted_usage` 不接入 BudgetUsage |
-| `0.7.x` | 本系列剩余全部功能 | P7：Console 独立 inspect 展示已投影 Proof；`trigger_observation`；P13：陌生人核验与叙事锁。summary 仍 `not_inspected` | 不另开 `0.8.0` / `0.9.0` / `1.0.0` 功能号 |
+| `0.7.0` | 已发布：Proof / Card / Compiler / `verify-bundle` | `dyro proof list/show/verify`；`export`；`verify-bundle`；`dyro capability *`；`dyro host compile`；`dyro objective attention` 可含 `PROOF_DECAYED` | 已关闭。不得改号为 `0.6.x` 或 `1.0.0` |
+| `0.7.x` | 后续全部功能与发版 | 已发 P7 / `trigger_observation` / P13；后续产品面与新能力继续打 `0.7.2`、`0.7.3`…… | 不另开 `0.8.0` / `0.9.0` / `1.0.0` 功能号 |
 | `1.0.0` | 身份冻结，不是本系列功能号 | 仅当产品显式要求时才打 | 未显式要求不得标 `1.0.0` |
 
 `0.6.x` 继续只接受维护修复。本计划的剩余实现继续走 `0.7.x`，不回写 `0.6.0` 的已发布语义，也不把同一批功能改标成 `0.8` / `0.9` / `1.0`。
@@ -200,7 +200,7 @@ dyro proof verify <proof-id> [--dry-run]
 - 目标类型是 **`SchedulerSnapshot._payload`** 与 **`ProgressFacts` 装配点**（supervision / planner 交界）。**禁止**给未实例化的 `ContinuationSnapshot` 加 `proofs[]`。
 - journal **不**持久化 proofs 当 PASS。`SchedulerReadProjection.schema_version` 保持 `1`；新字段缺省空，不进 merge 真源。
 - planner / `ReasonCode` / `attention.py` / `_schedule_block_reason` 同步加 `PROOF_DECAYED`。attention 映射 `AttentionKind.NEEDS_USER`。默认 **不**用该码 block 下游。
-- `progress_fingerprint` 继续忽略 trigger 类 Proof。`0.7` **不**把 Proof 接入生产 `BudgetUsage`，不新开 no-progress 自动耗尽。文档承认：`decide_no_progress` 是已锁纯函数，生产未接线。
+- `progress_fingerprint` 继续忽略 trigger 类 Proof。**不**把 Proof 接入生产 `BudgetUsage`，不新开 no-progress 自动耗尽。`trusted_usage` 接入 `BudgetUsage.provider_usage_trusted` / `BudgetRequest.provider_usage_trusted`，默认 `false`。`objective tick` 对 automatic Objective 预览 `decide_budget(..., automatic=True)`；受监督 apply 保持 `automatic=False`。未信任硬停要求显式 `workspace.max_provider_usage`。文档承认：`decide_no_progress` 是已锁纯函数，生产未接线。
 - 验收：同一 substrate 下 `build_scheduler_snapshot` digest 稳定；旧 journal 无 proof 字段兼容；`test_continuation_budgets` 仍绿；衰减后下一 tick 可出现 attention，不自动重跑 agent。
 
 ### P5 · 交付门 decay 投影（A1）
@@ -331,7 +331,7 @@ dyro capability test <id>
 
 **0.7.0 已发布：** P1–P6 + P8–P12a 绿。旧工作区不改 toml 即可 `proof list`；merge / 下游对错与 0.6 相同，merge 错误路径只多 `PROOF_DECAYED` 人话。`0.7.0` tag 检查**不含** `verify-bundle` 硬门禁。
 
-**0.7.x 剩余实现已落地：** P7 独立 inspect 展示 Proof，summary 无新 git probe；`trigger_observation` 已派生；P13 陌生人核验与 `0.7.x` 叙事锁。旧 adapters 仍跑；未审计命令不能进自动执行；手改投影不能偷偷继续自动跑。全部打 `0.7.x`，不另开 `0.8.0` / `0.9.0` / `1.0.0`。未要求前不发 `0.7.1`。
+**0.7.2 已准备：** 换工具 briefing、Console「现在需要你」、以及源码内 Agent Bridge 合同。发布号停在 `0.7.x`。后续产品面继续打 `0.7.3`……，不另开 `0.8.0` / `0.9.0` / `1.0.0`。
 
 **1.0.0：** 不是本系列功能出口。未显式要求不得标 `1.0.0`。
 

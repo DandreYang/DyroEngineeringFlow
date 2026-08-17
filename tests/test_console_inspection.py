@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import queue
 import subprocess
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -47,10 +48,26 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         self.assertEqual(overview["data"]["workspaces"][0]["availability"], "available")
         self.assertEqual(workspace["data"]["workspace"]["availability"], "available")
         self.assertEqual(inspect["data"]["proof_inspection"], "inspected")
+        self.assertEqual(overview["data"]["workspaces"][0]["proof_inspection"], "not_inspected")
+        self.assertEqual(workspace["data"]["workspace"]["proof_inspection"], "not_inspected")
+        self.assertEqual(set(workspace["data"]), {"workspace", "lines", "tasks", "objectives"})
+        self.assertNotIn("proofs", workspace["data"])
+        self.assertTrue(
+            all(
+                item.get("integration_state") == "not_inspected"
+                for item in workspace["data"]["tasks"]
+            )
+        )
         self.assertNotIn("procedure", repr(inspect))
         self.assertNotIn(str(self.root), repr(overview))
         self.assertNotIn(str(self.root), repr(workspace))
         self.assertNotIn(str(self.root), repr(inspect))
+        system = service.system()
+        self.assertEqual(system["data"]["tool_inspection"], "not_inspected")
+        self.assertEqual(system["data"]["tools"], [])
+        self.assertIn(system["data"]["update"]["kind"], {"none", "patch", "minor", "major"})
+        self.assertNotIn(str(self.root), repr(system))
+        self.assertNotIn("/usr/", repr(system))
 
     def test_default_workspace_budget_tolerates_process_startup_overhead(self) -> None:
         clock = [0.0]
@@ -145,6 +162,92 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
 
         killpg.assert_called_once()
 
+    def test_windows_inspection_fails_closed_without_starting_a_worker(self) -> None:
+        service = IsolatedOverviewService(registry_state_home=Path("/tmp"))
+        with (
+            patch("dyro.console.inspection.os.name", "nt"),
+            patch("dyro.console.inspection.subprocess.Popen") as popen,
+            self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE"),
+        ):
+            service.page()
+        popen.assert_not_called()
+        with (
+            patch("dyro.console.inspection.os.name", "nt"),
+            patch("dyro.console.inspection.subprocess.Popen") as popen,
+            self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE"),
+        ):
+            service.inspect_proofs("demo")
+        popen.assert_not_called()
+
+    def test_inspect_timeout_kills_its_process_group_and_returns_a_stable_code(self) -> None:
+        process = Mock(spec=subprocess.Popen)
+        process.pid = 12345
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(["worker"], 0.1),
+            (b"", b""),
+        ]
+        service = IsolatedOverviewService(registry_state_home=Path("/tmp"))
+
+        with (
+            patch("dyro.console.inspection.subprocess.Popen", return_value=process),
+            patch("dyro.console.inspection.os.killpg") as killpg,
+            self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_TIMEOUT"),
+        ):
+            service.inspect_proofs("demo")
+
+        killpg.assert_called_once()
+
+    def test_inspect_timeout_reaps_hung_descendants(self) -> None:
+        if os.name == "nt" or not hasattr(os, "killpg"):
+            self.skipTest("inspect process-group kill is POSIX-only")
+        marker = self.root / "hung-inspect-descendant.pid"
+        wrapper = self.root / "hang-inspect-python"
+        wrapper.write_text(
+            "\n".join(
+                (
+                    "#!/usr/bin/env python3",
+                    "import subprocess",
+                    "import sys",
+                    "import time",
+                    "from pathlib import Path",
+                    f"marker = Path({str(marker)!r})",
+                    "child = subprocess.Popen(",
+                    "    [sys.executable, '-c', 'import time; time.sleep(60)']",
+                    ")",
+                    "marker.write_text(str(child.pid), encoding='utf-8')",
+                    "time.sleep(60)",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=0.6,
+            cursor_secret=b"q" * 32,
+            python_executable=str(wrapper),
+        )
+
+        with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_TIMEOUT"):
+            service.inspect_proofs("demo")
+
+        deadline = time.monotonic() + 2.0
+        pid = 0
+        while time.monotonic() < deadline:
+            if marker.exists():
+                pid = int(marker.read_text(encoding="utf-8"))
+                break
+            time.sleep(0.05)
+        self.assertGreater(pid, 1, "hung inspect descendant did not start")
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return
+            time.sleep(0.05)
+        self.fail("hung inspect descendant survived process-group kill")
+
     def test_invalid_worker_output_fails_closed_without_echoing_it(self) -> None:
         service = IsolatedOverviewService(registry_state_home=Path("/tmp"))
         with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE") as raised:
@@ -202,6 +305,128 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         raw = json.dumps({"ok": True, "payload": payload}).encode("utf-8")
         with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE"):
             service._parse_worker_output(raw, expected_operation="inspect_proofs")
+
+    def test_parent_rejects_an_inspected_summary_card(self) -> None:
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+        )
+        valid = service.workspace("demo")
+        payload = deepcopy(valid)
+        payload["data"]["workspace"]["proof_inspection"] = "inspected"
+        payload["snapshot_sha256"] = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "schema_version": 1,
+                    "freshness": payload["freshness"],
+                    "data": payload["data"],
+                }
+            )
+        ).hexdigest()
+        raw = json.dumps({"ok": True, "payload": payload}).encode("utf-8")
+        with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE"):
+            service._parse_worker_output(raw, expected_operation="workspace")
+
+    def test_parent_rejects_workspace_inventory_that_leaks_inspect(self) -> None:
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+        )
+        valid = service.workspace("demo")
+
+        integrated = deepcopy(valid)
+        integrated["data"]["tasks"] = [
+            {
+                "id": "TASK-A",
+                "title": "Safe task",
+                "line": "alpha",
+                "status": "done",
+                "risk": "write",
+                "depends_on": [],
+                "blocked_on": [],
+                "conflict_group": "",
+                "executor": "codex",
+                "reviewer": "codex",
+                "integration_state": "integrated",
+                "external_claim_active": False,
+            }
+        ]
+        decayed = deepcopy(valid)
+        decayed["data"]["objectives"] = [
+            {
+                "id": "release",
+                "title": "Safe release",
+                "line": "alpha",
+                "revision": 1,
+                "operator_state": "active",
+                "derived_result": "incomplete",
+                "requested_mode": "supervised",
+                "operations": ["execute"],
+                "scope_count": 1,
+                "budget": {"max_actions": 2},
+                "selected_actions": [],
+                "blocked_actions": [],
+                "attention": [
+                    {
+                        "kind": "needs_user",
+                        "subject_id": "TASK-A",
+                        "reason": "PROOF_DECAYED",
+                    }
+                ],
+                "contract_sha256": "c" * 64,
+                "scope_sha256": "d" * 64,
+                "event_sha256": "e" * 64,
+            }
+        ]
+        proofs = deepcopy(valid)
+        proofs["data"]["proofs"] = []
+        missing = deepcopy(valid)
+        del missing["data"]["lines"]
+
+        for payload in (integrated, decayed, proofs, missing):
+            payload["snapshot_sha256"] = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "schema_version": 1,
+                        "freshness": payload["freshness"],
+                        "data": payload["data"],
+                    }
+                )
+            ).hexdigest()
+            raw = json.dumps({"ok": True, "payload": payload}).encode("utf-8")
+            with self.subTest(keys=sorted(payload["data"])):
+                with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE"):
+                    service._parse_worker_output(raw, expected_operation="workspace")
+
+    def test_parent_rejects_system_tool_probe_leak(self) -> None:
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+        )
+        valid = service.system()
+        inspected = deepcopy(valid)
+        inspected["data"]["tool_inspection"] = "inspected"
+        probed = deepcopy(valid)
+        probed["data"]["tools"] = [{"name": "git", "argv": ["git"]}]
+        for payload in (inspected, probed):
+            payload["snapshot_sha256"] = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "schema_version": 1,
+                        "freshness": payload["freshness"],
+                        "data": payload["data"],
+                    }
+                )
+            ).hexdigest()
+            raw = json.dumps({"ok": True, "payload": payload}).encode("utf-8")
+            with self.subTest(keys=sorted(payload["data"])):
+                with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE") as error:
+                    service._parse_worker_output(raw, expected_operation="system")
+                self.assertNotIn("git", str(error.exception))
+                self.assertNotIn("argv", str(error.exception))
 
 
 if __name__ == "__main__":

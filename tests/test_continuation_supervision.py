@@ -188,6 +188,26 @@ class SupervisedContinuationTests(WorkspaceCase):
         self.assertEqual(first[0].status, ActionStatus.SUCCEEDED)
         self.assertEqual(runner.call_count, 1)
 
+    def test_supervised_apply_ignores_untrusted_usage_even_with_provider_cap(self) -> None:
+        path = self.root / "dyro.toml"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                'name = "test-workspace"',
+                'name = "test-workspace"\nmax_provider_usage = 100',
+            ),
+            encoding="utf-8",
+        )
+        self.config = load(self.root)
+        self.task_directory.joinpath("receipt.md").write_text(
+            "result: DONE\n", encoding="utf-8"
+        )
+        wave = self._wave()
+        outcomes = apply_supervised_wave(self.config, wave, clock=lambda: self.now)
+        self.assertEqual(
+            [(item.status, item.result) for item in outcomes],
+            [(ActionStatus.SUCCEEDED, "review")],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

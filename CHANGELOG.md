@@ -2,6 +2,95 @@
 
 ## Unreleased
 
+## 0.7.2 - 2026-08-17
+
+- `objective explain` and a ready `next` now lead with a three-line
+  switch-tool briefing: human matter plus one path-free read command.
+  A single live Objective makes `next` emit `tick` or `attention`
+  directly. `next.commands` stays empty. Empty attention stays unread,
+  not idle. This is not a cross-harness chat resume.
+- Console home recommendations now match that follow-up: `tick` when
+  ready, `attention` when the user must act. Empty attention still
+  opens the workspace, not `task next`.
+- Bare `dyro` / `dyro home` prints the same briefing above the tool
+  menu so switching harnesses does not start by picking a chat. When
+  that briefing exists, Enter defaults to "做下一步" and does not
+  launch an editor. `dyro start` still opens a tool, but prints the
+  briefing first.
+- `objective tick` and `objective attention` text now open with the
+  same heading and matter, then a closer without another "下一步".
+  Machine SHA lines stay below. JSON envelopes are unchanged.
+- Console workspace detail now projects already-captured lines, tasks, and
+  objectives from the same summary snapshot. Overview polling stays
+  count-only. Summary Proof and task integration stay `not_inspected`;
+  `PROOF_DECAYED` stays on the independent inspect.
+- Console overview now rolls up `task_status_counts` from readable
+  workspaces only. Unreadable workspaces stay unknown and are not counted
+  as zero.
+- Console workspace detail now lists already-captured Objective attention
+  in Chinese. Empty attention stays "摘要未列出关注项"; an unreadable
+  workspace stays unknown. Summary still strips `PROOF_DECAYED`.
+- Console home now leads with a "现在需要你" list and a human why for
+  the next command. Workspace cards show the current matter instead of
+  freshness jargon. Empty tools and empty attention still mean unread,
+  not "nothing to do".
+- Console `GET /api/v1/system` reads the cached update record only.
+  `tools` stays empty and `tool_inspection=not_inspected`. The shell
+  fetches it on start and manual refresh, not on the 5s overview poll.
+  A broken cache is unread and path-free. Empty tools means unprobed,
+  not "no tools".
+- Console meta advertises `proofs`. The shell fetches
+  `GET /api/v1/workspaces/{alias}/proofs` only when that capability is present.
+- Overview summary cards now carry `proof_inspection=not_inspected`. Isolated
+  inspection rejects an `inspected` summary so the two Proof entries cannot
+  collapse.
+- Independent Proof inspect stays in the exec worker so a hung git is reaped
+  by the parent's process-group kill. Nested spawn is withdrawn: a successful
+  worker exit must not leave inspect descendants. Timeout reports unread, not
+  inspected.
+- Console labels Proof kinds and statuses in Chinese. Overview cards no
+  longer treat unread summary as workspace Proof state. `live` is kind-specific
+  and is not merge clearance.
+- `0.7.x` release gates ignore comment-only markers, refuse `0.8` / `0.9`
+  feature numbers, and keep a later `1.0.0` identity tag on the same stranger
+  contract. Wheel smoke now runs the stranger bundle check.
+- Production `BudgetUsage` / `BudgetRequest` read `trusted_usage` from the
+  executor Card. The default is untrusted. Proof still does not feed
+  no-progress exhaustion.
+- `proof list --line` includes `trigger_observation` from Objectives on that
+  line and stays mutually exclusive with `--task` / `--objective`. `--task`
+  still excludes triggers.
+- Console inspection fails closed on Windows without starting a worker.
+- `objective tick` and `objective plan` preview `decide_budget` for the
+  selected wave. Automatic Objectives pass `automatic=True`; supervised
+  apply stays `automatic=False`. Untrusted usage hard-stops only when
+  `workspace.max_provider_usage` is set. Preview never reserves.
+- `run_task_bound_dispatch` now requires the Capability plane on write and
+  refuses a Card without `execute`. No Card remains the 0.6.9 second door.
+- Console meta advertises `surfaces` (and keeps `capabilities` as an alias)
+  so HTTP feature flags are not Capability Cards.
+- Agent Bridge S1 contracts live in source as `dyro.bridge`. The default
+  wheel still omits that package and does not grow `dyro-bridge` /
+  `dyro-mcp` scripts.
+- Agent Bridge S2/S3 source adapters resolve workspaces, emit path-free
+  observations, and return non-executable Objective plans. Catalog marks
+  those IDs `implemented_testable`. Authoritative Git observations stay
+  unavailable. No transport entry point and no default-wheel package.
+- Agent Bridge S4 source transport parses one bounded JSON request and
+  emits one redacted response. Public exposure stays empty: hello and
+  plans are `implemented_testable` only. No `dyro-bridge` script.
+- Agent Bridge S5 source catalog promotes the seven Mandatory operations
+  to `public_available` only on Linux. macOS/Windows public exposure
+  stays empty. In-process zero-effect traps cover hello. Still no
+  console script, wheel package, or CI gate.
+- Agent Bridge S6 adds a source-only Skill and `python -m dyro.bridge`
+  public process. The Skill is not an integration asset and is not
+  installable. Default wheel and `dyro-bridge` / `dyro-mcp` scripts stay
+  absent.
+- Agent Bridge S7 / `dyro-mcp` stays out. Design status lines now match
+  the `0.6.3` removal: published artifacts remain CLI + Skill, not Bridge
+  or MCP.
+
 ## 0.7.1 - 2026-08-16
 
 - Console opens an independent Proof inspect at

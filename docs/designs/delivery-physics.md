@@ -1,7 +1,7 @@
 # Dyro 交付物理学与能力平面
 
-状态：提案；2026-08-15 锁定 A1 / B1；2026-08-16 版本列车收口为 `0.7.x`  
-目标版本：`0.7.0` 起在 `0.7.x` 内收口全部交付物理功能；不另开 `0.8.0` / `0.9.0` / `1.0.0` 功能号。`1.0.0` 只是身份冻结，未显式要求不得打。  
+状态：提案；2026-08-15 锁定 A1 / B1；2026-08-16 版本列车收口为 `0.7.x`
+目标版本：`0.7.0` 起功能继续在 `0.7.x` 开发和上线；不另开 `0.8.0` / `0.9.0` / `1.0.0` 功能号。`1.0.0` 只是以后的身份冻结，不是下一列功能车。
 适用范围：Dyro Core、Profile、Host Compiler、Witness；不改写已发布的 TaskGraph / Objective / Console 权威语义
 
 已锁定：
@@ -237,7 +237,7 @@ decay(proof, current_substrate, clock) -> live | decayed | inconclusive
 4. `trigger_observation`：`0.7.x` 已派生。用现有 `next_probe_at`，只影响唤醒，不影响完成，也不进入 `progress_fingerprint`。
 5. 用户或策略显式撤销 → `revoked`。这不是 `decay()` 的返回值。
 
-planner 在构造 **`SchedulerSnapshot`** 时评估衰减（不是未使用的 `ContinuationSnapshot`）。`progress_fingerprint` 的纯函数契约继续忽略 trigger；该函数已锁，但生产 `_budget_usage` **尚未**接线 `decide_no_progress`。`0.7` 不把 Proof 接入生产 `BudgetUsage`，不新开 no-progress 自动耗尽。merge 相关 live Proof 若投影，只进已有 `effective_evidence` / `integration_heads`，不并排再加一层。
+planner 在构造 **`SchedulerSnapshot`** 时评估衰减（不是未使用的 `ContinuationSnapshot`）。`progress_fingerprint` 的纯函数契约继续忽略 trigger；该函数已锁，但生产 `_budget_usage` **尚未**接线 `decide_no_progress`。Proof 不接入生产 `BudgetUsage`，不新开 no-progress 自动耗尽。`trusted_usage` 接入 `BudgetUsage.provider_usage_trusted` 与 `BudgetRequest.provider_usage_trusted`，默认 `false`。受监督 apply 仍 `automatic=False`，因此未审计用量不会在人手确认路径上新开硬停。`objective tick` 对 `requested_mode = automatic` 的 wave 做 `decide_budget(..., automatic=True)` 只读预览，零写、不 reserve。工作区可选 `workspace.max_provider_usage`；没有这个 cap 时，未信任用量不会硬停。merge 相关 live Proof 若投影，只进已有 `effective_evidence` / `integration_heads`，不并排再加一层。
 
 `PROOF_DECAYED` **仅当**对应 Proof 从 `live` → `decayed` 且该衰减挡住的是 **merge** 人话。不得用它命名线 dirty / 错分支 / push 失败，也不得用它 block 下游 ready set。状态字段本身仍不是放行证据。
 
@@ -258,7 +258,7 @@ read   = ["codex", "exec", "--sandbox", "workspace-write", "{prompt}"]
 write  = ["codex", "exec", "--sandbox", "workspace-write", "{prompt}"]
 
 attested_isolation = "cwd"          # none | cwd | worktree | os_sandbox | external_runner
-trusted_usage      = false          # 0.7 解析该字段；不接入生产 BudgetUsage
+trusted_usage      = false          # 生产 BudgetUsage / BudgetRequest 读取；默认 false
 can_prove          = []             # 只能填 Proof kind；空表示输出不能当完成证据
 cannot_prove       = ["done", "merge", "security", "product_acceptance"]
 intents            = ["observe", "execute"]
@@ -274,7 +274,7 @@ hosts              = ["cli"]        # cli = Dyro 启动的 adapter；不是宿�
 | `can_prove` | 它的输出里，哪些可以变成 Proof。只填 Proof kind，不填 dispatch 词汇。 |
 | `cannot_prove` | 即使它写了「已完成」，Core 也不得采信。 |
 | `intents` | 它可请求的操作格：`observe` `execute` `review` `sign` `integrate` `publish`。 |
-| `trusted_usage` | 是否能返回可核验用量。0.7 解析并默认 `false`，不接入生产 `BudgetUsage` / 硬限额自动跑。 |
+| `trusted_usage` | 是否能返回可核验用量。默认 `false`。生产 `BudgetUsage` / `BudgetRequest` 读取该字段；只有自动 tick 预览且存在 `workspace.max_provider_usage` 时，未信任用量才会硬停。人手 apply 不因此新开硬停。 |
 | `hosts` | 允许被编译到哪些宿主表面。 |
 
 兼容：本 `0.7.0` 已解析 `[[capabilities]]`，并把 `[adapters.*]` 升级为 Card。缺省 `cannot_prove` 至少包含 `done` 与 `merge`，`attested_isolation = "cwd"`。`dyro agent add` 继续工作，内部写 Card。
@@ -355,7 +355,7 @@ publish   →  push / 发布；第一版仍显式，且默认关
 
 ```text
 dyro                 看见线、目标、一条安全下一步
-dyro next            打印唯一安全命令
+dyro next            打印唯一安全命令；已有目标时先给换工具开场白
 dyro continue        按租约推进（已有）
 dyro proof verify    需要争辩「到底做没做完」时
 dyro host compile    换机器或换工具后
