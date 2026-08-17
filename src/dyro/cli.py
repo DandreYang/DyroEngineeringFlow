@@ -68,8 +68,10 @@ from .continuation.store import (
     get_objective,
     list_objectives,
     pause_objective,
+    preview_objective_wave_budgets,
     reconcile_objective,
     remove_objective_target,
+    render_budget_preview_text,
     resume_objective,
     stop_objective,
 )
@@ -3351,30 +3353,34 @@ def _read_objective_plan(
             config, objective=record, budget=read_budget
         )
     )
-    return snapshot, build_continuation_plan(snapshot)
+    return record, snapshot, build_continuation_plan(snapshot)
 
 
 def cmd_objective_plan(args: argparse.Namespace) -> None:
-    _, plan = _read_objective_plan(
-        _config(args),
+    config = _config(args)
+    record, _, plan = _read_objective_plan(
+        config,
         args.id,
         read_budget=_control_plane_budget(args) if args.format == "json" else None,
     )
+    preview = preview_objective_wave_budgets(
+        config,
+        objective=record.objective,
+        actions=plan.selected_actions,
+        now=datetime.now(timezone.utc),
+    )
     if args.format == "json":
-        print(
-            json.dumps(
-                continuation_plan_payload(plan),
-                ensure_ascii=False,
-                sort_keys=True,
-                indent=2,
-            )
-        )
+        payload = continuation_plan_payload(plan)
+        payload["budget_preview"] = preview
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
         return
     print(render_plan_text(plan))
+    for note in render_budget_preview_text(preview):
+        print(note)
 
 
 def cmd_objective_explain(args: argparse.Namespace) -> None:
-    _, plan = _read_objective_plan(
+    _, _, plan = _read_objective_plan(
         _config(args),
         args.id,
         read_budget=_control_plane_budget(args) if args.format == "json" else None,
@@ -3393,7 +3399,7 @@ def cmd_objective_explain(args: argparse.Namespace) -> None:
 
 
 def cmd_objective_graph(args: argparse.Namespace) -> None:
-    snapshot, plan = _read_objective_plan(
+    _, snapshot, plan = _read_objective_plan(
         _config(args),
         args.id,
         read_budget=_control_plane_budget(args) if args.format == "json" else None,
@@ -3443,6 +3449,12 @@ def cmd_objective_tick(args: argparse.Namespace) -> None:
         available_write,
         capabilities=getattr(config, "capabilities", None),
     )
+    overlay["budget_preview"] = preview_objective_wave_budgets(
+        config,
+        objective=record.objective,
+        actions=tick.wave,
+        now=datetime.now(timezone.utc),
+    )
     if args.format == "json":
         payload = scheduler_tick_payload(tick)
         payload.update(overlay)
@@ -3456,6 +3468,8 @@ def cmd_objective_tick(args: argparse.Namespace) -> None:
             f"Harness: {binding['task_id']} -> {binding['executor']} "
             f"({binding['source']})"
         )
+    for note in render_budget_preview_text(overlay["budget_preview"]):
+        print(note)
 
 
 def cmd_objective_attention(args: argparse.Namespace) -> None:
@@ -4469,7 +4483,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     objective_graph.set_defaults(func=cmd_objective_graph)
     objective_tick = objective_sub.add_parser(
-        "tick", help="预览下一组有界 Objective Action；不创建 intent 或执行任务"
+        "tick",
+        help="预览下一组有界 Objective Action 与预算；不创建 intent 或执行任务",
     )
     objective_tick.add_argument("id")
     objective_tick.add_argument("--format", choices=("text", "json"), default="text")
@@ -4569,7 +4584,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     proof = sub.add_parser("proof", help="只读派生并核验交付 Proof（rebind，不是 replay）")
     proof_sub = proof.add_subparsers(dest="proof_command", required=True)
-    proof_list = proof_sub.add_parser("list", help="从当前工作区全量重派生 Proof")
+    proof_list = proof_sub.add_parser(
+        "list",
+        help="从当前工作区全量重派生 Proof（含 trigger_observation；--task 不含；--line 只含该线 Objective 的 trigger）",
+    )
     proof_list.add_argument("--task")
     proof_list.add_argument("--objective")
     proof_list.add_argument("--line")

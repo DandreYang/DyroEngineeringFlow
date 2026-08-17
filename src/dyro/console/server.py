@@ -304,7 +304,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     "schema_version": 1,
                     "data": {
                         "version": __version__,
-                        "capabilities": ["overview"] if self.console.overview_service else [],
+                        "surfaces": (
+                            ["overview", "proofs"] if self.console.overview_service else []
+                        ),
+                        "capabilities": (
+                            ["overview", "proofs"] if self.console.overview_service else []
+                        ),
                         "initial_workspace": self.console.initial_workspace,
                         "session_expires_at": session.expires_at.isoformat(),
                     },

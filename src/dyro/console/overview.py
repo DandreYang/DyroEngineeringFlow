@@ -80,6 +80,39 @@ def _safe_list(value: object) -> list[dict[str, object]]:
     return [dict(item) for item in value if isinstance(item, dict)]
 
 
+def _empty_inventory() -> dict[str, list[dict[str, object]]]:
+    return {"lines": [], "tasks": [], "objectives": []}
+
+
+def _without_proof_decay(items: object) -> list[dict[str, object]]:
+    return [
+        dict(item)
+        for item in _safe_list(items)
+        if _safe_code(item.get("reason")) != "PROOF_DECAYED"
+    ]
+
+
+def _inventory_from_envelope(data: dict[str, object]) -> dict[str, list[dict[str, object]]]:
+    """Project already-captured lists. Never add Proofs or rebind integration."""
+    tasks: list[dict[str, object]] = []
+    for item in _safe_list(data.get("tasks")):
+        task = dict(item)
+        task["integration_state"] = "not_inspected"
+        tasks.append(task)
+    objectives: list[dict[str, object]] = []
+    for item in _safe_list(data.get("objectives")):
+        objective = dict(item)
+        objective["attention"] = _without_proof_decay(item.get("attention"))
+        objective["selected_actions"] = _without_proof_decay(item.get("selected_actions"))
+        objective["blocked_actions"] = _without_proof_decay(item.get("blocked_actions"))
+        objectives.append(objective)
+    return {
+        "lines": [dict(item) for item in _safe_list(data.get("lines"))],
+        "tasks": tasks,
+        "objectives": objectives,
+    }
+
+
 class ConsoleOverviewService:
     """Read and project registered workspaces without changing their state."""
 
@@ -149,12 +182,17 @@ class ConsoleOverviewService:
             "workspaces": items,
             "next_cursor": next_cursor,
             "attention_counts": attention_counts,
+            "task_status_counts": self._task_status_counts(summaries),
             "highest_priority": self._highest_priority(summaries),
         }
         return self._envelope(data, warning_codes)
 
     def workspace(self, alias: str) -> dict[str, object]:
-        """Return one registered workspace summary from the shared projection."""
+        """Return one summary card plus already-captured inventory.
+
+        Inventory comes from the same summary snapshot. It is not an inspect,
+        so Proofs stay out and task integration stays unread.
+        """
         try:
             alias = validate_id(alias, "工作区别名")
         except ValidationError:
@@ -164,10 +202,10 @@ class ConsoleOverviewService:
             record = next(item for item in registry.workspaces if item.name == alias)
         except StopIteration:
             raise ConsoleOverviewError("WORKSPACE_NOT_FOUND") from None
-        summary, warning_codes = self._summary(
+        summary, warning_codes, inventory = self._capture(
             record.name, record.root, record.name == registry.default
         )
-        return self._envelope({"workspace": summary}, warning_codes)
+        return self._envelope({"workspace": summary, **inventory}, warning_codes)
 
     def inspect_proofs(self, alias: str) -> dict[str, object]:
         """Independent Proof inspect. Must not use the summary snapshot_loader."""
@@ -246,7 +284,9 @@ class ConsoleOverviewService:
         summaries: list[dict[str, object]] = []
         warnings: set[str] = set()
         for record in registry.workspaces:
-            summary, codes = self._summary(record.name, record.root, record.name == registry.default)
+            summary, codes = self._summary(
+                record.name, record.root, record.name == registry.default
+            )
             summaries.append(summary)
             warnings.update(codes)
         summaries.sort(key=self._summary_sort_key)
@@ -269,6 +309,12 @@ class ConsoleOverviewService:
     def _summary(
         self, alias: str, root: Path, is_default: bool
     ) -> tuple[dict[str, object], set[str]]:
+        summary, warnings, _inventory = self._capture(alias, root, is_default)
+        return summary, warnings
+
+    def _capture(
+        self, alias: str, root: Path, is_default: bool
+    ) -> tuple[dict[str, object], set[str], dict[str, list[dict[str, object]]]]:
         safe_alias = _safe_code(alias)
         try:
             config = self._config_loader(root)
@@ -295,8 +341,10 @@ class ConsoleOverviewService:
                         "command": f"dyro --workspace {safe_alias} doctor",
                     },
                     "snapshot_sha256": "",
+                    "proof_inspection": "not_inspected",
                 },
                 {"WORKSPACE_UNAVAILABLE"},
+                _empty_inventory(),
             )
 
         data = _safe_mapping(envelope.get("data"))
@@ -335,8 +383,9 @@ class ConsoleOverviewService:
             "attention_counts": attention["counts"],
             "recommendation": self._recommendation(safe_alias, attention["items"]),
             "snapshot_sha256": str(envelope.get("snapshot_sha256", "")),
+            "proof_inspection": "not_inspected",
         }
-        return summary, warning_codes
+        return summary, warning_codes, _inventory_from_envelope(data)
 
     @staticmethod
     def _empty_attention_counts() -> dict[str, int]:
@@ -351,7 +400,8 @@ class ConsoleOverviewService:
             objective_id = _safe_code(objective.get("id"))
             for raw in _safe_list(objective.get("attention")):
                 kind = _safe_code(raw.get("kind"))
-                if kind not in _ATTENTION_PRIORITY:
+                reason = _safe_code(raw.get("reason"))
+                if kind not in _ATTENTION_PRIORITY or reason == "PROOF_DECAYED":
                     continue
                 counts[kind] += 1
                 items.append(
@@ -359,7 +409,7 @@ class ConsoleOverviewService:
                         "objective_id": objective_id,
                         "kind": kind,
                         "subject_id": _safe_code(raw.get("subject_id")),
-                        "reason": _safe_code(raw.get("reason")),
+                        "reason": reason,
                     }
                 )
         items.sort(
@@ -396,6 +446,23 @@ class ConsoleOverviewService:
                 if kind in counts and type(value) is int and value >= 0:
                     counts[kind] += value
         return counts
+
+    def _task_status_counts(self, summaries: list[dict[str, object]]) -> dict[str, int]:
+        """Sum task statuses from readable workspaces only.
+
+        Unavailable cards keep empty maps. Counting them as 0 would pretend
+        unread workspaces have no work.
+        """
+        counts: dict[str, int] = {}
+        for summary in summaries:
+            if summary.get("availability") != "available":
+                continue
+            for status, value in _safe_mapping(summary.get("task_status_counts")).items():
+                code = _safe_code(status)
+                if code == "REDACTED" or type(value) is not int or value < 0:
+                    continue
+                counts[code] = counts.get(code, 0) + value
+        return dict(sorted(counts.items()))
 
     def _highest_priority(self, summaries: list[dict[str, object]]) -> dict[str, str] | None:
         candidates: list[tuple[int, str, dict[str, str]]] = []

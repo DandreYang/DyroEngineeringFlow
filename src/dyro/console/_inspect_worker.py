@@ -18,7 +18,7 @@ import sys
 import time
 from typing import Any
 
-from ..config import load, validate_id
+from ..config import load
 from ..hub import WorkspaceRecord, WorkspaceRegistry
 from .overview import ConsoleOverviewError, ConsoleOverviewService
 
@@ -56,6 +56,7 @@ def _unavailable_summary(alias: str, code: str) -> dict[str, object]:
             "command": f"dyro --workspace {alias} doctor",
         },
         "snapshot_sha256": "",
+        "proof_inspection": "not_inspected",
     }
 
 
@@ -207,26 +208,9 @@ def _isolated_summaries(
 def _isolated_workspace(
     service: ConsoleOverviewService, alias: str
 ) -> dict[str, object]:
-    try:
-        alias = validate_id(alias, "工作区别名")
-    except Exception:
-        raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID") from None
-    registry = service._load_registry()
-    try:
-        record = next(item for item in registry.workspaces if item.name == alias)
-    except StopIteration:
-        raise ConsoleOverviewError("WORKSPACE_NOT_FOUND") from None
-    isolated_registry = WorkspaceRegistry(
-        default=record.name if record.name == registry.default else "",
-        workspaces=(record,),
-    )
-    summaries, warnings = _isolated_summaries(
-        isolated_registry,
-        total_timeout=_OVERVIEW_TIMEOUT_SECONDS,
-    )
-    if not summaries:
-        raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
-    return service._envelope({"workspace": summaries[0]}, warnings)
+    # Run in this exec worker so hung git stays in the parent's killpg
+    # group. Nested summary spawn only returns the count card.
+    return service.workspace(alias)
 
 
 def _secret_from_environment() -> bytes:
@@ -324,6 +308,8 @@ def main(argv: list[str] | None = None) -> int:
             alias = request.get("alias")
             if not isinstance(alias, str):
                 raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID")
+            # Inspect is its own exec-worker request. Keep git descendants in
+            # this process group so the parent's 8s killpg can reap them.
             payload = service.inspect_proofs(alias)
         else:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")

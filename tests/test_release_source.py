@@ -107,3 +107,13 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
         self.assertNotIn("Agent Bridge source/wheel/sdist gate", workflow)
         self.assertIn("dyro-dispatch','SKILL.md", workflow)
         self.assertIn("dyro-dispatch','agents','openai.yaml", workflow)
+        self.assertGreaterEqual(workflow.count("verify_bundle_stranger.py"), 2)
+
+    def test_default_wheel_stays_bridge_free(self) -> None:
+        metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertNotIn("dyro-bridge", metadata)
+        self.assertNotIn("dyro-mcp", metadata)
+        self.assertNotIn('"dyro.bridge"', metadata)
+        self.assertNotIn("[project.optional-dependencies.mcp]", metadata)
+        self.assertNotIn("[mcp]", metadata)
+        self.assertIn('dyro = "dyro.cli:main"', metadata)

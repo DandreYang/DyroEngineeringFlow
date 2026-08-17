@@ -1,0 +1,7 @@
+{
+  "name": "dyro-agent-bridge",
+  "installable": false,
+  "hosts": [],
+  "process": "python -m dyro.bridge",
+  "packaged_entry": false
+}

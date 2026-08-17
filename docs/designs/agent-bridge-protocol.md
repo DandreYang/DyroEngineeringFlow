@@ -18,7 +18,12 @@ changing a field, copying a digest, adding `--yes`, or claiming an actor.
 
 ## 2. Process contract
 
-The packaged console entry point is:
+The long-term packaged console entry point is `dyro-bridge`. In this `0.7.x`
+train that script is **not shipped**. Source-tree callers may use
+`python -m dyro.bridge`; an installed `dyro` wheel must not provide
+`dyro-bridge` or `dyro-mcp`.
+
+The packaged name, when a later extra exists, remains:
 
 ```text
 dyro-bridge

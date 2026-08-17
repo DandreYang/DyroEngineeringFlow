@@ -154,6 +154,7 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         self.assertEqual(first["data"]["highest_priority"]["kind"], "repair_required")
         self.assertEqual(first["data"]["attention_counts"]["needs_user"], 1)
         self.assertEqual(first["data"]["attention_counts"]["repair_required"], 1)
+        self.assertEqual(first["data"]["task_status_counts"], {"backlog": 2})
         self.assertIn("WORKSPACE_UNAVAILABLE", first["freshness"]["warnings"][1]["code"])
         self.assertNotIn("/private", repr(first))
         self.assertNotIn("dyro.toml", repr(first))
@@ -225,13 +226,51 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
 
     def test_single_workspace_reuses_the_same_summary_and_rejects_unsafe_aliases(self) -> None:
         payload = self.service.workspace("alpha")
+        page = self.service.page(limit=3)
 
         self.assertEqual(payload["data"]["workspace"]["alias"], "alpha")
+        self.assertEqual(payload["data"]["workspace"]["proof_inspection"], "not_inspected")
+        self.assertEqual(payload["data"]["lines"][0]["id"], "alpha")
+        self.assertEqual(payload["data"]["tasks"][0]["id"], "TASK-A")
+        self.assertEqual(payload["data"]["tasks"][0]["integration_state"], "not_inspected")
+        self.assertEqual(payload["data"]["objectives"][0]["id"], "release")
+        self.assertNotIn("proofs", payload["data"])
+        self.assertNotIn("lines", page["data"])
+        self.assertNotIn("tasks", page["data"])
+        self.assertNotIn("objectives", page["data"])
         self.assertNotIn("/private", repr(payload))
         with self.assertRaisesRegex(ConsoleOverviewError, "WORKSPACE_ALIAS_INVALID"):
             self.service.workspace("%2fprivate")
         with self.assertRaisesRegex(ConsoleOverviewError, "WORKSPACE_NOT_FOUND"):
             self.service.workspace("missing")
+
+    def test_overview_task_status_counts_ignore_unavailable_workspaces(self) -> None:
+        self.registry = WorkspaceRegistry(
+            default="broken",
+            workspaces=(WorkspaceRecord("broken", self.broken_root),),
+        )
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            config_loader=self.service._config_loader,
+            snapshot_loader=self.service._snapshot_loader,
+            clock=self.service._clock,
+            cursor_secret=b"k" * 32,
+        )
+
+        payload = service.page()
+
+        self.assertEqual(payload["data"]["workspaces"][0]["availability"], "unavailable")
+        self.assertEqual(payload["data"]["task_status_counts"], {})
+
+    def test_unavailable_workspace_keeps_empty_inventory_keys(self) -> None:
+        payload = self.service.workspace("broken")
+
+        self.assertEqual(payload["data"]["workspace"]["availability"], "unavailable")
+        self.assertEqual(payload["data"]["workspace"]["proof_inspection"], "not_inspected")
+        self.assertEqual(payload["data"]["lines"], [])
+        self.assertEqual(payload["data"]["tasks"], [])
+        self.assertEqual(payload["data"]["objectives"], [])
+        self.assertNotIn("proofs", payload["data"])
 
     def test_inspect_proofs_does_not_use_summary_loader_and_can_show_decay(self) -> None:
         inspected = _snapshot(
@@ -261,6 +300,19 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
             clock=lambda: datetime(2026, 8, 4, 12, 5, tzinfo=timezone.utc),
             cursor_secret=b"k" * 32,
         )
+        leaked = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            config_loader=self.service._config_loader,
+            snapshot_loader=lambda config: inspected,
+            inspect_loader=lambda config: inspected,
+            clock=lambda: datetime(2026, 8, 4, 12, 5, tzinfo=timezone.utc),
+            cursor_secret=b"k" * 32,
+        )
+        summary = leaked.workspace("alpha")
+        self.assertEqual(summary["data"]["workspace"]["proof_inspection"], "not_inspected")
+        self.assertEqual(summary["data"]["tasks"][0]["integration_state"], "not_inspected")
+        self.assertNotIn("proofs", summary["data"])
+        self.assertNotIn("PROOF_DECAYED", repr(summary["data"]["objectives"]))
         payload = service.inspect_proofs("alpha")
         self.assertEqual(payload["data"]["proof_inspection"], "inspected")
         self.assertEqual(payload["data"]["proofs"][0]["status"], "decayed")

@@ -1,9 +1,68 @@
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const TOKEN_KEY = "dyro.console.bearer";
-const state = { bearer: "", etags: new Map(), timer: null, focus: "", partial: false };
+const state = { bearer: "", etags: new Map(), timer: null, focus: "", partial: false, surfaces: [] };
 const HEALTH_LABELS = { healthy: "健康", degraded: "需关注", unavailable: "不可用" };
 const FRESHNESS_LABELS = { fresh: "新鲜", partial: "部分可用", stale: "待更新" };
 const AVAILABILITY_LABELS = { available: "可用", unavailable: "不可用" };
+const LINE_KIND_LABELS = { line: "开发线", hotfix: "热修线" };
+const TASK_STATUS_LABELS = {
+  backlog: "待办",
+  assigned: "已分配",
+  in_progress: "进行中",
+  waiting_answer: "待回答",
+  review: "复核中",
+  review_pending_signoff: "待签核",
+  done: "已完成",
+  failed: "失败",
+};
+const TASK_STATUS_ORDER = [
+  "backlog",
+  "assigned",
+  "in_progress",
+  "waiting_answer",
+  "review",
+  "review_pending_signoff",
+  "done",
+  "failed",
+];
+const OPERATOR_STATE_LABELS = {
+  active: "进行中",
+  paused: "已暂停",
+  completed: "已完成",
+  repair_required: "需要修复",
+};
+const PROOF_INSPECTION_LABELS = { not_inspected: "摘要未核验", inspected: "已独立检查" };
+const PROOF_KIND_LABELS = {
+  gate_log: "门禁日志",
+  review_verdict: "复核结论",
+  signoff: "外部签核",
+  integration_heads: "集成 HEAD",
+  action_receipt: "动作回执",
+  trigger_observation: "触发观察",
+};
+const PROOF_STATUS_LABELS = {
+  live: "检查仍有效",
+  decayed: "已衰减",
+  inconclusive: "无法判定",
+  revoked: "已撤销",
+};
+const PROOF_LIVE_LABELS = {
+  review_verdict: "复核仍绑当前 HEAD",
+  signoff: "签核仍绑当前 HEAD",
+  trigger_observation: "探测窗口未到期",
+  gate_log: "门禁字节仍匹配",
+  integration_heads: "集成 HEAD 仍在祖先链",
+  action_receipt: "动作回执仍有效",
+};
+const PROOF_DECAY_LABELS = {
+  review_acceptance: "复核绑定已失效",
+  external_signoff: "外部签核已失效",
+  dependency_integrated: "依赖集成已失效",
+  gate_bytes: "门禁字节已失效",
+  next_probe_at: "下次探测已到期",
+  still_bound: "谓词仍成立",
+  predicate_inconclusive: "谓词无法判定",
+};
 const ERROR_LABELS = {
   LOCAL_READ_UNAVAILABLE: "本地状态暂时不可读取",
   OVERVIEW_UNAVAILABLE: "工作区概览暂时不可读取",
@@ -41,6 +100,26 @@ function unavailableWorkspaceCount(workspaces) {
 function displayLabel(value, labels) {
   const raw = text(value);
   return labels[raw] || raw || "未提供";
+}
+
+function taskIntegrationLabel(state) {
+  // 摘要路径只能是 not_inspected。写成「已集成」会把未核验摘要伪装成 merge 放行。
+  return text(state) === "not_inspected" ? "摘要未核验集成" : "未提供";
+}
+
+function describeTask(task) {
+  const status = displayLabel(task && task.status, TASK_STATUS_LABELS);
+  const integration = taskIntegrationLabel(task && task.integration_state);
+  const blocked = Array.isArray(task && task.blocked_on) && task.blocked_on.length
+    ? `阻塞于 ${task.blocked_on.map((item) => text(item)).filter(Boolean).join("、")}`
+    : "";
+  return blocked ? `${status} · ${integration} · ${blocked}` : `${status} · ${integration}`;
+}
+
+function proofStatusLabel(kind, status) {
+  const raw = text(status);
+  if (raw === "live") return displayLabel(kind, PROOF_LIVE_LABELS);
+  return displayLabel(raw, PROOF_STATUS_LABELS);
 }
 
 function userError(value) {
@@ -192,6 +271,27 @@ function attentionLevel(summary) {
   return "";
 }
 
+function readableWorkspaceCount(workspaces) {
+  if (!Array.isArray(workspaces)) return 0;
+  return workspaces.filter((summary) => text(summary.availability) === "available").length;
+}
+
+function renderTaskStatusCounts(counts, workspaces) {
+  const root = $("task-status-counts");
+  if (!root) return;
+  root.replaceChildren();
+  const readable = readableWorkspaceCount(workspaces);
+  for (const key of TASK_STATUS_ORDER) {
+    const card = element("div");
+    card.className = "count task-count";
+    if (key === "failed" && readable && count(counts && counts[key])) card.dataset.level = "danger";
+    if (key === "in_progress" && readable && count(counts && counts[key])) card.dataset.level = "warning";
+    const value = readable ? String(count(counts && counts[key])) : "—";
+    card.append(element("strong", value), element("span", displayLabel(key, TASK_STATUS_LABELS)));
+    root.append(card);
+  }
+}
+
 function renderCounts(attention) {
   const root = $("attention-counts");
   root.replaceChildren();
@@ -271,6 +371,7 @@ function renderOverview(payload) {
     : "尚未登记工作区。可运行 dyro setup、dyro join 或 dyro workspace add。";
   $("captured-at").textContent = text(payload.captured_at) ? `采样于 ${new Date(text(payload.captured_at)).toLocaleString("zh-CN")}` : "";
   renderCounts(data.attention_counts || {});
+  renderTaskStatusCounts(data.task_status_counts || {}, data.workspaces);
   renderPrimaryAction(data.workspaces);
   const list = $("workspace-list");
   list.replaceChildren();
@@ -283,13 +384,57 @@ function renderOverview(payload) {
   for (const summary of data.workspaces) list.append(renderWorkspaceCard(summary));
 }
 
+function hasSurface(name) {
+  return state.surfaces.includes(name);
+}
+
+function renderInventoryList(title, items, describe) {
+  const section = element("div");
+  section.className = "inventory";
+  section.append(element("h3", title));
+  if (!items.length) {
+    section.append(element("p", "没有可展示的项目。"));
+    return section;
+  }
+  const list = element("ul");
+  for (const item of items) list.append(element("li", describe(item)));
+  section.append(list);
+  return section;
+}
+
+function renderInventory(data) {
+  const root = element("div");
+  root.className = "workspace-inventory";
+  const lines = Array.isArray(data && data.lines) ? data.lines : [];
+  const tasks = Array.isArray(data && data.tasks) ? data.tasks : [];
+  const objectives = Array.isArray(data && data.objectives) ? data.objectives : [];
+  root.append(
+    renderInventoryList("开发线", lines, (line) => {
+      const kind = displayLabel(line.kind, LINE_KIND_LABELS);
+      const branch = text(line.branch) || "未提供";
+      return `${text(line.id)} · ${kind} · ${branch}`;
+    }),
+    renderInventoryList("任务", tasks, (task) => {
+      const title = text(task.title) || text(task.id) || "未命名任务";
+      return `${title} · ${describeTask(task)}`;
+    }),
+    renderInventoryList("目标", objectives, (objective) => {
+      const title = text(objective.title) || text(objective.id) || "未命名目标";
+      const state = displayLabel(objective.operator_state, OPERATOR_STATE_LABELS);
+      return `${title} · ${state}`;
+    }),
+  );
+  return root;
+}
+
 function renderProofInspect(inspect) {
   const inspection = text(inspect && inspect.proof_inspection);
   const section = element("div");
   section.className = "proof-inspect";
-  section.append(element("h3", inspection === "inspected" ? "Proof 已检查" : "Proof 未检查"));
+  section.append(element("h3", inspection === "inspected" ? "独立检查 · 已检查" : "独立检查 · 未完成"));
+  section.append(element("p", "独立检查只读投影，不是 task merge 放行。"));
   if (inspection !== "inspected") {
-    section.append(element("p", "摘要保持未检查。独立检查失败时不会把摘要标成已检查。"));
+    section.append(element("p", "摘要保持未核验。独立检查未完成时不会把摘要标成已检查。"));
     return section;
   }
   const proofs = Array.isArray(inspect.proofs) ? inspect.proofs : [];
@@ -299,10 +444,10 @@ function renderProofInspect(inspect) {
   }
   const list = element("ul");
   for (const proof of proofs) {
-    const kind = text(proof.kind);
-    const status = text(proof.status);
+    const kind = displayLabel(proof.kind, PROOF_KIND_LABELS);
+    const status = proofStatusLabel(proof.kind, proof.status);
     const reason = text(proof.decay_reason);
-    list.append(element("li", reason ? `${kind} · ${status} · ${reason}` : `${kind} · ${status}`));
+    list.append(element("li", reason ? `${kind} · ${status} · ${displayLabel(reason, PROOF_DECAY_LABELS)}` : `${kind} · ${status}`));
   }
   section.append(list);
   const decayed = [];
@@ -316,6 +461,9 @@ function renderProofInspect(inspect) {
 }
 
 async function loadProofInspect(alias) {
+  if (!hasSurface("proofs")) {
+    return renderProofInspect({ proof_inspection: "not_inspected", proofs: [], objectives: [] });
+  }
   try {
     const payload = await request(`/api/v1/workspaces/${encodeURIComponent(alias)}/proofs`, `proofs:${alias}`);
     if (payload && payload.data) return renderProofInspect(payload.data);
@@ -350,8 +498,10 @@ async function loadWorkspace(alias, silent = false) {
       definition("任务总数", workspaceCount(summary, "task_count")),
       definition("开发线", workspaceCount(summary, "line_count")),
       definition("目标", workspaceCount(summary, "objective_count")),
+      definition("摘要 Proof", displayLabel(summary.proof_inspection, PROOF_INSPECTION_LABELS)),
     );
     content.replaceChildren(grid);
+    content.append(renderInventory(payload.data));
     const command = text(summary.recommendation && summary.recommendation.command);
     if (command) content.append(commandRow(command));
     content.append(await loadProofInspect(alias));
@@ -426,7 +576,13 @@ async function start() {
     else state.bearer = sessionStorage.getItem(TOKEN_KEY) || "";
     if (!state.bearer) throw new Error("SESSION_EXPIRED");
     const meta = await request("/api/v1/meta", "meta");
-    if (meta && !state.focus) state.focus = text(meta.data && meta.data.initial_workspace);
+    if (meta) {
+      const surfaces = meta.data && (meta.data.surfaces || meta.data.capabilities);
+      state.surfaces = Array.isArray(surfaces)
+        ? surfaces.filter((item) => typeof item === "string")
+        : [];
+      if (!state.focus) state.focus = text(meta.data && meta.data.initial_workspace);
+    }
     await refresh();
     scheduleRefresh();
   } catch (error) {

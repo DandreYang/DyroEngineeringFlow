@@ -81,6 +81,7 @@ class PeerWaveTests(unittest.TestCase):
                     workspace=workspace,
                     prompt="do not write",
                     timeout_seconds=1.0,
+                    capabilities={},
                 )
 
     def test_echo_bound_dispatch_writes_in_given_worktree_not_detached_tree(
@@ -96,6 +97,7 @@ class PeerWaveTests(unittest.TestCase):
                 workspace=workspace,
                 prompt="result: DONE",
                 timeout_seconds=1.0,
+                capabilities={},
             )
             self.assertEqual(result.code, 0)
             self.assertIn("echo-adapter", result.stdout)

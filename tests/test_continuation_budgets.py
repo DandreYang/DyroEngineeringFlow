@@ -196,6 +196,7 @@ class ContinuationBudgetTests(unittest.TestCase):
 
         self.assertIn(BudgetReason.PROVIDER_USAGE_UNTRUSTED, unknown.reasons)
         self.assertTrue(explicit_zero.allowed)
+        self.assertFalse(BudgetUsage().provider_usage_trusted)
         with self.assertRaisesRegex(TypeError, "automatic 必须是 bool"):
             BudgetDecisionInput(request=BudgetRequest("TASK-A"), automatic=0, **base)  # type: ignore[arg-type]
 

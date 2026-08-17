@@ -107,7 +107,7 @@ class ProofDecayPureTests(unittest.TestCase):
         self.assertNotEqual(decision.reason, LINE_PREPARE_NOT_DECAY)
         self.assertNotEqual(decision.status, ProofStatus.DECAYED)
 
-    def test_git_revert_is_not_ancestor_break(self) -> None:
+    def test_integration_heads_stay_live_when_ancestor_check_passes(self) -> None:
         proof = _proof(ProofKind.INTEGRATION_HEADS)
         decision = decay(proof, None, clock=CLOCK, integration_ok=True)
         self.assertEqual(decision.status, ProofStatus.LIVE)
@@ -362,8 +362,22 @@ class ProofDecayWorkspaceTests(WorkspaceCase):
         integration = next(proof for proof in proofs if proof.kind is ProofKind.INTEGRATION_HEADS)
         self.assertEqual(review.status, ProofStatus.LIVE)
         self.assertEqual(integration.status, ProofStatus.LIVE)
-        with self.assertRaisesRegex(DyroError, "开发线仓库不干净"):
+        with self.assertRaisesRegex(DyroError, "开发线仓库不干净") as raised:
             merge_task(config, task)
+        self.assertNotIn("PROOF_DECAYED", str(raised.exception))
+
+    def test_line_wrong_branch_is_prepare_merge_not_proof_decayed(self) -> None:
+        config, task = self._reviewed_task("TASK-LINE-BRANCH")
+        line_repo = self.root / "versions/alpha/services/api"
+        shell("git", "checkout", "-B", "wrong-branch", cwd=line_repo)
+        proofs = evaluate_proofs(config, derive_task_proofs(config, task))
+        review = next(proof for proof in proofs if proof.kind is ProofKind.REVIEW_VERDICT)
+        integration = next(proof for proof in proofs if proof.kind is ProofKind.INTEGRATION_HEADS)
+        self.assertEqual(review.status, ProofStatus.LIVE)
+        self.assertEqual(integration.status, ProofStatus.LIVE)
+        with self.assertRaisesRegex(DyroError, "开发线仓库分支错误") as raised:
+            merge_task(config, task)
+        self.assertNotIn("PROOF_DECAYED", str(raised.exception))
 
     def _downstream(self, config, task_id: str, dependency: str):
         path = config.task_specs_dir / task_id

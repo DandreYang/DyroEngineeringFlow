@@ -91,6 +91,8 @@ def main(argv: list[str] | None = None) -> int:
         absent = json.loads(missing.stdout or "{}")
         if any(item.get("status") == "live" for item in absent.get("proofs", [])):
             raise SystemExit("missing git objects must be inconclusive, not live")
+        if any(item.get("status") == "decayed" for item in absent.get("proofs", [])):
+            raise SystemExit("missing git objects must not report decayed")
         print(json.dumps({"ok": True, "mode": "integrity", "live": True}, sort_keys=True))
     return 0
 

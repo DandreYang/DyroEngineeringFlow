@@ -31,9 +31,18 @@ def list_proofs(
     line_id: str | None = None,
     evaluate: bool = True,
 ) -> tuple[Proof, ...]:
-    """Rebuild Proofs from disk. `--task` never includes action_receipt."""
+    """Rebuild Proofs from disk.
+
+    ``--task`` is task-scoped: no ``action_receipt`` and no
+    ``trigger_observation``. ``--line`` is line-scoped: task Proofs on that
+    line plus ``trigger_observation`` from Objectives on that line.
+    """
     if task_id and objective_id:
         raise ValidationError("proof list 的 --task 与 --objective 互斥")
+    if task_id and line_id:
+        raise ValidationError("proof list 的 --task 与 --line 互斥")
+    if objective_id and line_id:
+        raise ValidationError("proof list 的 --objective 与 --line 互斥")
     if objective_id:
         derived = derive_objective_proofs(config, objective_id)
     elif task_id:
@@ -45,7 +54,9 @@ def list_proofs(
         proofs: list[Proof] = []
         for task in tasks:
             proofs.extend(derive_task_proofs(config, task))
-        if not line_id:
+        if line_id:
+            proofs.extend(_derive_line_trigger_proofs(config, line_id))
+        else:
             proofs.extend(derive_trigger_proofs(config))
         derived = tuple(_dedupe(proofs))
     if not evaluate:
@@ -306,6 +317,22 @@ def _derive_signoff(config: Config, task: Task) -> Proof | None:
         produced_at=produced_at,
         declared_key_ids=(key_id,) if key_id else (),
     )
+
+
+def _derive_line_trigger_proofs(config: Config, line_id: str) -> tuple[Proof, ...]:
+    """Triggers belong to Objectives; a line filter keeps only that line's."""
+    from ..continuation.store import list_objectives
+
+    try:
+        records = list_objectives(config, recover=False)
+    except (DyroError, ValidationError, OSError):
+        return ()
+    proofs: list[Proof] = []
+    for record in records:
+        if record.objective.line != line_id:
+            continue
+        proofs.extend(derive_trigger_proofs(config, objective_id=record.objective.id))
+    return tuple(_dedupe(proofs))
 
 
 def derive_trigger_proofs(

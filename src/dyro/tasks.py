@@ -2043,6 +2043,7 @@ def _execute_task_agent(
             prompt=prompt,
             timeout_seconds=float(task.timeout_minutes * 60),
             dry_run=dry_run,
+            capabilities=getattr(config, "capabilities", None) or {},
         )
     elif executor in config.adapters:
         argv = _adapter_argv(

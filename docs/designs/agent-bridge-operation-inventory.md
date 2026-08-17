@@ -1,6 +1,9 @@
 # Dyro Agent Bridge Operation Inventory
 
-Status: Linux Ubuntu 24.04 Mandatory Core Surface promoted at S5
+Status: `0.7.x` source catalog may mark the seven Mandatory IDs
+`public_available` on Linux only. Published wheel/sdist do not include
+`dyro.bridge` or `dyro-bridge`, so that promotion is not an installed
+product surface.
 
 Decision source: [ADR 0007](../adr/0007-agent-bridge-phase-0.md)
 
@@ -68,16 +71,17 @@ unavailable rather than being interpreted with incomplete config.
 Declared status is not implementation approval. Each row must acquire a source
 call graph and pass the acceptance matrix before it becomes public-available.
 
-S5 promotes exactly the seven Mandatory Core Surface operations on Linux Ubuntu
-24.04. The other five implemented services and all six declared services remain
-unavailable through the installed transport. macOS 15 remains declared and
-Windows unavailable, so neither host receives an implicit availability
-override from this promotion.
+S5 source catalogs may promote exactly the seven Mandatory Core Surface
+operations on Linux. That is a source-tree availability bit, not an installed
+`dyro-bridge` process. The other implemented services stay
+`implemented_testable`. macOS and Windows keep an empty public surface.
+The published `0.7.x` wheel does not ship this catalog.
 
 ### Mandatory Core Surface
 
-Phase 0 cannot pass with an empty available catalog. The following non-empty
-surface is mandatory in the source-tree, wheel, and sdist protocol corpus:
+Phase 0 cannot later pass with an empty available catalog. The following
+non-empty surface is the Mandatory Core set. In `0.7.x` it is a source
+catalog on Linux only; wheel and sdist must not expose it:
 
 - `bridge.hello`;
 - `bridge.capabilities.compact`;

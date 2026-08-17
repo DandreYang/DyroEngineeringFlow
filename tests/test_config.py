@@ -11,6 +11,7 @@ class ConfigTests(WorkspaceCase):
         config = load(self.root)
         self.assertEqual(config.name, "test-workspace")
         self.assertEqual(config.recommended_tool, "")
+        self.assertIsNone(config.max_provider_usage)
         self.assertEqual(config.repositories["api"].mount, "services/api")
         self.assertEqual(expand_argv(("echo", "{workspace}"), workspace=Path("/tmp/work")), ("echo", "/tmp/work"))
 
@@ -33,6 +34,27 @@ class ConfigTests(WorkspaceCase):
             encoding="utf-8",
         )
         with self.assertRaisesRegex(ValidationError, "workspace.recommended_tool"):
+            load(self.root)
+
+    def test_loads_optional_workspace_provider_cap(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                'name = "test-workspace"',
+                'name = "test-workspace"\nmax_provider_usage = 40',
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(load(self.root).max_provider_usage, 40)
+
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                "max_provider_usage = 40",
+                "max_provider_usage = 0",
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValidationError, "workspace.max_provider_usage"):
             load(self.root)
 
     def test_recommended_tool_can_be_managed_without_manual_toml_editing(self) -> None:

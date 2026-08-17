@@ -89,6 +89,7 @@ jobs:
           test ! -e "$smoke_root/wheel-venv/bin/dyro-bridge"
           test ! -e "$smoke_root/wheel-venv/bin/dyro-mcp"
           DYRO_LOCAL_AGENT_DISPATCH_HOME="$smoke_root/wheel-dispatch-home" "$smoke_root/wheel-venv/bin/dyro" dispatch doctor >"$smoke_root/dispatch-doctor.json"
+          "$smoke_root/wheel-venv/bin/python" "$GITHUB_WORKSPACE/tools/verify_bundle_stranger.py" "$smoke_root/wheel-venv/bin/dyro"
           uv run python -m venv "$smoke_root/sdist-venv"
           sdist_artifact="$(find /tmp/dyro-dist -maxdepth 1 -name 'dyro-*.tar.gz' -print -quit)"
           "$smoke_root/sdist-venv/bin/pip" install "${sdist_artifact}"

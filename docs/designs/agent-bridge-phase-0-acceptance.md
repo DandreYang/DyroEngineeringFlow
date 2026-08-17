@@ -1,6 +1,9 @@
 # Dyro Agent Bridge Phase 0 Acceptance Matrix
 
-Status: Enforced Linux source/wheel/sdist release gate
+Status: Source-tree contracts only in `0.7.x`. The published wheel/sdist
+gate is the opposite of a Bridge promotion: `dyro.bridge` must stay absent,
+and `dyro-bridge` / `dyro-mcp` must not exist. Linux artifact/public-process
+gates are not enforced on this train.
 
 Authority: [ADR 0007](../adr/0007-agent-bridge-phase-0.md)
 

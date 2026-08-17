@@ -112,7 +112,8 @@ class ConsoleServerTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
         payload = json.loads(body)
         self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(payload["data"]["capabilities"], ["overview"])
+        self.assertEqual(payload["data"]["surfaces"], ["overview", "proofs"])
+        self.assertEqual(payload["data"]["capabilities"], ["overview", "proofs"])
         self.assertEqual(payload["data"]["initial_workspace"], "")
         self.assertIn("session_expires_at", payload["data"])
 

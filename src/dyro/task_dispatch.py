@@ -11,6 +11,7 @@ from experiments.local_agent_dispatch.errors import DispatchValidationError
 from experiments.local_agent_dispatch.fileset import SKIP_DIRS
 from experiments.local_agent_dispatch.task_contract import parse_task_contract
 
+from .capability.cards import card_forbids_execute
 from .errors import ValidationError
 from .peer_wave import AUTO_EXECUTOR, assert_write_executor_allowed
 from .process import Result
@@ -110,9 +111,17 @@ def run_task_bound_dispatch(
     prompt: str,
     timeout_seconds: float,
     dry_run: bool = False,
+    capabilities: Mapping[str, object] | None = None,
 ) -> Result:
     if executor == AUTO_EXECUTOR:
         raise ValidationError("auto executor 必须在派发前绑定到具体 Harness")
+    if task.risk == "write":
+        if capabilities is None:
+            raise ValidationError("write dispatch 必须提供 Capability 平面")
+        if card_forbids_execute(capabilities.get(executor)):
+            raise ValidationError(
+                f"Capability {executor} 未授予 execute，不能作为任务执行器"
+            )
     assert_write_executor_allowed(executor, risk=task.risk)
     argv = ("dyro", "task-dispatch", executor, task.id)
     if dry_run:
