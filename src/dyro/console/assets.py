@@ -22,18 +22,18 @@ class ConsoleAsset:
 ASSET_MANIFEST = {
     "index.html": (
         "text/html; charset=utf-8",
-        "1a5a5c448a700ecef4a44669458143177a65720be203ae8da1800d2a7bf84dad",
-        3614,
+        "eb0c18e8cf20df27c21a9ba8f309ffb66ac3f258371c5b450abd48ac5cf7fba5",
+        3812,
     ),
     "app.js": (
         "text/javascript; charset=utf-8",
-        "7c7ea211d143d1937575f50b4de830397266ed19a0a82a0c338a4e6bb00d3c7f",
-        25520,
+        "28320497905d3c560e52f2ebd1bd3a807c1d5ae31da07ba3a9a534eabe3e081d",
+        32622,
     ),
     "styles.css": (
         "text/css; charset=utf-8",
-        "bcde1854e7bcf52439e9a5d79176660193ceca17c8dec5a866d367a54a6a2b6e",
-        11419,
+        "f004307d19af82a906245affac01e2abc1efb39f0ae467c40cb7443f05262e9b",
+        12621,
     ),
 }
 

@@ -2,7 +2,7 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const TOKEN_KEY = "dyro.console.bearer";
 const state = { bearer: "", etags: new Map(), timer: null, focus: "", partial: false, surfaces: [], system: null };
 const HEALTH_LABELS = { healthy: "健康", degraded: "需关注", unavailable: "不可用" };
-const FRESHNESS_LABELS = { fresh: "新鲜", partial: "部分可用", stale: "待更新" };
+const FRESHNESS_LABELS = { fresh: "读取完整", partial: "部分可读", stale: "待刷新" };
 const AVAILABILITY_LABELS = { available: "可用", unavailable: "不可用" };
 const LINE_KIND_LABELS = { line: "开发线", hotfix: "热修线" };
 const TASK_STATUS_LABELS = {
@@ -31,7 +31,43 @@ const OPERATOR_STATE_LABELS = {
   completed: "已完成",
   repair_required: "需要修复",
 };
-const PROOF_INSPECTION_LABELS = { not_inspected: "摘要未核验", inspected: "已独立检查" };
+const REQUESTED_MODE_LABELS = {
+  observe: "只观察",
+  supervised: "监督执行",
+  automatic: "自动执行",
+};
+const ATTENTION_KIND_LABELS = {
+  repair_required: "需要修复",
+  needs_user: "需要你处理",
+  ready: "可推进",
+  paused: "已暂停",
+  waiting: "等待中",
+};
+const ATTENTION_KIND_ORDER = ["repair_required", "needs_user", "ready", "paused", "waiting"];
+const ATTENTION_REASON_LABELS = {
+  TASK_READY: "有任务可以继续做",
+  TASK_REVIEW_READY: "有任务等你复核",
+  DEPENDENCY_PENDING: "还在等依赖完成",
+  DECISION_OPEN: "有个决定还没做",
+  ANSWER_REQUIRED: "需要你回答一个问题",
+  EXTERNAL_CLAIM_ACTIVE: "这条任务还被别人占着",
+  CONFLICT_GROUP_ACTIVE: "和另一条任务冲突，还不能并行",
+  TASK_INTEGRATION_PENDING: "做完了，还没合入",
+  TASK_FAILED: "有任务失败了",
+  TRIGGER_NOT_DUE: "还没到下次检查时间",
+  BUDGET_EXHAUSTED: "这轮预算用完了",
+  NO_PROGRESS: "连续几轮没有进展",
+  CONTRACT_DRIFT: "目标和实际状态对不上",
+  ACTION_UNCERTAIN: "下一步还不明确",
+  TARGETS_INTEGRATED: "目标已经合入",
+  OBJECTIVE_SCOPE_CONFLICT: "目标和范围冲突",
+  OBJECTIVE_PAUSED: "这个目标已暂停",
+  ACTIVATION_REQUIRED: "需要你确认后才能继续",
+  POLICY_DISALLOWS_OPERATION: "当前策略不允许这一步",
+  HOME_GUIDANCE: "可以先打开这个项目看看",
+  WORKSPACE_UNAVAILABLE: "这个项目现在读不到",
+};
+const PROOF_INSPECTION_LABELS = { not_inspected: "尚未核验证据", inspected: "已单独检查证据" };
 const PROOF_KIND_LABELS = {
   gate_log: "门禁日志",
   review_verdict: "复核结论",
@@ -109,17 +145,48 @@ function displayLabel(value, labels) {
 }
 
 function taskIntegrationLabel(state) {
-  // 摘要路径只能是 not_inspected。写成「已集成」会把未核验摘要伪装成 merge 放行。
-  return text(state) === "not_inspected" ? "摘要未核验集成" : "未提供";
+  // 摘要路径只能是 not_inspected。写成「已合入」会把未核验摘要伪装成 merge 放行。
+  return text(state) === "not_inspected" ? "尚未核验是否已合入" : "未提供";
 }
 
 function describeTask(task) {
   const status = displayLabel(task && task.status, TASK_STATUS_LABELS);
   const integration = taskIntegrationLabel(task && task.integration_state);
+  const executor = text(task && task.executor);
+  const reviewer = text(task && task.reviewer);
+  const roles = [
+    executor ? `执行 ${executor}` : "",
+    reviewer ? `复核 ${reviewer}` : "",
+  ].filter(Boolean).join(" · ");
   const blocked = Array.isArray(task && task.blocked_on) && task.blocked_on.length
     ? `阻塞于 ${task.blocked_on.map((item) => text(item)).filter(Boolean).join("、")}`
     : "";
-  return blocked ? `${status} · ${integration} · ${blocked}` : `${status} · ${integration}`;
+  return [status, integration, roles, blocked].filter(Boolean).join(" · ");
+}
+
+function describeObjective(objective) {
+  const title = text(objective && objective.title) || text(objective && objective.id) || "未命名目标";
+  const state = displayLabel(objective && objective.operator_state, OPERATOR_STATE_LABELS);
+  const mode = text(objective && objective.requested_mode)
+    ? displayLabel(objective.requested_mode, REQUESTED_MODE_LABELS)
+    : "";
+  return [title, state, mode].filter(Boolean).join(" · ");
+}
+
+function attentionKindRank(item) {
+  const index = ATTENTION_KIND_ORDER.indexOf(text(item && item.kind));
+  return index === -1 ? ATTENTION_KIND_ORDER.length : index;
+}
+
+function describeAttentionItem(item, objective) {
+  if (!item) return "";
+  const reason = displayLabel(item.reason, ATTENTION_REASON_LABELS);
+  const subject = text(item.subject_id);
+  const owner = objective ? (text(objective.title) || text(objective.id)) : "";
+  if (owner && subject) return `${owner}：${reason}（${subject}）`;
+  if (owner) return `${owner}：${reason}`;
+  if (subject) return `${reason}（${subject}）`;
+  return reason;
 }
 
 function proofStatusLabel(kind, status) {
@@ -227,22 +294,99 @@ function overviewState(attention, workspaces) {
   return "全部正常";
 }
 
+function workspaceMatter(summary) {
+  if (text(summary && summary.availability) !== "available") {
+    return "这个项目现在读不到";
+  }
+  const reason = text(summary && summary.recommendation && summary.recommendation.reason);
+  if (reason && reason !== "HOME_GUIDANCE") {
+    return displayLabel(reason, ATTENTION_REASON_LABELS);
+  }
+  const attention = summary && summary.attention_counts || {};
+  if (count(attention.repair_required)) return "有事项需要修复";
+  if (count(attention.needs_user)) return "有事项需要你处理";
+  if (count(attention.ready)) return "有工作可以继续推进";
+  if (count(attention.waiting)) return "在等外部条件";
+  if (count(attention.paused)) return "有工作已暂停";
+  return "可以先观察";
+}
+
+function needsYouWorkspaces(workspaces) {
+  if (!Array.isArray(workspaces)) return [];
+  return workspaces
+    .filter((summary) => {
+      if (text(summary.availability) !== "available") return true;
+      const attention = summary.attention_counts || {};
+      return Boolean(count(attention.repair_required) || count(attention.needs_user));
+    })
+    .sort((left, right) => workspaceAttention(left) - workspaceAttention(right));
+}
+
+function renderNeedsYou(workspaces, total) {
+  const root = $("needs-you");
+  if (!root) return;
+  root.replaceChildren();
+  const heading = element("h3", "现在需要你");
+  heading.className = "needs-you-heading";
+  root.append(heading);
+  if (!total) {
+    root.append(element("p", "还没有登记项目。可运行 dyro setup、dyro join 或 dyro workspace add。"));
+    return;
+  }
+  const items = needsYouWorkspaces(workspaces);
+  if (!items.length) {
+    const readable = readableWorkspaceCount(workspaces);
+    root.append(element("p", readable
+      ? "现在没有需要你当场处理的项目。"
+      : "项目状态还不完整，关注项未知。"));
+    return;
+  }
+  for (const summary of items) {
+    const row = element("article");
+    row.className = "needs-you-item";
+    const level = attentionLevel(summary);
+    if (level) row.dataset.level = level;
+    const title = element("strong", text(summary.display_name) || text(summary.alias) || "未命名项目");
+    const why = element("p", workspaceMatter(summary));
+    const actions = element("div");
+    actions.className = "needs-you-actions";
+    const command = text(summary.recommendation && summary.recommendation.command);
+    if (command) {
+      const copy = element("button", "复制命令");
+      copy.type = "button";
+      copy.addEventListener("click", () => copyCommand(command, copy));
+      actions.append(copy);
+    }
+    const view = element("button", "打开项目");
+    view.type = "button";
+    view.className = "secondary";
+    view.addEventListener("click", () => loadWorkspace(text(summary.alias)));
+    actions.append(view);
+    row.append(title, why, actions);
+    root.append(row);
+  }
+}
+
 function renderPrimaryAction(workspaces) {
   const summary = priorityWorkspace(workspaces);
   const guidance = $("primary-guidance");
+  const why = $("primary-why");
   const command = $("primary-command");
   const button = $("primary-copy");
   const recommendation = summary && summary.recommendation;
   const nextCommand = text(recommendation && recommendation.command);
   if (!summary || !nextCommand) {
-    guidance.textContent = "下一步 · 等待工作区建议";
+    guidance.textContent = "下一步 · 还没有可执行的建议";
+    if (why) why.textContent = "等项目状态可读之后，这里会给出一条可以贴到终端的命令。";
     command.textContent = "尚无可复制的推荐命令";
     button.dataset.command = "";
     button.disabled = true;
     button.textContent = "复制命令";
     return;
   }
-  guidance.textContent = `下一步 · ${text(summary.display_name) || text(summary.alias)}`;
+  const name = text(summary.display_name) || text(summary.alias);
+  guidance.textContent = `下一步 · ${name}`;
+  if (why) why.textContent = `${workspaceMatter(summary)}。把命令贴到终端里处理，这页不会替你执行。`;
   command.textContent = nextCommand;
   button.dataset.command = nextCommand;
   button.disabled = false;
@@ -336,12 +480,12 @@ function renderWorkspaceCard(summary) {
   addBadge(health, displayLabel(summary.health, HEALTH_LABELS), attentionLevel(summary));
   card.append(health);
 
-  const freshness = element("div");
-  freshness.className = "workspace-signal";
-  freshness.append(element("span", "新鲜度"));
-  freshness.firstChild.className = "workspace-signal-label";
-  addBadge(freshness, displayLabel(summary.freshness, FRESHNESS_LABELS));
-  card.append(freshness);
+  const matter = element("div");
+  matter.className = "workspace-signal";
+  matter.append(element("span", "当前事项"));
+  matter.firstChild.className = "workspace-signal-label";
+  addBadge(matter, workspaceMatter(summary), attentionLevel(summary));
+  card.append(matter);
 
   const tasks = element("div", workspaceCount(summary, "task_count"));
   tasks.className = "workspace-count";
@@ -354,7 +498,7 @@ function renderWorkspaceCard(summary) {
 
   const action = element("div");
   action.className = "workspace-action";
-  const view = element("button", "查看摘要");
+  const view = element("button", "打开项目");
   view.className = "secondary";
   view.type = "button";
   view.addEventListener("click", () => loadWorkspace(text(summary.alias)));
@@ -372,13 +516,14 @@ function renderOverview(payload) {
   $("overview-heading").textContent = total ? overviewState(attention, data.workspaces) : "尚未登记工作区";
   $("overview-summary").textContent = total
     ? unavailable
-      ? `已登记 ${total} 个本地工作区，其中 ${unavailable} 个暂时不可读取；未知数据不会按 0 展示。`
-      : `已加载 ${total} 个本地工作区；优先使用下一步命令继续已识别的工程工作。`
-    : "尚未登记工作区。可运行 dyro setup、dyro join 或 dyro workspace add。";
-  $("captured-at").textContent = text(payload.captured_at) ? `采样于 ${new Date(text(payload.captured_at)).toLocaleString("zh-CN")}` : "";
+      ? `${total} 个项目里有 ${unavailable} 个现在读不到。下面先列出需要你处理的事。`
+      : `${total} 个本地项目。先看需要你的事，再把命令贴到终端。`
+    : "还没有登记项目。可运行 dyro setup、dyro join 或 dyro workspace add。";
+  $("captured-at").textContent = text(payload.captured_at) ? `读取于 ${new Date(text(payload.captured_at)).toLocaleString("zh-CN")}` : "";
   renderCounts(data.attention_counts || {});
-  renderTaskStatusCounts(data.task_status_counts || {}, data.workspaces);
+  renderNeedsYou(data.workspaces, total);
   renderPrimaryAction(data.workspaces);
+  renderTaskStatusCounts(data.task_status_counts || {}, data.workspaces);
   const list = $("workspace-list");
   list.replaceChildren();
   if (!data.workspaces.length) {
@@ -411,6 +556,11 @@ function renderInventoryList(title, items, describe) {
 function renderInventory(data) {
   const root = element("div");
   root.className = "workspace-inventory";
+  root.append(renderWorkspaceAttention(data));
+  const available = text(data && data.workspace && data.workspace.availability) === "available";
+  if (!available) {
+    return root;
+  }
   const lines = Array.isArray(data && data.lines) ? data.lines : [];
   const tasks = Array.isArray(data && data.tasks) ? data.tasks : [];
   const objectives = Array.isArray(data && data.objectives) ? data.objectives : [];
@@ -424,28 +574,50 @@ function renderInventory(data) {
       const title = text(task.title) || text(task.id) || "未命名任务";
       return `${title} · ${describeTask(task)}`;
     }),
-    renderInventoryList("目标", objectives, (objective) => {
-      const title = text(objective.title) || text(objective.id) || "未命名目标";
-      const state = displayLabel(objective.operator_state, OPERATOR_STATE_LABELS);
-      return `${title} · ${state}`;
-    }),
+    renderInventoryList("目标", objectives, describeObjective),
   );
   return root;
+}
+
+function renderWorkspaceAttention(data) {
+  const section = element("div");
+  section.className = "inventory";
+  section.append(element("h3", "需要关注"));
+  const available = text(data && data.workspace && data.workspace.availability) === "available";
+  if (!available) {
+    section.append(element("p", "工作区不可读取，关注项未知。"));
+    return section;
+  }
+  const items = [];
+  for (const objective of Array.isArray(data && data.objectives) ? data.objectives : []) {
+    for (const item of Array.isArray(objective.attention) ? objective.attention : []) {
+      items.push({ objective, item });
+    }
+  }
+  items.sort((left, right) => attentionKindRank(left.item) - attentionKindRank(right.item));
+  if (!items.length) {
+    section.append(element("p", "摘要未列出关注项。"));
+    return section;
+  }
+  const list = element("ul");
+  for (const entry of items) list.append(element("li", describeAttentionItem(entry.item, entry.objective)));
+  section.append(list);
+  return section;
 }
 
 function renderProofInspect(inspect) {
   const inspection = text(inspect && inspect.proof_inspection);
   const section = element("div");
   section.className = "proof-inspect";
-  section.append(element("h3", inspection === "inspected" ? "独立检查 · 已检查" : "独立检查 · 未完成"));
-  section.append(element("p", "独立检查只读投影，不是 task merge 放行。"));
+  section.append(element("h3", inspection === "inspected" ? "证据检查 · 已核对" : "证据检查 · 还没核对"));
+  section.append(element("p", "这是只读核对，不能代替合并。"));
   if (inspection !== "inspected") {
-    section.append(element("p", "摘要保持未核验。独立检查未完成时不会把摘要标成已检查。"));
+    section.append(element("p", "上面的项目摘要还没有核验证据。核对失败时，不会把摘要标成已检查。"));
     return section;
   }
   const proofs = Array.isArray(inspect.proofs) ? inspect.proofs : [];
   if (!proofs.length) {
-    section.append(element("p", "没有可展示的 Proof。"));
+    section.append(element("p", "没有可展示的证据记录。"));
     return section;
   }
   const list = element("ul");
@@ -462,7 +634,7 @@ function renderProofInspect(inspect) {
       if (text(item.reason) === "PROOF_DECAYED") decayed.push(text(objective.id));
     }
   }
-  if (decayed.length) section.append(element("p", `已投影衰减：${decayed.join("、")}`));
+  if (decayed.length) section.append(element("p", `这些目标的证据已经过期：${decayed.join("、")}`));
   return section;
 }
 
@@ -510,23 +682,23 @@ function renderSystem(payload, failed = false) {
   panel.hidden = false;
   if (failed || !payload) {
     note.textContent = failed
-      ? "本机系统暂时不可读取。本页不探测 PATH，也不发起网络检查。"
-      : "本机系统尚未读取。点刷新后只读已缓存的更新记录，不探测 PATH。";
+      ? "这台电脑的更新记录暂时读不到。不会扫描本机工具，也不会联网。"
+      : "还没读取这台电脑的更新记录。点刷新后只看上次记下的版本。";
     update.replaceChildren();
     return;
   }
   const warning = firstWarning(payload);
   const unread = warning === "UPDATE_STATE_UNAVAILABLE";
   note.textContent = unread
-    ? "更新缓存不可读。本页不探测 PATH，也不发起网络检查。"
-    : "本页只读已缓存的更新记录，不探测 PATH，也不发起网络检查。";
+    ? "更新记录读不到。不会扫描本机工具，也不会联网。"
+    : "只显示上次记下的更新。不会扫描本机工具，也不会联网。";
   const cached = payload.data && payload.data.update ? payload.data.update : {};
   update.replaceChildren(
-    definition("检查开关", unread ? "—" : (cached.check_enabled ? "已启用" : "已关闭")),
+    definition("自动检查", unread ? "—" : (cached.check_enabled ? "已打开" : "已关闭")),
     definition("上次检查", unread ? "—" : (text(cached.last_checked_on) || "—")),
-    definition("缓存最新版", unread ? "—" : (text(cached.latest_version) || "—")),
-    definition("相对当前版本", unread ? "—" : updateKindLabel(cached.kind, cached.latest_version)),
-    definition("本机工具", "摘要未探测"),
+    definition("记下的新版本", unread ? "—" : (text(cached.latest_version) || "—")),
+    definition("和现在比", unread ? "—" : updateKindLabel(cached.kind, cached.latest_version)),
+    definition("本机工具", "还未检查本机工具"),
   );
 }
 
@@ -561,12 +733,13 @@ async function loadWorkspace(alias, silent = false) {
     grid.append(
       definition("别名", text(summary.alias)),
       definition("健康", displayLabel(summary.health, HEALTH_LABELS)),
+      definition("读取情况", displayLabel(summary.freshness, FRESHNESS_LABELS)),
       definition("可用性", displayLabel(summary.availability, AVAILABILITY_LABELS)),
       definition("仓库", workspaceCount(summary, "repository_count")),
       definition("任务总数", workspaceCount(summary, "task_count")),
       definition("开发线", workspaceCount(summary, "line_count")),
       definition("目标", workspaceCount(summary, "objective_count")),
-      definition("摘要 Proof", displayLabel(summary.proof_inspection, PROOF_INSPECTION_LABELS)),
+      definition("证据核验", displayLabel(summary.proof_inspection, PROOF_INSPECTION_LABELS)),
     );
     content.replaceChildren(grid);
     content.append(renderInventory(payload.data));
@@ -608,7 +781,7 @@ async function refresh({ includeSystem = false } = {}) {
       renderSystem(state.system);
     }
     setStatus(
-      state.partial ? "本地会话已就绪；部分工作区状态未能读取，页面只读。" : "本地会话已就绪；页面只读。",
+      state.partial ? "已连上本地页面；有些项目还读不到，这页不会改你的文件。" : "已连上本地页面；这页只看状态，不会改你的文件。",
       false,
     );
   } catch (error) {

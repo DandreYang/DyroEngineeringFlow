@@ -9,6 +9,13 @@
 - Console overview now rolls up `task_status_counts` from readable
   workspaces only. Unreadable workspaces stay unknown and are not counted
   as zero.
+- Console workspace detail now lists already-captured Objective attention
+  in Chinese. Empty attention stays "摘要未列出关注项"; an unreadable
+  workspace stays unknown. Summary still strips `PROOF_DECAYED`.
+- Console home now leads with a "现在需要你" list and a human why for
+  the next command. Workspace cards show the current matter instead of
+  freshness jargon. Empty tools and empty attention still mean unread,
+  not "nothing to do".
 - Console `GET /api/v1/system` reads the cached update record only.
   `tools` stays empty and `tool_inspection=not_inspected`. The shell
   fetches it on start and manual refresh, not on the 5s overview poll.

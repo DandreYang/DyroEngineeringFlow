@@ -93,7 +93,7 @@ dyro console
 
 ### 3.3 工作区详情
 
-工作区详情按“需要关注 → 正在推进 → 其余状态”排序，而不是先展示仓库内部结构。开发线表格提供 Task 分布、dirty 或 missing 摘要和最近活动。仓库 Git 深度检查异步加载，不阻塞页面基本信息。
+工作区详情按“需要关注 → 正在推进 → 其余状态”排序，而不是先展示仓库内部结构。首屏关注列表只投影同一次 summary 快照里的 Objective attention，并去掉 `PROOF_DECAYED`。空列表写成「摘要未列出关注项」；工作区不可读时写成未知，不得按 0 或「没有事项」展示。开发线表格提供 Task 分布、dirty 或 missing 摘要和最近活动。仓库 Git 深度检查异步加载，不阻塞页面基本信息。
 
 绝对根路径和 remote URL 默认不进入 API。所有恢复命令优先使用安全别名，例如：
 
@@ -382,7 +382,7 @@ argv、环境值和原始解析内容不得直接进入 `facts` 或 recovery com
 
 `ConsoleOverview`：
 
-- Dyro 版本和 API surfaces（`overview` / `proofs`；`capabilities` 仍是兼容别名，不是 Capability Card）；
+- Dyro 版本和 API surfaces（`overview` / `proofs` / `system`；`capabilities` 仍是兼容别名，不是 Capability Card）；
 - registry 状态、默认或当前别名；
 - `WorkspaceSummary[]`；
 - 全局 attention 计数、可读工作区的 Task 状态分布，以及最高优先级事项；

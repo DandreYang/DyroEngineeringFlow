@@ -23,35 +23,37 @@
       <section class="command-center" aria-labelledby="overview-heading">
         <div class="command-center-top">
           <div>
-            <p class="eyebrow">项目态势</p>
+            <p class="eyebrow">你的工程</p>
             <h2 id="overview-heading">正在读取工程状态</h2>
             <p id="overview-summary">正在读取本地工作区状态。</p>
           </div>
-          <button id="refresh" type="button" class="secondary">刷新状态</button>
+          <button id="refresh" type="button" class="secondary">刷新</button>
         </div>
         <section aria-label="全局计数" class="counts" id="attention-counts"></section>
-        <section aria-label="任务状态" class="task-counts" id="task-status-counts"></section>
+        <section id="needs-you" class="needs-you" aria-label="现在需要你"></section>
         <div class="next-step" aria-live="polite">
           <div class="next-step-copy">
             <p id="primary-guidance" class="next-step-label">下一步</p>
+            <p id="primary-why" class="next-step-why">先看需要你处理的事，再把命令贴到终端。</p>
             <code id="primary-command">正在准备推荐命令…</code>
           </div>
           <button id="primary-copy" type="button" class="primary-action" disabled>复制命令</button>
         </div>
+        <section aria-label="任务状态" class="task-counts" id="task-status-counts"></section>
       </section>
       <section aria-labelledby="workspace-heading">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">注册项目</p>
-            <h2 id="workspace-heading">工作区</h2>
+            <p class="eyebrow">全部项目</p>
+            <h2 id="workspace-heading">已登记的工作区</h2>
           </div>
           <p id="captured-at"></p>
         </div>
         <div class="workspace-surface">
           <div class="workspace-column-headings" aria-hidden="true">
-            <span>工作区</span>
+            <span>项目</span>
             <span>状态</span>
-            <span>新鲜度</span>
+            <span>当前事项</span>
             <span>任务数</span>
             <span>目标数</span>
             <span>操作</span>
@@ -62,24 +64,24 @@
       <section id="system-panel" class="system-panel" hidden aria-labelledby="system-heading">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">本机系统</p>
-            <h2 id="system-heading">工具与更新</h2>
+            <p class="eyebrow">这台电脑</p>
+            <h2 id="system-heading">Dyro 版本</h2>
           </div>
         </div>
-        <p id="system-note">本页只读已缓存的更新记录，不探测 PATH，也不发起网络检查。</p>
+        <p id="system-note">只显示上次记下的更新。不会扫描本机工具，也不会联网。</p>
         <dl id="system-update" class="detail-grid"></dl>
       </section>
       <section id="workspace-detail" class="workspace-detail" hidden aria-labelledby="detail-heading">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">工作区详情</p>
-            <h2 id="detail-heading" tabindex="-1">工作区摘要</h2>
+            <p class="eyebrow">这个项目</p>
+            <h2 id="detail-heading" tabindex="-1">项目详情</h2>
           </div>
           <button id="detail-close" type="button" class="secondary">关闭</button>
         </div>
         <div id="detail-content"></div>
       </section>
     </main>
-    <footer>Dyro Console 仅展示本地权威状态；执行、复核、签收、合并和推送仍须通过 CLI。</footer>
+    <footer>这页只看状态，不会改你的项目。执行、复核、签收、合并和推送请回到终端。</footer>
   </body>
 </html>
