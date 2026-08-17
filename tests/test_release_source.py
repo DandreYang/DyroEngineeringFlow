@@ -108,6 +108,9 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
         self.assertIn("dyro-dispatch','SKILL.md", workflow)
         self.assertIn("dyro-dispatch','agents','openai.yaml", workflow)
         self.assertGreaterEqual(workflow.count("verify_bundle_stranger.py"), 2)
+        self.assertGreaterEqual(
+            workflow.count("find_spec('dyro.bridge') is None"), 2
+        )
 
     def test_default_wheel_stays_bridge_free(self) -> None:
         metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")

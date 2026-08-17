@@ -1202,8 +1202,9 @@ class ObjectiveCliTests(WorkspaceCase):
         self.assertEqual(unavailable["commands"], [])
         self.assertEqual(
             unavailable["diagnostic_commands"],
-            [f"dyro --root {self.root.resolve()} doctor"],
+            ["dyro --workspace test-workspace doctor"],
         )
+        self.assertNotIn(str(self.root.resolve()), json.dumps(unavailable))
 
         config_path = self.root / "dyro.toml"
         config_path.write_text(
@@ -1217,8 +1218,9 @@ class ObjectiveCliTests(WorkspaceCase):
         self.assertTrue(applicable["mutation_available"])
         self.assertEqual(
             applicable["commands"],
-            [f"dyro --root {self.root.resolve()} bootstrap --yes"],
+            ["dyro --workspace test-workspace bootstrap --yes"],
         )
+        self.assertNotIn(str(self.root.resolve()), json.dumps(applicable))
 
     def test_control_plane_next_never_offers_bootstrap_through_symlink_parent(
         self,
@@ -1667,6 +1669,7 @@ class ObjectiveCliTests(WorkspaceCase):
         self.assertIn("今天做什么", text)
         self.assertIn("做下一步，不打开编码工具", text)
         self.assertNotIn("objective apply", text)
+        self.assertNotIn(str(self.root.resolve()), text)
 
     def test_bare_dyro_without_objectives_does_not_invent_a_briefing(self) -> None:
         output = StringIO()

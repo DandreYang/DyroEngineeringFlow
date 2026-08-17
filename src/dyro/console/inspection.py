@@ -626,7 +626,7 @@ class IsolatedOverviewService:
         escaped_alias = re.escape(alias)
         return bool(
             re.fullmatch(
-                rf"dyro --workspace {escaped_alias}(?: (?:doctor|task next|objective (?:explain|tick|attention) [A-Za-z0-9][A-Za-z0-9._-]{{0,79}}))?",
+                rf"dyro --workspace {escaped_alias}(?: (?:doctor|objective (?:explain|tick|attention) [A-Za-z0-9][A-Za-z0-9._-]{{0,79}}))?",
                 command,
             )
         )

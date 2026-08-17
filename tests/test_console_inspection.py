@@ -428,6 +428,21 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
                 self.assertNotIn("git", str(error.exception))
                 self.assertNotIn("argv", str(error.exception))
 
+    def test_isolated_command_allowlist_rejects_task_next(self) -> None:
+        self.assertTrue(
+            IsolatedOverviewService._safe_command(
+                "dyro --workspace demo objective tick release", "demo"
+            )
+        )
+        self.assertTrue(
+            IsolatedOverviewService._safe_command("dyro --workspace demo doctor", "demo")
+        )
+        self.assertFalse(
+            IsolatedOverviewService._safe_command(
+                "dyro --workspace demo task next", "demo"
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
