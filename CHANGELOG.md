@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.2 - 2026-08-17
+
 - `objective explain` and a ready `next` now lead with a three-line
   switch-tool briefing: human matter plus one path-free read command.
   A single live Objective makes `next` emit `tick` or `attention`
