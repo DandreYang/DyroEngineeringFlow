@@ -546,7 +546,7 @@ objective revision
   → existing attempt_id / review binding / merge ledger
 ```
 
-`objective explain` 默认给人类原因；`--format json` 输出 reason code、事实、来源文件的安全相对定位、预算余额和下一唤醒时间。它不输出 secret、完整 provider stdout 或未经验证的远程正文。人话开场白是派生投影 `briefing`：三行事项加一条只读命令。它不进入 `plan_sha256`，不读另一家工具的对话，也不把旧会话当成当前真相。`next` 在已有未停止 Objective 时复用同一开场白，并直接给出那条只读下一步（可推进则 `objective tick`，要你处理则 `objective attention`）；多目标时只指向 `objective list`，不擅自挑选。计划读不到时才退回 `objective explain`。
+`objective explain` 默认给人类原因；`--format json` 输出 reason code、事实、来源文件的安全相对定位、预算余额和下一唤醒时间。它不输出 secret、完整 provider stdout 或未经验证的远程正文。人话开场白是派生投影 `briefing`：三行事项加一条只读命令。它不进入 `plan_sha256`，不读另一家工具的对话，也不把旧会话当成当前真相。`next` 在已有未停止 Objective 时复用同一开场白，并直接给出那条只读下一步（可推进则 `objective tick`，要你处理则 `objective attention`）；多目标时只指向 `objective list`，不擅自挑选。计划读不到时才退回 `objective explain`。人跑完那条命令后，`tick` / `attention` 的文本同样先给标题和事项，第三行是取向说明（预览尚未执行，或事项需要人处理），不再把同一条命令再念一遍。机器 SHA 行仍在后面；JSON 信封不因此改哈希。
 
 最低指标只本地计算：计划耗时、Trigger 探测耗时、action 成功或失败或 uncertain、预算余额、无进展次数。第一版不上传。
 

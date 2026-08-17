@@ -3,16 +3,22 @@ from __future__ import annotations
 import unittest
 
 from dyro.continuation.briefing import (
+    ATTENTION_CLOSER,
     EMPTY_ATTENTION,
     INVENTORY_MATTER,
+    TICK_CLOSER,
     UNREAD_MATTER,
+    arrival_lines,
     briefing_payload,
+    describe_action,
     follow_up_argv,
     follow_up_from_kind,
     inventory_briefing,
     matter_for,
     primary_attention,
     render_briefing_text,
+    render_human_attention,
+    render_human_wave,
     unread_briefing,
 )
 from dyro.continuation.models import (
@@ -142,6 +148,52 @@ class BriefingProjectionTests(unittest.TestCase):
         self.assertTrue(inventory["available"])
         self.assertEqual(inventory["matter"], INVENTORY_MATTER)
         self.assertIn("2 个未停止的目标", inventory["lines"][0])
+
+    def test_arrival_does_not_repeat_the_follow_up_command(self) -> None:
+        plan = _plan(
+            AttentionItem(
+                "ready", AttentionKind.READY, "TASK-A", ReasonCode.TASK_READY
+            )
+        )
+        lines = arrival_lines(plan, "Release", TICK_CLOSER)
+        blob = "\n".join(lines)
+        self.assertEqual(lines[0], "Release · 未完成")
+        self.assertEqual(lines[1], "有任务可以继续做（TASK-A）")
+        self.assertEqual(lines[2], TICK_CLOSER)
+        self.assertNotIn("下一步：", blob)
+        self.assertNotIn("objective tick", blob)
+        self.assertNotIn("objective attention", blob)
+        self.assertNotIn("session", blob.lower())
+
+    def test_human_wave_and_attention_use_reason_labels(self) -> None:
+        action = PlannedAction(
+            ActionKind.EXECUTE_TASK, "TASK-A", ReasonCode.TASK_READY
+        )
+        self.assertEqual(describe_action(action), "执行 · 有任务可以继续做（TASK-A）")
+        self.assertEqual(
+            render_human_wave((action,)),
+            ["本轮可以推进：", "- 执行 · 有任务可以继续做（TASK-A）"],
+        )
+        self.assertEqual(render_human_wave(()), ["本轮没有可推进的写入。"])
+        self.assertEqual(
+            render_human_attention(((ReasonCode.ANSWER_REQUIRED, "TASK-A"),)),
+            ["需要关注：", "- 需要你回答一个问题（TASK-A）"],
+        )
+        self.assertEqual(render_human_attention(()), [EMPTY_ATTENTION])
+        attention_lines = arrival_lines(
+            _plan(
+                AttentionItem(
+                    "ask",
+                    AttentionKind.NEEDS_USER,
+                    "TASK-A",
+                    ReasonCode.ANSWER_REQUIRED,
+                )
+            ),
+            "Release",
+            ATTENTION_CLOSER,
+        )
+        self.assertEqual(attention_lines[2], ATTENTION_CLOSER)
+        self.assertNotIn("objective apply", "\n".join(attention_lines))
 
 
 if __name__ == "__main__":

@@ -15,6 +15,9 @@
   that briefing exists, Enter defaults to "做下一步" and does not
   launch an editor. `dyro start` still opens a tool, but prints the
   briefing first.
+- `objective tick` and `objective attention` text now open with the
+  same heading and matter, then a closer without another "下一步".
+  Machine SHA lines stay below. JSON envelopes are unchanged.
 - Console workspace detail now projects already-captured lines, tasks, and
   objectives from the same summary snapshot. Overview polling stays
   count-only. Summary Proof and task integration stay `not_inspected`;

@@ -30,6 +30,19 @@ _HUMAN_KINDS = frozenset(
 _READY_ACTIONS = frozenset(
     {ActionKind.EXECUTE_TASK, ActionKind.REVIEW_TASK, ActionKind.MERGE_TASK}
 )
+_ACTION_LABELS = {
+    ActionKind.EXECUTE_TASK: "执行",
+    ActionKind.REVIEW_TASK: "复核",
+    ActionKind.MERGE_TASK: "合入",
+    ActionKind.ASK_USER: "提问",
+    ActionKind.WAIT: "等待",
+    ActionKind.PAUSE: "暂停",
+    ActionKind.COMPLETE: "完成",
+    ActionKind.REPAIR_REQUIRED: "修复",
+    ActionKind.PROBE_TRIGGER: "探测",
+}
+TICK_CLOSER = "这是预览，还没有执行。当前窗口可以接着做。"
+ATTENTION_CLOSER = "这些事项需要你处理。当前窗口可以接着做。"
 
 _REASON_LABELS = {
     ReasonCode.TASK_READY: "有任务可以继续做",
@@ -204,3 +217,41 @@ def render_briefing_text(payload: dict[str, object]) -> str:
     if not isinstance(lines, list):
         return ""
     return "\n".join(item for item in lines if isinstance(item, str) and item)
+
+
+def arrival_lines(plan: ContinuationPlan, title: str, closer: str) -> list[str]:
+    """Heading and matter for a follow-up command, without repeating that command."""
+    heading = title.strip() or plan.objective_id
+    completion = _COMPLETION_LABELS[plan.completion]
+    return [f"{heading} · {completion}", matter_for(plan), closer]
+
+
+def describe_action(action: PlannedAction) -> str:
+    verb = _ACTION_LABELS.get(action.kind, action.kind.value)
+    return _matter_line(
+        f"{verb} · {reason_label(action.reason)}", action.subject_id, ""
+    )
+
+
+def describe_attention(reason: ReasonCode, subject_id: str) -> str:
+    return _matter_line(reason_label(reason), subject_id, "")
+
+
+def render_human_wave(actions: tuple[PlannedAction, ...]) -> list[str]:
+    if not actions:
+        return ["本轮没有可推进的写入。"]
+    lines = ["本轮可以推进："]
+    lines.extend(f"- {describe_action(action)}" for action in actions)
+    return lines
+
+
+def render_human_attention(
+    items: tuple[tuple[ReasonCode, str], ...],
+) -> list[str]:
+    if not items:
+        return [EMPTY_ATTENTION]
+    lines = ["需要关注："]
+    lines.extend(
+        f"- {describe_attention(reason, subject_id)}" for reason, subject_id in items
+    )
+    return lines

@@ -1715,6 +1715,35 @@ class ObjectiveCliTests(WorkspaceCase):
         self.assertIn("objective list", payload["briefing"]["command"])
         self.assertIn("多个未停止的目标", payload["briefing"]["matter"])
 
+    def test_objective_tick_text_leads_with_human_arrival(self) -> None:
+        self._start_release_objective()
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", str(self.root), "objective", "tick", "release"])
+        text = output.getvalue()
+        self.assertIn("Release · 未完成", text)
+        self.assertIn("这是预览，还没有执行。当前窗口可以接着做。", text)
+        self.assertIn("本轮可以推进：", text)
+        self.assertIn("执行 · 有任务可以继续做（TASK-A）", text)
+        self.assertIn("Tick SHA-256", text)
+        self.assertNotIn("objective apply", text)
+        payload = self._read_json("objective", "tick", "release")
+        self.assertNotIn("briefing", payload)
+        self.assertIn("tick_sha256", payload)
+
+    def test_objective_attention_text_leads_with_human_arrival(self) -> None:
+        self._start_release_objective()
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", str(self.root), "objective", "attention", "release"])
+        text = output.getvalue()
+        self.assertIn("Release · 未完成", text)
+        self.assertIn("这些事项需要你处理。当前窗口可以接着做。", text)
+        self.assertIn("Attention SHA-256", text)
+        payload = self._read_json("objective", "attention", "release")
+        self.assertNotIn("briefing", payload)
+        self.assertIn("attention_sha256", payload)
+
     def test_objective_apply_dry_run_shows_the_exact_wave_without_writing(self) -> None:
         root = str(self.root)
         main(

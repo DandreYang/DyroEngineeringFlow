@@ -34,7 +34,16 @@ from .continuation.attention import (
     render_attention_json,
     render_attention_text,
 )
-from .continuation.briefing import briefing_payload, follow_up_argv, render_briefing_text
+from .continuation.briefing import (
+    ATTENTION_CLOSER,
+    TICK_CLOSER,
+    arrival_lines,
+    briefing_payload,
+    follow_up_argv,
+    render_briefing_text,
+    render_human_attention,
+    render_human_wave,
+)
 from .continuation.ready_briefing import briefing_command, build_ready_briefing
 from .continuation.engine import (
     build_scheduler_tick,
@@ -3524,6 +3533,18 @@ def cmd_objective_tick(args: argparse.Namespace) -> None:
         payload.update(overlay)
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
         return
+    print(
+        render_briefing_text(
+            {
+                "lines": arrival_lines(
+                    plan, record.objective.title, TICK_CLOSER
+                )
+            }
+        )
+    )
+    print()
+    print("\n".join(render_human_wave(tick.wave)))
+    print()
     print(render_scheduler_tick_text(tick))
     for note in overlay.get("peer_wave", {}).get("warnings", []):
         print(f"Warning: {note}")
@@ -3559,6 +3580,24 @@ def cmd_objective_attention(args: argparse.Namespace) -> None:
     if args.format == "json":
         print(render_attention_json(projection))
         return
+    print(
+        render_briefing_text(
+            {
+                "lines": arrival_lines(
+                    plan, record.objective.title, ATTENTION_CLOSER
+                )
+            }
+        )
+    )
+    print()
+    print(
+        "\n".join(
+            render_human_attention(
+                tuple((item.reason, item.subject_id) for item in projection.items)
+            )
+        )
+    )
+    print()
     print(render_attention_text(projection))
 
 
