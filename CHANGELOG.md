@@ -7,6 +7,14 @@
   A single live Objective makes `next` emit `tick` or `attention`
   directly. `next.commands` stays empty. Empty attention stays unread,
   not idle. This is not a cross-harness chat resume.
+- Console home recommendations now match that follow-up: `tick` when
+  ready, `attention` when the user must act. Empty attention still
+  opens the workspace, not `task next`.
+- Bare `dyro` / `dyro home` prints the same briefing above the tool
+  menu so switching harnesses does not start by picking a chat. When
+  that briefing exists, Enter defaults to "做下一步" and does not
+  launch an editor. `dyro start` still opens a tool, but prints the
+  briefing first.
 - Console workspace detail now projects already-captured lines, tasks, and
   objectives from the same summary snapshot. Overview polling stays
   count-only. Summary Proof and task integration stay `not_inspected`;

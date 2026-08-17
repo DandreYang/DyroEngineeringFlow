@@ -24,6 +24,7 @@ from ..canonical import canonical_json_bytes
 from ..config import Config, load, validate_id
 from ..errors import DyroError, ValidationError
 from ..hub import WorkspaceRegistry, load_registry
+from ..continuation.briefing import follow_up_from_kind
 from ..updates import UpdateState, classify_update, load_update_state
 from ..observations import (
     WorkspaceReadSnapshot,
@@ -488,7 +489,14 @@ class ConsoleOverviewService:
         objective_id = _safe_code(item.get("objective_id"))
         return {
             "reason": _safe_code(item.get("reason")),
-            "command": f"dyro --workspace {alias} objective explain {objective_id}",
+            "command": " ".join(
+                (
+                    "dyro",
+                    "--workspace",
+                    alias,
+                    *follow_up_from_kind(_safe_code(item.get("kind")), objective_id),
+                )
+            ),
         }
 
     def _attention_counts(self, summaries: list[dict[str, object]]) -> dict[str, int]:

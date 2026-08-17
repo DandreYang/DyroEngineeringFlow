@@ -99,7 +99,8 @@ dyro console
 
 ```text
 dyro --workspace example doctor
-dyro --workspace example objective explain --objective release-readiness
+dyro --workspace example objective tick release-readiness
+dyro --workspace example objective attention release-readiness
 dyro --workspace example task open API-101
 ```
 

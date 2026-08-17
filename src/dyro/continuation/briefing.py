@@ -83,16 +83,23 @@ def _ready_action(plan: ContinuationPlan) -> PlannedAction | None:
     return None
 
 
+def follow_up_from_kind(kind: str, objective_id: str) -> tuple[str, ...]:
+    """Map a captured attention kind to one read-only follow-up."""
+    if kind == AttentionKind.READY.value:
+        return ("objective", "tick", objective_id)
+    return ("objective", "attention", objective_id)
+
+
 def follow_up_argv(plan: ContinuationPlan) -> tuple[str, ...]:
     """Return one read-only follow-up. Never apply, dispatch, or resume a chat."""
     item = primary_attention(plan)
     if item is not None and item.kind in _HUMAN_KINDS:
-        return ("objective", "attention", plan.objective_id)
+        return follow_up_from_kind(item.kind.value, plan.objective_id)
     if item is not None and item.kind is AttentionKind.READY:
-        return ("objective", "tick", plan.objective_id)
+        return follow_up_from_kind(item.kind.value, plan.objective_id)
     if _ready_action(plan) is not None:
-        return ("objective", "tick", plan.objective_id)
-    return ("objective", "attention", plan.objective_id)
+        return follow_up_from_kind(AttentionKind.READY.value, plan.objective_id)
+    return follow_up_from_kind("", plan.objective_id)
 
 
 def reason_label(reason: ReasonCode) -> str:

@@ -8,6 +8,7 @@ from dyro.continuation.briefing import (
     UNREAD_MATTER,
     briefing_payload,
     follow_up_argv,
+    follow_up_from_kind,
     inventory_briefing,
     matter_for,
     primary_attention,
@@ -104,6 +105,14 @@ class BriefingProjectionTests(unittest.TestCase):
         )
         self.assertEqual(
             follow_up_argv(needs_user), ("objective", "attention", "release")
+        )
+        self.assertEqual(
+            follow_up_from_kind("ready", "release"),
+            ("objective", "tick", "release"),
+        )
+        self.assertEqual(
+            follow_up_from_kind("needs_user", "release"),
+            ("objective", "attention", "release"),
         )
 
     def test_payload_is_path_free_and_uses_supplied_command(self) -> None:

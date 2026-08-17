@@ -34,13 +34,8 @@ from .continuation.attention import (
     render_attention_json,
     render_attention_text,
 )
-from .continuation.briefing import (
-    briefing_payload,
-    follow_up_argv,
-    inventory_briefing,
-    render_briefing_text,
-    unread_briefing,
-)
+from .continuation.briefing import briefing_payload, follow_up_argv, render_briefing_text
+from .continuation.ready_briefing import briefing_command, build_ready_briefing
 from .continuation.engine import (
     build_scheduler_tick,
     render_scheduler_tick_text,
@@ -565,7 +560,7 @@ def _briefing_command(
 ) -> str:
     """Scope a read-only briefing command without embedding --root paths."""
     alias = getattr(args, "workspace_alias", None) or config.name
-    return shlex.join(("dyro", "--workspace", str(alias), *command))
+    return briefing_command(str(alias), *command)
 
 
 def _workspace_ready_briefing(
@@ -577,39 +572,8 @@ def _workspace_ready_briefing(
 
     `next.commands` stays empty. The briefing command is a read, not a mutation.
     """
-    try:
-        records = [
-            record
-            for record in list_objectives(
-                config, recover=False, read_budget=read_budget
-            )
-            if record.operator_state != "stopped"
-        ]
-    except (DyroError, ValidationError, OSError, ReadLimitError):
-        command = _briefing_command(args, config, "objective", "list")
-        return unread_briefing(command), [command]
-    if not records:
-        return None, []
-    if len(records) > 1:
-        command = _briefing_command(args, config, "objective", "list")
-        return inventory_briefing(command, len(records)), [command]
-    record = records[0]
-    explain = _briefing_command(
-        args, config, "objective", "explain", record.objective.id
-    )
-    try:
-        _, _, plan = _read_objective_plan(
-            config, record.objective.id, read_budget=read_budget
-        )
-    except (DyroError, ValidationError, OSError, ReadLimitError):
-        return unread_briefing(explain), [explain]
-    command = _briefing_command(args, config, *follow_up_argv(plan))
-    return (
-        briefing_payload(
-            plan, command=command, title=record.objective.title
-        ),
-        [command],
-    )
+    alias = getattr(args, "workspace_alias", None) or config.name
+    return build_ready_briefing(config, alias=str(alias), read_budget=read_budget)
 
 
 def _ready_next_summary(briefing: dict[str, object] | None) -> str:
@@ -2355,6 +2319,12 @@ def cmd_start(args: argparse.Namespace) -> None:
         raise DyroError(
             "工作区尚未就绪；先修复 doctor 失败项，或运行 dyro bootstrap --yes"
         )
+    alias = getattr(args, "workspace_alias", None) or config.name
+    briefing, _ = build_ready_briefing(config, alias=str(alias))
+    text = render_briefing_text(briefing) if briefing else ""
+    if text:
+        print(text)
+        print()
     line_id = args.line or _choose("开发线", [line.id for line in list_lines(config)])
     line, workspace = existing_line_workspace(config, line_id, args.kind)
     record = _record_for_root(config.root)

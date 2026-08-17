@@ -1654,6 +1654,32 @@ class ObjectiveCliTests(WorkspaceCase):
         self.assertNotIn("objective apply", json.dumps(payload))
         self.assertNotIn(str(self.root.resolve()), json.dumps(payload))
 
+    def test_bare_dyro_prints_the_same_follow_up_before_the_home_menu(self) -> None:
+        self._start_release_objective()
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=False),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+        text = output.getvalue()
+        self.assertRegex(text, r"dyro --workspace \S+ objective tick release")
+        self.assertIn("今天做什么", text)
+        self.assertIn("做下一步，不打开编码工具", text)
+        self.assertNotIn("objective apply", text)
+
+    def test_bare_dyro_without_objectives_does_not_invent_a_briefing(self) -> None:
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=False),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+        text = output.getvalue()
+        self.assertIn("今天做什么", text)
+        self.assertNotIn("objective tick", text)
+        self.assertNotIn("objective attention", text)
+
     def test_next_with_two_live_objectives_does_not_pick_one(self) -> None:
         self._start_release_objective()
         directory = self.config.task_specs_dir / "TASK-B"

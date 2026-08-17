@@ -164,6 +164,10 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         self.assertEqual(second["data"]["workspaces"][0]["alias"], "broken")
         self.assertEqual(second["data"]["workspaces"][0]["availability"], "unavailable")
         self.assertEqual(
+            first["data"]["workspaces"][0]["recommendation"]["command"],
+            "dyro --workspace beta objective attention release",
+        )
+        self.assertEqual(
             second["data"]["workspaces"][0]["recommendation"]["command"],
             "dyro --workspace broken doctor",
         )
@@ -188,6 +192,42 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         self.assertEqual(
             recommendation,
             {"reason": "HOME_GUIDANCE", "command": "dyro --workspace alpha"},
+        )
+
+    def test_attention_recommends_the_same_follow_up_as_next(self) -> None:
+        self.assertEqual(
+            self.service._recommendation(
+                "alpha",
+                [
+                    {
+                        "objective_id": "release",
+                        "kind": "ready",
+                        "subject_id": "TASK-A",
+                        "reason": "TASK_READY",
+                    }
+                ],
+            ),
+            {
+                "reason": "TASK_READY",
+                "command": "dyro --workspace alpha objective tick release",
+            },
+        )
+        self.assertEqual(
+            self.service._recommendation(
+                "alpha",
+                [
+                    {
+                        "objective_id": "release",
+                        "kind": "needs_user",
+                        "subject_id": "TASK-A",
+                        "reason": "ANSWER_REQUIRED",
+                    }
+                ],
+            ),
+            {
+                "reason": "ANSWER_REQUIRED",
+                "command": "dyro --workspace alpha objective attention release",
+            },
         )
 
     def test_registry_failure_is_stable_and_path_free(self) -> None:
