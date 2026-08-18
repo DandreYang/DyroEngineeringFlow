@@ -218,6 +218,8 @@ class IntegrationManagerTests(unittest.TestCase):
         for integration, skill_name in (
             ("executor", "dyro-executor"),
             ("board", "dyro-board"),
+            ("review-board", "dyro-review-board"),
+            ("task-merge", "dyro-task-merge"),
         ):
             with self.subTest(integration=integration):
                 installed = install_integration(integration, yes=True)
