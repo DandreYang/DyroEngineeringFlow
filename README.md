@@ -460,6 +460,8 @@ Install recipes are built into Dyro as shell-free argv. Project files cannot
 supply install commands. Remote-script installers are never executed by Dyro;
 after confirmation it opens the official page instead. See
 [coding-tool catalog and guided installation](docs/tool-catalog.md).
+The optional [image sidecar](docs/image-sidecar.md) is a separate CLI
+(`local-image-gen`), not a home tool and not a managed seat.
 An OpenClaw workspace is a default working directory, not an operating-system
 sandbox; the onboarding prompt calls out that boundary before launch.
 
@@ -612,6 +614,7 @@ dyro --dry-run task run API-101
 | `blueprint validate` / `join` | Validate a team-owned generic blueprint and create a resumable isolated multi-repository workspace. |
 | `setup` / `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | Onboard a teammate without TOML edits, manage anchors, and choose a line and agent. |
 | `doctor` / `status` / `status --all` | Validate and display one or every registered workspace. |
+| `image doctor` / `image install` | Discover or guide-install the optional `local-image-gen` sidecar. Does not generate images. |
 | `line create/list` | Create, register, and inspect feature development lines. |
 | `hotfix create` | Create a hotfix line from an explicit production base. |
 | `changeset create/list/verify` | Pin and verify the exact clean Git heads that make up a multi-repository delivery. |
@@ -626,6 +629,7 @@ dyro --dry-run task run API-101
 See the [architecture and Profile contract](docs/architecture.md),
 the [workspace blueprint contract](docs/workspace-blueprints.md),
 the [existing control-plane migration guide](docs/migrating-existing-control-planes.md),
+the [optional image sidecar](docs/image-sidecar.md),
 and the [PyPI publishing runbook](docs/publishing.md) (maintainers) for implementation detail.
 
 ## Languages and documentation
@@ -639,3 +643,7 @@ DyroEngineeringFlow provides a complete local workflow loop and policy controls 
 ### Graph Engineering (optional reading)
 
 Some discussions call multi-node agent/work topologies **Graph Engineering** (as opposed to a single-agent loop). Dyro’s delivery topology is close in substance—TaskGraph, state machine, gates, review, merge, plus the optional `dispatch` subgraph—but the product identity remains a **delivery control plane**, not an agent-orchestration framework or a knowledge-graph/RAG stack. Dispatch output is advisory. See [architecture](docs/architecture.md#与-graph-engineering-的关系可选读).
+
+## Related sibling
+
+[`local-image-gen`](https://github.com/DandreYang/local-image-gen) is an optional first-party image CLI. Same house, not the same product: it is not a Dyro coding tool and not a managed Skill seat. Installing Dyro does not install it. See the [image sidecar](docs/image-sidecar.md).

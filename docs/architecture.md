@@ -8,6 +8,7 @@
 DyroEngineeringFlow Core（`dyro` CLI）
   ├─ home: 全局工作区入口、最近目标、任意目录导航（无交付权限）
   ├─ workspace: anchors、逐仓基线、开发线、Hotfix、存储模式、doctor
+  ├─ image sidecar: 可选的 `local-image-gen` 发现与安装引导（不是座位，也不是编码工具）
   ├─ launch: Agent adapter 的安全 argv 模板
   ├─ dispatch: 任务 DAG、决策点、冲突组、状态机、回执、复核与外部签收
   ├─ verify: gates、日志、台账和统计
