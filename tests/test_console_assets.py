@@ -84,6 +84,8 @@ class ConsoleAssetTests(unittest.TestCase):
         self.assertIn("摘要未列出关注项".encode(), script.body)
         self.assertIn("关注项未知".encode(), script.body)
         self.assertNotIn("没有需要关注的事项".encode(), script.body)
+        self.assertNotIn("全部正常".encode(), script.body)
+        self.assertNotIn("可以先观察".encode(), script.body)
         self.assertIn("function renderTaskStatusCounts".encode(), script.body)
         self.assertIn("待签核".encode(), script.body)
         self.assertIn("尚未核验是否已合入".encode(), script.body)

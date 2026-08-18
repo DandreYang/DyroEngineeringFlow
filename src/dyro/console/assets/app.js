@@ -291,7 +291,8 @@ function overviewState(attention, workspaces) {
   if (count(attention && attention.ready)) return "有工作可推进";
   if (count(attention && attention.waiting)) return "等待外部条件";
   if (count(attention && attention.paused)) return "存在已暂停工作";
-  return "全部正常";
+  if (readableWorkspaceCount(workspaces)) return "关注项未知";
+  return "状态不完整";
 }
 
 function workspaceMatter(summary) {
@@ -308,7 +309,7 @@ function workspaceMatter(summary) {
   if (count(attention.ready)) return "有工作可以继续推进";
   if (count(attention.waiting)) return "在等外部条件";
   if (count(attention.paused)) return "有工作已暂停";
-  return "可以先观察";
+  return "摘要未列出关注项";
 }
 
 function needsYouWorkspaces(workspaces) {
@@ -336,9 +337,20 @@ function renderNeedsYou(workspaces, total) {
   const items = needsYouWorkspaces(workspaces);
   if (!items.length) {
     const readable = readableWorkspaceCount(workspaces);
-    root.append(element("p", readable
+    if (!readable) {
+      root.append(element("p", "项目状态还不完整，关注项未知。"));
+      return;
+    }
+    const listed = workspaces.some((summary) => {
+      if (text(summary.availability) !== "available") return false;
+      const attention = summary.attention_counts || {};
+      return Boolean(
+        count(attention.ready) || count(attention.waiting) || count(attention.paused)
+      );
+    });
+    root.append(element("p", listed
       ? "现在没有需要你当场处理的项目。"
-      : "项目状态还不完整，关注项未知。"));
+      : "摘要未列出关注项。"));
     return;
   }
   for (const summary of items) {
@@ -456,7 +468,6 @@ function renderCounts(attention) {
     card.className = "count";
     if (key === "repair_required" && count(attention && attention[key])) card.dataset.level = "danger";
     if (key === "needs_user" && count(attention && attention[key])) card.dataset.level = "warning";
-    if (!count(attention && attention[key])) card.dataset.level = "success";
     card.append(element("strong", String(count(attention && attention[key]))), element("span", label));
     root.append(card);
   }

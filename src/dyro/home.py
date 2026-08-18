@@ -2165,7 +2165,7 @@ def _run_config_home(
     config: Config, record: WorkspaceRecord | None, dry_run: bool
 ) -> None:
     print("\n" + title(f"━━ {config.name} ━━"))
-    print(f"工作区  {value(config.root)}")
+    print(f"工作区  {value(config.name)}")
     failures = [finding for finding in doctor(config) if finding.startswith("FAIL")]
     if failures:
         print(

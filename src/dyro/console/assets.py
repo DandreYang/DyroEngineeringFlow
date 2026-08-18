@@ -27,8 +27,8 @@ ASSET_MANIFEST = {
     ),
     "app.js": (
         "text/javascript; charset=utf-8",
-        "28320497905d3c560e52f2ebd1bd3a807c1d5ae31da07ba3a9a534eabe3e081d",
-        32622,
+        "beaa5e872359895d9af8aa0ae17c0ebbf60e369b4df4d46fd1e022164fe427af",
+        33027,
     ),
     "styles.css": (
         "text/css; charset=utf-8",

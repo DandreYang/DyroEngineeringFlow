@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.7.3 - 2026-08-18
+
+- Console home no longer treats empty attention as idle. The overview
+  says unread, workspace cards say "摘要未列出关注项", and zero-count
+  attention chips are not marked success. Ready work still can say
+  there is nothing that needs you on the spot.
+- Bare `dyro` home prints the workspace alias, not the local root.
+  Unhealthy `next` repair findings and commands stay path-free and
+  use `--workspace`. Isolated Console no longer allowlists `task next`.
+- CI wheel/sdist smoke now asserts `dyro.bridge` is absent, matching
+  the publish gate.
+
 ## 0.7.2 - 2026-08-17
 
 - `objective explain` and a ready `next` now lead with a three-line

@@ -2433,29 +2433,32 @@ def cmd_next(args: argparse.Namespace) -> None:
             bool(absent_bootstrap_ids) and set(failures) == expected_bootstrap_failures
         )
         repair_commands = (
-            [_scoped_command(args, config, "bootstrap", "--yes")]
+            [_briefing_command(args, config, "bootstrap", "--yes")]
             if bootstrap_applicable
             else []
         )
+        findings = [
+            _doctor_finding_payload(item, include_paths=False) for item in failures
+        ]
         if args.format == "json":
             _print_control_plane_json(
                 "next_step",
                 state="needs_repair",
                 summary="工作区还不能开始任务。",
                 commands=repair_commands,
-                diagnostic_commands=[_scoped_command(args, config, "doctor")],
+                diagnostic_commands=[_briefing_command(args, config, "doctor")],
                 mutation_available=bootstrap_applicable,
-                findings=[_finding_payload(item) for item in failures],
+                findings=findings,
             )
             return
         print("工作区还不能开始任务：")
-        for finding in failures:
-            print("  " + finding)
-        print(f"修复后运行：{_scoped_command(args, config, 'doctor')}")
+        for finding in findings:
+            print(f"  {finding['status']} {finding['message']}")
+        print(f"修复后运行：{_briefing_command(args, config, 'doctor')}")
         if bootstrap_applicable:
             print(
                 "缺失仓库均已配置 remote，可运行："
-                + _scoped_command(args, config, "bootstrap", "--yes")
+                + _briefing_command(args, config, "bootstrap", "--yes")
             )
         return
     lines = list_lines(config, read_budget=budget)
