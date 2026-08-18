@@ -614,17 +614,24 @@ dyro --dry-run task run API-101
 | `blueprint validate` / `join` | Validate a team-owned generic blueprint and create a resumable isolated multi-repository workspace. |
 | `setup` / `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | Onboard a teammate without TOML edits, manage anchors, and choose a line and agent. |
 | `doctor` / `status` / `status --all` | Validate and display one or every registered workspace. |
+| `next` | Print the one safe follow-up. A live Objective may emit `tick` or `attention`; `next.commands` stays empty. |
 | `image doctor` / `image install` | Discover or guide-install the optional `local-image-gen` sidecar. Does not generate images. |
 | `line create/list` | Create, register, and inspect feature development lines. |
 | `hotfix create` | Create a hotfix line from an explicit production base. |
 | `changeset create/list/verify` | Pin and verify the exact clean Git heads that make up a multi-repository delivery. |
+| `objective list/status/explain/tick/attention/plan` | Inspect accepted Objectives and the switch-tool briefing. Mutations stay on `objective apply`. |
+| `proof list/show/verify/export/verify-bundle` | Rebind delivery Proof. `verify` rebinds the workspace; `verify-bundle` checks portable integrity only. `live` is not merge. |
 | `config get/set` / `agent list/add/test/discover` / `tool list/install/default/pin` / `open` | Safely manage policy, adapters, tool discovery and personal launch preferences, or open an agent in the correct line. |
+| `integration status/install/sync/uninstall` | Manage first-party Skill seats (`dyro-control-plane`, `dyro-executor`, `dyro-board`, `dyro-dispatch`). Loading a seat is not consent to mutate. |
 | `task create/open/list/board/status/next/graph/explain/attempts/binding` | Create or enter tasks, manage state, validate the task graph, explain scheduling, inspect provenance, and output review bindings. |
 | `task run/answer/gates/review/signoff` | Run tasks, resolve questions, execute gates, request independent review, and record external sign-off when a Profile requires it. |
 | `task claim --output` / `task evidence build/execution/review` | One-time claim with a create-only runner handoff file, portable execution-evidence build/import, and receipt-bound review import. |
 | `task merge` | Merge a reviewed task branch into its owning development line. |
 | `task loop/daemon/stats/decisions` | Run controlled batches, scheduling, ledger reporting, and decision gates. |
 | `dispatch` | Optional local multi-agent dispatch (L0–L4); advisory only — not a substitute for gates/merge. |
+
+First-party seats are installed with `dyro integration`. Proof is rebound with
+`dyro proof verify`; it does not replay gates.
 
 See the [architecture and Profile contract](docs/architecture.md),
 the [workspace blueprint contract](docs/workspace-blueprints.md),

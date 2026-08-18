@@ -552,17 +552,23 @@ dyro --dry-run task run API-101
 | `blueprint validate` / `join` | 验证团队自有的通用蓝图，并创建可续跑的隔离多仓工作区。 |
 | `setup` / `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | 无需手改 TOML 地完成新人引导、仓库管理与开发线、Agent 选择。 |
 | `doctor` / `status` / `status --all` | 验证并显示当前或全部已登记工作区状态。 |
+| `next` | 打印当前工作区唯一安全的下一步。活着的 Objective 可能直接给出 `tick` 或 `attention`；`next.commands` 保持为空。 |
 | `image doctor` / `image install` | 发现或引导安装可选的 `local-image-gen` sidecar。不代跑出图。 |
 | `line create/list` | 创建、登记和查看功能开发线。 |
 | `hotfix create` | 从显式生产基线创建 Hotfix 开发线。 |
 | `changeset create/list/verify` | 固化并核验一次多仓交付所包含的干净、精确 Git 提交组合。 |
+| `objective list/status/explain/tick/attention/plan` | 查看已接受的 Objective 与换工具开场白。写操作在 `objective apply`。 |
+| `proof list/show/verify/export/verify-bundle` | 重绑交付 Proof。`verify` 重绑当前工作区；`verify-bundle` 只核便携完整性。`live` 不是 merge。 |
 | `config get/set` / `agent list/add/test/discover` / `tool list/install/default/pin` / `open` | 安全管理策略、adapter、工具发现与个人启动偏好，或在正确开发线启动 Agent。 |
+| `integration status/install/sync/uninstall` | 管理第一方座位 Skill（`dyro-control-plane`、`dyro-executor`、`dyro-board`、`dyro-dispatch`）。加载座位不是同意改世界。 |
 | `task create/open/list/board/status/next/graph/explain/attempts/binding` | 创建或进入任务、管理状态，编译/校验任务图，解释调度，查看 provenance，输出精确复核绑定。 |
 | `task run/answer/gates/review/signoff` | 执行任务、回答追问、运行门禁、申请独立复核；需要时记录外部签收。 |
 | `task claim --output` / `task evidence build/execution/review` | 一次性领取任务并以“仅创建”文件交给隔离执行器，构建/导入可移植执行证据包，并导入与回执绑定的复核证据。 |
 | `task merge` | 将已复核的任务分支合入所属开发线。 |
 | `task loop/daemon/stats/decisions` | 受控批处理、调度、台账报表和决策门禁。 |
 | `dispatch` | 可选本地多 Agent 派发（L0–L4）；仅建议，不替代 gates/merge。 |
+
+第一方座位用 `dyro integration` 安装。Proof 用 `dyro proof verify` 重绑，不重跑 gates。
 
 实现细节见[零摩擦全局首页 ADR](docs/adr/0003-zero-friction-global-home.md)、[架构与 Profile 契约](docs/architecture.md)、[工作区蓝图契约](docs/workspace-blueprints.md)、[既有控制面迁移指南](docs/migrating-existing-control-planes.md)、[可选生图 sidecar](docs/image-sidecar.md)，以及维护者用的 [PyPI 发布说明](docs/publishing.md)。
 
