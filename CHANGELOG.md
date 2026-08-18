@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.5 - 2026-08-18
 
 - Optional `local-image-gen` sidecar discovery: `dyro doctor` reports PATH
   presence only, and `dyro image doctor` / `dyro image install` stay off the
