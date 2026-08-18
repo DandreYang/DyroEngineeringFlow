@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.4 - 2026-08-18
 
 - First-party Skill seats now include `dyro-executor` and `dyro-board` beside
   the existing control-plane and dispatch Skills. Setup and an opted-in
