@@ -131,6 +131,14 @@ from .hub import (
     remove_workspace,
     set_default_workspace,
 )
+from .image_sidecar import (
+    ABSENT_INFO_LINE,
+    SOURCE_URL,
+    discover_sidecar,
+    install_image_sidecar,
+    probe_sidecar,
+    require_interactive_install,
+)
 from .integrations import (
     INTEGRATION_CHOICES,
     IntegrationState,
@@ -497,6 +505,7 @@ def _control_plane_command(args: argparse.Namespace) -> str:
         "command",
         "workspace_command",
         "integration_command",
+        "image_command",
         "line_command",
         "changeset_command",
         "objective_command",
@@ -526,6 +535,7 @@ def _control_plane_error_code(
     return {
         "changeset": "CHANGESET_UNAVAILABLE",
         "doctor": "WORKSPACE_UNHEALTHY",
+        "image": "SIDECAR_UNREADABLE",
         "integration": "INTEGRATION_UNAVAILABLE",
         "line": "LINE_UNAVAILABLE",
         "next": "NEXT_STEP_UNAVAILABLE",
@@ -1547,6 +1557,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     budget = _control_plane_budget(args) if args.format == "json" else None
     findings = doctor(config, read_budget=budget)
     failures = [item for item in findings if item.startswith("FAIL")]
+    sidecar = discover_sidecar()
     if args.format == "json":
         _print_control_plane_json(
             "doctor",
@@ -1556,6 +1567,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
                 _doctor_finding_payload(item, include_paths=args.include_paths)
                 for item in findings
             ],
+            sidecars={"local_image_gen": sidecar.as_dict()},
         )
         if failures:
             raise SystemExit(2)
@@ -1564,9 +1576,62 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print(muted(f"Profile：{config.name} · 检查仓库、基线与隔离工作区。"))
     for finding in findings:
         _print_doctor_finding(finding)
+    if sidecar.state == "absent":
+        print(ABSENT_INFO_LINE)
     if failures:
         raise DyroError("doctor 发现结构错误")
     print("\n" + success("检查通过。") + " 下一步：" + terminal_value("dyro"))
+
+
+def cmd_image_doctor(args: argparse.Namespace) -> None:
+    if args.dry_run:
+        presence = discover_sidecar()
+        if args.format == "json":
+            _print_control_plane_json("image_doctor", **presence.as_dict())
+            return
+        print("DRY RUN: 未探测 local-image-gen")
+        if presence.state == "absent":
+            print(ABSENT_INFO_LINE)
+        else:
+            print("PATH 上已有 local-image-gen；未查询后端。")
+        return
+    probe = probe_sidecar()
+    if args.format == "json":
+        _print_control_plane_json(
+            "image_doctor",
+            **probe.as_dict(include_paths=args.include_paths),
+        )
+        if probe.state == "unavailable":
+            raise SystemExit(2)
+        return
+    print("\n" + title("━━ local-image-gen ━━"))
+    if probe.state == "absent":
+        print(ABSENT_INFO_LINE)
+        print("下一步：" + terminal_value("dyro image install"))
+        return
+    if probe.state == "ready":
+        backends = "、".join(probe.usable_providers) or "-"
+        print(success("状态：ready") + (f" · {probe.version}" if probe.version else ""))
+        print(f"可用后端：{backends}")
+        print("下一步：直接运行 " + terminal_value("local-image-gen") + "。Dyro 不代跑出图。")
+        return
+    if probe.state == "needs_setup":
+        print(muted("状态：needs_setup"))
+        print(probe.message or "已安装 local-image-gen，但没有可用订阅或 API key。")
+        print(f"来源：{SOURCE_URL}")
+        print("下一步：按上游文档登录或配置密钥后，再运行 " + terminal_value("dyro image doctor"))
+        return
+    print(danger(probe.message or "sidecar 不可读"))
+    raise SystemExit(2)
+
+
+def cmd_image_install(args: argparse.Namespace) -> None:
+    require_interactive_install(
+        yes=args.yes,
+        dry_run=args.dry_run,
+        tty=sys.stdin.isatty() and sys.stdout.isatty(),
+    )
+    install_image_sidecar(yes=args.yes, dry_run=args.dry_run)
 
 
 def cmd_terminology_check(args: argparse.Namespace) -> None:
@@ -4086,6 +4151,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="在 JSON 中显式包含本机诊断路径",
     )
     doctor_parser.set_defaults(func=cmd_doctor)
+    image = sub.add_parser(
+        "image",
+        help="发现并引导安装可选的 local-image-gen sidecar；不代跑计费出图",
+    )
+    image_sub = image.add_subparsers(dest="image_command", required=True)
+    image_doctor = image_sub.add_parser(
+        "doctor",
+        help="探测 local-image-gen 是否在 PATH，以及是否有可用后端",
+    )
+    image_doctor.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
+    image_doctor.add_argument(
+        "--include-paths",
+        action="store_true",
+        help="在 JSON 中显式包含本机产出目录与工作区路径",
+    )
+    image_doctor.set_defaults(func=cmd_image_doctor)
+    image_install = image_sub.add_parser(
+        "install",
+        help="展示官方安装来源；不会执行远程安装脚本",
+    )
+    image_install.add_argument(
+        "--yes", action="store_true", help="确认后打开官方仓库页面"
+    )
+    image_install.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="仅展示安装来源，不打开浏览器；也兼容全局 --dry-run",
+    )
+    image_install.set_defaults(func=cmd_image_install)
     terminology = sub.add_parser("terminology", help="使用仓库外策略扫描候选术语")
     terminology_sub = terminology.add_subparsers(
         dest="terminology_command", required=True

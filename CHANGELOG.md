@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Optional `local-image-gen` sidecar discovery: `dyro doctor` reports PATH
+  presence only, and `dyro image doctor` / `dyro image install` stay off the
+  coding-tool catalog and Skill seats. Dyro still does not generate images.
+
 ## 0.7.4 - 2026-08-18
 
 - First-party Skill seats now include `dyro-executor` and `dyro-board` beside

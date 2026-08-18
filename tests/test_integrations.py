@@ -130,6 +130,8 @@ class IntegrationManagerTests(unittest.TestCase):
             self.assertIn(command, content)
         for forbidden_action in ("`console`", "`dispatch`", "`task gates`"):
             self.assertIn(forbidden_action, content)
+        self.assertNotIn("`image`", content)
+        self.assertNotIn("dyro image", content)
         self.assertIn("skip global discovery", content)
         self.assertIn("Never add `--include-paths`", content)
         for private_pattern in (

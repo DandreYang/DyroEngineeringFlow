@@ -119,3 +119,10 @@ project. The user must confirm onboarding separately. The selected workspace
 is a default working directory, not an operating-system sandbox; OpenClaw can
 still reach other paths allowed to the current user unless its own sandboxing
 is configured.
+
+## Out of catalog
+
+`local-image-gen` is an optional sidecar, not a coding tool. Do not add it to
+`TOOL_DEFINITIONS` or Skill seats. Discover it with `dyro doctor` / `dyro image
+doctor`, and install it from the official repository. See
+[image sidecar](image-sidecar.md).

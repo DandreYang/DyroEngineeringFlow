@@ -460,6 +460,8 @@ Install recipes are built into Dyro as shell-free argv. Project files cannot
 supply install commands. Remote-script installers are never executed by Dyro;
 after confirmation it opens the official page instead. See
 [coding-tool catalog and guided installation](docs/tool-catalog.md).
+The optional [image sidecar](docs/image-sidecar.md) is a separate CLI
+(`local-image-gen`), not a home tool and not a managed seat.
 An OpenClaw workspace is a default working directory, not an operating-system
 sandbox; the onboarding prompt calls out that boundary before launch.
 
@@ -612,10 +614,15 @@ dyro --dry-run task run API-101
 | `blueprint validate` / `join` | Validate a team-owned generic blueprint and create a resumable isolated multi-repository workspace. |
 | `setup` / `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | Onboard a teammate without TOML edits, manage anchors, and choose a line and agent. |
 | `doctor` / `status` / `status --all` | Validate and display one or every registered workspace. |
+| `next` | Print the one safe follow-up. A live Objective may emit `tick` or `attention`; `next.commands` stays empty. |
+| `image doctor` / `image install` | Discover or guide-install the optional `local-image-gen` sidecar. Does not generate images. |
 | `line create/list` | Create, register, and inspect feature development lines. |
 | `hotfix create` | Create a hotfix line from an explicit production base. |
 | `changeset create/list/verify` | Pin and verify the exact clean Git heads that make up a multi-repository delivery. |
+| `objective list/status/explain/tick/attention/plan` | Inspect accepted Objectives and the switch-tool briefing. Mutations stay on `objective apply`. |
+| `proof list/show/verify/export/verify-bundle` | Rebind delivery Proof. `verify` rebinds the workspace; `verify-bundle` checks portable integrity only. `live` is not merge. |
 | `config get/set` / `agent list/add/test/discover` / `tool list/install/default/pin` / `open` | Safely manage policy, adapters, tool discovery and personal launch preferences, or open an agent in the correct line. |
+| `integration status/install/sync/uninstall` | Manage first-party Skill seats (`dyro-control-plane`, `dyro-executor`, `dyro-board`, `dyro-dispatch`). Loading a seat is not consent to mutate. |
 | `task create/open/list/board/status/next/graph/explain/attempts/binding` | Create or enter tasks, manage state, validate the task graph, explain scheduling, inspect provenance, and output review bindings. |
 | `task run/answer/gates/review/signoff` | Run tasks, resolve questions, execute gates, request independent review, and record external sign-off when a Profile requires it. |
 | `task claim --output` / `task evidence build/execution/review` | One-time claim with a create-only runner handoff file, portable execution-evidence build/import, and receipt-bound review import. |
@@ -623,9 +630,13 @@ dyro --dry-run task run API-101
 | `task loop/daemon/stats/decisions` | Run controlled batches, scheduling, ledger reporting, and decision gates. |
 | `dispatch` | Optional local multi-agent dispatch (L0–L4); advisory only — not a substitute for gates/merge. |
 
+First-party seats are installed with `dyro integration`. Proof is rebound with
+`dyro proof verify`; it does not replay gates.
+
 See the [architecture and Profile contract](docs/architecture.md),
 the [workspace blueprint contract](docs/workspace-blueprints.md),
 the [existing control-plane migration guide](docs/migrating-existing-control-planes.md),
+the [optional image sidecar](docs/image-sidecar.md),
 and the [PyPI publishing runbook](docs/publishing.md) (maintainers) for implementation detail.
 
 ## Languages and documentation
@@ -639,3 +650,7 @@ DyroEngineeringFlow provides a complete local workflow loop and policy controls 
 ### Graph Engineering (optional reading)
 
 Some discussions call multi-node agent/work topologies **Graph Engineering** (as opposed to a single-agent loop). Dyro’s delivery topology is close in substance—TaskGraph, state machine, gates, review, merge, plus the optional `dispatch` subgraph—but the product identity remains a **delivery control plane**, not an agent-orchestration framework or a knowledge-graph/RAG stack. Dispatch output is advisory. See [architecture](docs/architecture.md#与-graph-engineering-的关系可选读).
+
+## Related sibling
+
+[`local-image-gen`](https://github.com/DandreYang/local-image-gen) is an optional first-party image CLI. Same house, not the same product: it is not a Dyro coding tool and not a managed Skill seat. Installing Dyro does not install it. See the [image sidecar](docs/image-sidecar.md).
