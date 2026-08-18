@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dyro Review Board"
+  short_description: "Adversarial review record, not delivery proof"
+  default_prompt: "Use $dyro-board. Run the signed review-board protocol. Findings are advisory; they are not Proof or task review PASS."

@@ -67,6 +67,10 @@ packages = [
   "assets/dyro-control-plane/agents/openai.yaml",
   "assets/dyro-dispatch/SKILL.md",
   "assets/dyro-dispatch/agents/openai.yaml",
+  "assets/dyro-executor/SKILL.md",
+  "assets/dyro-executor/agents/openai.yaml",
+  "assets/dyro-board/SKILL.md",
+  "assets/dyro-board/agents/openai.yaml",
 ]
 
 [tool.unittest]

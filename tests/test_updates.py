@@ -604,6 +604,20 @@ class DailyCliIntegrationTests(unittest.TestCase):
                 Path("/tmp/dispatch.json"),
                 "outdated",
             ),
+            "executor": IntegrationStatus(
+                "executor",
+                IntegrationState.CURRENT,
+                Path("/tmp/executor"),
+                Path("/tmp/executor.json"),
+                "current",
+            ),
+            "board": IntegrationStatus(
+                "board",
+                IntegrationState.CURRENT,
+                Path("/tmp/board"),
+                Path("/tmp/board.json"),
+                "current",
+            ),
         }
         plan = Mock()
         plan.changes = ("升级镜像",)
@@ -642,6 +656,20 @@ class DailyCliIntegrationTests(unittest.TestCase):
                 Path("/tmp/dispatch.json"),
                 "absent",
             ),
+            "executor": IntegrationStatus(
+                "executor",
+                IntegrationState.ABSENT,
+                Path("/tmp/executor"),
+                Path("/tmp/executor.json"),
+                "absent",
+            ),
+            "board": IntegrationStatus(
+                "board",
+                IntegrationState.ABSENT,
+                Path("/tmp/board"),
+                Path("/tmp/board.json"),
+                "absent",
+            ),
         }
         plan = Mock(changes=("创建 Dispatch Skill",))
         output = StringIO()
@@ -652,8 +680,13 @@ class DailyCliIntegrationTests(unittest.TestCase):
         ):
             _maybe_sync_managed_skill()
 
-        sync.assert_called_once_with(
-            "dispatch", yes=True, allow_first_install=True
+        self.assertEqual(
+            sync.call_args_list,
+            [
+                call("dispatch", yes=True, allow_first_install=True),
+                call("executor", yes=True, allow_first_install=True),
+                call("board", yes=True, allow_first_install=True),
+            ],
         )
         self.assertIn("自动安装 / 同步", output.getvalue())
 
@@ -697,6 +730,20 @@ class DailyCliIntegrationTests(unittest.TestCase):
                 Path("/tmp/dispatch.json"),
                 "absent",
             ),
+            "executor": IntegrationStatus(
+                "executor",
+                IntegrationState.ABSENT,
+                Path("/tmp/executor"),
+                Path("/tmp/executor.json"),
+                "absent",
+            ),
+            "board": IntegrationStatus(
+                "board",
+                IntegrationState.ABSENT,
+                Path("/tmp/board"),
+                Path("/tmp/board.json"),
+                "absent",
+            ),
         }
         completed = Mock(returncode=0, stdout="synced\n", stderr="")
         with (
@@ -715,6 +762,63 @@ class DailyCliIntegrationTests(unittest.TestCase):
             [
                 call("integration", "sync", "skill", "--yes"),
                 call("integration", "install", "dispatch", "--yes"),
+                call("integration", "install", "executor", "--yes"),
+                call("integration", "install", "board", "--yes"),
+            ],
+        )
+        self.assertEqual(run.call_count, 4)
+
+    def test_post_update_refresh_skips_current_and_blocked_companions(self) -> None:
+        from dyro.cli import _refresh_skill_via_new_cli
+        from dyro.integrations import IntegrationState, IntegrationStatus
+
+        statuses = {
+            "skill": IntegrationStatus(
+                "skill",
+                IntegrationState.CURRENT,
+                Path("/tmp/control"),
+                Path("/tmp/control.json"),
+                "current",
+            ),
+            "dispatch": IntegrationStatus(
+                "dispatch",
+                IntegrationState.CURRENT,
+                Path("/tmp/dispatch"),
+                Path("/tmp/dispatch.json"),
+                "current",
+            ),
+            "executor": IntegrationStatus(
+                "executor",
+                IntegrationState.DRIFTED,
+                Path("/tmp/executor"),
+                Path("/tmp/executor.json"),
+                "drifted",
+            ),
+            "board": IntegrationStatus(
+                "board",
+                IntegrationState.ABSENT,
+                Path("/tmp/board"),
+                Path("/tmp/board.json"),
+                "absent",
+            ),
+        }
+        completed = Mock(returncode=0, stdout="synced\n", stderr="")
+        with (
+            patch("dyro.cli.integration_status", side_effect=statuses.__getitem__),
+            patch(
+                "dyro.cli._fresh_dyro_argv",
+                side_effect=lambda *args: ["dyro", *args],
+            ) as argv,
+            patch("dyro.cli.subprocess.run", return_value=completed) as run,
+            redirect_stdout(StringIO()),
+        ):
+            _refresh_skill_via_new_cli()
+
+        self.assertEqual(
+            argv.call_args_list,
+            [
+                call("integration", "sync", "skill", "--yes"),
+                call("integration", "install", "board", "--yes"),
             ],
         )
         self.assertEqual(run.call_count, 2)
@@ -783,10 +887,19 @@ class DailyCliIntegrationTests(unittest.TestCase):
 
     def test_refresh_skill_warns_on_nonzero_exit(self) -> None:
         from dyro.cli import _refresh_skill_via_new_cli
+        from dyro.integrations import IntegrationState, IntegrationStatus
 
         completed = Mock(returncode=2, stdout="", stderr="boom")
+        absent = IntegrationStatus(
+            "skill",
+            IntegrationState.ABSENT,
+            Path("/tmp/mirror"),
+            Path("/tmp/manifest"),
+            "absent",
+        )
         output = StringIO()
         with (
+            patch("dyro.cli.integration_status", return_value=absent),
             patch(
                 "dyro.cli._fresh_dyro_argv",
                 return_value=["dyro", "integration", "sync", "skill", "--yes"],

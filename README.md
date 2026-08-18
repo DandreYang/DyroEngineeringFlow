@@ -288,11 +288,13 @@ python3 -m pip install --user --upgrade dyro
 ```
 
 Interactive `dyro setup` can install the first-party Skill bundle during personal
-preferences. That one opt-in installs both `dyro-control-plane` and the separate
-`dyro-dispatch` Skill. Existing managed control-plane installations automatically
-gain the Dispatch companion on the next interactive launch or package refresh, and
-both managed Skills then stay synchronized with Dyro updates. Machines that have
-never opted into a Dyro Skill are not modified silently.
+preferences. That one opt-in installs the first-batch seats: `dyro-control-plane`,
+`dyro-executor`, `dyro-board`, and `dyro-dispatch`. Existing managed control-plane
+installations automatically gain the new companions on the next interactive
+launch or package refresh, and managed Skills then stay synchronized with Dyro
+updates. Machines that have never opted into a Dyro Skill are not modified
+silently. Each seat auto-loads from context; loading a seat is not consent to
+mutate.
 
 Multi-harness delegation remains separate from the read-only control plane so its
 process/network effects are explicit. Manual installation is still available:

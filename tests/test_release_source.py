@@ -95,6 +95,8 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
         self.assertNotIn("bridge-gate-run.tsv", workflow)
         self.assertIn("dyro-dispatch','SKILL.md", workflow)
         self.assertIn("dyro-dispatch','agents','openai.yaml", workflow)
+        self.assertIn("dyro-executor','SKILL.md", workflow)
+        self.assertIn("dyro-board','SKILL.md", workflow)
 
     def test_ci_no_longer_ships_agent_bridge_zero_effect_gate(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
@@ -107,6 +109,8 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
         self.assertNotIn("Agent Bridge source/wheel/sdist gate", workflow)
         self.assertIn("dyro-dispatch','SKILL.md", workflow)
         self.assertIn("dyro-dispatch','agents','openai.yaml", workflow)
+        self.assertIn("dyro-executor','SKILL.md", workflow)
+        self.assertIn("dyro-board','SKILL.md", workflow)
         self.assertGreaterEqual(workflow.count("verify_bundle_stranger.py"), 2)
         self.assertGreaterEqual(
             workflow.count("find_spec('dyro.bridge') is None"), 2
