@@ -61,8 +61,9 @@ After a successful `dyro update` or patch auto-update, Dyro best-effort syncs
 the managed bundle through the fresh `dyro` entry point. Interactive `dyro`,
 `dyro home`, and `dyro start` launches also repair outdated managed Skills.
 The control-plane opt-in covers first-party companions, so an existing managed
-control plane automatically gains `dyro-dispatch`. A machine with no prior Dyro
-Skill ownership remains untouched. Manual control-plane commands are:
+control plane automatically gains `dyro-dispatch`, `dyro-executor`, and
+`dyro-board`. A machine with no prior Dyro Skill ownership remains untouched.
+Manual control-plane commands are:
 
 ```bash
 dyro integration install skill --dry-run
@@ -72,17 +73,20 @@ dyro integration sync skill --yes   # upgrade-only; skips absent installs
 
 (`codex` is an alias for `skill`.)
 
-The outbound `dyro-dispatch` Skill keeps independent ownership state from the
-read-only control-plane Skill. One `dyro setup` opt-in installs both. An existing
-managed control-plane installation also gains the Dispatch companion on the next
-interactive launch or post-update refresh; after that, both stay synchronized.
-Hosts with no prior Dyro Skill opt-in remain untouched. Manual lifecycle commands
-are still available:
+The outbound `dyro-dispatch`, executor, and board Skills keep independent
+ownership state from the read-only control-plane Skill. One `dyro setup` opt-in
+installs the first-batch seat bundle. An existing managed control-plane
+installation also gains those companions on the next interactive launch or
+post-update refresh; after that they stay synchronized. Hosts with no prior
+Dyro Skill opt-in remain untouched. Manual lifecycle commands are still
+available:
 
 ```bash
 dyro integration install dispatch --dry-run
 dyro integration install dispatch --yes
 dyro integration sync dispatch --yes
+dyro integration install executor --yes
+dyro integration install board --yes
 ```
 
 Editable source installations are deliberately rejected. Update those through

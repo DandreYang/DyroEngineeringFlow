@@ -1,6 +1,6 @@
 ---
 name: dyro-dispatch
-description: Plan and dispatch bounded advisory work to local coding-agent harnesses, or help split delivery work into parallel Core tasks. Use when the user explicitly asks to parallelize, delegate, compare harnesses, or obtain independent opinions. Default write-parallel work is Core peer wave (task worktrees), not one writer plus watchers.
+description: Plan and dispatch bounded advisory work to local coding-agent harnesses, or help split delivery work into parallel Core tasks. Use when the user asks to parallelize, compare harnesses, delegate, 并行, 对比, or 几个 agent. Auto-load this seat on those words; starting a Provider still requires this-turn parallel intent. Default write-parallel work is Core peer wave (task worktrees), not one writer plus watchers.
 ---
 
 # Dyro Dispatch
@@ -10,8 +10,9 @@ Treat `dyro dispatch` as an outbound harness, separate from the read-only
 
 ## Authorization boundary
 
-- Start Providers only after the user explicitly requests parallel, delegated,
-  multi-harness, or independent-agent work. A Skill trigger alone is not consent.
+- Auto-load this seat when the user asks to parallelize, 并行, 对比, or split
+  work across agents. A Skill appearing alone is not consent to start a
+  Provider. Starting one still requires this-turn parallel intent.
 - Treat Provider execution as a local-state, process, and potentially network or
   usage-billed effect even when the delegated task is read-only.
 - Use `mode=edit` only when the user also authorizes code changes. Scratch

@@ -120,6 +120,8 @@ class IntegrationManagerTests(unittest.TestCase):
             "workspace list --format json",
             "status --format json",
             "doctor --format json",
+            "integration status executor --format json",
+            "integration status board --format json",
             "integration status dispatch --format json",
             "objective attention <id> --format json",
             "objective explain <id> --format json",
@@ -209,6 +211,23 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertFalse(
             self.dispatch_avatar.exists() or self.dispatch_avatar.is_symlink()
         )
+
+    def test_executor_and_board_skills_install_independently(self) -> None:
+        for integration, skill_name in (
+            ("executor", "dyro-executor"),
+            ("board", "dyro-board"),
+        ):
+            with self.subTest(integration=integration):
+                installed = install_integration(integration, yes=True)
+                self.assertEqual(installed.status.state, IntegrationState.CURRENT)
+                mirror = self.dyro_home / "skills" / skill_name
+                avatar = self.codex_home / "skills" / skill_name
+                self.assertTrue(mirror.joinpath("SKILL.md").is_file())
+                self.assertTrue(avatar.is_symlink())
+                self.assertEqual(avatar.resolve(), mirror.resolve())
+                removed = uninstall_integration(integration, yes=True)
+                self.assertEqual(removed.status.state, IntegrationState.ABSENT)
+                self.assertFalse(mirror.exists())
 
     def test_dispatch_skill_status_and_dry_run_are_zero_write(self) -> None:
         before = self._tree_snapshot()

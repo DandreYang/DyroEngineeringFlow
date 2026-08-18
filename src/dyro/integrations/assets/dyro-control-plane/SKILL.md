@@ -1,11 +1,13 @@
 ---
 name: dyro-control-plane
-description: Inspect Dyro control-plane state and prepare bounded read-only explanations and plans from a coding agent. Use for registered workspace discovery, workspace health, status, or safe-next-step questions, development-line or Change Set inspection, integration health, or existing Objective status, blockers, attention, graph, wave preview, and plan requests. Never use for execution or delivery mutations.
+description: Inspect Dyro control-plane state and prepare bounded read-only explanations and plans from a coding agent. Use when the user asks what is next, what is blocked, workspace or objective status, 下一步, 堵住了, or after switching coding tools. Auto-load this navigator seat; do not wait to be named. Never use for execution or delivery mutations.
 ---
 
 # Dyro Control Plane
 
 Treat Dyro as the delivery control plane. Run only the allowlisted observations below, prefer their JSON output, and leave every state-changing action to the user in Dyro.
+
+Auto-load this navigator seat at a workspace or line root, after switching tools, or when the user asks 下一步 / 堵住了 / status. Loading the seat is not consent to mutate. Writing in a task worktree is `dyro-executor`. 会审 / 对抗 is `dyro-board`. Parallel harnesses are `dyro-dispatch`.
 
 ## Read-only routing
 
@@ -17,6 +19,8 @@ When the request already supplies a workspace alias, skip global discovery and u
 - Lines or hotfixes: `dyro --workspace <alias> line list [--kind line|hotfix] --format json`
 - Change Sets: `dyro --workspace <alias> changeset list --format json` or `dyro --workspace <alias> changeset verify <id> --format json`
 - Installed control-plane Skill health: `dyro integration status skill --format json`
+- Installed executor Skill health: `dyro integration status executor --format json`
+- Installed board Skill health: `dyro integration status board --format json`
 - Installed dispatch Skill health: `dyro integration status dispatch --format json`
 - Objective inventory or facts: `dyro --workspace <alias> objective list --format json` or `dyro --workspace <alias> objective status <id> --format json`
 - Objective explanation: `dyro --workspace <alias> objective explain <id> --format json`. JSON may include `briefing` (human matter plus one read-only command).
@@ -43,7 +47,7 @@ Keep the handoff short and separate evidence from judgment:
 
 Only hand off a workspace-scoped mutation when the returned command retains an explicit `--workspace <alias>` or absolute `--root <path>` selector. Never reconstruct, shorten, retarget, or strip that selector. When `next.commands` is empty or `mutation_available` is false, do not manufacture a mutation from `diagnostic_commands`, findings, or prose.
 
-Use P0/P1/P2 and Go/No-Go only when the user explicitly requests an adversarial review or release decision. A CLI summary alone is never final runtime or production acceptance.
+If the user asks for 会审, 对抗, or Go/No-Go, follow `dyro-board` instead of inventing P0 here. A CLI summary alone is never final runtime or production acceptance.
 
 ## Hard safety boundary
 

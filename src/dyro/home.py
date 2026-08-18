@@ -12,6 +12,7 @@ from .config import CONFIG_NAME, Config, expand_argv, load, validate_id
 from .continuation.briefing import render_briefing_text
 from .continuation.ready_briefing import build_ready_briefing
 from .errors import DyroError, ValidationError
+from .integrations.seats import render_seat_notice, select_launch_seat
 from .hub import (
     WorkspaceRecord,
     add_workspace,
@@ -642,6 +643,9 @@ def launch_start_tool(
     prompt: str = "",
     dry_run: bool,
 ) -> None:
+    print(
+        render_seat_notice(select_launch_seat(task=task, line=line))
+    )
     if tool.kind == "adapter":
         launch_adapter(
             config,
@@ -2219,9 +2223,13 @@ def _run_config_home(
         if line is None:
             return
         kind, target_id = line.kind, line.id
+    task_id = ""
+    line_id = target_id
     if kind == "task":
         task = load_task(config, target_id)
         target_workspace = existing_task_workspace(config, task)
+        line_id = task.line
+        task_id = task.id
     else:
         _, target_workspace = existing_line_workspace(config, target_id, kind)
     tool = _choose_tool(config, record, workspace=target_workspace, dry_run=dry_run)
@@ -2231,14 +2239,15 @@ def _run_config_home(
         mark_workspace_used(
             record.name, target_kind=kind, target_id=target_id, agent=tool.id
         )
-    if tool.kind == "launcher":
-        launch_home_tool(workspace=target_workspace, tool=tool, dry_run=dry_run)
-    elif kind == "task":
-        open_task(config, target_id, agent=tool.id, prompt="", dry_run=dry_run)
-    else:
-        open_line(
-            config, target_id, kind=kind, agent=tool.id, prompt="", dry_run=dry_run
-        )
+    launch_start_tool(
+        config,
+        workspace=target_workspace,
+        tool=tool,
+        line=line_id,
+        task=task_id,
+        prompt="",
+        dry_run=dry_run,
+    )
 
 
 def run_home(*, root: str | None, workspace: str | None, dry_run: bool) -> None:

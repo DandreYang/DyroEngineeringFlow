@@ -58,7 +58,7 @@ Agent 输出永远是**建议**；进入交付链必须经过 Dyro 契约与独�
 
 ## 3. 对抗评审记录协议（摘要）
 
-完整模板见 [可选本地 Agent 派发设计 §6](designs/optional-local-agent-dispatch.md#6-对抗评审记录协议)。
+第一方座位 `dyro-board` 在用户提出会审 / 对抗 / Go/No-Go 时自动戴上；记录仍不是 Proof。完整模板见 [可选本地 Agent 派发设计 §6](designs/optional-local-agent-dispatch.md#6-对抗评审记录协议)。
 
 硬规则：
 

@@ -1339,7 +1339,9 @@ mount = "web"
             main(
                 ["--workspace", "demo", "--dry-run", "open", "alpha", "--agent", "noop"]
             )
-        self.assertIn(str(self.root / "versions/alpha"), output.getvalue())
+        rendered = output.getvalue()
+        self.assertIn(str(self.root / "versions/alpha"), rendered)
+        self.assertIn("座位  控制面 · dyro-control-plane", rendered)
 
     def test_runner_workspace_option_does_not_collide_with_global_alias(self) -> None:
         arguments = [

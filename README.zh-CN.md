@@ -285,10 +285,11 @@ dyro --version
 python3 -m pip install --user --upgrade dyro
 ```
 
-交互式 `dyro setup` 可在个人偏好步骤一次启用第一方 Skill 套件，同时安装
-`dyro-control-plane` 与独立的 `dyro-dispatch`。已经托管控制面 Skill 的用户会在下次
-交互启动或包更新后自动补装 Dispatch，此后两项都会随 Dyro 自动同步；从未启用过
-Dyro Skill 的机器不会被后台静默写入。
+交互式 `dyro setup` 可在个人偏好步骤一次启用第一方 Skill 套件，同时安装首批座位：
+`dyro-control-plane`、`dyro-executor`、`dyro-board` 与 `dyro-dispatch`。已经托管
+控制面 Skill 的用户会在下次交互启动或包更新后自动补装新座位，此后都会随 Dyro
+自动同步；从未启用过 Dyro Skill 的机器不会被后台静默写入。座位按情景自动戴上，
+戴上不等于同意突变。
 
 多 Harness 委派仍与只读控制面隔离，确保 Provider 进程与网络副作用需要明确请求。
 也可手动运行 `dyro integration install dispatch --dry-run` 预览，再用

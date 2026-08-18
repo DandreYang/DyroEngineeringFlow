@@ -684,6 +684,8 @@ class CliTests(unittest.TestCase):
             [
                 call("skill", yes=True, allow_first_install=True),
                 call("dispatch", yes=True, allow_first_install=True),
+                call("executor", yes=True, allow_first_install=True),
+                call("board", yes=True, allow_first_install=True),
             ],
         )
         self.assertEqual(outcome, "success")
@@ -708,6 +710,26 @@ class CliTests(unittest.TestCase):
                 IntegrationState.ABSENT,
                 Path("/tmp/dispatch"),
                 Path("/tmp/dispatch.json"),
+                "absent",
+                avatars=(
+                    AvatarStatus("codex", Path("/tmp/codex"), "missing", "missing"),
+                ),
+            ),
+            "executor": IntegrationStatus(
+                "executor",
+                IntegrationState.ABSENT,
+                Path("/tmp/executor"),
+                Path("/tmp/executor.json"),
+                "absent",
+                avatars=(
+                    AvatarStatus("codex", Path("/tmp/codex"), "missing", "missing"),
+                ),
+            ),
+            "board": IntegrationStatus(
+                "board",
+                IntegrationState.ABSENT,
+                Path("/tmp/board"),
+                Path("/tmp/board.json"),
                 "absent",
                 avatars=(
                     AvatarStatus("codex", Path("/tmp/codex"), "missing", "missing"),
@@ -749,18 +771,23 @@ class StartTests(WorkspaceCase):
     def test_start_dry_run_uses_selected_line_and_adapter(self) -> None:
         config = load(self.root)
         create_line(config, line_id="alpha", branch="feat/alpha", base="main")
-        main(
-            [
-                "--root",
-                str(self.root),
-                "--dry-run",
-                "start",
-                "--line",
-                "alpha",
-                "--agent",
-                "noop",
-            ]
-        )
+        output = StringIO()
+        with redirect_stdout(output):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "--dry-run",
+                    "start",
+                    "--line",
+                    "alpha",
+                    "--agent",
+                    "noop",
+                ]
+            )
+        rendered = output.getvalue()
+        self.assertIn("座位  控制面 · dyro-control-plane", rendered)
+        self.assertIn("先观察 next / attention", rendered)
 
     def test_next_without_a_profile_explains_how_to_begin(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:

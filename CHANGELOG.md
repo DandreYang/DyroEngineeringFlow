@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- First-party Skill seats now include `dyro-executor` and `dyro-board` beside
+  the existing control-plane and dispatch Skills. Setup and an opted-in
+  control plane install or sync the whole first batch. Each seat auto-loads
+  from context; loading a seat is not consent to mutate. Opening a task
+  prints the executor seat; opening a line prints the navigator seat.
+  `dyro-reviewer` and personal skill directories stay out.
+
 ## 0.7.3 - 2026-08-18
 
 - Console home no longer treats empty attention as idle. The overview
