@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.6 - 2026-08-19
 
 - First-party slash Skills `dyro-review-board` (会审 / 对抗审查) and
   `dyro-task-merge` (task → line preflight). They install via
