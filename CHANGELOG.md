@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.6 - 2026-08-19
+
+- First-party slash Skills `dyro-review-board` (会审 / 对抗审查) and
+  `dyro-task-merge` (task → line preflight). They install via
+  `dyro integration` and do not auto-load. Loading either is not merge,
+  push, or publish. `dyro-board` remains the protocol id; the public
+  label is 会审.
+
 ## 0.7.5 - 2026-08-18
 
 - Optional `local-image-gen` sidecar discovery: `dyro doctor` reports PATH

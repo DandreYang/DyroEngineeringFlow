@@ -36,7 +36,7 @@ class FirstBatchSeatTests(unittest.TestCase):
                 ("skill", "控制面"),
                 ("dispatch", "Dispatch"),
                 ("executor", "执行"),
-                ("board", "评审板"),
+                ("board", "会审"),
             ),
         )
         names = {seat.skill_name for seat in SEATS}
@@ -109,6 +109,26 @@ class FirstBatchSeatTests(unittest.TestCase):
                     re.search(pattern, content),
                     msg=f"{seat.skill_name}: {pattern}",
                 )
+
+    def test_slash_skills_are_packaged_but_not_auto_load_seats(self) -> None:
+        names = {seat.skill_name for seat in SEATS}
+        self.assertNotIn("dyro-review-board", names)
+        self.assertNotIn("dyro-task-merge", names)
+        metadata = Path(__file__).resolve().parents[1].joinpath("pyproject.toml")
+        text = metadata.read_text(encoding="utf-8")
+        for skill_name in ("dyro-review-board", "dyro-task-merge"):
+            self.assertIn(f"assets/{skill_name}/SKILL.md", text)
+            content = (
+                Path(__file__).resolve().parents[1]
+                / "src"
+                / "dyro"
+                / "integrations"
+                / "assets"
+                / skill_name
+                / "SKILL.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn("disable-model-invocation: true", content)
+            self.assertNotIn("TODO", content)
 
     def test_wheel_package_data_lists_every_first_batch_skill(self) -> None:
         metadata = Path(__file__).resolve().parents[1].joinpath("pyproject.toml")

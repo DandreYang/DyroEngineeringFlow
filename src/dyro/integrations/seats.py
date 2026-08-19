@@ -72,7 +72,7 @@ SEATS: tuple[SeatSpec, ...] = (
     SeatSpec(
         BOARD_ID,
         BOARD_SKILL,
-        "评审板",
+        "会审",
         "board",
         True,
         (
