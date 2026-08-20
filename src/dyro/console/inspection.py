@@ -22,6 +22,7 @@ from ..hub import registry_home
 from .events import is_safe_event_fact
 from .overview import ConsoleOverviewError
 from .redaction import REDACTED, safe_branch, safe_id, safe_sha256, safe_title
+from .twin import DISPATCH_STATES, MILESTONES, TASK_STATUSES
 
 
 _CURSOR_SECRET_ENV = "DYRO_CONSOLE_CURSOR_SECRET"
@@ -414,10 +415,11 @@ class IsolatedOverviewService:
             cls._validate_channel(data)
             return
         if expected_operation == "workspace":
-            if set(data) != {"workspace", "lines", "tasks", "objectives"}:
+            if set(data) != {"workspace", "lines", "tasks", "objectives", "operator_twin"}:
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
             cls._validate_summary(data["workspace"])
             cls._validate_inventory(data)
+            cls._validate_operator_twin(data["operator_twin"], data)
             return
         if set(data) == {"workspace"}:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
@@ -784,6 +786,192 @@ class IsolatedOverviewService:
         cls._validate_lines(data["lines"])
         cls._validate_tasks(data["tasks"])
         cls._validate_objectives(data["objectives"])
+
+    @classmethod
+    def _validate_operator_twin(cls, value: object, inventory: Mapping[str, object]) -> None:
+        if not isinstance(value, dict) or set(value) != {
+            "plan",
+            "phases",
+            "running",
+            "latest_ledger",
+            "projected_seq",
+            "overlay_complete",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        plan = value["plan"]
+        phases = value["phases"]
+        running = value["running"]
+        ledger = value["latest_ledger"]
+        if (
+            not isinstance(plan, list)
+            or not isinstance(phases, list)
+            or not isinstance(running, list)
+            or len(plan) > 1000
+            or len(phases) != len(TASK_STATUSES)
+            or len(running) > 1000
+            or not cls._count(value.get("projected_seq"))
+            or type(value.get("overlay_complete")) is not bool
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        objective_ids = {
+            item.get("id")
+            for item in inventory.get("objectives", [])
+            if isinstance(item, dict)
+        }
+        task_ids = {
+            item.get("id")
+            for item in inventory.get("tasks", [])
+            if isinstance(item, dict)
+        }
+        for item in plan:
+            cls._validate_twin_plan_row(item)
+            if item.get("id") not in objective_ids:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            task_ids_row = item.get("task_ids")
+            if not isinstance(task_ids_row, list) or any(task_id not in task_ids for task_id in task_ids_row):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        in_progress_ids: set[object] = set()
+        for index, item in enumerate(phases):
+            if not isinstance(item, dict) or set(item) != {"status", "tasks"}:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if item.get("status") != TASK_STATUSES[index]:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            tasks = item.get("tasks")
+            if not isinstance(tasks, list) or len(tasks) > 1000:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            for task in tasks:
+                cls._validate_twin_task_card(task, expected_status=TASK_STATUSES[index])
+                if TASK_STATUSES[index] == "in_progress":
+                    in_progress_ids.add(task.get("id"))
+        for item in running:
+            cls._validate_twin_running_row(item)
+            if item.get("id") not in in_progress_ids:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        cls._validate_twin_ledger(ledger)
+
+    @classmethod
+    def _validate_twin_plan_row(cls, item: object) -> None:
+        if not isinstance(item, dict) or set(item) != {
+            "id",
+            "title",
+            "line",
+            "milestone",
+            "wave_present",
+            "wave_id",
+            "wave_at",
+            "wave_mode",
+            "wave_count",
+            "task_ids",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        title = item.get("title")
+        milestone = item.get("milestone")
+        wave_at = item.get("wave_at")
+        task_ids = item.get("task_ids")
+        if title != REDACTED and safe_title(title) != title:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if (
+            not cls._safe_alias(item.get("id"))
+            or not (item.get("line") == "" or cls._safe_alias(item.get("line")))
+            or not (milestone == "" or milestone in MILESTONES)
+            or type(item.get("wave_present")) is not bool
+            or not (item.get("wave_id") == "" or cls._safe_alias(item.get("wave_id")))
+            or not isinstance(wave_at, str)
+            or len(wave_at) > 40
+            or not (item.get("wave_mode") == "" or cls._safe_code(item.get("wave_mode")))
+            or not cls._count(item.get("wave_count"))
+            or not isinstance(task_ids, list)
+            or len(task_ids) > 1000
+            or not all(cls._safe_alias(task_id) for task_id in task_ids)
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_twin_task_card(cls, item: object, *, expected_status: str | None = None) -> None:
+        if not isinstance(item, dict) or set(item) != {
+            "id",
+            "title",
+            "line",
+            "executor",
+            "status",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        title = item.get("title")
+        status = item.get("status")
+        if title != REDACTED and safe_title(title) != title:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if (
+            not cls._safe_alias(item.get("id"))
+            or not (item.get("line") == "" or cls._safe_alias(item.get("line")))
+            or not (item.get("executor") == "" or cls._safe_code(item.get("executor")))
+            or status not in TASK_STATUSES
+            or (expected_status is not None and status != expected_status)
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_twin_running_row(cls, item: object) -> None:
+        if not isinstance(item, dict) or set(item) != {
+            "id",
+            "title",
+            "line",
+            "executor",
+            "dispatch_present",
+            "dispatch_id",
+            "dispatch_at",
+            "dispatch_state",
+            "dispatch_facts",
+            "board_landed",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        title = item.get("title")
+        dispatch_at = item.get("dispatch_at")
+        facts = item.get("dispatch_facts")
+        if title != REDACTED and safe_title(title) != title:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if (
+            not cls._safe_alias(item.get("id"))
+            or not (item.get("line") == "" or cls._safe_alias(item.get("line")))
+            or not (item.get("executor") == "" or cls._safe_code(item.get("executor")))
+            or type(item.get("dispatch_present")) is not bool
+            or not (item.get("dispatch_id") == "" or cls._safe_alias(item.get("dispatch_id")))
+            or not isinstance(dispatch_at, str)
+            or len(dispatch_at) > 40
+            or item.get("dispatch_state") not in DISPATCH_STATES
+            or type(item.get("board_landed")) is not bool
+            or not isinstance(facts, dict)
+            or len(facts) > 16
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for key, value in facts.items():
+            if not is_safe_event_fact(key, value):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_twin_ledger(cls, item: object) -> None:
+        if not isinstance(item, dict) or set(item) != {
+            "present",
+            "at",
+            "task_id",
+            "phase",
+            "facts",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        at = item.get("at")
+        facts = item.get("facts")
+        if (
+            type(item.get("present")) is not bool
+            or not isinstance(at, str)
+            or len(at) > 40
+            or not (item.get("task_id") == "" or cls._safe_alias(item.get("task_id")))
+            or not (item.get("phase") == "" or cls._safe_code(item.get("phase")))
+            or not isinstance(facts, dict)
+            or len(facts) > 16
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for key, value in facts.items():
+            if not is_safe_event_fact(key, value):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
 
     @classmethod
     def _validate_lines(cls, value: object) -> None:

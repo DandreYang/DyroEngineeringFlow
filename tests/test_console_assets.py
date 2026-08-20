@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from http.client import HTTPConnection
+import json
+import re
 from threading import Thread
 import unittest
 
@@ -111,6 +113,28 @@ class ConsoleAssetTests(unittest.TestCase):
         self.assertIn("function loadArtifacts".encode(), script.body)
         self.assertIn("function channelRowKey".encode(), script.body)
         self.assertIn("function requestWrite".encode(), script.body)
+        self.assertIn("function renderOperatorTwin".encode(), script.body)
+        self.assertIn("function renderTwinPlan".encode(), script.body)
+        self.assertIn("function renderTwinPhases".encode(), script.body)
+        self.assertIn("function renderTwinRunning".encode(), script.body)
+        self.assertIn("function mergeTwinFromEvents".encode(), script.body)
+        self.assertIn("function applyLiveTwinEvents".encode(), script.body)
+        self.assertIn("overlayComplete !== true".encode(), script.body)
+        self.assertIn("seq <= floor".encode(), script.body)
+        self.assertIn("function eventKnownTaskId".encode(), script.body)
+        self.assertIn("function moveTwinTask".encode(), script.body)
+        self.assertIn("to_status".encode(), script.body)
+        self.assertIn("workspace-room".encode(), script.body)
+        self.assertIn("这一列没有任务".encode(), script.body)
+        self.assertIn("状态未知".encode(), script.body)
+        self.assertIn("计划".encode(), script.body)
+        self.assertIn("里程碑".encode(), script.body)
+        self.assertIn("阶段".encode(), script.body)
+        self.assertIn("谁在跑".encode(), script.body)
+        self.assertIn("未见会审记录".encode(), script.body)
+        self.assertIn("未见波次".encode(), script.body)
+        self.assertIn("未见账本行".encode(), script.body)
+        self.assertIn("会审已落下".encode(), script.body)
         self.assertIn("events/stream".encode(), script.body)
         self.assertIn("families/".encode(), script.body)
         self.assertIn("以 operator 身份发送".encode(), script.body)
@@ -133,6 +157,38 @@ class ConsoleAssetTests(unittest.TestCase):
         self.assertIn("未检查".encode(), script.body)
         self.assertNotIn("干净".encode(), script.body)
         self.assertNotIn("远端已绑定".encode(), script.body)
+        self.assertNotIn(b"fonts.googleapis", script.body)
+        self.assertNotIn(b"fonts.gstatic", script.body)
+        self.assertNotIn(b"unpkg.com", script.body)
+        self.assertNotIn(b"three.js", script.body)
+        styles = load_asset("styles.css")
+        bundled = shell.body + script.body + styles.body
+        lowered = bundled.lower()
+        self.assertNotIn(b"websocket", lowered)
+        self.assertNotIn(b"serviceworker", lowered)
+        self.assertNotIn(b"webgl", lowered)
+        live_tabs = re.findall(
+            rb"function renderLivePanes[\s\S]*?for \(const \[id, label\] of (\[\[.*?\]\])\)",
+            script.body,
+        )
+        self.assertEqual(len(live_tabs), 1)
+        tabs = json.loads(live_tabs[0])
+        self.assertEqual([row[0] for row in tabs], ["family", "events", "channel"])
+        self.assertEqual(len(tabs), 3)
+        self.assertEqual(
+            script.body.count('[["family", "家族"], ["events", "事件"], ["channel", "频道"]]'.encode()),
+            1,
+        )
+        self.assertIn(b"--filament", styles.body)
+        self.assertIn(b"--bay: #141A1F", styles.body)
+        self.assertIn(b"ui-serif", styles.body)
+        self.assertIn(b"ui-monospace", styles.body)
+        self.assertIn(b"workspace-room", styles.body)
+        self.assertIn(b"family-jack.is-focus", styles.body)
+        self.assertNotIn(b"fonts.googleapis", styles.body)
+        self.assertNotIn(b"fonts.gstatic", styles.body)
+        self.assertNotIn(b"@import", styles.body)
+        self.assertIn(b"prefers-reduced-motion", styles.body)
 
 
 if __name__ == "__main__":

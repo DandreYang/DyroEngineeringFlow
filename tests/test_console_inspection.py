@@ -50,7 +50,17 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         self.assertEqual(inspect["data"]["proof_inspection"], "inspected")
         self.assertEqual(overview["data"]["workspaces"][0]["proof_inspection"], "not_inspected")
         self.assertEqual(workspace["data"]["workspace"]["proof_inspection"], "not_inspected")
-        self.assertEqual(set(workspace["data"]), {"workspace", "lines", "tasks", "objectives"})
+        self.assertEqual(
+            set(workspace["data"]),
+            {"workspace", "lines", "tasks", "objectives", "operator_twin"},
+        )
+        twin = workspace["data"]["operator_twin"]
+        self.assertEqual(
+            set(twin),
+            {"plan", "phases", "running", "latest_ledger", "projected_seq", "overlay_complete"},
+        )
+        self.assertFalse(twin["latest_ledger"]["present"])
+        self.assertEqual(twin["running"], [])
         self.assertTrue(
             all("parent" in item for item in workspace["data"]["lines"])
         )
@@ -402,6 +412,88 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         raw = json.dumps({"ok": True, "payload": payload}).encode("utf-8")
         with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE"):
             service._parse_worker_output(raw, expected_operation="workspace")
+
+    def test_parent_rejects_twin_plan_or_running_unbound_from_inventory(self) -> None:
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+        )
+        valid = service.workspace("demo")
+        digest = "a" * 64
+        objective = {
+            "id": "release",
+            "title": "Release readiness",
+            "line": "core",
+            "revision": 1,
+            "operator_state": "active",
+            "derived_result": "incomplete",
+            "requested_mode": "supervised",
+            "operations": ["execute"],
+            "scope_count": 1,
+            "budget": {"max_actions": 1},
+            "selected_actions": [],
+            "blocked_actions": [],
+            "attention": [],
+            "contract_sha256": digest,
+            "scope_sha256": digest,
+            "event_sha256": digest,
+        }
+        ghost_plan = {
+            "id": "ghost",
+            "title": "Ghost",
+            "line": "core",
+            "milestone": "incomplete",
+            "wave_present": False,
+            "wave_id": "",
+            "wave_at": "",
+            "wave_mode": "",
+            "wave_count": 0,
+            "task_ids": [],
+        }
+        running = {
+            "id": "TASK-A",
+            "title": "Pay path",
+            "line": "core",
+            "executor": "noop",
+            "dispatch_present": False,
+            "dispatch_id": "",
+            "dispatch_at": "",
+            "dispatch_state": "unknown",
+            "dispatch_facts": {},
+            "board_landed": True,
+        }
+
+        def resign(payload: dict[str, object]) -> bytes:
+            payload["snapshot_sha256"] = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "schema_version": 1,
+                        "freshness": payload["freshness"],
+                        "data": payload["data"],
+                    }
+                )
+            ).hexdigest()
+            return json.dumps({"ok": True, "payload": payload}).encode("utf-8")
+
+        ghost = deepcopy(valid)
+        ghost["data"]["objectives"] = [objective]
+        ghost["data"]["operator_twin"]["plan"] = [ghost_plan]
+        with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE"):
+            service._parse_worker_output(resign(ghost), expected_operation="workspace")
+
+        unbound_running = deepcopy(valid)
+        unbound_running["data"]["operator_twin"]["running"] = [running]
+        in_progress = next(
+            column
+            for column in unbound_running["data"]["operator_twin"]["phases"]
+            if column["status"] == "in_progress"
+        )
+        in_progress["tasks"] = []
+        with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE"):
+            service._parse_worker_output(
+                resign(unbound_running), expected_operation="workspace"
+            )
 
     def test_parent_rejects_workspace_inventory_that_leaks_inspect(self) -> None:
         service = IsolatedOverviewService(

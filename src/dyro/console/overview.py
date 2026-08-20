@@ -34,6 +34,7 @@ from ..observations import (
 from .models import ConsoleEnvelope
 from .read_model import proof_inspect_data, workspace_envelope
 from .redaction import REDACTED, safe_id, safe_title
+from .twin import empty_operator_twin, project_operator_twin
 
 
 _PAGE_SCHEMA_VERSION = 1
@@ -241,7 +242,22 @@ class ConsoleOverviewService:
         summary, warning_codes, inventory = self._capture(
             record.name, record.root, record.name == registry.default
         )
-        return self._envelope({"workspace": summary, **inventory}, warning_codes)
+        twin = self._operator_twin(alias, inventory)
+        return self._envelope(
+            {"workspace": summary, **inventory, "operator_twin": twin},
+            warning_codes,
+        )
+
+    def _operator_twin(
+        self, alias: str, inventory: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Fail-closed overlay projection. Missing events or ledger stay empty."""
+        try:
+            config, extra = self._workspace_config(alias)
+        except ConsoleOverviewError:
+            return empty_operator_twin()
+        del extra
+        return project_operator_twin(config, inventory)
 
     def events(
         self,

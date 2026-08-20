@@ -26,6 +26,10 @@ const state = {
   channelUnacked: false,
   artifactItems: [],
   artifactBlobs: new Map(),
+  operatorTwin: null,
+  twinTasks: [],
+  twinAfterSeq: 0,
+  twinOverlayComplete: false,
 };
 const HEALTH_LABELS = { healthy: "健康", degraded: "需关注", unavailable: "不可用" };
 const FRESHNESS_LABELS = { fresh: "读取完整", partial: "部分可读", stale: "待刷新" };
@@ -56,6 +60,16 @@ const OPERATOR_STATE_LABELS = {
   paused: "已暂停",
   completed: "已完成",
   repair_required: "需要修复",
+};
+const MILESTONE_LABELS = {
+  incomplete: "未完成",
+  complete: "已完成",
+  repair_required: "需要修复",
+};
+const DISPATCH_STATE_LABELS = {
+  running: "在跑",
+  idle: "已停",
+  unknown: "状态未知",
 };
 const REQUESTED_MODE_LABELS = {
   observe: "只观察",
@@ -184,7 +198,9 @@ const UPDATE_KIND_LABELS = {
   major: "有主版本更新",
 };
 
-const $ = (id) => document.getElementById(id);
+const $ = (id) => (typeof document !== "undefined" && document.getElementById
+  ? document.getElementById(id)
+  : null);
 
 function setStatus(message, error = false) {
   const node = $("session-status");
@@ -664,7 +680,7 @@ function renderOverview(payload) {
   const list = $("workspace-list");
   list.replaceChildren();
   if (!data.workspaces.length) {
-    const empty = element("p", "没有可展示的工作区。页面不会自动创建或登记项目。");
+    const empty = element("p", "没有可展示的工作区。运行 dyro setup、dyro join 或 dyro workspace add。");
     empty.className = "empty";
     list.append(empty);
     return;
@@ -681,7 +697,11 @@ function renderInventoryList(title, items, describe) {
   section.className = "inventory";
   section.append(element("h3", title));
   if (!items.length) {
-    section.append(element("p", "没有可展示的项目。"));
+    section.append(element("p", title === "开发线"
+      ? "没有开发线。回终端跑 dyro setup 或 line spawn。"
+      : title === "任务"
+        ? "没有任务。回终端建 Task 后再打开这一页。"
+        : "没有目标。回终端建 Objective 后再看计划。"));
     return section;
   }
   const list = element("ul");
@@ -714,6 +734,391 @@ function renderInventory(data) {
     renderInventoryList("目标", objectives, describeObjective),
   );
   return root;
+}
+
+function emptyTwin() {
+  return {
+    plan: [],
+    phases: TASK_STATUS_ORDER.map((status) => ({ status, tasks: [] })),
+    running: [],
+    latest_ledger: { present: false, at: "", task_id: "", phase: "", facts: {} },
+    projected_seq: 0,
+    overlay_complete: false,
+  };
+}
+
+function copyTwin(twin) {
+  const source = twin && typeof twin === "object" ? twin : emptyTwin();
+  return {
+    plan: Array.isArray(source.plan) ? source.plan.map((row) => ({
+      ...row,
+      task_ids: Array.isArray(row && row.task_ids) ? row.task_ids.slice() : [],
+    })) : [],
+    phases: Array.isArray(source.phases)
+      ? source.phases.map((column) => ({
+        status: text(column && column.status),
+        tasks: Array.isArray(column && column.tasks)
+          ? column.tasks.map((task) => ({ ...task }))
+          : [],
+      }))
+      : emptyTwin().phases,
+    running: Array.isArray(source.running) ? source.running.map((row) => ({ ...row })) : [],
+    latest_ledger: source.latest_ledger && typeof source.latest_ledger === "object"
+      ? { ...source.latest_ledger, facts: { ...(source.latest_ledger.facts || {}) } }
+      : emptyTwin().latest_ledger,
+    projected_seq: Number.isInteger(source.projected_seq) && source.projected_seq >= 0
+      ? source.projected_seq
+      : 0,
+    overlay_complete: source.overlay_complete === true,
+  };
+}
+
+function twinFromData(data) {
+  const twin = data && data.operator_twin;
+  if (!twin || typeof twin !== "object") return emptyTwin();
+  return copyTwin(twin);
+}
+
+function findTwinTask(taskId) {
+  return state.twinTasks.find((task) => text(task && task.id) === taskId) || null;
+}
+
+function knownTwinTaskId(value) {
+  const id = text(value);
+  if (!id) return "";
+  if (findTwinTask(id)) return id;
+  const twin = state.operatorTwin;
+  if (!twin) return "";
+  for (const column of Array.isArray(twin.phases) ? twin.phases : []) {
+    for (const task of Array.isArray(column && column.tasks) ? column.tasks : []) {
+      if (text(task && task.id) === id) return id;
+    }
+  }
+  for (const row of Array.isArray(twin.running) ? twin.running : []) {
+    if (text(row && row.id) === id) return id;
+  }
+  return "";
+}
+
+function eventKnownTaskId(event) {
+  return (
+    knownTwinTaskId(event && event.subject)
+    || knownTwinTaskId(event && event.facts && event.facts.task_id)
+    || knownTwinTaskId(event && event.facts && event.facts.task)
+  );
+}
+
+function emptyRunningRow(card) {
+  return {
+    id: text(card && card.id),
+    title: text(card && card.title),
+    line: text(card && card.line),
+    executor: text(card && card.executor),
+    dispatch_present: false,
+    dispatch_id: "",
+    dispatch_at: "",
+    dispatch_state: "unknown",
+    dispatch_facts: {},
+    board_landed: false,
+  };
+}
+
+function moveTwinTask(taskId, nextStatus) {
+  const twin = state.operatorTwin;
+  if (!twin || !taskId || !TASK_STATUS_ORDER.includes(nextStatus)) return false;
+  if (!Array.isArray(twin.phases)) twin.phases = emptyTwin().phases;
+  let card = null;
+  for (const column of twin.phases) {
+    const tasks = Array.isArray(column.tasks) ? column.tasks : [];
+    column.tasks = tasks;
+    const index = tasks.findIndex((task) => text(task && task.id) === taskId);
+    if (index >= 0) {
+      card = tasks[index];
+      tasks.splice(index, 1);
+      break;
+    }
+  }
+  const known = findTwinTask(taskId);
+  if (!card && !known) return false;
+  if (!card) {
+    card = {
+      id: text(known.id),
+      title: text(known.title),
+      line: text(known.line),
+      executor: text(known.executor),
+      status: nextStatus,
+    };
+  } else {
+    card.status = nextStatus;
+  }
+  if (known) known.status = nextStatus;
+  const dest = twin.phases.find((column) => text(column && column.status) === nextStatus);
+  if (!dest) return false;
+  dest.tasks = Array.isArray(dest.tasks) ? dest.tasks : [];
+  if (!dest.tasks.some((task) => text(task && task.id) === taskId)) dest.tasks.push(card);
+  dest.tasks.sort((left, right) => text(left && left.id).localeCompare(text(right && right.id)));
+  twin.running = Array.isArray(twin.running) ? twin.running : [];
+  const runIndex = twin.running.findIndex((row) => text(row && row.id) === taskId);
+  if (nextStatus === "in_progress") {
+    if (runIndex < 0) twin.running.push(emptyRunningRow(card));
+  } else if (runIndex >= 0) {
+    twin.running.splice(runIndex, 1);
+  }
+  return true;
+}
+
+function showTwinTask(taskId) {
+  const panel = $("twin-task-summary");
+  if (!panel) return;
+  const task = findTwinTask(taskId);
+  panel.replaceChildren();
+  if (!task) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  panel.append(element("h4", "任务"));
+  const title = text(task.title) || text(task.id) || "未命名任务";
+  panel.append(element("p", `${title} · ${describeTask(task)}`));
+  panel.append(element("p", "点开的是已有任务摘要。这页没有任务工作室。"));
+}
+
+function renderTwinPlan() {
+  const section = element("section");
+  section.className = "twin-plan";
+  section.append(element("h4", "计划"));
+  const plan = state.operatorTwin && Array.isArray(state.operatorTwin.plan) ? state.operatorTwin.plan : [];
+  if (!plan.length) {
+    section.append(element("p", "没有目标。先在终端建 Objective，再回到这页看计划。"));
+    return section;
+  }
+  const lanes = element("div");
+  lanes.className = "twin-lanes";
+  for (const row of plan) {
+    const lane = element("article");
+    lane.className = "twin-lane";
+    if (row && row.wave_present) lane.classList.add("has-wave");
+    const head = element("header");
+    head.className = "twin-lane-head";
+    const title = element("strong", text(row && row.title) || text(row && row.id) || "未命名目标");
+    const milestone = element("span", `里程碑 · ${displayLabel(row && row.milestone, MILESTONE_LABELS)}`);
+    milestone.className = "twin-milestone";
+    if (text(row && row.milestone) === "repair_required") milestone.dataset.level = "danger";
+    if (text(row && row.milestone) === "complete") milestone.dataset.level = "ready";
+    head.append(title, milestone);
+    lane.append(head);
+    if (row && row.wave_present) {
+      const mode = text(row.wave_mode);
+      lane.append(element("p", mode ? `波次 ${mode} · ${count(row.wave_count)} 项` : `波次 · ${count(row.wave_count)} 项`));
+    } else {
+      lane.append(element("p", "未见波次。计划仍按已有目标摊开，不另造 backlog。"));
+    }
+    const cells = element("div");
+    cells.className = "twin-cells";
+    const ids = Array.isArray(row && row.task_ids) ? row.task_ids : [];
+    if (!ids.length) {
+      cells.append(element("span", "这一波还没有任务格"));
+    } else {
+      for (const id of ids) {
+        const cell = element("button", text(id));
+        cell.type = "button";
+        cell.className = "twin-cell";
+        cell.addEventListener("click", () => showTwinTask(text(id)));
+        cells.append(cell);
+      }
+    }
+    lane.append(cells);
+    lanes.append(lane);
+  }
+  section.append(lanes);
+  return section;
+}
+
+function renderTwinPhases() {
+  const section = element("section");
+  section.className = "twin-phases";
+  section.append(element("h4", "阶段"));
+  const columns = element("div");
+  columns.className = "twin-phase-grid";
+  const phases = state.operatorTwin && Array.isArray(state.operatorTwin.phases)
+    ? state.operatorTwin.phases
+    : emptyTwin().phases;
+  for (const status of TASK_STATUS_ORDER) {
+    const column = phases.find((item) => text(item && item.status) === status) || { status, tasks: [] };
+    const pane = element("div");
+    pane.className = "twin-phase";
+    pane.append(element("h5", displayLabel(status, TASK_STATUS_LABELS)));
+    const tasks = Array.isArray(column.tasks) ? column.tasks : [];
+    if (!tasks.length) {
+      pane.classList.add("is-empty");
+      pane.append(element("p", "这一列没有任务"));
+    } else {
+      for (const task of tasks) {
+        const button = element("button", text(task.title) || text(task.id) || "未命名任务");
+        button.type = "button";
+        button.className = "twin-task";
+        button.addEventListener("click", () => showTwinTask(text(task.id)));
+        pane.append(button);
+      }
+    }
+    columns.append(pane);
+  }
+  section.append(columns);
+  return section;
+}
+
+function describeDispatchFacts(facts) {
+  if (!facts || typeof facts !== "object") return "";
+  const parts = [];
+  for (const key of Object.keys(facts).sort()) {
+    const value = facts[key];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      parts.push(`${key} ${value}`);
+    }
+  }
+  return parts.join(" · ");
+}
+
+function renderTwinRunning() {
+  const section = element("section");
+  section.className = "twin-running";
+  section.append(element("h4", "谁在跑"));
+  const running = state.operatorTwin && Array.isArray(state.operatorTwin.running) ? state.operatorTwin.running : [];
+  if (!running.length) {
+    section.append(element("p", "没有进行中的任务。要派人，回终端跑 dispatch。"));
+  } else {
+    const list = element("ul");
+    list.className = "twin-running-list";
+    for (const row of running) {
+      const item = element("li");
+      const title = element("button", text(row.title) || text(row.id) || "未命名任务");
+      title.type = "button";
+      title.className = "twin-task";
+      title.addEventListener("click", () => showTwinTask(text(row.id)));
+      const executor = text(row.executor) ? `执行 ${text(row.executor)}` : "未见执行者";
+      const dispatch = row.dispatch_present
+        ? displayLabel(row.dispatch_state, DISPATCH_STATE_LABELS)
+        : "未见派发";
+      const board = row.board_landed ? "会审已落下" : "未见会审记录";
+      const facts = describeDispatchFacts(row.dispatch_facts);
+      item.append(
+        title,
+        element("p", [executor, dispatch, board].join(" · ")),
+      );
+      if (facts) item.append(element("p", facts));
+      list.append(item);
+    }
+    section.append(list);
+  }
+  const ledger = state.operatorTwin && state.operatorTwin.latest_ledger
+    ? state.operatorTwin.latest_ledger
+    : emptyTwin().latest_ledger;
+  const line = element("p");
+  line.className = "twin-ledger";
+  if (!ledger.present) {
+    line.textContent = "未见账本行。账本仍是交付审计，这页只读最近一行。";
+  } else {
+    const bits = ["最近账本行"];
+    if (text(ledger.at)) bits.push(text(ledger.at));
+    if (text(ledger.task_id)) bits.push(text(ledger.task_id));
+    if (text(ledger.phase)) bits.push(text(ledger.phase));
+    const facts = describeDispatchFacts(ledger.facts);
+    if (facts) bits.push(facts);
+    line.textContent = bits.length > 1 ? bits.join(" · ") : "最近账本行已脱敏";
+  }
+  section.append(line);
+  return section;
+}
+
+function buildOperatorTwin() {
+  const section = element("section");
+  section.className = "operator-twin";
+  section.id = "operator-twin";
+  section.append(element("h3", "这一家现在怎样"));
+  section.append(element("p", "计划、里程碑、阶段和谁在跑。页面不另造 backlog，也不改任务。"));
+  section.append(renderTwinPlan(), renderTwinPhases(), renderTwinRunning());
+  const summary = element("div");
+  summary.id = "twin-task-summary";
+  summary.className = "twin-task-summary";
+  summary.hidden = true;
+  section.append(summary);
+  return section;
+}
+
+function renderOperatorTwin(data) {
+  state.operatorTwin = twinFromData(data);
+  state.twinTasks = Array.isArray(data && data.tasks) ? data.tasks : [];
+  state.twinAfterSeq = state.operatorTwin.projected_seq;
+  state.twinOverlayComplete = state.operatorTwin.overlay_complete === true;
+  return buildOperatorTwin();
+}
+
+function applyLiveTwinEvents(twin, events, afterSeq, overlayComplete) {
+  if (!twin || overlayComplete !== true || !Array.isArray(events) || !events.length) return false;
+  const floor = Number.isInteger(afterSeq) && afterSeq >= 0 ? afterSeq : 0;
+  const planById = new Map((twin.plan || []).map((row) => [text(row && row.id), row]));
+  let changed = false;
+  let maxSeq = floor;
+  for (const event of events) {
+    const seq = event && event.seq;
+    if (!Number.isInteger(seq) || seq <= floor) continue;
+    const kind = text(event && event.kind);
+    const subject = text(event && event.subject);
+    const actor = text(event && event.actor);
+    if (kind === "objective_wave") {
+      const row = planById.get(subject) || planById.get(actor);
+      if (!row) continue;
+      row.wave_present = true;
+      row.wave_id = text(event.id);
+      row.wave_at = text(event.at);
+      row.wave_mode = text(event.facts && event.facts.mode);
+      const value = event.facts && event.facts.count;
+      if (Number.isInteger(value) && value >= 0) row.wave_count = value;
+      changed = true;
+    }
+    if (kind === "task_status") {
+      const taskId = eventKnownTaskId(event);
+      const nextStatus = text(event && event.facts && event.facts.to_status);
+      if (moveTwinTask(taskId, nextStatus)) changed = true;
+    }
+    if (kind === "dispatch") {
+      const row = (twin.running || []).find((item) => text(item && item.id) === eventKnownTaskId(event));
+      if (!row) continue;
+      row.dispatch_present = true;
+      row.dispatch_id = text(event.id);
+      row.dispatch_at = text(event.at);
+      const phase = text(event.facts && event.facts.phase);
+      const status = text(event.facts && event.facts.status);
+      row.dispatch_state = phase === "start" ? "running" : phase === "end" && status === "idle" ? "idle" : "unknown";
+      row.dispatch_facts = event.facts && typeof event.facts === "object" ? event.facts : {};
+      changed = true;
+    }
+    if (kind === "board") {
+      const row = (twin.running || []).find((item) => text(item && item.id) === eventKnownTaskId(event));
+      if (!row) continue;
+      row.board_landed = true;
+      changed = true;
+    }
+    if (seq > maxSeq) maxSeq = seq;
+  }
+  if (changed) twin.projected_seq = maxSeq;
+  return changed;
+}
+
+function renderedTwinText(twin) {
+  const bits = [];
+  for (const row of twin && Array.isArray(twin.running) ? twin.running : []) {
+    bits.push(row && row.board_landed ? "会审已落下" : "未见会审记录");
+  }
+  return bits.join("\n");
+}
+
+function mergeTwinFromEvents(events) {
+  const twin = state.operatorTwin;
+  if (!applyLiveTwinEvents(twin, events, state.twinAfterSeq, state.twinOverlayComplete)) return;
+  state.twinAfterSeq = twin.projected_seq;
+  const current = $("operator-twin");
+  if (current) current.replaceWith(buildOperatorTwin());
 }
 
 function renderWorkspaceAttention(data) {
@@ -895,7 +1300,7 @@ function renderFamilyTree(alias, lines, tasks) {
   section.id = "family-pane";
   section.append(element("h3", "家族"));
   if (!hasSurface("events")) {
-    section.append(element("p", "家族树尚未开放。"));
+    section.append(element("p", "家族尚未开放。运行 dyro console 后打开这一页。"));
     return section;
   }
   const parents = familyParents(lines);
@@ -960,37 +1365,47 @@ function edgeLabel(parent, child, live) {
   return live ? `${parent} → ${child} · 刚有合入或同步` : `${parent} → ${child}`;
 }
 
+function renderFamilyJack(id, role, tasks) {
+  const jack = element("div");
+  jack.className = role === "parent" ? "family-jack is-focus" : "family-jack";
+  jack.dataset.member = id;
+  jack.dataset.role = role;
+  const title = element("strong", id);
+  const label = element(
+    "span",
+    role === "parent" ? "父线" : role === "operator" ? "操作者" : "子线",
+  );
+  label.className = "family-role";
+  jack.append(title, label, familyBadges(id, tasks));
+  return jack;
+}
+
 function renderFamilyGraph(alias, lines, parent, tasks) {
   const wrap = element("div");
   wrap.id = "family-tree";
-  wrap.className = "family-tree";
+  wrap.className = "family-tree family-bay";
   const children = familyChildren(lines, parent);
-  const members = [parent, ...children, "operator"];
-  const list = element("ul");
-  list.className = "family-nodes";
-  for (const id of members) {
-    const item = element("li");
-    item.className = "family-node";
-    item.dataset.member = id;
-    item.dataset.role = id === parent ? "parent" : id === "operator" ? "operator" : "child";
-    const title = element("strong", id);
-    const role = element(
-      "span",
-      id === parent ? "父线" : id === "operator" ? "操作者" : "子线",
-    );
-    role.className = "family-role";
-    item.append(title, role, familyBadges(id, tasks));
-    if (id !== "operator" && id !== parent) {
-      const live = state.liveEdges.has(`${parent}>${id}`) || state.liveEdges.has(`${id}>${parent}`);
-      const edge = element("span", edgeLabel(parent, id, live));
-      edge.className = live ? "family-edge live" : "family-edge";
-      edge.dataset.from = parent;
-      edge.dataset.to = id;
-      item.append(edge);
-    }
-    list.append(item);
+  const stage = element("div");
+  stage.className = "family-stage";
+  stage.append(renderFamilyJack(parent, "parent", tasks));
+  const outbound = element("div");
+  outbound.className = "family-outbound";
+  if (!children.length) {
+    outbound.append(element("p", "还没有子线。开子线：把下面的 dry-run 贴到终端。"));
   }
-  wrap.append(list);
+  for (const id of children) {
+    const run = element("div");
+    run.className = "family-run";
+    const live = state.liveEdges.has(`${parent}>${id}`) || state.liveEdges.has(`${id}>${parent}`);
+    const thread = element("span", live ? "刚有合入或同步" : "一层亲属");
+    thread.className = live ? "family-edge live" : "family-edge";
+    thread.dataset.from = parent;
+    thread.dataset.to = id;
+    run.append(thread, renderFamilyJack(id, "child", tasks));
+    outbound.append(run);
+  }
+  stage.append(outbound, renderFamilyJack("operator", "operator", tasks));
+  wrap.append(stage);
   const actions = element("div");
   actions.className = "family-actions";
   const child = children[0] || `${parent}_new`;
@@ -1040,7 +1455,7 @@ function renderEventList() {
   if (!list) return;
   list.replaceChildren();
   if (!state.eventItems.length) {
-    list.append(element("li", "还没有直播事件。"));
+    list.append(element("li", "还没有直播事件。在终端跑 line spawn、merge 或 sync 后回到这一页。"));
     return;
   }
   for (const event of [...state.eventItems].reverse()) {
@@ -1062,6 +1477,7 @@ function appendEvents(events) {
   }
   applyLiveEdges(state.eventItems);
   renderEventList();
+  mergeTwinFromEvents(events);
 }
 
 function consumeSse(buffer) {
@@ -1423,13 +1839,13 @@ function renderChannelPane(alias) {
   const section = element("section");
   section.className = "live-pane channel-pane";
   section.id = "channel-pane";
-  section.append(element("h3", "频道"));
+  section.append(element("h3", "决定"));
   if (!hasSurface("families")) {
-    section.append(element("p", "尚未开放"));
+    section.append(element("p", "决定尚未开放。运行 dyro console 后打开这一页。"));
     section.append(renderArtifactRail(alias, "channel-artifact-rail"));
     return section;
   }
-  section.append(element("p", "人类身份固定为 operator。"));
+  section.append(element("p", "以 operator 留下决定或约定。这不是交付门。"));
   const parent = state.familyParent;
   const members = state.channelMembers.length ? state.channelMembers : [];
   section.append(renderChannelFilters(members));
@@ -1800,12 +2216,27 @@ async function loadWorkspace(alias, silent = false) {
       definition("目标", workspaceCount(summary, "objective_count")),
       definition("证据核验", displayLabel(summary.proof_inspection, PROOF_INSPECTION_LABELS)),
     );
-    content.replaceChildren(grid);
-    content.append(renderInventory(payload.data));
+    const room = element("div");
+    room.className = "workspace-room";
+    const meta = element("p");
+    meta.className = "workspace-room-meta";
+    meta.textContent = [
+      text(summary.alias),
+      displayLabel(summary.health, HEALTH_LABELS),
+      displayLabel(summary.freshness, FRESHNESS_LABELS),
+      displayLabel(summary.availability, AVAILABILITY_LABELS),
+    ].filter(Boolean).join(" · ");
+    const hero = element("div");
+    hero.className = "workspace-hero";
+    hero.append(renderLivePanes(alias, payload.data));
+    const quiet = element("div");
+    quiet.className = "workspace-quiet";
+    quiet.append(grid, renderInventory(payload.data));
     const command = text(summary.recommendation && summary.recommendation.command);
-    if (command) content.append(commandRow(command));
-    content.append(await loadProofInspect(alias));
-    content.append(renderLivePanes(alias, payload.data));
+    if (command) quiet.append(commandRow(command));
+    quiet.append(await loadProofInspect(alias));
+    room.append(meta, hero, renderOperatorTwin(payload.data), quiet);
+    content.replaceChildren(room);
     renderEventList();
     renderChannelMessages();
     detail.hidden = false;
@@ -1921,4 +2352,15 @@ async function start() {
   }
 }
 
-start();
+if (typeof document !== "undefined" && document.getElementById && document.getElementById("refresh")) {
+  start();
+}
+globalThis.__dyroTwinLive = {
+  twinFromData,
+  renderOperatorTwin,
+  mergeTwinFromEvents,
+  applyLiveTwinEvents,
+  renderedTwinText,
+  emptyTwin,
+  getState: () => state,
+};
