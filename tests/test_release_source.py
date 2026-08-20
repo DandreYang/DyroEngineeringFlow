@@ -99,6 +99,7 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
         self.assertIn("dyro-board','SKILL.md", workflow)
         self.assertIn("dyro-review-board','SKILL.md", workflow)
         self.assertIn("dyro-task-merge','SKILL.md", workflow)
+        self.assertIn("dyro-line-family','SKILL.md", workflow)
 
     def test_ci_no_longer_ships_agent_bridge_zero_effect_gate(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
@@ -115,6 +116,7 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
         self.assertIn("dyro-board','SKILL.md", workflow)
         self.assertIn("dyro-review-board','SKILL.md", workflow)
         self.assertIn("dyro-task-merge','SKILL.md", workflow)
+        self.assertIn("dyro-line-family','SKILL.md", workflow)
         self.assertGreaterEqual(workflow.count("verify_bundle_stranger.py"), 2)
         self.assertGreaterEqual(
             workflow.count("find_spec('dyro.bridge') is None"), 2

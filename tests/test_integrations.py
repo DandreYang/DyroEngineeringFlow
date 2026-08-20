@@ -128,7 +128,14 @@ class IntegrationManagerTests(unittest.TestCase):
             "objective plan <id> --format json",
         ):
             self.assertIn(command, content)
-        for forbidden_action in ("`console`", "`dispatch`", "`task gates`"):
+        for forbidden_action in (
+            "`console`",
+            "`dispatch`",
+            "`task gates`",
+            "`line spawn`",
+            "`line merge`",
+            "`line sync`",
+        ):
             self.assertIn(forbidden_action, content)
         self.assertNotIn("`image`", content)
         self.assertNotIn("dyro image", content)
@@ -181,6 +188,44 @@ class IntegrationManagerTests(unittest.TestCase):
             if ": " in line:
                 self.assertTrue(line.split(": ", 1)[1].startswith('"'))
 
+    def test_packaged_line_family_skill_is_preflight_only(self) -> None:
+        root = manager._asset_root("line-family")
+        skill = root / "SKILL.md"
+        metadata = root / "agents" / "openai.yaml"
+
+        content = skill.read_text(encoding="utf-8")
+        self.assertLessEqual(len(content.encode("utf-8")), 8 * 1024)
+        self.assertNotIn("TODO", content)
+        self.assertIn("name: dyro-line-family", content)
+        self.assertIn("disable-model-invocation: true", content)
+        self.assertIn("user-invocable: true", content)
+        self.assertIn("Never pass `--yes`", content)
+        self.assertIn("Do not invent `--yes` or `--push`", content)
+        self.assertIn("Do not add `--push`", content)
+        self.assertIn("line spawn <parent> <child> --yes", content)
+        self.assertIn("line merge <child> --into <parent> --yes", content)
+        self.assertIn("line sync <child> --yes", content)
+        self.assertIn("--dry-run line spawn", content)
+        self.assertIn("--dry-run line merge", content)
+        self.assertIn("--dry-run line sync", content)
+        self.assertIn("git `main`", content)
+        self.assertIn("/dyro-task-merge", content)
+        self.assertIn("$dyro-line-family", metadata.read_text(encoding="utf-8"))
+        for line in metadata.read_text(encoding="utf-8").splitlines():
+            if ": " in line:
+                self.assertTrue(line.split(": ", 1)[1].startswith('"'))
+
+        task_merge = (manager._asset_root("task-merge") / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("/dyro-line-family", task_merge)
+        executor = (manager._asset_root("executor") / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("`line spawn`", executor)
+        self.assertIn("`line merge`", executor)
+        self.assertIn("`line sync`", executor)
+
     def test_dispatch_skill_installs_independently_from_control_plane(self) -> None:
         self.assertEqual(
             integration_status("dispatch").state,
@@ -220,6 +265,7 @@ class IntegrationManagerTests(unittest.TestCase):
             ("board", "dyro-board"),
             ("review-board", "dyro-review-board"),
             ("task-merge", "dyro-task-merge"),
+            ("line-family", "dyro-line-family"),
         ):
             with self.subTest(integration=integration):
                 installed = install_integration(integration, yes=True)

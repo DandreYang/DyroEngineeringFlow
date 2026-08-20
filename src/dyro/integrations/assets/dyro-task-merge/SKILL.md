@@ -15,9 +15,11 @@ metadata:
 Preflight only. This is not a first-party Dyro integration and not `task review` PASS.
 
 `task merge` means **done task branch → owning development line**.
-It does not mean line → `main`, release, tag, or PyPI.
+It does not mean child line → parent line, or line → `main`, release, tag, or PyPI.
 
 If the user said 合入主线 and means git `main`, say Dyro has no such command here and stop **before** any preflight.
+
+If the user means **child line → parent line** (`line merge`), or `line spawn` / `line sync`, stop **before** any preflight and point them at `/dyro-line-family`.
 
 ## Hard boundary
 

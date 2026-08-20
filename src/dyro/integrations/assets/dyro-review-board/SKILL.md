@@ -21,7 +21,7 @@ metadata:
 
 ## Same-turn delivery
 
-If this turn also asks to 提交、commit、push、发布、publish、`task merge`、或「没问题就合入」：
+If this turn also asks to 提交、commit、push、发布、publish、`task merge`、`line merge`、`line spawn`、`line sync`、或「没问题就合入」：
 
 1. Do the 会审 only.
 2. Refuse those delivery actions in this turn.
@@ -40,12 +40,12 @@ If this turn also asks to 提交、commit、push、发布、publish、`task merg
 
 - 这是会审 / 对抗审查：独立反证，最后由一个仲裁收口，不是投票。
 - 记录不是 Proof，也不是 `task review` PASS。
-- 会审给出 Go，也不等于可以 `task merge`、push 或发布。
+- 会审给出 Go，也不等于可以 `task merge`、`line merge`、`line spawn`、`line sync`、push 或发布。
 - `task review` 仍走 Core 回执绑定；不要用本次会审替代它。
 
 ## Do not
 
-- 不要 merge、push、signoff、`objective apply`、`dispatch run`、`task run`、git commit、或发布。
+- 不要 merge、push、signoff、`line spawn`、`line merge`、`line sync`、`objective apply`、`dispatch run`、`task run`、git commit、或发布。
 - 不要改另一位评审员写过的章节。
 - 不要把模型票数升级成事实。
 - 不要扫描未安装的个人 skill 目录来代替 first-party 协议。

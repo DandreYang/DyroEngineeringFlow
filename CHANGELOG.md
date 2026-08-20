@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- User slash Skill `dyro-line-family` (`/dyro-line-family`) preflights
+  `line spawn` / `line merge` / `line sync` and prints one `--yes` command
+  for the human. It does not execute the mutation, invent `--push`, or
+  merge a line into git `main` / release / PyPI. Install via
+  `dyro integration install line-family`; it does not auto-load.
+  `/dyro-task-merge` stays task → owning line and points line-family
+  ops at this slash. Control-plane, executor, and 会审 refuse those
+  mutations in the same turn.
 - Line manifests may declare an optional `parent` line id (schema 3). Schema 1
   and 2 files still parse; the writer emits schema 3 only when `parent` is set.
   `base` remains a Git ref.

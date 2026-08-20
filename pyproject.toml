@@ -75,6 +75,8 @@ packages = [
   "assets/dyro-review-board/agents/openai.yaml",
   "assets/dyro-task-merge/SKILL.md",
   "assets/dyro-task-merge/agents/openai.yaml",
+  "assets/dyro-line-family/SKILL.md",
+  "assets/dyro-line-family/agents/openai.yaml",
 ]
 
 [tool.unittest]

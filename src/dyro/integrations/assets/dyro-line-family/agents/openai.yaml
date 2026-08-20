@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dyro 开发线家族"
+  short_description: "预检子线派生 / 合入父线 / 从父线同步；不要执行"
+  default_prompt: "Use $dyro-line-family. Preflight with doctor/status/line list and --dry-run line spawn|merge|sync only. Never run --yes, invent --push, or git merge. A printed command is not next.commands."
