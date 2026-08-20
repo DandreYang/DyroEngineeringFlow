@@ -175,8 +175,10 @@ class WorkspaceEventLogTests(WorkspaceCase):
         self.assertEqual(len(digest), 64)
         resumed = event_page(self.config, secret=secret, after=cursor, limit=50)
         self.assertEqual(resumed["events"], [])
+        # Unpadded base64 can treat the final character as unused bits; flip
+        # a body character so the HMAC input actually changes.
         with self.assertRaisesRegex(ConsoleOverviewError, "EVENT_CURSOR_INVALID"):
-            event_page(self.config, secret=secret, after=cursor[:-1] + "x", limit=50)
+            event_page(self.config, secret=secret, after="x" + cursor[1:], limit=50)
         path = self.root / ".dyro" / "events.jsonl"
         path.write_text("", encoding="utf-8")
         with self.assertRaisesRegex(ConsoleOverviewError, "EVENT_CURSOR_INVALID"):
