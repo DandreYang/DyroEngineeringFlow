@@ -423,7 +423,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         try:
             if suffix == []:
                 payload = service.workspace(alias)
-            elif suffix == ["proofs"]:
+            elif remainder.endswith("/proofs") and suffix == ["proofs"]:
                 payload = service.inspect_proofs(alias)
             elif suffix == ["events"] or suffix == ["events", "stream"]:
                 after, limit = self._event_parameters(query)
@@ -527,22 +527,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         cursor = data.get("next_cursor") if isinstance(data, dict) else None
         if not isinstance(events, list):
             events = []
-        self.close_connection = True
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "close")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
-        self.send_header("Content-Security-Policy", _CSP)
-        self.end_headers()
-        for event in events:
-            self.wfile.write(b"data: " + _json_bytes(event) + b"\n\n")
+        chunks = [b"data: " + _json_bytes(event) + b"\n\n" for event in events]
         if isinstance(cursor, str) and re.fullmatch(r"[A-Za-z0-9_-]+", cursor):
-            self.wfile.write(b"id: " + cursor.encode("ascii") + b"\n\n")
-        self.wfile.write(b": keepalive\n\n")
+            chunks.append(b"id: " + cursor.encode("ascii") + b"\n\n")
+        chunks.append(b": keepalive\n\n")
+        self._send(200, b"".join(chunks), "text/event-stream; charset=utf-8")
 
     def _validate_request_envelope(self) -> bool:
         if len(self.raw_requestline) > REQUEST_LINE_LIMIT:
