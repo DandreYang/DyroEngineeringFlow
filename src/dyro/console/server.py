@@ -40,6 +40,14 @@ def _json_bytes(value: object) -> bytes:
     )
 
 
+def _query_allowed(path: str) -> bool:
+    if path == "/api/v1/overview":
+        return True
+    return path.startswith("/api/v1/workspaces/") and (
+        path.endswith("/events") or path.endswith("/events/stream")
+    )
+
+
 class ConsoleHTTPServer(ThreadingHTTPServer):
     """A bounded IPv4 loopback server with no request logging."""
 
@@ -267,7 +275,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if parsed.fragment or not parsed.path or parsed.path.startswith("//"):
             self._error(400, "BAD_REQUEST")
             return
-        if parsed.query and parsed.path != "/api/v1/overview":
+        if parsed.query and not _query_allowed(parsed.path):
             self._error(400, "BAD_REQUEST")
             return
         if self.command == "GET" and parsed.path == "/":
@@ -305,12 +313,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     "data": {
                         "version": __version__,
                         "surfaces": (
-                            ["overview", "proofs", "system"]
+                            ["overview", "proofs", "system", "events"]
                             if self.console.overview_service
                             else []
                         ),
                         "capabilities": (
-                            ["overview", "proofs", "system"]
+                            ["overview", "proofs", "system", "events"]
                             if self.console.overview_service
                             else []
                         ),
@@ -351,7 +359,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 return
             if self._authorized_session() is None:
                 return
-            self._workspace_resource(parsed.path)
+            self._workspace_resource(parsed.path, parsed.query)
             return
         if parsed.path.startswith("/api/"):
             self._error(401, "UNAUTHORIZED")
@@ -394,21 +402,51 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         self._json(200, payload, etag=str(payload.get("snapshot_sha256", "")))
 
-    def _workspace_resource(self, path: str) -> None:
+    def _workspace_resource(self, path: str, query: str) -> None:
         service = self.console.overview_service
         if service is None:
             self._error(404, "NOT_FOUND")
             return
         remainder = path.removeprefix("/api/v1/workspaces/")
-        inspect = remainder.endswith("/proofs")
-        alias = remainder[: -len("/proofs")] if inspect else remainder
+        parts = remainder.split("/")
+        if not parts or not parts[0]:
+            self._error(400, "WORKSPACE_ALIAS_INVALID")
+            return
+        alias = parts[0]
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", alias):
             self._error(400, "WORKSPACE_ALIAS_INVALID")
             return
+        suffix = parts[1:]
+        if query and suffix[:1] != ["events"]:
+            self._error(400, "BAD_REQUEST")
+            return
         try:
-            payload = service.inspect_proofs(alias) if inspect else service.workspace(alias)
+            if suffix == []:
+                payload = service.workspace(alias)
+            elif suffix == ["proofs"]:
+                payload = service.inspect_proofs(alias)
+            elif suffix == ["events"] or suffix == ["events", "stream"]:
+                after, limit = self._event_parameters(query)
+                payload = service.events(alias, after=after, limit=limit)
+                if suffix == ["events", "stream"]:
+                    self._sse(payload)
+                    return
+            elif suffix == ["families"]:
+                payload = service.families(alias)
+            elif len(suffix) == 2 and suffix[0] == "families":
+                parent = suffix[1]
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", parent):
+                    self._error(400, "FAMILY_PARENT_INVALID")
+                    return
+                payload = service.family(alias, parent)
+            else:
+                self._error(404, "NOT_FOUND")
+                return
         except ConsoleOverviewError as exc:
             self._error(self._overview_error_status(exc.code), exc.code)
+            return
+        except AttributeError:
+            self._error(404, "NOT_FOUND")
             return
         self._json(200, payload, etag=str(payload.get("snapshot_sha256", "")))
 
@@ -419,9 +457,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             "OVERVIEW_LIMIT_INVALID",
             "OVERVIEW_QUERY_INVALID",
             "WORKSPACE_ALIAS_INVALID",
+            "EVENT_CURSOR_INVALID",
+            "EVENT_LIMIT_INVALID",
+            "EVENT_QUERY_INVALID",
+            "EVENT_LOG_INVALID",
+            "FAMILY_PARENT_INVALID",
         }:
             return 400
-        if code == "WORKSPACE_NOT_FOUND":
+        if code in {"WORKSPACE_NOT_FOUND", "FAMILY_NOT_FOUND"}:
             return 404
         return 503
 
@@ -449,6 +492,57 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if len(raw_limit) > 3 or not raw_limit.isdecimal():
             raise ConsoleOverviewError("OVERVIEW_QUERY_INVALID")
         return cursor, int(raw_limit)
+
+    @staticmethod
+    def _event_parameters(query: str) -> tuple[str | None, int]:
+        if not query:
+            return None, 50
+        values: dict[str, str] = {}
+        for segment in query.split("&"):
+            key, separator, value = segment.partition("=")
+            if (
+                not separator
+                or key not in {"after", "limit"}
+                or key in values
+                or not value
+            ):
+                raise ConsoleOverviewError("EVENT_QUERY_INVALID")
+            values[key] = value
+        after = values.get("after")
+        if after is not None and (
+            len(after) > 512 or not re.fullmatch(r"[A-Za-z0-9_-]+", after)
+        ):
+            raise ConsoleOverviewError("EVENT_QUERY_INVALID")
+        raw_limit = values.get("limit", "50")
+        if len(raw_limit) > 3 or not raw_limit.isdecimal():
+            raise ConsoleOverviewError("EVENT_QUERY_INVALID")
+        limit = int(raw_limit)
+        if not 1 <= limit <= 100:
+            raise ConsoleOverviewError("EVENT_LIMIT_INVALID")
+        return after, limit
+
+    def _sse(self, payload: object) -> None:
+        data = payload.get("data") if isinstance(payload, dict) else None
+        events = data.get("events") if isinstance(data, dict) else None
+        cursor = data.get("next_cursor") if isinstance(data, dict) else None
+        if not isinstance(events, list):
+            events = []
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Content-Security-Policy", _CSP)
+        self.end_headers()
+        for event in events:
+            self.wfile.write(b"data: " + _json_bytes(event) + b"\n\n")
+        if isinstance(cursor, str) and re.fullmatch(r"[A-Za-z0-9_-]+", cursor):
+            self.wfile.write(b"id: " + cursor.encode("ascii") + b"\n\n")
+        self.wfile.write(b": keepalive\n\n")
 
     def _validate_request_envelope(self) -> bool:
         if len(self.raw_requestline) > REQUEST_LINE_LIMIT:

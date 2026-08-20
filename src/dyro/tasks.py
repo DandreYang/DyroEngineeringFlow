@@ -877,6 +877,16 @@ def set_status(
             ledger(
                 config, task.id, "status", from_status=current, to_status=next_status
             )
+            from .events import append_event
+
+            append_event(
+                config,
+                kind="task_status",
+                actor=task.line,
+                subject=task.id,
+                family=task.line,
+                facts={"from_status": current, "to_status": next_status},
+            )
 
 
 def _set_quality_gate_status(
@@ -2035,15 +2045,55 @@ def _execute_task_agent(
         assert_write_executor_allowed(executor, risk=task.risk)
         assert_capability_allows_write(config, executor)
     if is_dispatch_write_ready(executor):
-        result = run_task_bound_dispatch(
-            task,
-            executor=executor,
-            workspace=workspace,
-            prompt=prompt,
-            timeout_seconds=float(task.timeout_minutes * 60),
-            dry_run=dry_run,
-            capabilities=getattr(config, "capabilities", None) or {},
-        )
+        if not dry_run:
+            from .events import append_event
+
+            append_event(
+                config,
+                kind="dispatch",
+                actor=task.line,
+                subject=task.id,
+                family=task.line,
+                facts={"executor": executor, "phase": "start"},
+            )
+        try:
+            result = run_task_bound_dispatch(
+                task,
+                executor=executor,
+                workspace=workspace,
+                prompt=prompt,
+                timeout_seconds=float(task.timeout_minutes * 60),
+                dry_run=dry_run,
+                capabilities=getattr(config, "capabilities", None) or {},
+            )
+        except Exception:
+            if not dry_run:
+                from .events import append_event
+
+                append_event(
+                    config,
+                    kind="dispatch",
+                    actor=task.line,
+                    subject=task.id,
+                    family=task.line,
+                    facts={"executor": executor, "phase": "end", "status": "failed"},
+                )
+            raise
+        if not dry_run:
+            from .events import append_event
+
+            append_event(
+                config,
+                kind="dispatch",
+                actor=task.line,
+                subject=task.id,
+                family=task.line,
+                facts={
+                    "executor": executor,
+                    "phase": "end",
+                    "status": "idle" if getattr(result, "code", 1) == 0 else "failed",
+                },
+            )
     elif executor in config.adapters:
         argv = _adapter_argv(
             config,

@@ -548,7 +548,18 @@ def apply_supervised_wave(
             # hide an Action failure or turn it into a misleading success.
             if primary_error is None:
                 raise
-    return tuple(outcomes)
+    frozen = tuple(outcomes)
+    from ..events import append_event
+
+    append_event(
+        config,
+        kind="objective_wave",
+        actor=wave.objective_id,
+        subject=wave.objective_id,
+        family="",
+        facts={"mode": "apply", "count": len(frozen)},
+    )
+    return frozen
 
 
 def render_supervised_outcomes(outcomes: tuple[SupervisedOutcome, ...]) -> str:

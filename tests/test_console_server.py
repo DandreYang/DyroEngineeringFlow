@@ -112,8 +112,8 @@ class ConsoleServerTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
         payload = json.loads(body)
         self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(payload["data"]["surfaces"], ["overview", "proofs", "system"])
-        self.assertEqual(payload["data"]["capabilities"], ["overview", "proofs", "system"])
+        self.assertEqual(payload["data"]["surfaces"], ["overview", "proofs", "system", "events"])
+        self.assertEqual(payload["data"]["capabilities"], ["overview", "proofs", "system", "events"])
         self.assertEqual(payload["data"]["initial_workspace"], "")
         self.assertIn("session_expires_at", payload["data"])
 
@@ -268,6 +268,46 @@ class ConsoleOverviewServerTests(unittest.TestCase):
             "freshness": {"state": "fresh", "partial": False, "warnings": []},
             "data": {"proof_inspection": "inspected", "proofs": [], "objectives": []},
         }
+        self.overview.events.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "b" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {
+                "events": [
+                    {
+                        "seq": 1,
+                        "id": "evt_1",
+                        "kind": "spawn",
+                        "at": "2026-08-20T12:00:00Z",
+                        "actor": "core",
+                        "subject": "core_pay",
+                        "family": "core",
+                        "facts": {"parent": "core", "child": "core_pay"},
+                    }
+                ],
+                "next_cursor": "after_evt_1",
+            },
+        }
+        self.overview.families.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "a" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {"families": []},
+        }
+        self.overview.family.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "9" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {
+                "parent": "core",
+                "members": ["core", "core_pay", "operator"],
+                "nodes": [],
+                "edges": [],
+            },
+        }
         self.server = create_console_http_server(
             port=0,
             bootstrap_secret="a" * 43,
@@ -389,6 +429,57 @@ class ConsoleOverviewServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["data"]["tool_inspection"], "not_inspected")
         self.assertEqual(json.loads(body)["data"]["tools"], [])
         self.overview.system.assert_called_once_with()
+
+    def test_events_after_query_and_sse_resume_are_authenticated(self) -> None:
+        unauthorized, _, body = self._request("GET", "/api/v1/workspaces/alpha/events")
+        self.assertEqual(unauthorized, 401)
+        self.assertEqual(json.loads(body)["error"]["code"], "UNAUTHORIZED")
+
+        rejected, _, rejected_body = self._request("POST", "/api/v1/workspaces/alpha/events")
+        self.assertEqual(rejected, 405)
+        self.assertEqual(json.loads(rejected_body)["error"]["code"], "METHOD_NOT_ALLOWED")
+
+        bearer = self._bearer()
+        headers = {"Authorization": f"Bearer {bearer}", "Origin": self.origin}
+        status, _, body = self._request(
+            "GET", "/api/v1/workspaces/alpha/events?after=after_evt_1&limit=50", headers=headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["data"]["events"][0]["kind"], "spawn")
+        self.overview.events.assert_called_with("alpha", after="after_evt_1", limit=50)
+
+        stream, stream_headers, stream_body = self._request(
+            "GET", "/api/v1/workspaces/alpha/events/stream?after=after_evt_1", headers=headers
+        )
+        self.assertEqual(stream, 200)
+        self.assertEqual(stream_headers["Content-Type"], "text/event-stream; charset=utf-8")
+        self.assertIn(b"data: ", stream_body)
+        self.assertIn(b'"kind":"spawn"', stream_body)
+        self.assertIn(b"id: after_evt_1", stream_body)
+        self.assertIn(b": keepalive", stream_body)
+
+        localhost, _, _ = self._request(
+            "GET",
+            "/api/v1/workspaces/alpha/events",
+            headers={"Host": "localhost", "Authorization": f"Bearer {bearer}"},
+        )
+        self.assertEqual(localhost, 400)
+
+        channel, _, channel_body = self._request(
+            "POST", "/api/v1/workspaces/alpha/families/core/channel", headers=headers
+        )
+        self.assertEqual(channel, 405)
+        self.assertEqual(json.loads(channel_body)["error"]["code"], "METHOD_NOT_ALLOWED")
+
+    def test_family_graph_is_authenticated_get_only(self) -> None:
+        bearer = self._bearer()
+        headers = {"Authorization": f"Bearer {bearer}", "Origin": self.origin}
+        status, _, body = self._request(
+            "GET", "/api/v1/workspaces/alpha/families/core", headers=headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["data"]["parent"], "core")
+        self.overview.family.assert_called_once_with("alpha", "core")
 
 
 if __name__ == "__main__":

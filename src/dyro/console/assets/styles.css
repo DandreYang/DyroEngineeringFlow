@@ -322,6 +322,60 @@ footer { border-top: 1px solid var(--border); color: var(--muted); font-size: .8
   .command { align-items: stretch; flex-direction: column; }
 }
 
+.live-panes {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 1.15rem;
+  padding-top: 1rem;
+}
+.live-tabs { display: none; }
+.live-pane {
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-medium);
+  padding: 0.9rem;
+}
+.live-pane h3 { font-size: .95rem; margin: 0 0 .5rem; }
+.live-pane p, .live-pane ul { color: var(--subtle); font-size: .86rem; margin: 0; }
+.family-picker { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .75rem; }
+.family-nodes { list-style: none; margin: 0; padding: 0; }
+.family-node {
+  border-left: 3px solid var(--border-strong);
+  margin: .45rem 0;
+  padding: .35rem 0 .35rem .7rem;
+}
+.family-node[data-role="parent"] { border-left-color: var(--accent); }
+.family-node[data-role="operator"] { border-left-color: var(--success); }
+.family-role { color: var(--subtle); display: block; font-size: .75rem; }
+.family-badges { display: flex; flex-wrap: wrap; gap: .35rem; margin: .3rem 0 0; }
+.family-badge {
+  border: 1px solid var(--border-strong);
+  border-radius: .35rem;
+  color: var(--text);
+  font-size: .72rem;
+  padding: .1rem .35rem;
+}
+.family-edge { display: block; font-size: .75rem; margin-top: .2rem; }
+.family-edge.live { font-weight: 700; }
+.family-actions { margin-top: .75rem; }
+.event-list { list-style: none; max-height: 16rem; overflow: auto; padding: 0; }
+.event-list li { border-top: 1px solid var(--border); padding: .35rem 0; }
+.event-list li:first-child { border-top: 0; }
+
+@media (max-width: 767px) {
+  .live-panes { grid-template-columns: 1fr; }
+  .live-tabs { display: flex; gap: .4rem; margin-bottom: .75rem; }
+  .live-panes[data-tab="family"] .event-pane,
+  .live-panes[data-tab="family"] .channel-pane,
+  .live-panes[data-tab="events"] .family-pane,
+  .live-panes[data-tab="events"] .channel-pane,
+  .live-panes[data-tab="channel"] .family-pane,
+  .live-panes[data-tab="channel"] .event-pane { display: none; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+  .family-edge.live { font-weight: 700; }
 }

@@ -51,6 +51,9 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         self.assertEqual(overview["data"]["workspaces"][0]["proof_inspection"], "not_inspected")
         self.assertEqual(workspace["data"]["workspace"]["proof_inspection"], "not_inspected")
         self.assertEqual(set(workspace["data"]), {"workspace", "lines", "tasks", "objectives"})
+        self.assertTrue(
+            all("parent" in item for item in workspace["data"]["lines"])
+        )
         self.assertNotIn("proofs", workspace["data"])
         self.assertTrue(
             all(
@@ -62,12 +65,55 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         self.assertNotIn(str(self.root), repr(overview))
         self.assertNotIn(str(self.root), repr(workspace))
         self.assertNotIn(str(self.root), repr(inspect))
+        events = service.events("demo")
+        families = service.families("demo")
+        self.assertEqual(events["data"]["events"], [])
+        self.assertIn("next_cursor", events["data"])
+        self.assertIsInstance(families["data"]["families"], list)
+        self.assertNotIn(str(self.root), repr(events))
+        self.assertNotIn(str(self.root), repr(families))
         system = service.system()
         self.assertEqual(system["data"]["tool_inspection"], "not_inspected")
         self.assertEqual(system["data"]["tools"], [])
         self.assertIn(system["data"]["update"]["kind"], {"none", "patch", "minor", "major"})
         self.assertNotIn(str(self.root), repr(system))
         self.assertNotIn("/usr/", repr(system))
+
+    def test_events_after_cursor_and_one_level_family_survive_a_new_worker(self) -> None:
+        from dyro.config import load
+        from dyro.workspace import create_line, spawn_line
+
+        config = load(self.root)
+        create_line(config, line_id="core", branch="feat/core", base="main")
+        spawn_line(config, "core", "pay")
+        spawn_line(config, "core_pay", "fix")
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+        )
+
+        first = service.events("demo")
+        events = first["data"]["events"]
+        self.assertEqual([item["kind"] for item in events], ["spawn", "spawn"])
+        self.assertEqual(events[0]["facts"]["child"], "core_pay")
+        cursor = first["data"]["next_cursor"]
+        self.assertTrue(cursor)
+        resumed = service.events("demo", after=cursor)
+        self.assertEqual(resumed["data"]["events"], [])
+
+        workspace = service.workspace("demo")
+        parents = {item["id"]: item["parent"] for item in workspace["data"]["lines"]}
+        self.assertEqual(parents["core"], "")
+        self.assertEqual(parents["core_pay"], "core")
+        self.assertEqual(parents["core_pay_fix"], "core_pay")
+
+        core = service.family("demo", "core")
+        self.assertEqual(core["data"]["members"], ["core", "core_pay", "operator"])
+        self.assertFalse(any(node["id"] == "core_pay_fix" for node in core["data"]["nodes"]))
+        pay = service.family("demo", "core_pay")
+        self.assertIn("core_pay_fix", pay["data"]["members"])
+        self.assertNotIn("core", pay["data"]["members"])
 
     def test_default_workspace_budget_tolerates_process_startup_overhead(self) -> None:
         clock = [0.0]

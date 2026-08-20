@@ -42,6 +42,7 @@ class WorkspaceLineObservation:
     branch: str
     base: str
     repository_count: int
+    parent: str = ""
 
 
 @dataclass(frozen=True)
@@ -233,6 +234,7 @@ def _revision_payload(
                 "branch": item.branch,
                 "base": item.base,
                 "repository_count": item.repository_count,
+                "parent": item.parent,
             }
             for item in lines
         ],
@@ -329,6 +331,7 @@ def capture_workspace_read_snapshot(
                 branch=line.branch,
                 base=line.base,
                 repository_count=len(line.repositories),
+                parent=line.parent,
             )
             for line in list_lines(config)
         )
@@ -344,6 +347,7 @@ def capture_workspace_read_snapshot(
                                 "branch": item.branch,
                                 "base": item.base,
                                 "repository_count": item.repository_count,
+                                "parent": item.parent,
                             }
                             for item in lines
                         ]
@@ -430,6 +434,7 @@ def inspect_workspace_read_snapshot(
                 branch=line.branch,
                 base=line.base,
                 repository_count=len(line.repositories),
+                parent=line.parent,
             )
             for line in list_lines(config)
         )
@@ -445,6 +450,7 @@ def inspect_workspace_read_snapshot(
                                 "branch": item.branch,
                                 "base": item.base,
                                 "repository_count": item.repository_count,
+                                "parent": item.parent,
                             }
                             for item in lines
                         ]

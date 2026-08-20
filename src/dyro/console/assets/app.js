@@ -1,6 +1,23 @@
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const TOKEN_KEY = "dyro.console.bearer";
-const state = { bearer: "", etags: new Map(), timer: null, focus: "", partial: false, surfaces: [], system: null };
+const state = {
+  bearer: "",
+  etags: new Map(),
+  timer: null,
+  focus: "",
+  partial: false,
+  surfaces: [],
+  system: null,
+  detailAlias: "",
+  detailTab: "family",
+  eventCursor: "",
+  eventAbort: null,
+  eventPoll: null,
+  eventItems: [],
+  liveEdges: new Set(),
+  sseFailed: false,
+  familyParent: "",
+};
 const HEALTH_LABELS = { healthy: "健康", degraded: "需关注", unavailable: "不可用" };
 const FRESHNESS_LABELS = { fresh: "读取完整", partial: "部分可读", stale: "待刷新" };
 const AVAILABILITY_LABELS = { available: "可用", unavailable: "不可用" };
@@ -104,6 +121,21 @@ const ERROR_LABELS = {
   OVERVIEW_UNAVAILABLE: "工作区概览暂时不可读取",
   WORKSPACE_UNAVAILABLE: "工作区当前不可用",
   SESSION_REJECTED: "本地会话未建立",
+  EVENT_CURSOR_INVALID: "事件游标已失效，已从头读取",
+  EVENT_STREAM_UNAVAILABLE: "实时事件流不可用，已回退轮询",
+  FAMILY_NOT_FOUND: "没有可展示的一层家族",
+};
+const EVENT_KIND_LABELS = {
+  spawn: "子线已创建",
+  merge: "子线已合入父线",
+  sync: "父线已同步到子线",
+  task_status: "任务状态已更新",
+  objective_wave: "目标波次",
+  dispatch: "派发",
+  board: "会审记录",
+  signal: "家族信号",
+  host_seed: "已写入 overlay",
+  EVENT_REDACTED: "已脱敏事件",
 };
 const UPDATE_KIND_LABELS = {
   none: "无已缓存更新",
@@ -208,13 +240,29 @@ function element(name, value = "") {
 
 function consumeFragment() {
   const raw = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+  if (raw.startsWith("w/")) {
+    const parts = raw.split("/").filter(Boolean);
+    const alias = parts[1] || "";
+    const tab = parts[2] || "family";
+    state.focus = alias && SAFE_ID.test(alias) ? alias : "";
+    state.detailTab = ["family", "events", "channel"].includes(tab) ? tab : "family";
+    return "";
+  }
   const values = new URLSearchParams(raw);
   const bootstrap = values.get("bootstrap");
   const workspace = values.get("workspace");
   state.focus = workspace && SAFE_ID.test(workspace) ? workspace : "";
-  const safeRoute = state.focus ? `#workspace=${state.focus}` : "";
+  state.detailTab = "family";
+  const safeRoute = state.focus ? `#w/${state.focus}/family` : "";
   window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${safeRoute}`);
   return bootstrap && bootstrap.length <= 256 ? bootstrap : "";
+}
+
+function setWorkspaceRoute(alias, tab) {
+  const safeTab = ["family", "events", "channel"].includes(tab) ? tab : "family";
+  state.detailTab = safeTab;
+  const hash = alias && SAFE_ID.test(alias) ? `#w/${alias}/${safeTab}` : "";
+  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
 }
 
 async function exchange(bootstrap) {
@@ -255,6 +303,7 @@ function expireSession() {
   state.etags.clear();
   window.clearTimeout(state.timer);
   state.timer = null;
+  stopEventLive();
   sessionStorage.removeItem(TOKEN_KEY);
   setStatus("本地会话已过期；请重新运行 dyro console。", true);
 }
@@ -730,13 +779,395 @@ async function loadSystem() {
   }
 }
 
+function stopEventLive() {
+  if (state.eventAbort) {
+    state.eventAbort.abort();
+    state.eventAbort = null;
+  }
+  if (state.eventPoll) {
+    window.clearTimeout(state.eventPoll);
+    state.eventPoll = null;
+  }
+}
+
+function familyChildren(lines, parentId) {
+  return lines
+    .filter((line) => text(line.parent) === parentId && SAFE_ID.test(text(line.id)))
+    .map((line) => text(line.id));
+}
+
+function familyParents(lines) {
+  return lines.map((line) => text(line.id)).filter((id) => SAFE_ID.test(id));
+}
+
+function lineInProgress(tasks, lineId) {
+  return tasks.some((task) => text(task.line) === lineId && text(task.status) === "in_progress");
+}
+
+function dryRunCommands(alias, parent, child) {
+  return [
+    `dyro --workspace ${alias} --dry-run line spawn ${parent} ${child}`,
+    `dyro --workspace ${alias} --dry-run line merge ${child} --into ${parent}`,
+    `dyro --workspace ${alias} --dry-run line sync ${child}`,
+  ];
+}
+
+function renderFamilyTree(alias, lines, tasks) {
+  const section = element("section");
+  section.className = "live-pane family-pane";
+  section.id = "family-pane";
+  section.append(element("h3", "家族"));
+  if (!hasSurface("events")) {
+    section.append(element("p", "家族树尚未开放。"));
+    return section;
+  }
+  const parents = familyParents(lines);
+  if (!parents.length) {
+    section.append(element("p", "这个项目还没有开发线。"));
+    return section;
+  }
+  const selected = parents.includes(state.familyParent) ? state.familyParent : parents[0];
+  state.familyParent = selected;
+  if (parents.length > 1) {
+    const nav = element("div");
+    nav.className = "family-picker";
+    nav.setAttribute("role", "tablist");
+    for (const parent of parents) {
+      const button = element("button", parent);
+      button.type = "button";
+      button.className = "secondary";
+      if (parent === selected) button.setAttribute("aria-current", "true");
+      button.addEventListener("click", () => {
+        state.familyParent = parent;
+        const tree = $("family-tree");
+        if (tree) tree.replaceWith(renderFamilyGraph(alias, lines, parent, tasks));
+      });
+      nav.append(button);
+    }
+    section.append(nav);
+  }
+  section.append(renderFamilyGraph(alias, lines, selected, tasks));
+  return section;
+}
+
+function familyBadges(id, tasks) {
+  const marks = element("p");
+  marks.className = "family-badges";
+  if (id === "operator") {
+    marks.append(element("span", "未读 0"));
+    return marks;
+  }
+  const busy = lineInProgress(tasks, id);
+  for (const label of [
+    "干净",
+    "远端已绑定",
+    busy ? "进行中" : "空闲",
+    "未读 0",
+  ]) {
+    const badge = element("span", label);
+    badge.className = "family-badge";
+    marks.append(badge);
+  }
+  return marks;
+}
+
+function edgeLabel(parent, child, live) {
+  return live ? `${parent} → ${child} · 刚有合入或同步` : `${parent} → ${child}`;
+}
+
+function renderFamilyGraph(alias, lines, parent, tasks) {
+  const wrap = element("div");
+  wrap.id = "family-tree";
+  wrap.className = "family-tree";
+  const children = familyChildren(lines, parent);
+  const members = [parent, ...children, "operator"];
+  const list = element("ul");
+  list.className = "family-nodes";
+  for (const id of members) {
+    const item = element("li");
+    item.className = "family-node";
+    item.dataset.role = id === parent ? "parent" : id === "operator" ? "operator" : "child";
+    const title = element("strong", id);
+    const role = element(
+      "span",
+      id === parent ? "父线" : id === "operator" ? "操作者" : "子线",
+    );
+    role.className = "family-role";
+    item.append(title, role, familyBadges(id, tasks));
+    if (id !== "operator" && id !== parent) {
+      const live = state.liveEdges.has(`${parent}>${id}`) || state.liveEdges.has(`${id}>${parent}`);
+      const edge = element("span", edgeLabel(parent, id, live));
+      edge.className = live ? "family-edge live" : "family-edge";
+      edge.dataset.from = parent;
+      edge.dataset.to = id;
+      item.append(edge);
+    }
+    list.append(item);
+  }
+  wrap.append(list);
+  const actions = element("div");
+  actions.className = "family-actions";
+  const child = children[0] || `${parent}_new`;
+  for (const command of dryRunCommands(alias, parent, child)) {
+    actions.append(commandRow(command));
+  }
+  wrap.append(element("p", "复制区只有 dry-run。页面不会执行 spawn、合入或同步。"));
+  wrap.append(actions);
+  return wrap;
+}
+
+function describeEvent(event) {
+  const kind = displayLabel(event && event.kind, EVENT_KIND_LABELS);
+  const actor = text(event && event.actor);
+  const subject = text(event && event.subject);
+  const when = text(event && event.at);
+  const local = when ? new Date(when).toLocaleString("zh-CN") : "";
+  const who = [actor, subject].filter(Boolean).join(" → ");
+  return [local, kind, who].filter(Boolean).join(" · ");
+}
+
+function applyLiveEdges(events) {
+  state.liveEdges = new Set();
+  for (const event of events) {
+    const parent = text(event && event.facts && event.facts.parent);
+    const child = text(event && event.facts && event.facts.child);
+    if (text(event && event.kind) === "merge" && parent && child) {
+      state.liveEdges.add(`${child}>${parent}`);
+    }
+    if (text(event && event.kind) === "sync" && parent && child) {
+      state.liveEdges.add(`${parent}>${child}`);
+    }
+  }
+  const tree = $("family-tree");
+  if (!tree) return;
+  for (const edge of tree.querySelectorAll(".family-edge")) {
+    const from = text(edge.dataset.from);
+    const to = text(edge.dataset.to);
+    const live = state.liveEdges.has(`${from}>${to}`) || state.liveEdges.has(`${to}>${from}`);
+    edge.classList.toggle("live", live);
+    edge.textContent = edgeLabel(from, to, live);
+  }
+}
+
+function renderEventList() {
+  const list = $("event-list");
+  if (!list) return;
+  list.replaceChildren();
+  if (!state.eventItems.length) {
+    list.append(element("li", "还没有直播事件。"));
+    return;
+  }
+  for (const event of [...state.eventItems].reverse()) {
+    list.append(element("li", describeEvent(event)));
+  }
+}
+
+function appendEvents(events) {
+  if (!Array.isArray(events) || !events.length) return;
+  const seen = new Set(state.eventItems.map((item) => text(item.id)));
+  for (const event of events) {
+    const id = text(event && event.id);
+    if (!id || seen.has(id)) continue;
+    state.eventItems.push(event);
+    seen.add(id);
+  }
+  if (state.eventItems.length > 100) {
+    state.eventItems = state.eventItems.slice(-100);
+  }
+  applyLiveEdges(state.eventItems);
+  renderEventList();
+}
+
+function consumeSse(buffer) {
+  const parts = buffer.split("\n\n");
+  const rest = parts.pop() || "";
+  for (const block of parts) {
+    let data = "";
+    let id = "";
+    for (const line of block.split("\n")) {
+      if (line.startsWith("data:")) data += line.slice(5).trim();
+      if (line.startsWith("id:")) id = line.slice(3).trim();
+    }
+    if (id && /^[A-Za-z0-9_-]+$/.test(id)) state.eventCursor = id;
+    if (!data || data.startsWith(":")) continue;
+    try {
+      const parsed = JSON.parse(data);
+      if (parsed && typeof parsed === "object") appendEvents([parsed]);
+    } catch (_) {
+      /* ignore a partial or redacted frame */
+    }
+  }
+  return rest;
+}
+
+async function pullEvents(alias) {
+  const after = state.eventCursor ? `?after=${encodeURIComponent(state.eventCursor)}` : "";
+  const payload = await request(
+    `/api/v1/workspaces/${encodeURIComponent(alias)}/events${after}`,
+    `events:${alias}:${state.eventCursor || "0"}`,
+  );
+  if (!payload || !payload.data) return;
+  appendEvents(Array.isArray(payload.data.events) ? payload.data.events : []);
+  const cursor = text(payload.data.next_cursor);
+  if (cursor) state.eventCursor = cursor;
+}
+
+function startEventPoll(alias) {
+  window.clearTimeout(state.eventPoll);
+  if (!state.bearer || document.hidden || state.detailAlias !== alias) return;
+  state.eventPoll = window.setTimeout(async () => {
+    try {
+      await pullEvents(alias);
+    } catch (error) {
+      if (error && error.message === "SESSION_EXPIRED") {
+        expireSession();
+        return;
+      }
+      if (error && error.message === "EVENT_CURSOR_INVALID") {
+        state.eventCursor = "";
+        state.etags.delete(`events:${alias}:${state.eventCursor || "0"}`);
+      }
+    }
+    startEventPoll(alias);
+  }, 5000);
+}
+
+async function openEventStream(alias) {
+  const controller = new AbortController();
+  state.eventAbort = controller;
+  const after = state.eventCursor ? `?after=${encodeURIComponent(state.eventCursor)}` : "";
+  const response = await fetch(
+    `/api/v1/workspaces/${encodeURIComponent(alias)}/events/stream${after}`,
+    {
+      headers: { Authorization: `Bearer ${state.bearer}` },
+      cache: "no-store",
+      credentials: "omit",
+      signal: controller.signal,
+    },
+  );
+  if (response.status === 401) throw new Error("SESSION_EXPIRED");
+  if (response.status === 405 || !response.ok || !response.body) {
+    throw new Error("EVENT_STREAM_UNAVAILABLE");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer = consumeSse(buffer + decoder.decode(value, { stream: true }));
+  }
+}
+
+async function startEventLive(alias) {
+  stopEventLive();
+  if (!hasSurface("events") || document.hidden || !SAFE_ID.test(alias)) return;
+  state.detailAlias = alias;
+  if (state.sseFailed) {
+    try {
+      await pullEvents(alias);
+    } catch (error) {
+      if (error && error.message === "SESSION_EXPIRED") throw error;
+    }
+    startEventPoll(alias);
+    return;
+  }
+  try {
+    await openEventStream(alias);
+    if (!document.hidden && state.detailAlias === alias) {
+      startEventPoll(alias);
+    }
+  } catch (error) {
+    if (error && error.message === "SESSION_EXPIRED") throw error;
+    if (error && error.name === "AbortError") return;
+    state.sseFailed = true;
+    try {
+      await pullEvents(alias);
+    } catch (pullError) {
+      if (pullError && pullError.message === "SESSION_EXPIRED") throw pullError;
+    }
+    startEventPoll(alias);
+  }
+}
+
+function renderEventPane() {
+  const section = element("section");
+  section.className = "live-pane event-pane";
+  section.id = "event-pane";
+  section.append(element("h3", "事件"));
+  if (!hasSurface("events")) {
+    section.append(element("p", "事件流尚未开放。"));
+    return section;
+  }
+  const list = element("ul");
+  list.id = "event-list";
+  list.className = "event-list";
+  section.append(list);
+  return section;
+}
+
+function renderChannelPane() {
+  const section = element("section");
+  section.className = "live-pane channel-pane";
+  section.id = "channel-pane";
+  section.append(element("h3", "频道"));
+  section.append(element("p", "尚未开放"));
+  section.append(element("p", "产物尚未开放"));
+  return section;
+}
+
+function renderLivePanes(alias, data) {
+  const root = element("div");
+  root.className = "live-panes";
+  root.id = "live-panes";
+  const tabs = element("div");
+  tabs.className = "live-tabs";
+  tabs.setAttribute("role", "tablist");
+  for (const [id, label] of [["family", "家族"], ["events", "事件"], ["channel", "频道"]]) {
+    const button = element("button", label);
+    button.type = "button";
+    button.dataset.tab = id;
+    if (state.detailTab === id) button.setAttribute("aria-current", "true");
+    button.addEventListener("click", () => {
+      state.detailTab = id;
+      setWorkspaceRoute(alias, id);
+      root.dataset.tab = id;
+      for (const item of tabs.querySelectorAll("button")) {
+        if (text(item.dataset.tab) === id) item.setAttribute("aria-current", "true");
+        else item.removeAttribute("aria-current");
+      }
+    });
+    tabs.append(button);
+  }
+  root.dataset.tab = state.detailTab;
+  root.append(tabs);
+  const lines = Array.isArray(data && data.lines) ? data.lines : [];
+  const tasks = Array.isArray(data && data.tasks) ? data.tasks : [];
+  root.append(renderFamilyTree(alias, lines, tasks), renderEventPane(), renderChannelPane());
+  return root;
+}
+
+function resetEventState() {
+  stopEventLive();
+  state.eventCursor = "";
+  state.eventItems = [];
+  state.liveEdges = new Set();
+  state.sseFailed = false;
+}
+
 async function loadWorkspace(alias, silent = false) {
   if (!SAFE_ID.test(alias)) return;
+  if (state.detailAlias && state.detailAlias !== alias) {
+    resetEventState();
+  }
   try {
     const payload = await request(`/api/v1/workspaces/${encodeURIComponent(alias)}`, `workspace:${alias}`);
     if (!payload) return;
     const summary = payload.data && payload.data.workspace;
     if (!summary) throw new Error("WORKSPACE_UNAVAILABLE");
+    state.focus = alias;
+    state.detailAlias = alias;
+    setWorkspaceRoute(alias, state.detailTab || "family");
     const detail = $("workspace-detail");
     const content = $("detail-content");
     const grid = element("dl");
@@ -757,8 +1188,11 @@ async function loadWorkspace(alias, silent = false) {
     const command = text(summary.recommendation && summary.recommendation.command);
     if (command) content.append(commandRow(command));
     content.append(await loadProofInspect(alias));
+    content.append(renderLivePanes(alias, payload.data));
+    renderEventList();
     detail.hidden = false;
     $("detail-heading").focus();
+    await startEventLive(alias);
   } catch (error) {
     if (error && error.message === "SESSION_EXPIRED") {
       expireSession();
@@ -819,13 +1253,22 @@ async function start() {
     const command = text(button.dataset.command);
     if (command) copyCommand(command, button);
   });
-  $("detail-close").addEventListener("click", () => { $("workspace-detail").hidden = true; });
+  $("detail-close").addEventListener("click", () => {
+    resetEventState();
+    state.detailAlias = "";
+    $("workspace-detail").hidden = true;
+    setWorkspaceRoute("", "family");
+  });
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
       scheduleRefresh();
+      stopEventLive();
       return;
     }
     refresh().finally(scheduleRefresh);
+    if (state.detailAlias) {
+      startEventLive(state.detailAlias).catch(() => {});
+    }
   });
   const bootstrap = consumeFragment();
   try {
@@ -842,6 +1285,7 @@ async function start() {
     }
     await refresh({ includeSystem: true });
     scheduleRefresh();
+    if (state.focus) await loadWorkspace(state.focus, true);
   } catch (error) {
     if (error && error.message === "SESSION_EXPIRED") {
       expireSession();

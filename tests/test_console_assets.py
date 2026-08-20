@@ -103,6 +103,19 @@ class ConsoleAssetTests(unittest.TestCase):
         self.assertIn("UPDATE_KIND_LABELS".encode(), script.body)
         self.assertIn("现在需要你".encode(), script.body)
         self.assertNotIn("没有工具".encode(), script.body)
+        self.assertIn("function renderFamilyTree".encode(), script.body)
+        self.assertIn("function startEventLive".encode(), script.body)
+        self.assertIn("function resetEventState".encode(), script.body)
+        self.assertIn("events/stream".encode(), script.body)
+        self.assertIn("--dry-run line spawn".encode(), script.body)
+        self.assertIn("--dry-run line merge".encode(), script.body)
+        self.assertIn("--dry-run line sync".encode(), script.body)
+        self.assertNotIn(b"--yes", script.body)
+        self.assertNotIn(b"--push", script.body)
+        self.assertIn("尚未开放".encode(), script.body)
+        self.assertIn("产物尚未开放".encode(), script.body)
+        self.assertIn("document.hidden".encode(), script.body)
+        self.assertIn("刚有合入或同步".encode(), script.body)
 
 
 if __name__ == "__main__":

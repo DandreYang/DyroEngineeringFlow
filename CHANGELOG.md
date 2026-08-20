@@ -5,6 +5,12 @@
 - Add design `docs/designs/console-v2-live-family-signals.md` for live
   events, one-level line families, and overlay family signals. It extends
   the local Web Console and ADR 0005; it does not replace them.
+- Console P1: append-only `.dyro/events.jsonl`, project line `parent`,
+  one-level family graph, and an SSE event stream with `after=` resume.
+  Hidden tabs pause; SSE failure falls back to the existing 5s poll.
+  Workspace detail shows the family tree and live event panes. Copy
+  buttons emit dry-run CLI only. Browser stays read-only; P2 channel
+  POST and P3 artifacts are not implemented.
 - User slash Skill `dyro-line-family` (`/dyro-line-family`) preflights
   `line spawn` / `line merge` / `line sync` and prints one `--yes` command
   for the human. It does not execute the mutation, invent `--push`, or

@@ -272,6 +272,7 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         self.assertEqual(payload["data"]["workspace"]["alias"], "alpha")
         self.assertEqual(payload["data"]["workspace"]["proof_inspection"], "not_inspected")
         self.assertEqual(payload["data"]["lines"][0]["id"], "alpha")
+        self.assertEqual(payload["data"]["lines"][0]["parent"], "")
         self.assertEqual(payload["data"]["tasks"][0]["id"], "TASK-A")
         self.assertEqual(payload["data"]["tasks"][0]["integration_state"], "not_inspected")
         self.assertEqual(payload["data"]["objectives"][0]["id"], "release")

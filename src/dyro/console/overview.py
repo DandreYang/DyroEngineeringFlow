@@ -243,6 +243,47 @@ class ConsoleOverviewService:
         )
         return self._envelope({"workspace": summary, **inventory}, warning_codes)
 
+    def events(
+        self,
+        alias: str,
+        *,
+        after: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        """Return a cursor page of overlay live events. Overview polling never calls this."""
+        from .events import event_page
+
+        config, _warning_codes = self._workspace_config(alias)
+        try:
+            data = event_page(
+                config, secret=self._cursor_secret, after=after, limit=limit
+            )
+        except ConsoleOverviewError:
+            raise
+        return self._envelope(data, set())
+
+    def families(self, alias: str) -> dict[str, object]:
+        """Return one-level family cards. Channel unread stays 0 in P1."""
+        from .families import family_cards
+
+        _summary, warning_codes, inventory = self._workspace_inventory(alias)
+        data = {"families": family_cards(inventory["lines"], inventory["tasks"])}
+        return self._envelope(data, warning_codes)
+
+    def family(self, alias: str, parent: str) -> dict[str, object]:
+        """Return ``F(parent)``. Grandchildren are excluded."""
+        from .families import family_payload
+
+        try:
+            parent_id = validate_id(parent, "父开发线 ID")
+        except ValidationError:
+            raise ConsoleOverviewError("FAMILY_PARENT_INVALID") from None
+        _summary, warning_codes, inventory = self._workspace_inventory(alias)
+        payload = family_payload(inventory["lines"], parent_id, inventory["tasks"])
+        if not payload:
+            raise ConsoleOverviewError("FAMILY_NOT_FOUND")
+        return self._envelope(payload, warning_codes)
+
     def system(self) -> dict[str, object]:
         """Return cached update facts. Do not probe PATH or start a network check."""
         warnings: set[str] = set()
@@ -315,6 +356,35 @@ class ConsoleOverviewService:
             warnings=warnings,
             data=data,
         ).to_payload()
+
+    def _workspace_config(self, alias: str) -> tuple[Config, set[str]]:
+        try:
+            alias = validate_id(alias, "工作区别名")
+        except ValidationError:
+            raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID") from None
+        registry = self._load_registry()
+        try:
+            record = next(item for item in registry.workspaces if item.name == alias)
+        except StopIteration:
+            raise ConsoleOverviewError("WORKSPACE_NOT_FOUND") from None
+        try:
+            return self._config_loader(record.root), set()
+        except (DyroError, ValidationError, OSError, UnicodeError):
+            raise ConsoleOverviewError("WORKSPACE_UNAVAILABLE") from None
+
+    def _workspace_inventory(
+        self, alias: str
+    ) -> tuple[dict[str, object], set[str], dict[str, list[dict[str, object]]]]:
+        try:
+            alias = validate_id(alias, "工作区别名")
+        except ValidationError:
+            raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID") from None
+        registry = self._load_registry()
+        try:
+            record = next(item for item in registry.workspaces if item.name == alias)
+        except StopIteration:
+            raise ConsoleOverviewError("WORKSPACE_NOT_FOUND") from None
+        return self._capture(record.name, record.root, record.name == registry.default)
 
     def _load_registry(self) -> WorkspaceRegistry:
         try:
