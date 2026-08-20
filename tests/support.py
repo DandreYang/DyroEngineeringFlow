@@ -39,6 +39,26 @@ def shell(*args: str, cwd: Path) -> None:
     subprocess.run(args, cwd=cwd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
+def publish_origin_branch(repo: Path, branch: str) -> Path:
+    """Publish HEAD to origin/<branch> without minting a local branch."""
+    remote = repo.parent / f"{repo.name}.origin.git"
+    if not remote.exists():
+        remote.mkdir(parents=True)
+        shell("git", "init", "--bare", cwd=remote)
+    remotes = subprocess.run(
+        ["git", "-C", str(repo), "remote"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.split()
+    if "origin" not in remotes:
+        shell("git", "remote", "add", "origin", str(remote), cwd=repo)
+    shell("git", "push", "origin", f"HEAD:refs/heads/{branch}", cwd=repo)
+    shell("git", "fetch", "origin", cwd=repo)
+    return remote
+
+
 class WorkspaceCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="dyro-test-")

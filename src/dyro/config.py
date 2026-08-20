@@ -20,6 +20,7 @@ CHANGESETS_DIR = ".dyro/changes"
 OBJECTIVES_DIR = ".dyro/objectives"
 
 SAFE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$")
+PUSH_DISABLED_NOTE = "Dyro 不会 push；普通 `git push` 仍可用。"
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,21 @@ def external_security_errors(policy: Policy) -> tuple[str, ...]:
     ):
         missing.append("policy.require_signed_signoff = true")
     return tuple(missing)
+
+
+
+
+def push_disclosure(policy: Policy) -> str:
+    """User-facing note when Dyro itself will not push."""
+    if policy.allow_push:
+        return ""
+    return PUSH_DISABLED_NOTE
+
+
+def push_policy_fields(policy: Policy) -> dict[str, object]:
+    if policy.allow_push:
+        return {"allow_push": True}
+    return {"allow_push": False, "push_note": PUSH_DISABLED_NOTE}
 
 
 def validate_id(value: str, label: str = "ID") -> str:

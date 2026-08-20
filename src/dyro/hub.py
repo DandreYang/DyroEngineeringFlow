@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import difflib
 import json
 import os
 from pathlib import Path
@@ -41,6 +42,35 @@ class WorkspaceRegistrationPlan:
     root: Path
     already_registered: bool
     becomes_default: bool
+
+
+
+def looks_like_workspace_path(value: str) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    return Path(value).is_absolute() or "/" in value or "\\" in value
+
+
+def workspace_path_as_alias_error(value: str) -> ValidationError:
+    return ValidationError(
+        f"--workspace 接受已登记的工作区别名，不能是路径：{value}；请改用 --root"
+    )
+
+
+def _close_workspace_names(name: str, names: tuple[str, ...]) -> tuple[str, ...]:
+    exact_ci = tuple(item for item in names if item.lower() == name.lower() and item != name)
+    if exact_ci:
+        return exact_ci
+    return tuple(difflib.get_close_matches(name, names, n=5, cutoff=0.4))
+
+
+def unregistered_workspace_error(name: str, names: tuple[str, ...]) -> DyroError:
+    close = _close_workspace_names(name, names)
+    if close:
+        return DyroError(f"未登记工作区：{name}；你是不是指 {'、'.join(close)}？")
+    if names:
+        return DyroError(f"未登记工作区：{name}；已登记：{'、'.join(names)}")
+    return DyroError(f"未登记工作区：{name}；运行 dyro workspace list 查看可用项目")
 
 
 def registry_home() -> Path:
@@ -301,13 +331,15 @@ def ensure_workspace(path: str | Path) -> WorkspaceRecord:
 
 
 def get_workspace(name: str) -> WorkspaceRecord:
+    if looks_like_workspace_path(name):
+        raise workspace_path_as_alias_error(name)
     validate_id(name, "工作区别名")
     registry = load_registry()
     try:
         return next(record for record in registry.workspaces if record.name == name)
     except StopIteration as exc:
-        raise DyroError(
-            f"未登记工作区：{name}；运行 dyro workspace list 查看可用项目"
+        raise unregistered_workspace_error(
+            name, tuple(record.name for record in registry.workspaces)
         ) from exc
 
 

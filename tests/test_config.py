@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from dyro.config import ValidationError, expand_argv, external_security_errors, load
+from dyro.config import PUSH_DISABLED_NOTE, ValidationError, expand_argv, external_security_errors, load, push_disclosure, push_policy_fields
 from dyro.profile import config_value, set_config_value
 
 from .support import WorkspaceCase
@@ -141,3 +141,23 @@ class ConfigTests(WorkspaceCase):
         self.assertTrue(updated.policy.allow_unattended_execute)
         self.assertTrue(updated.policy.allow_unattended_review)
         self.assertTrue(updated.policy.allow_unattended_merge)
+
+    def test_push_disclosure_only_when_allow_push_is_false(self) -> None:
+        config = load(self.root)
+        self.assertFalse(config.policy.allow_push)
+        self.assertEqual(push_disclosure(config.policy), PUSH_DISABLED_NOTE)
+        self.assertEqual(
+            push_policy_fields(config.policy),
+            {"allow_push": False, "push_note": PUSH_DISABLED_NOTE},
+        )
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                "allow_push = false", "allow_push = true"
+            ),
+            encoding="utf-8",
+        )
+        enabled = load(self.root)
+        self.assertTrue(enabled.policy.allow_push)
+        self.assertEqual(push_disclosure(enabled.policy), "")
+        self.assertEqual(push_policy_fields(enabled.policy), {"allow_push": True})

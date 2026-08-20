@@ -276,6 +276,109 @@ def _ensure_clean(path: Path) -> None:
         raise DyroError(f"仓库不干净，拒绝创建或合并 worktree：{path}")
 
 
+
+def _ref_exists(path: Path, ref: str, *, read_budget: ReadBudget | None = None) -> bool:
+    return (
+        git_read(
+            path,
+            "show-ref",
+            "--verify",
+            "--quiet",
+            ref,
+            read_budget=read_budget,
+        ).code
+        == 0
+    )
+
+
+def _normalize_upstream(upstream: str) -> str:
+    if upstream.startswith("refs/remotes/"):
+        return upstream[len("refs/remotes/") :]
+    if upstream.startswith("refs/heads/"):
+        return upstream[len("refs/heads/") :]
+    return upstream
+
+
+def _expected_remote_branch(branch: str) -> str:
+    return f"origin/{branch}"
+
+
+def _branch_upstream(
+    path: Path, branch: str | None = None, *, read_budget: ReadBudget | None = None
+) -> str:
+    spec = "@{upstream}" if branch is None else f"{branch}@{{upstream}}"
+    result = git_read(
+        path,
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        spec,
+        read_budget=read_budget,
+    )
+    return _normalize_upstream(result.stdout.strip()) if result.code == 0 else ""
+
+
+def _rev_parse(
+    path: Path, spec: str, *, read_budget: ReadBudget | None = None
+) -> str:
+    result = git_read(path, "rev-parse", spec, read_budget=read_budget)
+    return result.stdout.strip() if result.code == 0 else ""
+
+
+def _validate_existing_local_branch(
+    anchor: Path, repo_id: str, line: Line, repo_base: str
+) -> None:
+    expected = _expected_remote_branch(line.branch)
+    remote_ref = f"refs/remotes/{expected}"
+    remote_exists = _ref_exists(anchor, remote_ref)
+    upstream = _branch_upstream(anchor, line.branch)
+    if upstream and upstream != expected:
+        raise DyroError(
+            f"{repo_id} 既有分支 {line.branch} 的上游是 {upstream}，不是 {expected}；"
+            f"从父级 feat 检出或跟踪其他开发线的分支不能作为本线工作区"
+        )
+    local_sha = _rev_parse(anchor, line.branch)
+    remote_sha = _rev_parse(anchor, expected) if remote_exists else ""
+    is_remote_feat = bool(remote_sha) and (
+        local_sha == remote_sha or upstream == expected
+    )
+    ancestry = git_read(anchor, "merge-base", "--is-ancestor", repo_base, line.branch)
+    if not (is_remote_feat or ancestry.code == 0):
+        raise DyroError(
+            f"{repo_id} 既有分支 {line.branch} 不包含声明的基线 {repo_base}"
+        )
+
+
+def _linked_worktree_command(
+    anchor: Path, repo_id: str, line: Line, repo_base: str, destination: Path
+) -> tuple[str, ...]:
+    local_ref = f"refs/heads/{line.branch}"
+    remote_name = _expected_remote_branch(line.branch)
+    remote_ref = f"refs/remotes/{remote_name}"
+    if _ref_exists(anchor, local_ref):
+        _validate_existing_local_branch(anchor, repo_id, line, repo_base)
+        return ("worktree", "add", str(destination), line.branch)
+    if _ref_exists(anchor, remote_ref):
+        return (
+            "worktree",
+            "add",
+            "--track",
+            "-b",
+            line.branch,
+            str(destination),
+            remote_name,
+        )
+    return (
+        "worktree",
+        "add",
+        "--no-track",
+        "-b",
+        line.branch,
+        str(destination),
+        repo_base,
+    )
+
+
 def _remove_line_worktree(config: Config, line: Line, repo_id: str, destination: Path) -> str | None:
     """Best-effort cleanup for one worktree or anchor-reference created during line setup."""
     try:
@@ -385,17 +488,6 @@ def _plan_line_creation(
         )
         if destination.exists() or destination.is_symlink():
             raise DyroError(f"worktree 目标已存在：{destination}")
-        branch_check = git_read(
-            anchor, "show-ref", "--verify", "--quiet", f"refs/heads/{line.branch}"
-        )
-        if branch_check.code == 0:
-            ancestry = git_read(
-                anchor, "merge-base", "--is-ancestor", repo_base, line.branch
-            )
-            if ancestry.code != 0:
-                raise DyroError(
-                    f"{repo_id} 既有分支 {line.branch} 不包含声明的基线 {repo_base}"
-                )
         if line.storage_for(repo_id) == "anchor-reference":
             anchor_branch = require_ok(
                 git_read(anchor, "branch", "--show-current"),
@@ -408,11 +500,8 @@ def _plan_line_creation(
                 )
             planned.append((repo_id, destination, ()))
             continue
-        command = ("worktree", "add")
-        if branch_check.code != 0:
-            command += ("-b", line.branch)
-        command += (
-            str(destination), line.branch if branch_check.code == 0 else repo_base
+        command = _linked_worktree_command(
+            anchor, repo_id, line, repo_base, destination
         )
         planned.append((repo_id, destination, command))
     return planned
@@ -633,8 +722,31 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
                 "--git-common-dir",
                 read_budget=read_budget,
             )
-            if anchor_common.code == 0 and worktree_common.code == 0 and anchor_common.stdout.strip() == worktree_common.stdout.strip():
-                findings.append(f"PASS {line.kind}:{line.id}/{repo_id}: linked to configured anchor")
-            else:
+            if not (
+                anchor_common.code == 0
+                and worktree_common.code == 0
+                and anchor_common.stdout.strip() == worktree_common.stdout.strip()
+            ):
                 findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: unexpected Git common-dir")
+                continue
+            expected_remote = _expected_remote_branch(line.branch)
+            if not _ref_exists(
+                worktree, f"refs/remotes/{expected_remote}", read_budget=read_budget
+            ):
+                findings.append(
+                    f"FAIL {line.kind}:{line.id}/{repo_id}: missing {expected_remote}"
+                )
+                continue
+            upstream = _branch_upstream(worktree, read_budget=read_budget)
+            head = _rev_parse(worktree, "HEAD", read_budget=read_budget)
+            remote_head = _rev_parse(worktree, expected_remote, read_budget=read_budget)
+            if upstream == expected_remote or (head and head == remote_head):
+                findings.append(
+                    f"PASS {line.kind}:{line.id}/{repo_id}: linked to configured anchor"
+                )
+            else:
+                findings.append(
+                    f"FAIL {line.kind}:{line.id}/{repo_id}: "
+                    f"expected upstream {expected_remote}, found {upstream or '-'}"
+                )
     return findings

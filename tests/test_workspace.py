@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import subprocess
 
 from dyro.config import load
 from dyro.errors import DyroError
@@ -13,7 +14,19 @@ from dyro.workspace import (
     status_rows,
 )
 
-from .support import WorkspaceCase, shell
+from .support import WorkspaceCase, publish_origin_branch, shell
+
+
+def shell_stdout(*args: str, cwd, check: bool = True) -> str:
+    completed = subprocess.run(
+        args,
+        cwd=cwd,
+        check=check,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return completed.stdout.strip()
 
 
 class WorkspaceTests(WorkspaceCase):
@@ -37,6 +50,7 @@ class WorkspaceTests(WorkspaceCase):
         self.assertFalse(index.with_name("index.lock").exists())
 
     def test_create_line_and_dynamic_doctor(self) -> None:
+        publish_origin_branch(self.anchor, "feat/alpha")
         config = load(self.root)
         line = create_line(config, line_id="alpha", branch="feat/alpha", base="main")
         self.assertEqual(line.id, "alpha")
@@ -44,6 +58,128 @@ class WorkspaceTests(WorkspaceCase):
         self.assertEqual([item.id for item in list_lines(config)], ["alpha"])
         findings = doctor(config)
         self.assertFalse(any(item.startswith("FAIL") for item in findings), findings)
+
+    def test_create_line_tracks_origin_feat_when_remote_exists(self) -> None:
+        publish_origin_branch(self.anchor, "feat/remote-ready")
+        config = load(self.root)
+        line = create_line(
+            config, line_id="remote-ready", branch="feat/remote-ready", base="main"
+        )
+        worktree = line_repository_path(config, line, "api")
+        upstream = shell_stdout(
+            "git",
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+            cwd=worktree,
+        )
+        self.assertEqual(upstream, "origin/feat/remote-ready")
+        findings = doctor(config)
+        self.assertFalse(any(item.startswith("FAIL") for item in findings), findings)
+
+    def test_local_only_line_creates_but_doctor_and_next_are_not_ready(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+        import json
+
+        from dyro.cli import main
+
+        config = load(self.root)
+        line = create_line(
+            config, line_id="local-only", branch="feat/local-only", base="main"
+        )
+        worktree = line_repository_path(config, line, "api")
+        upstream = shell_stdout(
+            "git",
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+            cwd=worktree,
+            check=False,
+        )
+        self.assertIn(upstream, ("", "-"))
+        findings = doctor(config)
+        self.assertTrue(
+            any("missing origin/feat/local-only" in item for item in findings),
+            findings,
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", str(self.root), "next"])
+        rendered = output.getvalue()
+        self.assertIn("还不能开始任务", rendered)
+        self.assertNotIn("工作区已就绪", rendered)
+        json_out = StringIO()
+        with redirect_stdout(json_out):
+            main(["--root", str(self.root), "next", "--format", "json"])
+        payload = json.loads(json_out.getvalue())
+        self.assertEqual(payload["state"], "needs_repair")
+
+    def test_doctor_fails_when_one_repo_missing_origin_feat(self) -> None:
+        web = self.root / "repositories/web"
+        web.mkdir(parents=True)
+        shell("git", "init", "-b", "main", cwd=web)
+        shell("git", "config", "user.name", "Test User", cwd=web)
+        shell("git", "config", "user.email", "test@example.com", cwd=web)
+        (web / "README.md").write_text("web\n", encoding="utf-8")
+        shell("git", "add", "README.md", cwd=web)
+        shell("git", "commit", "-m", "chore: initial", cwd=web)
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8")
+            + '\n[repositories.web]\npath = "repositories/web"\nmount = "clients/web"\n',
+            encoding="utf-8",
+        )
+        publish_origin_branch(self.anchor, "feat/partial-remote")
+        config = load(self.root)
+        create_line(
+            config,
+            line_id="partial-remote",
+            branch="feat/partial-remote",
+            base="main",
+        )
+        findings = doctor(config)
+        self.assertTrue(
+            any(
+                item.startswith("FAIL")
+                and "web" in item
+                and "missing origin/feat/partial-remote" in item
+                for item in findings
+            ),
+            findings,
+        )
+
+    def test_doctor_fails_when_named_child_sits_on_parent(self) -> None:
+        publish_origin_branch(self.anchor, "main")
+        shell("git", "checkout", "-b", "feat/child", cwd=self.anchor)
+        (self.anchor / "child.txt").write_text("child\n", encoding="utf-8")
+        shell("git", "add", "child.txt", cwd=self.anchor)
+        shell("git", "commit", "-m", "feat: child", cwd=self.anchor)
+        publish_origin_branch(self.anchor, "feat/child")
+        shell("git", "checkout", "main", cwd=self.anchor)
+        shell("git", "branch", "-D", "feat/child", cwd=self.anchor)
+        config = load(self.root)
+        line = create_line(config, line_id="child", branch="feat/child", base="main")
+        worktree = line_repository_path(config, line, "api")
+        shell("git", "reset", "--hard", "main", cwd=worktree)
+        shell("git", "branch", "--set-upstream-to=origin/main", cwd=worktree)
+        findings = doctor(config)
+        self.assertTrue(
+            any(item.startswith("FAIL") and "child" in item for item in findings),
+            findings,
+        )
+
+    def test_plan_rejects_local_branch_tracking_parent_feat(self) -> None:
+        shell("git", "checkout", "-b", "feat/from-parent", cwd=self.anchor)
+        shell("git", "branch", "--set-upstream-to=main", cwd=self.anchor)
+        shell("git", "checkout", "main", cwd=self.anchor)
+        config = load(self.root)
+        with self.assertRaisesRegex(DyroError, "上游"):
+            create_line(
+                config, line_id="from-parent", branch="feat/from-parent", base="main"
+            )
 
     def test_create_line_preflight_rejects_bad_base_without_worktrees(self) -> None:
         web = self.root / "repositories/web"
@@ -110,9 +246,8 @@ class WorkspaceTests(WorkspaceCase):
         original_git = workspace_mod.git
 
         def flaky_git(repo: Path, *args: str, dry_run: bool = False, timeout: int = 180):
-            if not dry_run and len(args) >= 3 and args[0] == "worktree" and args[1] == "add":
-                destination = Path(args[4] if args[2] == "-b" else args[2])
-                if "clients/web" in destination.as_posix():
+            if not dry_run and args[:2] == ("worktree", "add"):
+                if any("clients/web" in str(item) for item in args):
                     return Result(("git", "-C", str(repo), *args), 1, "simulated worktree failure")
             return original_git(repo, *args, dry_run=dry_run, timeout=timeout)
 

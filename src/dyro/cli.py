@@ -27,7 +27,7 @@ from .changesets import (
     list_changesets,
     verify_changeset,
 )
-from .config import CONFIG_NAME, Config, load, load_profile_exact, validate_id
+from .config import CONFIG_NAME, Config, load, load_profile_exact, push_disclosure, push_policy_fields, validate_id
 from .console.launcher import launch_console, render_console_plan
 from .continuation.attention import (
     build_attention_projection,
@@ -483,6 +483,7 @@ def _status_payload(
 ) -> dict[str, object]:
     return {
         "workspace": config.name,
+        **push_policy_fields(config.policy),
         "rows": [
             {
                 "scope": scope,
@@ -2430,6 +2431,16 @@ def _bootstrap_destination_safe(config: Config, relative: str) -> bool:
     return True
 
 
+def _next_push_fields(config: Config) -> dict[str, object]:
+    return push_policy_fields(config.policy)
+
+
+def _print_push_disclosure(config: Config) -> None:
+    note = push_disclosure(config.policy)
+    if note:
+        print(note)
+
+
 def cmd_next(args: argparse.Namespace) -> None:
     """Give newcomers one safe, concrete next step without making changes."""
 
@@ -2440,25 +2451,6 @@ def cmd_next(args: argparse.Namespace) -> None:
             getattr(args, "workspace_alias", None)
             or getattr(args, "root", None)
             or exc.code is not WorkspaceResolutionFailure.WORKSPACE_NOT_FOUND
-        ):
-            raise
-        if args.format == "json":
-            _print_control_plane_json(
-                "next_step",
-                state="workspace_missing",
-                summary="尚未发现 Dyro 工作区。",
-                commands=[],
-                mutation_available=False,
-                required_choice="join_existing_or_setup_new",
-            )
-            return
-        print("尚未发现 Dyro 工作区。")
-        print("加入团队项目：dyro join <蓝图地址>")
-        print("设置一个新项目：dyro setup")
-        return
-    except ValidationError:
-        if args.format == "json" and (
-            getattr(args, "workspace_alias", None) or getattr(args, "root", None)
         ):
             raise
         if args.format == "json":
@@ -2512,6 +2504,7 @@ def cmd_next(args: argparse.Namespace) -> None:
                 diagnostic_commands=[_briefing_command(args, config, "doctor")],
                 mutation_available=bootstrap_applicable,
                 findings=findings,
+                **_next_push_fields(config),
             )
             return
         print("工作区还不能开始任务：")
@@ -2523,6 +2516,7 @@ def cmd_next(args: argparse.Namespace) -> None:
                 "缺失仓库均已配置 remote，可运行："
                 + _briefing_command(args, config, "bootstrap", "--yes")
             )
+        _print_push_disclosure(config)
         return
     lines = list_lines(config, read_budget=budget)
     if not lines:
@@ -2534,9 +2528,11 @@ def cmd_next(args: argparse.Namespace) -> None:
                 summary="Profile 已就绪，但还没有开发线。",
                 commands=[command],
                 mutation_available=True,
+                **_next_push_fields(config),
             )
             return
         print(f"Profile 已就绪，但还没有开发线。下一步：{command}")
+        _print_push_disclosure(config)
         return
     if not config.adapters and not installed_launchable_presets():
         if args.format == "json":
@@ -2547,6 +2543,7 @@ def cmd_next(args: argparse.Namespace) -> None:
                 commands=[],
                 mutation_available=False,
                 required_inputs=["agent_id", "agent_command"],
+                **_next_push_fields(config),
             )
             return
         print(
@@ -2554,6 +2551,7 @@ def cmd_next(args: argparse.Namespace) -> None:
             "安装本机 Agent 后运行 dyro start，或 "
             + _scoped_command(args, config, "agent", "add", "<id>", "--command", "…")
         )
+        _print_push_disclosure(config)
         return
     briefing, diagnostic_commands = _workspace_ready_briefing(
         args, config, budget
@@ -2568,12 +2566,15 @@ def cmd_next(args: argparse.Namespace) -> None:
         if briefing is not None:
             payload["briefing"] = briefing
             payload["diagnostic_commands"] = diagnostic_commands
+        payload.update(_next_push_fields(config))
         _print_control_plane_json("next_step", **payload)
         return
     if briefing is None:
         print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。")
+        _print_push_disclosure(config)
         return
     print(render_briefing_text(briefing))
+    _print_push_disclosure(config)
 
 
 def cmd_line_list(args: argparse.Namespace) -> None:

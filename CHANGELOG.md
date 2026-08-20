@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Linked-worktree lines bind to `origin/<line.branch>` when that remote-tracking
+  ref exists, and never auto-track the parent when starting a local-only line.
+  `doctor` / `next` treat a missing `origin/feat/<line>` as not delivery-ready.
+- `--workspace` path values tell you to use `--root` instead of looking like a
+  missing workspace. Unknown aliases stay case-sensitive and suggest the closest
+  registered name.
+- `status` and `next` disclose when `policy.allow_push` is false: Dyro 不会 push；
+  ordinary `git push` still works.
+- Supervised host apply fails closed until `dyro host compile` has run. Ordinary
+  `dyro doctor` still treats host projections as optional.
+
 ## 0.7.6 - 2026-08-19
 
 - First-party slash Skills `dyro-review-board` (会审 / 对抗审查) and

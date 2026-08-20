@@ -8,7 +8,7 @@ import shutil
 import sys
 from urllib.parse import urlencode
 
-from .config import CONFIG_NAME, Config, expand_argv, load, validate_id
+from .config import CONFIG_NAME, Config, expand_argv, load, push_disclosure, validate_id
 from .continuation.briefing import render_briefing_text
 from .continuation.ready_briefing import build_ready_briefing
 from .errors import DyroError, ValidationError
@@ -135,6 +135,9 @@ def print_status(config: Config) -> None:
             f"{scope:24} {value(f'{repo_id:14}')} {value(f'{branch:24}')} "
             f"{head:12} {dirty_display} {upstream}"
         )
+    note = push_disclosure(config.policy)
+    if note:
+        print(note)
 
 
 def print_all_status() -> None:
@@ -749,6 +752,7 @@ def existing_line_workspace(
         finding
         for finding in doctor(config)
         if any(finding.startswith(prefix) for prefix in relevant)
+        and "missing origin/" not in finding
     ]
     if failures:
         raise DyroError(
