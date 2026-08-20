@@ -168,9 +168,11 @@ class FamilyChannelTests(WorkspaceCase):
             item["id"]
             for item in read_visible_channel(self.config, "core_pay", viewer="core_pay")
         }
-        core_ids = {item["id"] for item in read_visible_channel(self.config, "core")}
+        core_from = {
+            item["from"] for item in read_visible_channel(self.config, "core")
+        }
         self.assertIn(grandchild["id"], pay_parent)
-        self.assertNotIn(grandchild["id"], core_ids)
+        self.assertNotIn("core_pay_fix", core_from)
 
     def test_to_outside_family_is_rejected(self) -> None:
         with self.assertRaises(FamilyChannelError) as raised:
