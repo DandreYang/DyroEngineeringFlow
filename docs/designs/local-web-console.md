@@ -4,6 +4,8 @@
 目标版本：0.6.0；与持久续航引擎同一发布列车
 适用范围：全局工作区、TaskGraph、Objective、Attention、证据元数据与本机健康状态
 
+后续：实时事件、一层家族图与家族频道见 [Console 实时家族与信号](console-v2-live-family-signals.md)。那是本文件与 [ADR 0005](../adr/0005-local-web-console.md) 的后续设计，扩展而不替换这里的只读快照契约。
+
 ## 1. 产品定位
 
 Dyro Console 是 **Dyro 权威状态的本地只读窗口**。它解决的不是“再提供一套操作系统”，而是让使用者在一个页面中快速回答：

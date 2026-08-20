@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add design `docs/designs/console-v2-live-family-signals.md` for live
+  events, one-level line families, and overlay family signals. It extends
+  the local Web Console and ADR 0005; it does not replace them.
 - User slash Skill `dyro-line-family` (`/dyro-line-family`) preflights
   `line spawn` / `line merge` / `line sync` and prints one `--yes` command
   for the human. It does not execute the mutation, invent `--push`, or
