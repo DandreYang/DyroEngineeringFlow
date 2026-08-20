@@ -76,10 +76,14 @@ Prefer JSON when the command accepts `--format json`. One JSON document only; `k
 
 ## Preflight
 
-1. `doctor`. Any `FAIL` → stop.
+1. `doctor` is observational. Do not treat every `FAIL` as a stop.
+   Stop only on **blocking** FAILs: any `FAIL` that is not missing-origin
+   (`FAIL ...: missing origin/<branch>`). Do not weaken other FAILs:
+   wrong upstream, wrong branch, missing worktree, and every other FAIL
+   still stop. A line that only lacks `origin/<line.branch>` is not a stop.
 2. `status`. The lines that would be written must match the registered branch and `dirty_count` must be 0. Otherwise stop.
 3. `line list --format json`. Confirm the named ids exist. For `merge`, `child.parent` must equal `--into`. For `sync`, the child must have a `parent`. One-level parent only.
-4. Run the matching `--dry-run line spawn|merge|sync`. Non-zero exit or `kind=error` → stop and quote the CLI error. Do not proceed.
+4. Run the matching `--dry-run line spawn|merge|sync`. This is the real gate. Non-zero exit or `kind=error` → stop and quote the CLI error. Do not proceed.
 
 ## Report
 

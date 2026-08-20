@@ -210,6 +210,12 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertIn("--dry-run line sync", content)
         self.assertIn("git `main`", content)
         self.assertIn("/dyro-task-merge", content)
+        self.assertNotIn("Any `FAIL` → stop", content)
+        self.assertIn("observational", content)
+        self.assertIn("missing origin/<branch>", content)
+        self.assertIn("wrong upstream", content)
+        self.assertIn("missing worktree", content)
+        self.assertIn("the real gate", content)
         self.assertIn("$dyro-line-family", metadata.read_text(encoding="utf-8"))
         for line in metadata.read_text(encoding="utf-8").splitlines():
             if ": " in line:

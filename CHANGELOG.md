@@ -9,7 +9,9 @@
   `dyro integration install line-family`; it does not auto-load.
   `/dyro-task-merge` stays task → owning line and points line-family
   ops at this slash. Control-plane, executor, and 会审 refuse those
-  mutations in the same turn.
+  mutations in the same turn. A doctor FAIL that is only missing
+  `origin/<line.branch>` does not stop preflight; other FAILs still
+  do. `--dry-run` remains the real gate.
 - Line manifests may declare an optional `parent` line id (schema 3). Schema 1
   and 2 files still parse; the writer emits schema 3 only when `parent` is set.
   `base` remains a Git ref.
