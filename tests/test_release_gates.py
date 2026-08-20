@@ -32,7 +32,7 @@ class ReleaseGateTests(unittest.TestCase):
     def test_0_7_release_runs_gates_without_claiming_1_0(self) -> None:
         stdout = StringIO()
         with redirect_stdout(stdout):
-            code = main(["--root", str(ROOT), "--release-tag", "v0.7.7"])
+            code = main(["--root", str(ROOT), "--release-tag", "v0.7.8"])
         self.assertEqual(code, 0)
         self.assertIn("0.7 gates present", stdout.getvalue())
         self.assertNotIn("1.0 gates present", stdout.getvalue())

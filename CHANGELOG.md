@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.8 - 2026-08-20
+
 - Tighten the internal `dyro-board` Record protocol: declare a
   production-line baseline (not `master`/`main`), close prior P0/P1 as
   `已闭环` / `未闭环` / `须人工核` (or `已检索·无先前会审` when none),
@@ -10,7 +12,6 @@
   record the full test command plus whether a pipeline/redirect hid the
   exit code. Pins lock those polarities. The `/dyro-review-board`
   wrapper still follows that file only and refuses same-turn delivery.
-  Version unchanged.
 - Hide the internal `dyro-board` protocol from slash / `$` skill pickers.
   `/dyro-review-board` is the only human-facing 会审 command. The protocol
   asset still installs as a non-invocable companion of `review-board` (and
@@ -51,7 +52,7 @@
   cannot write artifacts. Planted path, URL, or credential titles are
   blanked on read; artifact ids reject a `..` substring. Unpaired
   channel logs are no longer hidden as unread 0; `msg_N` page keys
-  stay `(family, id)`. Version stays `0.7.7`.
+  stay `(family, id)`.
 - User slash Skill `dyro-line-family` (`/dyro-line-family`) preflights
   `line spawn` / `line merge` / `line sync` and prints one `--yes` command
   for the human. It does not execute the mutation, invent `--push`, or

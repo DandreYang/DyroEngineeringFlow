@@ -225,12 +225,12 @@ class ConsoleArtifactPageTests(unittest.TestCase):
         self.assertNotEqual(refresh_at, -1)
         self.assertNotIn(b"/artifacts", script.body[refresh_at:next_fn])
 
-    def test_version_stays_0_7_7(self) -> None:
+    def test_package_version_is_0_7_8(self) -> None:
         import tomllib
         from pathlib import Path
 
         metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-        self.assertEqual(metadata["project"]["version"], "0.7.7")
+        self.assertEqual(metadata["project"]["version"], "0.7.8")
 
 
 class ConsoleArtifactServiceTests(WorkspaceCase):
