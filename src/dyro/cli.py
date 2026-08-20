@@ -238,7 +238,10 @@ from .workspace import (
     get_line,
     is_missing_origin_finding,
     list_lines,
+    merge_line,
+    spawn_line,
     status_rows,
+    sync_line,
 )
 
 
@@ -2632,6 +2635,7 @@ def cmd_line_list(args: argparse.Namespace) -> None:
                 {
                     "kind": line.kind,
                     "id": line.id,
+                    "parent": line.parent,
                     "branch": line.branch,
                     "base": line.base,
                     "repositories": [
@@ -2650,14 +2654,14 @@ def cmd_line_list(args: argparse.Namespace) -> None:
     if not lines:
         print("暂无已登记开发线")
         return
-    print(f"{'KIND':8} {'ID':28} {'BRANCH':30} {'BASE':24} REPOSITORIES")
+    print(f"{'KIND':8} {'ID':28} {'PARENT':24} {'BRANCH':30} {'BASE':24} REPOSITORIES")
     for line in lines:
         repositories = ", ".join(
             f"{repo_id}@{line.base_for(repo_id)}[{line.storage_for(repo_id)}]"
             for repo_id in line.repositories
         )
         print(
-            f"{line.kind:8} {line.id:28} {line.branch:30} {line.base:24} {repositories}"
+            f"{line.kind:8} {line.id:28} {(line.parent or '-'):24} {line.branch:30} {line.base:24} {repositories}"
         )
 
 
@@ -2695,6 +2699,51 @@ def _create_line(args: argparse.Namespace, kind: str) -> None:
 
 def cmd_line_create(args: argparse.Namespace) -> None:
     _create_line(args, "line")
+
+
+def cmd_line_spawn(args: argparse.Namespace) -> None:
+    config = _config(args)
+    _require_yes(args, "派生子开发线")
+    line = spawn_line(
+        config,
+        args.parent,
+        args.child,
+        repositories=_repositories(args.repos),
+        dry_run=args.dry_run,
+    )
+    bases = ", ".join(
+        f"{repo_id}={line.base_for(repo_id)}" for repo_id in line.repositories
+    )
+    print(
+        f"{'DRY RUN: ' if args.dry_run else ''}已从 {line.parent} 派生 {line.kind} {line.id}，"
+        f"分支 {line.branch}，仓库基线：{bases}"
+    )
+
+
+def cmd_line_merge(args: argparse.Namespace) -> None:
+    _require_yes(args, "合并子开发线")
+    config = _config(args)
+    merge_line(
+        config,
+        args.child,
+        args.parent,
+        push=args.push,
+        dry_run=args.dry_run,
+    )
+    print(
+        f"{'DRY RUN: ' if args.dry_run else ''}已将 {args.child} 合并入 {args.parent}"
+        + (" 并推送" if args.push else "")
+    )
+
+
+def cmd_line_sync(args: argparse.Namespace) -> None:
+    _require_yes(args, "同步父开发线")
+    config = _config(args)
+    sync_line(config, args.child, push=args.push, dry_run=args.dry_run)
+    print(
+        f"{'DRY RUN: ' if args.dry_run else ''}已将父线同步到 {args.child}"
+        + (" 并推送" if args.push else "")
+    )
 
 
 def cmd_hotfix_create(args: argparse.Namespace) -> None:
@@ -4636,6 +4685,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     line_create.add_argument("--yes", action="store_true")
     line_create.set_defaults(func=cmd_line_create)
+    line_spawn = line_sub.add_parser(
+        "spawn", help="从父开发线创建子线（不是任务）；不 fetch、不 push"
+    )
+    line_spawn.add_argument("parent", help="父开发线 ID")
+    line_spawn.add_argument(
+        "child", help="子线短名或完整 ID；短名默认写成 {父ID}_{短名}"
+    )
+    line_spawn.add_argument(
+        "--repos",
+        help="逗号分隔的仓库子集；默认继承父线全部仓库",
+    )
+    line_spawn.add_argument("--yes", action="store_true")
+    line_spawn.set_defaults(func=cmd_line_spawn)
+    line_merge = line_sub.add_parser(
+        "merge", help="将子线 --no-ff 合并回其直接父开发线；不删除子线"
+    )
+    line_merge.add_argument("child", help="子开发线 ID")
+    line_merge.add_argument(
+        "--into",
+        dest="parent",
+        required=True,
+        help="父开发线 ID；必须是该子线的直接父线",
+    )
+    line_merge.add_argument(
+        "--push",
+        action="store_true",
+        help="合并后推送父线分支；需 policy.allow_push",
+    )
+    line_merge.add_argument("--yes", action="store_true")
+    line_merge.set_defaults(func=cmd_line_merge)
+    line_sync = line_sub.add_parser(
+        "sync", help="将父线提交 --no-ff 合并进子线；无线父线则拒绝"
+    )
+    line_sync.add_argument("child", help="子开发线 ID")
+    line_sync.add_argument(
+        "--push",
+        action="store_true",
+        help="同步后推送子线分支；需 policy.allow_push",
+    )
+    line_sync.add_argument("--yes", action="store_true")
+    line_sync.set_defaults(func=cmd_line_sync)
 
     hotfix = sub.add_parser("hotfix", help="生产 Hotfix 开发线")
     hotfix_sub = hotfix.add_subparsers(dest="hotfix_command", required=True)

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Line manifests may declare an optional `parent` line id (schema 3). Schema 1
+  and 2 files still parse; the writer emits schema 3 only when `parent` is set.
+  `base` remains a Git ref.
+- `dyro line spawn <parent> <child>` creates a durable child line (not a task)
+  from a parent, inheriting repositories (optional `--repos` subset). The child
+  binds like `line create` and does not fetch, push, or track the parent branch.
+- `dyro line merge <child> --into <parent>` merges the child into its direct
+  parent across the child's repos (`--no-ff`, locked, dry-runnable). One repo
+  failure rolls back already-merged repos. `--push` still requires
+  `policy.allow_push`.
+- `dyro line sync <child>` merges the parent into the child the same way.
+  `line list` / `status` show the parent id when set.
+
 ## 0.7.7 - 2026-08-20
 
 - Linked-worktree lines bind to `origin/<line.branch>` when that remote-tracking

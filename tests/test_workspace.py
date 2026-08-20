@@ -9,11 +9,15 @@ from dyro.process import Result
 from dyro.workspace import (
     create_line,
     doctor,
+    get_line,
     is_missing_origin_finding,
     line_repository_path,
     list_lines,
+    merge_line,
     preflight_line,
+    spawn_line,
     status_rows,
+    sync_line,
 )
 
 from .support import WorkspaceCase, publish_origin_branch, shell
@@ -377,6 +381,181 @@ class WorkspaceTests(WorkspaceCase):
         shell("git", "checkout", "main", cwd=self.anchor)
         findings = doctor(config)
         self.assertTrue(any("expected feat/reuse-anchor" in item for item in findings), findings)
+
+
+def _commit_text(worktree: Path, filename: str, content: str, message: str) -> str:
+    (worktree / filename).write_text(content, encoding="utf-8")
+    shell("git", "add", filename, cwd=worktree)
+    shell("git", "commit", "-m", message, cwd=worktree)
+    return shell_stdout("git", "rev-parse", "HEAD", cwd=worktree)
+
+
+class LineFamilyTests(WorkspaceCase):
+    def _parent_and_child(self, *, parent_id: str = "onboard", child: str = "tryon"):
+        publish_origin_branch(self.anchor, f"feat/{parent_id}")
+        config = load(self.root)
+        parent = create_line(
+            config, line_id=parent_id, branch=f"feat/{parent_id}", base="main"
+        )
+        spawned = spawn_line(config, parent_id, child)
+        return load(self.root), parent, spawned
+
+    def test_spawn_writes_parent_inherited_repos_and_does_not_track_parent(self) -> None:
+        config, parent, child = self._parent_and_child()
+        self.assertEqual(child.id, "onboard_tryon")
+        self.assertEqual(child.parent, "onboard")
+        self.assertEqual(child.repositories, parent.repositories)
+        self.assertEqual(child.base, "origin/feat/onboard")
+        manifest = (config.lines_state_dir / "onboard_tryon.toml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("schema_version = 3", manifest)
+        self.assertIn('parent = "onboard"', manifest)
+        worktree = line_repository_path(config, child, "api")
+        upstream = shell_stdout(
+            "git",
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+            cwd=worktree,
+            check=False,
+        )
+        self.assertIn(upstream, ("", "-"))
+        self.assertNotEqual(upstream, "origin/feat/onboard")
+        self.assertNotEqual(upstream, "feat/onboard")
+        full = spawn_line(config, "onboard", "onboard_extra")
+        self.assertEqual(full.id, "onboard_extra")
+        self.assertEqual(full.parent, "onboard")
+        listed = {item.id: item.parent for item in list_lines(config, kind="line")}
+        self.assertEqual(listed["onboard"], "")
+        self.assertEqual(listed["onboard_tryon"], "onboard")
+
+    def test_merge_dry_run_conflict_does_not_mutate(self) -> None:
+        config, parent, child = self._parent_and_child()
+        parent_wt = line_repository_path(config, parent, "api")
+        child_wt = line_repository_path(config, child, "api")
+        parent_head = _commit_text(
+            parent_wt, "README.md", "parent-side\n", "feat: parent edit"
+        )
+        child_head = _commit_text(
+            child_wt, "README.md", "child-side\n", "feat: child edit"
+        )
+        parent_status = shell_stdout(
+            "git", "status", "--porcelain=v1", "-uall", cwd=parent_wt
+        )
+        with self.assertRaisesRegex(DyroError, "冲突"):
+            merge_line(config, child.id, parent.id, dry_run=True)
+        self.assertEqual(
+            shell_stdout("git", "rev-parse", "HEAD", cwd=parent_wt), parent_head
+        )
+        self.assertEqual(
+            shell_stdout("git", "rev-parse", "HEAD", cwd=child_wt), child_head
+        )
+        self.assertEqual(
+            shell_stdout("git", "status", "--porcelain=v1", "-uall", cwd=parent_wt),
+            parent_status,
+        )
+        merge_head = subprocess.run(
+            ["git", "rev-parse", "--verify", "-q", "MERGE_HEAD"],
+            cwd=parent_wt,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertNotEqual(merge_head.returncode, 0)
+
+    def test_merge_success_parent_contains_child_commits(self) -> None:
+        config, parent, child = self._parent_and_child()
+        child_wt = line_repository_path(config, child, "api")
+        parent_wt = line_repository_path(config, parent, "api")
+        child_head = _commit_text(
+            child_wt, "child.txt", "from child\n", "feat: child work"
+        )
+        merge_line(config, child.id, parent.id)
+        contained = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", child_head, "HEAD"],
+            cwd=parent_wt,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(contained.returncode, 0)
+        ledger = config.ledger_file.read_text(encoding="utf-8")
+        self.assertIn('"phase": "line_merge"', ledger)
+
+    def test_merge_rejects_skip_level_missing_parent_dirty_parent_and_wrong_upstream(
+        self,
+    ) -> None:
+        config, parent, child = self._parent_and_child()
+        grandchild = spawn_line(config, child.id, "fix")
+        with self.assertRaisesRegex(DyroError, "直接父线"):
+            merge_line(config, grandchild.id, parent.id)
+
+        other = create_line(
+            config, line_id="other", branch="feat/other", base="main"
+        )
+        with self.assertRaisesRegex(DyroError, "没有父线"):
+            merge_line(config, other.id, parent.id)
+        with self.assertRaisesRegex(DyroError, "未登记"):
+            merge_line(config, child.id, "missing-parent")
+
+        parent_wt = line_repository_path(config, parent, "api")
+        (parent_wt / "dirty.txt").write_text("pending\n", encoding="utf-8")
+        with self.assertRaisesRegex(DyroError, "不干净"):
+            merge_line(config, child.id, parent.id)
+        (parent_wt / "dirty.txt").unlink()
+
+        child_wt = line_repository_path(config, child, "api")
+        publish_origin_branch(child_wt, child.branch)
+        shell("git", "branch", "--set-upstream-to=origin/feat/onboard", cwd=child_wt)
+        with self.assertRaisesRegex(DyroError, "doctor"):
+            merge_line(config, child.id, parent.id)
+
+    def test_sync_brings_parent_commit_to_child_and_rejects_root(self) -> None:
+        config, parent, child = self._parent_and_child()
+        parent_wt = line_repository_path(config, parent, "api")
+        child_wt = line_repository_path(config, child, "api")
+        parent_head = _commit_text(
+            parent_wt, "from-parent.txt", "synced\n", "feat: parent ahead"
+        )
+        sync_line(config, child.id)
+        contained = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", parent_head, "HEAD"],
+            cwd=child_wt,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(contained.returncode, 0)
+        ledger = config.ledger_file.read_text(encoding="utf-8")
+        self.assertIn('"phase": "line_sync"', ledger)
+        with self.assertRaisesRegex(DyroError, "没有父线"):
+            sync_line(config, parent.id)
+
+    def test_schema_2_line_files_still_parse(self) -> None:
+        config = load(self.root)
+        config.lines_state_dir.mkdir(parents=True, exist_ok=True)
+        path = config.lines_state_dir / "legacy.toml"
+        path.write_text(
+            'schema_version = 2\n'
+            'id = "legacy"\n'
+            'kind = "line"\n'
+            'branch = "feat/legacy"\n'
+            'base = "main"\n'
+            'repositories = ["api"]\n',
+            encoding="utf-8",
+        )
+        line = get_line(config, "legacy")
+        self.assertEqual(line.parent, "")
+        self.assertEqual(line.branch, "feat/legacy")
+        self.assertEqual(line.repositories, ("api",))
+        root = create_line(config, line_id="rootline", branch="feat/rootline", base="main")
+        written = (config.lines_state_dir / "rootline.toml").read_text(encoding="utf-8")
+        self.assertIn("schema_version = 2", written)
+        self.assertNotIn("parent", written)
+        self.assertEqual(root.parent, "")
+
 
 class MissingOriginFindingTests(unittest.TestCase):
     def test_recognizes_only_missing_origin_doctor_fails(self) -> None:
