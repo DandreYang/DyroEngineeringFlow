@@ -238,7 +238,10 @@ from .workspace import (
     get_line,
     is_missing_origin_finding,
     list_lines,
+    merge_line,
+    spawn_line,
     status_rows,
+    sync_line,
 )
 
 
@@ -677,6 +680,9 @@ def cmd_init(args: argparse.Namespace) -> None:
     atomic_write_text(config_file, content)
     for relative in (".dyro/tasks", ".dyro/lines", ".dyro/hotfixes", ".dyro/changes"):
         (root / relative).mkdir(parents=True, exist_ok=True)
+    from .instructions import seed_workspace_overlay
+
+    seed_workspace_overlay(root)
     print(f"已初始化 {root}")
     if args.discover:
         print(
@@ -1232,6 +1238,9 @@ def _apply_setup_plan(
     registration = _register_setup_workspace(
         config, register=register, make_default=make_default
     )
+    from .instructions import seed_workspace_overlay
+
+    seed_workspace_overlay(config.root)
     if plan.needs_bootstrap:
         for message in bootstrap(config, branch=plan.default_base):
             print(message)
@@ -1305,6 +1314,9 @@ def _interactive_setup(args: argparse.Namespace) -> None:
             register=registration is not None,
             make_default=preferences.make_default_workspace,
         )
+        from .instructions import seed_workspace_overlay
+
+        seed_workspace_overlay(config.root)
         skill_outcome = _apply_setup_personal_preferences(preferences)
         _print_setup_completion(
             config, record, preferences, skill_outcome=skill_outcome
@@ -1451,6 +1463,9 @@ def _non_interactive_setup(args: argparse.Namespace) -> None:
         _render_setup_registration_plan(registration)
     if not args.dry_run:
         _ensure_state_directories(config.root)
+        from .instructions import seed_workspace_overlay
+
+        seed_workspace_overlay(config.root)
         registered = _register_setup_workspace(
             config,
             register=not args.no_register,
@@ -2115,6 +2130,27 @@ def cmd_host_doctor(args: argparse.Namespace) -> None:
         raise DyroError("宿主投影过期或被手改")
 
 
+def cmd_host_seed(args: argparse.Namespace) -> None:
+    from .instructions import seed_configured_overlays
+
+    config = _config(args)
+    workspace, lines = seed_configured_overlays(
+        config, force=args.force, dry_run=args.dry_run
+    )
+    prefix = "DRY RUN: " if args.dry_run else ""
+    if workspace.written:
+        print(f"{prefix}已写入 overlay {', '.join(workspace.written)}")
+    if workspace.skipped:
+        print(f"{prefix}已跳过 overlay {', '.join(workspace.skipped)}（已存在）")
+    if not workspace.written and not workspace.skipped:
+        print(f"{prefix}overlay 未写入说明文件")
+    for line_id, outcome in lines:
+        if outcome.written:
+            print(f"{prefix}已写入开发线 {line_id} {', '.join(outcome.written)}")
+        if outcome.skipped and args.force:
+            print(f"{prefix}已跳过开发线 {line_id} {', '.join(outcome.skipped)}")
+
+
 def cmd_tool_list(args: argparse.Namespace) -> None:
     resolved = resolve_home_config(
         root=getattr(args, "root", None),
@@ -2632,6 +2668,7 @@ def cmd_line_list(args: argparse.Namespace) -> None:
                 {
                     "kind": line.kind,
                     "id": line.id,
+                    "parent": line.parent,
                     "branch": line.branch,
                     "base": line.base,
                     "repositories": [
@@ -2650,14 +2687,14 @@ def cmd_line_list(args: argparse.Namespace) -> None:
     if not lines:
         print("暂无已登记开发线")
         return
-    print(f"{'KIND':8} {'ID':28} {'BRANCH':30} {'BASE':24} REPOSITORIES")
+    print(f"{'KIND':8} {'ID':28} {'PARENT':24} {'BRANCH':30} {'BASE':24} REPOSITORIES")
     for line in lines:
         repositories = ", ".join(
             f"{repo_id}@{line.base_for(repo_id)}[{line.storage_for(repo_id)}]"
             for repo_id in line.repositories
         )
         print(
-            f"{line.kind:8} {line.id:28} {line.branch:30} {line.base:24} {repositories}"
+            f"{line.kind:8} {line.id:28} {(line.parent or '-'):24} {line.branch:30} {line.base:24} {repositories}"
         )
 
 
@@ -2695,6 +2732,51 @@ def _create_line(args: argparse.Namespace, kind: str) -> None:
 
 def cmd_line_create(args: argparse.Namespace) -> None:
     _create_line(args, "line")
+
+
+def cmd_line_spawn(args: argparse.Namespace) -> None:
+    config = _config(args)
+    _require_yes(args, "派生子开发线")
+    line = spawn_line(
+        config,
+        args.parent,
+        args.child,
+        repositories=_repositories(args.repos),
+        dry_run=args.dry_run,
+    )
+    bases = ", ".join(
+        f"{repo_id}={line.base_for(repo_id)}" for repo_id in line.repositories
+    )
+    print(
+        f"{'DRY RUN: ' if args.dry_run else ''}已从 {line.parent} 派生 {line.kind} {line.id}，"
+        f"分支 {line.branch}，仓库基线：{bases}"
+    )
+
+
+def cmd_line_merge(args: argparse.Namespace) -> None:
+    _require_yes(args, "合并子开发线")
+    config = _config(args)
+    merge_line(
+        config,
+        args.child,
+        args.parent,
+        push=args.push,
+        dry_run=args.dry_run,
+    )
+    print(
+        f"{'DRY RUN: ' if args.dry_run else ''}已将 {args.child} 合并入 {args.parent}"
+        + (" 并推送" if args.push else "")
+    )
+
+
+def cmd_line_sync(args: argparse.Namespace) -> None:
+    _require_yes(args, "同步父开发线")
+    config = _config(args)
+    sync_line(config, args.child, push=args.push, dry_run=args.dry_run)
+    print(
+        f"{'DRY RUN: ' if args.dry_run else ''}已将父线同步到 {args.child}"
+        + (" 并推送" if args.push else "")
+    )
 
 
 def cmd_hotfix_create(args: argparse.Namespace) -> None:
@@ -4350,6 +4432,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     host_doctor.add_argument("--format", choices=("text", "json"), default="text")
     host_doctor.set_defaults(func=cmd_host_doctor)
+    host_seed = host_sub.add_parser(
+        "seed",
+        help="在 overlay 根写入缺失的 AGENTS.md 与 CLAUDE.md；已有文件不覆盖",
+    )
+    host_seed.add_argument(
+        "--force",
+        action="store_true",
+        help="覆盖已有 AGENTS.md/CLAUDE.md；必须显式指定",
+    )
+    host_seed.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只打印将写入的路径，不落盘（兼容全局 --dry-run）",
+    )
+    host_seed.set_defaults(func=cmd_host_seed)
 
     agent_test = agent_sub.add_parser(
         "test", help="仅检查 adapter 可执行文件是否可用，不启动 Agent"
@@ -4636,6 +4735,68 @@ def build_parser() -> argparse.ArgumentParser:
     )
     line_create.add_argument("--yes", action="store_true")
     line_create.set_defaults(func=cmd_line_create)
+    line_spawn = line_sub.add_parser(
+        "spawn", help="从父开发线创建子线（不是任务）；不 fetch、不 push"
+    )
+    line_spawn.add_argument("parent", help="父开发线 ID")
+    line_spawn.add_argument(
+        "child", help="子线短名或完整 ID；短名默认写成 {父ID}_{短名}"
+    )
+    line_spawn.add_argument(
+        "--repos",
+        help="逗号分隔的仓库子集；默认继承父线全部仓库",
+    )
+    line_spawn.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只打印计划，不创建子线或工作树（兼容全局 --dry-run）",
+    )
+    line_spawn.add_argument("--yes", action="store_true")
+    line_spawn.set_defaults(func=cmd_line_spawn)
+    line_merge = line_sub.add_parser(
+        "merge", help="将子线 --no-ff 合并回其直接父开发线；不删除子线"
+    )
+    line_merge.add_argument("child", help="子开发线 ID")
+    line_merge.add_argument(
+        "--into",
+        dest="parent",
+        required=True,
+        help="父开发线 ID；必须是该子线的直接父线",
+    )
+    line_merge.add_argument(
+        "--push",
+        action="store_true",
+        help="合并后推送父线分支；需 policy.allow_push",
+    )
+    line_merge.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="探测合入但不提交（兼容全局 --dry-run）",
+    )
+    line_merge.add_argument("--yes", action="store_true")
+    line_merge.set_defaults(func=cmd_line_merge)
+    line_sync = line_sub.add_parser(
+        "sync", help="将父线提交 --no-ff 合并进子线；无线父线则拒绝"
+    )
+    line_sync.add_argument("child", help="子开发线 ID")
+    line_sync.add_argument(
+        "--push",
+        action="store_true",
+        help="同步后推送子线分支；需 policy.allow_push",
+    )
+    line_sync.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="探测同步但不提交（兼容全局 --dry-run）",
+    )
+    line_sync.add_argument("--yes", action="store_true")
+    line_sync.set_defaults(func=cmd_line_sync)
 
     hotfix = sub.add_parser("hotfix", help="生产 Hotfix 开发线")
     hotfix_sub = hotfix.add_subparsers(dest="hotfix_command", required=True)

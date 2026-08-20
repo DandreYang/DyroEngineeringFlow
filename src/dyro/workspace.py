@@ -17,10 +17,12 @@ from .read_limits import (
     ReadLimitError,
     bounded_directory_names,
 )
-from .state import atomic_write_text
+from .state import atomic_write_text, exclusive_lock
 
 
 STORAGE_MODES = frozenset({"linked-worktree", "anchor-reference"})
+LINE_MANIFEST_SCHEMAS = frozenset({1, 2, 3})
+MERGE_LOCK_TIMEOUT_SECONDS = 1800.0
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,7 @@ class Line:
     repositories: tuple[str, ...]
     repository_bases: Mapping[str, str] = field(default_factory=dict)
     storage_modes: Mapping[str, str] = field(default_factory=dict)
+    parent: str = ""
 
     def base_for(self, repo_id: str) -> str:
         return self.repository_bases.get(repo_id, self.base)
@@ -65,14 +68,17 @@ def _write_line(config: Config, line: Line, *, dry_run: bool = False) -> None:
     repo_items = ", ".join(_toml_string(repo_id) for repo_id in line.repositories)
     bases = tuple((repo_id, line.base_for(repo_id)) for repo_id in line.repositories if line.base_for(repo_id) != line.base)
     storage = tuple((repo_id, line.storage_for(repo_id)) for repo_id in line.repositories if line.storage_for(repo_id) != "linked-worktree")
+    schema_version = 3 if line.parent else 2
     chunks = [
-        "schema_version = 2",
+        f"schema_version = {schema_version}",
         f"id = {_toml_string(line.id)}",
         f"kind = {_toml_string(line.kind)}",
         f"branch = {_toml_string(line.branch)}",
         f"base = {_toml_string(line.base)}",
-        f"repositories = [{repo_items}]",
     ]
+    if line.parent:
+        chunks.append(f"parent = {_toml_string(line.parent)}")
+    chunks.append(f"repositories = [{repo_items}]")
     if bases:
         chunks.extend(("", "[repository_bases]"))
         chunks.extend(f"{_toml_key(repo_id)} = {_toml_string(base)}" for repo_id, base in bases)
@@ -90,7 +96,7 @@ def _parse_line_content(path: Path, content: bytes) -> Line:
         raw = tomllib.loads(content.decode("utf-8"))
     except (UnicodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
         raise ValidationError(f"开发线清单格式错误：{path}: {exc}") from exc
-    if raw.get("schema_version") not in (1, 2):
+    if raw.get("schema_version") not in LINE_MANIFEST_SCHEMAS:
         raise ValidationError(f"不支持的开发线清单版本：{path}")
     line_id = validate_id(str(raw.get("id", "")), "开发线 ID")
     kind = str(raw.get("kind", ""))
@@ -119,7 +125,21 @@ def _parse_line_content(path: Path, content: bytes) -> Line:
         if value not in STORAGE_MODES:
             raise ValidationError(f"开发线清单存储方式无效：{repo_id}={value!r}")
         storage_modes[str(repo_id)] = value
-    return Line(line_id, kind, branch, base, repositories, repository_bases, storage_modes)
+    parent = _parse_parent_field(raw.get("parent", ""), line_id, path)
+    return Line(
+        line_id, kind, branch, base, repositories, repository_bases, storage_modes, parent
+    )
+
+
+def _parse_parent_field(raw: object, line_id: str, path: Path) -> str:
+    if raw in ("", None):
+        return ""
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValidationError(f"开发线清单 parent 必须是开发线 ID：{path}")
+    parent = validate_id(raw.strip(), "父开发线 ID")
+    if parent == line_id:
+        raise ValidationError(f"开发线不能以自身为父线：{path}")
+    return parent
 
 
 def _parse_line(path: Path) -> Line:
@@ -435,6 +455,7 @@ def _build_line(
     repository_bases: Mapping[str, str] | None = None,
     storage_modes: Mapping[str, str] | None = None,
     kind: str = "line",
+    parent: str = "",
 ) -> Line:
     """Validate line arguments and turn them into one immutable creation plan."""
     validate_id(line_id, "开发线 ID")
@@ -462,7 +483,10 @@ def _build_line(
     for repo_id, storage_mode in storage_overrides.items():
         if storage_mode not in STORAGE_MODES:
             raise ValidationError(f"{repo_id} 的存储方式必须是：{', '.join(sorted(STORAGE_MODES))}")
-    return Line(line_id, kind, branch, base, selected, base_overrides, storage_overrides)
+    parent_id = _validate_parent_link(config, line_id, parent)
+    return Line(
+        line_id, kind, branch, base, selected, base_overrides, storage_overrides, parent_id
+    )
 
 
 def _plan_line_creation(
@@ -517,6 +541,7 @@ def preflight_line(
     repository_bases: Mapping[str, str] | None = None,
     storage_modes: Mapping[str, str] | None = None,
     kind: str = "line",
+    parent: str = "",
 ) -> Line:
     """Verify that a line can be created without changing Git state.
 
@@ -533,6 +558,7 @@ def preflight_line(
         repository_bases=repository_bases,
         storage_modes=storage_modes,
         kind=kind,
+        parent=parent,
     )
     _plan_line_creation(config, line)
     return line
@@ -548,6 +574,7 @@ def create_line(
     repository_bases: Mapping[str, str] | None = None,
     storage_modes: Mapping[str, str] | None = None,
     kind: str = "line",
+    parent: str = "",
     dry_run: bool = False,
 ) -> Line:
     """Create isolated linked worktrees from configured repository anchors."""
@@ -560,6 +587,7 @@ def create_line(
         repository_bases=repository_bases,
         storage_modes=storage_modes,
         kind=kind,
+        parent=parent,
     )
     planned = _plan_line_creation(config, line)
 
@@ -588,7 +616,495 @@ def create_line(
                 detail = "; ".join(recovery_failures)
                 raise DyroError(f"{exc}\n自动清理未完全成功：{detail}") from exc
         raise
+    if not dry_run:
+        from .instructions import seed_line_overlay
+
+        seed_line_overlay(line_root(config, line), line_id=line.id, branch=line.branch)
     return line
+
+
+def merge_lock_path(config: Config, line_id: str) -> Path:
+    validate_id(line_id, "开发线 ID")
+    return config.root / ".dyro" / "lines" / f"{line_id}.merge.lock"
+
+
+def _validate_parent_link(config: Config, child_id: str, parent: str) -> str:
+    if not parent:
+        return ""
+    parent_id = validate_id(parent, "父开发线 ID")
+    if parent_id == child_id:
+        raise ValidationError(f"开发线不能以自身为父线：{child_id}")
+    ancestor = get_line(config, parent_id)
+    seen = {child_id, parent_id}
+    current = ancestor.parent
+    while current:
+        if current == child_id or current in seen:
+            raise ValidationError(f"开发线父子关系不能成环：{child_id} -> {parent_id}")
+        seen.add(current)
+        current = get_line(config, current).parent
+    return parent_id
+
+
+def resolve_spawn_child_id(parent_id: str, child: str) -> str:
+    validate_id(parent_id, "父开发线 ID")
+    token = child.strip() if isinstance(child, str) else ""
+    if not token:
+        raise ValidationError("子开发线 ID 不能为空")
+    candidate = token if token.startswith(parent_id) else f"{parent_id}_{token}"
+    return validate_id(candidate, "开发线 ID")
+
+
+def _spawn_base_for(config: Config, parent: Line, repo_id: str) -> str:
+    anchor = repository_path(config, repo_id)
+    remote = _expected_remote_branch(parent.branch)
+    if _ref_exists(anchor, f"refs/remotes/{remote}"):
+        return remote
+    if _rev_parse(anchor, parent.branch):
+        return parent.branch
+    raise DyroError(
+        f"{repo_id} 找不到父线分支 {parent.branch} 或其 origin 跟踪引用"
+    )
+
+
+def spawn_line(
+    config: Config,
+    parent_id: str,
+    child: str,
+    *,
+    repositories: Iterable[str] | None = None,
+    dry_run: bool = False,
+) -> Line:
+    """Create a child line from an existing parent line. No fetch, no push."""
+    parent = get_line(config, parent_id)
+    child_id = resolve_spawn_child_id(parent.id, child)
+    if repositories is None:
+        selected = parent.repositories
+    else:
+        selected = tuple(repositories)
+        if not selected:
+            raise ValidationError("至少选择一个仓库")
+        extra = [repo_id for repo_id in selected if repo_id not in parent.repositories]
+        if extra:
+            raise ValidationError(
+                f"子线仓库必须是父线 {parent.id} 仓库的子集：{', '.join(extra)}"
+            )
+    bases = {repo_id: _spawn_base_for(config, parent, repo_id) for repo_id in selected}
+    default_base = bases[selected[0]]
+    repository_bases = {
+        repo_id: base for repo_id, base in bases.items() if base != default_base
+    }
+    storage_modes = {
+        repo_id: parent.storage_for(repo_id)
+        for repo_id in selected
+        if parent.storage_for(repo_id) != "linked-worktree"
+    }
+    return create_line(
+        config,
+        line_id=child_id,
+        branch=f"feat/{child_id}",
+        base=default_base,
+        repositories=selected,
+        repository_bases=repository_bases,
+        storage_modes=storage_modes,
+        kind="line",
+        parent=parent.id,
+        dry_run=dry_run,
+    )
+
+
+@dataclass(frozen=True)
+class _LineMergePlan:
+    repository: str
+    target: Path
+    source_head: str
+    original_head: str
+
+
+def _line_ledger(config: Config, subject_id: str, phase: str, **fields: object) -> None:
+    from .tasks import ledger
+
+    ledger(config, subject_id, phase, **fields)
+
+
+def _require_push_allowed(config: Config, *, push: bool) -> None:
+    if push and not config.policy.allow_push:
+        raise DyroError(
+            "当前 Profile 禁止 push；请在 dyro.toml 的 policy.allow_push 显式开启"
+        )
+
+
+def _require_line_worktrees(
+    config: Config, line: Line, *, clean: bool, label: str
+) -> None:
+    for repo_id in line.repositories:
+        target = line_repository_path(config, line, repo_id)
+        inside = git(target, "rev-parse", "--is-inside-work-tree")
+        if inside.code != 0 or inside.stdout.strip() != "true":
+            raise DyroError(f"{label} worktree 不存在或不是 Git：{target}")
+        current = require_ok(
+            git(target, "branch", "--show-current"), f"读取 {repo_id} 分支"
+        ).stdout.strip()
+        if current != line.branch:
+            raise DyroError(
+                f"{label}仓库分支错误：{target} 当前 {current or 'DETACHED'}，期望 {line.branch}"
+            )
+        if clean:
+            dirty = require_ok(
+                git(target, "status", "--porcelain=v1", "-uall"), f"读取 {repo_id} 状态"
+            ).stdout.strip()
+            if dirty:
+                raise DyroError(f"{label}仓库不干净，拒绝合并：{target}")
+
+
+def _child_blocking_doctor_findings(config: Config, child: Line) -> list[str]:
+    prefix = f"FAIL {child.kind}:{child.id}/"
+    return [
+        item
+        for item in doctor(config)
+        if item.startswith(prefix) and not is_missing_origin_finding(item)
+    ]
+
+
+def _prepare_line_merge_plans(
+    config: Config,
+    *,
+    target: Line,
+    source: Line,
+    repositories: tuple[str, ...],
+    push: bool,
+    dry_run: bool,
+) -> tuple[_LineMergePlan, ...]:
+    missing = [repo_id for repo_id in repositories if repo_id not in target.repositories]
+    if missing:
+        raise DyroError(
+            f"仓库不在目标开发线 {target.id} 上：{', '.join(missing)}"
+        )
+    missing_source = [
+        repo_id for repo_id in repositories if repo_id not in source.repositories
+    ]
+    if missing_source:
+        raise DyroError(
+            f"仓库不在源开发线 {source.id} 上：{', '.join(missing_source)}"
+        )
+    plans: list[_LineMergePlan] = []
+    for repo_id in repositories:
+        target_path = line_repository_path(config, target, repo_id)
+        source_path = line_repository_path(config, source, repo_id)
+        source_head = require_ok(
+            git(source_path, "rev-parse", "HEAD"), f"读取 {repo_id} 源 HEAD"
+        ).stdout.strip()
+        original_head = require_ok(
+            git(target_path, "rev-parse", "HEAD"), f"读取 {repo_id} 目标 HEAD"
+        ).stdout.strip()
+        plans.append(_LineMergePlan(repo_id, target_path, source_head, original_head))
+    if push:
+        for plan in plans:
+            require_ok(
+                git(
+                    plan.target,
+                    "push",
+                    "--dry-run",
+                    "origin",
+                    target.branch,
+                    dry_run=dry_run,
+                ),
+                f"预检推送 {plan.repository}",
+            )
+    return tuple(plans)
+
+
+def _rollback_line_merges(
+    plans: Iterable[_LineMergePlan], committed_heads: dict[str, str]
+) -> list[str]:
+    failures: list[str] = []
+    for plan in reversed(tuple(plans)):
+        merge_head = git(plan.target, "rev-parse", "--verify", "-q", "MERGE_HEAD")
+        if merge_head.code == 0:
+            result = git(plan.target, "merge", "--abort")
+        else:
+            committed_head = committed_heads.get(plan.repository)
+            if committed_head is None:
+                continue
+            current = git(plan.target, "rev-parse", "HEAD")
+            if current.code != 0:
+                failures.append(f"{plan.repository}: cannot read HEAD during rollback")
+                continue
+            if current.stdout.strip() != committed_head:
+                failures.append(
+                    f"{plan.repository}: HEAD changed concurrently; manual recovery required"
+                )
+                continue
+            result = git(plan.target, "reset", "--keep", plan.original_head)
+        if result.code != 0:
+            failures.append(
+                f"{plan.repository}: {result.stdout.strip() or 'rollback failed'}"
+            )
+    return failures
+
+
+def _abort_line_merge_probes(plans: Iterable[_LineMergePlan]) -> list[str]:
+    return _rollback_line_merges(plans, {})
+
+
+def _record_line_merge_changeset(
+    config: Config, line: Line, repositories: tuple[str, ...]
+) -> str:
+    from datetime import datetime, timezone
+
+    from .changesets import create_changeset
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    changeset_id = f"merge_{line.id}_{stamp}"
+    if len(changeset_id) > 80:
+        changeset_id = f"merge_{stamp}"
+    try:
+        create_changeset(
+            config,
+            changeset_id=changeset_id,
+            line_id=line.id,
+            repositories=repositories,
+        )
+    except DyroError:
+        return ""
+    return changeset_id
+
+
+def _merge_line_repositories(
+    config: Config,
+    *,
+    target: Line,
+    source: Line,
+    repositories: tuple[str, ...],
+    lock_line_id: str,
+    message: str,
+    phase: str,
+    push: bool,
+    dry_run: bool,
+    extra_ledger: Mapping[str, object] | None = None,
+) -> None:
+    with exclusive_lock(
+        merge_lock_path(config, lock_line_id),
+        timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS,
+    ):
+        _merge_line_repositories_locked(
+            config,
+            target=target,
+            source=source,
+            repositories=repositories,
+            message=message,
+            phase=phase,
+            push=push,
+            dry_run=dry_run,
+            extra_ledger=extra_ledger,
+        )
+
+
+def _merge_line_repositories_locked(
+    config: Config,
+    *,
+    target: Line,
+    source: Line,
+    repositories: tuple[str, ...],
+    message: str,
+    phase: str,
+    push: bool,
+    dry_run: bool,
+    extra_ledger: Mapping[str, object] | None = None,
+) -> None:
+    plans = _prepare_line_merge_plans(
+        config,
+        target=target,
+        source=source,
+        repositories=repositories,
+        push=push,
+        dry_run=dry_run,
+    )
+    fields = dict(extra_ledger or {})
+    probed: list[_LineMergePlan] = []
+    try:
+        for plan in plans:
+            result = git(
+                plan.target,
+                "merge",
+                "--no-ff",
+                "--no-commit",
+                plan.source_head,
+                timeout=300,
+            )
+            probed.append(plan)
+            if result.code != 0:
+                raise DyroError(
+                    f"预检合并 {plan.repository} 存在冲突，拒绝合并"
+                    + (f"\n{result.stdout.strip()}" if result.stdout.strip() else "")
+                )
+        if dry_run:
+            recovery_failures = _abort_line_merge_probes(probed)
+            if recovery_failures:
+                raise DyroError(
+                    "预检合并后清理未完全成功：" + "; ".join(recovery_failures)
+                )
+            return
+    except DyroError as exc:
+        recovery_failures = _abort_line_merge_probes(probed)
+        if not dry_run:
+            _line_ledger(
+                config,
+                source.id,
+                f"{phase}_failed",
+                error=str(exc),
+                recovered=not recovery_failures,
+                recovery_failures=recovery_failures,
+                **fields,
+            )
+        if recovery_failures:
+            raise DyroError(
+                f"{exc}\n自动恢复未完全成功：{'; '.join(recovery_failures)}"
+            ) from exc
+        raise
+
+    committed_heads: dict[str, str] = {}
+    try:
+        for plan in plans:
+            if git(plan.target, "rev-parse", "--verify", "-q", "MERGE_HEAD").code == 0:
+                require_ok(
+                    git(plan.target, "commit", "-m", message, timeout=300),
+                    f"提交 {plan.repository} 合并",
+                )
+                committed_heads[plan.repository] = require_ok(
+                    git(plan.target, "rev-parse", "HEAD"),
+                    f"读取 {plan.repository} 合并提交",
+                ).stdout.strip()
+    except DyroError as exc:
+        recovery_failures = _rollback_line_merges(plans, committed_heads)
+        _line_ledger(
+            config,
+            source.id,
+            f"{phase}_failed",
+            error=str(exc),
+            recovered=not recovery_failures,
+            recovery_failures=recovery_failures,
+            **fields,
+        )
+        if recovery_failures:
+            raise DyroError(
+                f"{exc}\n自动恢复未完全成功：{'; '.join(recovery_failures)}"
+            ) from exc
+        raise
+
+    pushed: list[str] = []
+    if push:
+        for plan in plans:
+            result = git(plan.target, "push", "origin", target.branch)
+            if result.code != 0:
+                _line_ledger(
+                    config,
+                    source.id,
+                    "push_failed",
+                    repository=plan.repository,
+                    pushed_repositories=pushed,
+                    error=result.stdout.strip(),
+                    **fields,
+                )
+                raise DyroError(
+                    f"推送 {plan.repository} 失败；本地合并已保留，已推送仓库：{', '.join(pushed) or '-'}"
+                    f"\n{result.stdout.strip()}"
+                )
+            pushed.append(plan.repository)
+
+    changeset_id = ""
+    if not dry_run:
+        changeset_id = _record_line_merge_changeset(config, target, repositories)
+
+    for plan in plans:
+        result_head = require_ok(
+            git(plan.target, "rev-parse", "HEAD"), f"读取 {plan.repository} 合并结果"
+        ).stdout.strip()
+        _line_ledger(
+            config,
+            source.id,
+            phase,
+            repository=plan.repository,
+            branch=target.branch,
+            source_head=plan.source_head,
+            previous_head=plan.original_head,
+            result_head=result_head,
+            pushed=push,
+            changeset_id=changeset_id,
+            **fields,
+        )
+
+
+def merge_line(
+    config: Config,
+    child_id: str,
+    parent_id: str,
+    *,
+    push: bool = False,
+    dry_run: bool = False,
+) -> None:
+    """Merge a child line into its direct parent. One level only."""
+    _require_push_allowed(config, push=push)
+    child = get_line(config, child_id)
+    parent = get_line(config, parent_id)
+    if not child.parent:
+        raise DyroError(f"开发线 {child.id} 没有父线，无法合并")
+    if child.parent != parent.id:
+        raise DyroError(
+            f"只能将子线合并到其直接父线：{child.id} 的父线是 {child.parent}，不是 {parent.id}"
+        )
+    _require_line_worktrees(config, parent, clean=True, label="父开发线")
+    _require_line_worktrees(config, child, clean=False, label="子开发线")
+    blocking = _child_blocking_doctor_findings(config, child)
+    if blocking:
+        raise DyroError(f"子线 {child.id} 未通过 doctor，拒绝合并：{blocking[0]}")
+    _merge_line_repositories(
+        config,
+        target=parent,
+        source=child,
+        repositories=child.repositories,
+        lock_line_id=parent.id,
+        message=f"merge(line): {child.id} -> {parent.id}",
+        phase="line_merge",
+        push=push,
+        dry_run=dry_run,
+        extra_ledger={"parent": parent.id, "child": child.id},
+    )
+
+
+def sync_line(
+    config: Config,
+    child_id: str,
+    *,
+    push: bool = False,
+    dry_run: bool = False,
+) -> None:
+    """Merge parent commits into a child line. Requires a parent."""
+    _require_push_allowed(config, push=push)
+    child = get_line(config, child_id)
+    if not child.parent:
+        raise DyroError(f"开发线 {child.id} 没有父线，无法同步")
+    parent = get_line(config, child.parent)
+    _require_line_worktrees(config, child, clean=True, label="子开发线")
+    _require_line_worktrees(config, parent, clean=False, label="父开发线")
+    _merge_line_repositories(
+        config,
+        target=child,
+        source=parent,
+        repositories=child.repositories,
+        lock_line_id=child.id,
+        message=f"sync(line): {parent.id} -> {child.id}",
+        phase="line_sync",
+        push=push,
+        dry_run=dry_run,
+        extra_ledger={"parent": parent.id, "child": child.id},
+    )
+
+
+def _line_status_scope(line: Line) -> str:
+    scope = f"{line.kind}:{line.id}"
+    if line.parent:
+        return f"{scope} ({line.parent})"
+    return scope
 
 
 def _short_status(
@@ -660,9 +1176,9 @@ def status_rows(
                 branch, head, upstream, dirty = _short_status(
                     path, read_budget=read_budget
                 )
-                rows.append((f"{line.kind}:{line.id}", repo_id, branch, head, upstream, dirty))
+                rows.append((_line_status_scope(line), repo_id, branch, head, upstream, dirty))
             else:
-                rows.append((f"{line.kind}:{line.id}", repo_id, "MISSING", "-", "-", -1))
+                rows.append((_line_status_scope(line), repo_id, "MISSING", "-", "-", -1))
     return rows
 
 
@@ -673,6 +1189,11 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
         findings.append(f"FAIL external Profile requires {requirement}")
     root_git = _is_git_repo(config.root, read_budget=read_budget)
     findings.append(("WARN" if root_git else "PASS") + " workspace root " + ("is a Git repository" if root_git else "is not a Git repository"))
+    from .instructions import overlay_instruction_warning
+
+    overlay_warning = overlay_instruction_warning(config.root)
+    if overlay_warning:
+        findings.append(overlay_warning)
     for repo_id in sorted(config.repositories):
         anchor = repository_path(config, repo_id)
         if _is_git_repo(anchor, read_budget=read_budget):

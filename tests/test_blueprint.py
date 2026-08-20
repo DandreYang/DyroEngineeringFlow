@@ -201,6 +201,18 @@ class BlueprintJoinTests(unittest.TestCase):
             self.assertEqual(branch, "")
             self.assertEqual(head, expected_head)
             self.assertTrue((target / "versions/feature-a" / config.repositories[repo_id].mount).is_dir())
+            self.assertFalse(
+                (
+                    target
+                    / "versions/feature-a"
+                    / config.repositories[repo_id].mount
+                    / "AGENTS.md"
+                ).exists()
+            )
+        self.assertTrue((target / "AGENTS.md").is_file())
+        self.assertTrue((target / "CLAUDE.md").is_file())
+        self.assertTrue((target / "versions/feature-a/AGENTS.md").is_file())
+        self.assertTrue((target / "versions/feature-a/CLAUDE.md").is_file())
 
     def test_join_dry_run_and_validation_do_not_create_target(self) -> None:
         target = self.parent / "preview"

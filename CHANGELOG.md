@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Line manifests may declare an optional `parent` line id (schema 3). Schema 1
+  and 2 files still parse; the writer emits schema 3 only when `parent` is set.
+  `base` remains a Git ref.
+- `dyro line spawn <parent> <child>` creates a durable child line (not a task)
+  from a parent, inheriting repositories (optional `--repos` subset). The child
+  binds like `line create` and does not fetch, push, or track the parent branch.
+- `dyro line merge <child> --into <parent>` merges the child into its direct
+  parent across the child's repos (`--no-ff`, locked, dry-runnable). One repo
+  failure rolls back already-merged repos. `--push` still requires
+  `policy.allow_push`.
+- `dyro line sync <child>` merges the parent into the child the same way.
+  `line list` / `status` show the parent id when set.
+- New `setup` / `join` / `init` workspaces get thin overlay-root `AGENTS.md`
+  and `CLAUDE.md` (same body). They point at host-compiled SKILL.md and
+  `dyro next`; they are not the gate. Installing or upgrading Dyro does not
+  rewrite existing workspaces. `dyro doctor` WARNs when both files are
+  missing; `dyro host seed` creates missing files only (`--force` overwrites).
+- `line spawn` / `create` write overlay personas at `versions/<line>/` (not
+  inside product Git worktrees). Must-track `origin/<line.branch>`.
+- `status` no longer appends a phantom MISSING row after every line; a missing
+  worktree is reported on that repo only. `dyro line spawn|merge|sync` and
+  `dyro host seed` accept `--dry-run` after the verb, not only the global flag.
+
 ## 0.7.7 - 2026-08-20
 
 - Linked-worktree lines bind to `origin/<line.branch>` when that remote-tracking

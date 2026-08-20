@@ -50,7 +50,7 @@ from .provenance import (
     validate_review_binding,
 )
 from .state import append_text, atomic_write_bytes, atomic_write_text, exclusive_lock
-from .workspace import Line, get_line, line_repository_path, repository_path
+from .workspace import Line, get_line, line_repository_path, merge_lock_path, repository_path
 
 
 STATUSES = (
@@ -567,8 +567,7 @@ def _review_lock_path(task: Task) -> Path:
 
 
 def _merge_lock_path(config: Config, line_id: str) -> Path:
-    validate_id(line_id, "开发线 ID")
-    return config.root / ".dyro" / "lines" / f"{line_id}.merge.lock"
+    return merge_lock_path(config, line_id)
 
 
 def _claim(task: Task) -> dict[str, object] | None:
@@ -2880,7 +2879,7 @@ def _merge_task_repositories(
 ) -> None:
     # Serialize merges into the same delivery line across concurrent dyro processes.
     with exclusive_lock(
-        _merge_lock_path(config, task.line), timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS
+        merge_lock_path(config, task.line), timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS
     ):
         _merge_task_repositories_locked(config, task, push=push, dry_run=dry_run)
 

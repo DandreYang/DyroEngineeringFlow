@@ -1,6 +1,7 @@
 from pathlib import Path
 import unittest
 import os
+import shutil
 import subprocess
 
 from dyro.config import load
@@ -9,11 +10,16 @@ from dyro.process import Result
 from dyro.workspace import (
     create_line,
     doctor,
+    get_line,
     is_missing_origin_finding,
     line_repository_path,
+    line_root,
     list_lines,
+    merge_line,
     preflight_line,
+    spawn_line,
     status_rows,
+    sync_line,
 )
 
 from .support import WorkspaceCase, publish_origin_branch, shell
@@ -377,6 +383,397 @@ class WorkspaceTests(WorkspaceCase):
         shell("git", "checkout", "main", cwd=self.anchor)
         findings = doctor(config)
         self.assertTrue(any("expected feat/reuse-anchor" in item for item in findings), findings)
+
+
+def _commit_text(worktree: Path, filename: str, content: str, message: str) -> str:
+    (worktree / filename).write_text(content, encoding="utf-8")
+    shell("git", "add", filename, cwd=worktree)
+    shell("git", "commit", "-m", message, cwd=worktree)
+    return shell_stdout("git", "rev-parse", "HEAD", cwd=worktree)
+
+
+class LineFamilyTests(WorkspaceCase):
+    def _parent_and_child(self, *, parent_id: str = "onboard", child: str = "tryon"):
+        publish_origin_branch(self.anchor, f"feat/{parent_id}")
+        config = load(self.root)
+        parent = create_line(
+            config, line_id=parent_id, branch=f"feat/{parent_id}", base="main"
+        )
+        spawned = spawn_line(config, parent_id, child)
+        return load(self.root), parent, spawned
+
+    def test_spawn_writes_parent_inherited_repos_and_does_not_track_parent(self) -> None:
+        config, parent, child = self._parent_and_child()
+        self.assertEqual(child.id, "onboard_tryon")
+        self.assertEqual(child.parent, "onboard")
+        self.assertEqual(child.repositories, parent.repositories)
+        self.assertEqual(child.base, "origin/feat/onboard")
+        manifest = (config.lines_state_dir / "onboard_tryon.toml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("schema_version = 3", manifest)
+        self.assertIn('parent = "onboard"', manifest)
+        worktree = line_repository_path(config, child, "api")
+        upstream = shell_stdout(
+            "git",
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+            cwd=worktree,
+            check=False,
+        )
+        self.assertIn(upstream, ("", "-"))
+        self.assertNotEqual(upstream, "origin/feat/onboard")
+        self.assertNotEqual(upstream, "feat/onboard")
+        overlay = line_root(config, child)
+        self.assertTrue((overlay / "AGENTS.md").is_file())
+        self.assertTrue((overlay / "CLAUDE.md").is_file())
+        self.assertIn("origin/feat/onboard_tryon", (overlay / "AGENTS.md").read_text())
+        self.assertEqual(
+            (overlay / "AGENTS.md").read_text(encoding="utf-8"),
+            (overlay / "CLAUDE.md").read_text(encoding="utf-8"),
+        )
+        self.assertFalse((worktree / "AGENTS.md").exists())
+        self.assertFalse((worktree / "CLAUDE.md").exists())
+        self.assertFalse((self.anchor / "AGENTS.md").exists())
+        full = spawn_line(config, "onboard", "onboard_extra")
+        self.assertEqual(full.id, "onboard_extra")
+        self.assertEqual(full.parent, "onboard")
+        listed = {item.id: item.parent for item in list_lines(config, kind="line")}
+        self.assertEqual(listed["onboard"], "")
+        self.assertEqual(listed["onboard_tryon"], "onboard")
+
+    def test_merge_dry_run_conflict_does_not_mutate(self) -> None:
+        config, parent, child = self._parent_and_child()
+        parent_wt = line_repository_path(config, parent, "api")
+        child_wt = line_repository_path(config, child, "api")
+        parent_head = _commit_text(
+            parent_wt, "README.md", "parent-side\n", "feat: parent edit"
+        )
+        child_head = _commit_text(
+            child_wt, "README.md", "child-side\n", "feat: child edit"
+        )
+        parent_status = shell_stdout(
+            "git", "status", "--porcelain=v1", "-uall", cwd=parent_wt
+        )
+        with self.assertRaisesRegex(DyroError, "冲突"):
+            merge_line(config, child.id, parent.id, dry_run=True)
+        self.assertEqual(
+            shell_stdout("git", "rev-parse", "HEAD", cwd=parent_wt), parent_head
+        )
+        self.assertEqual(
+            shell_stdout("git", "rev-parse", "HEAD", cwd=child_wt), child_head
+        )
+        self.assertEqual(
+            shell_stdout("git", "status", "--porcelain=v1", "-uall", cwd=parent_wt),
+            parent_status,
+        )
+        merge_head = subprocess.run(
+            ["git", "rev-parse", "--verify", "-q", "MERGE_HEAD"],
+            cwd=parent_wt,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertNotEqual(merge_head.returncode, 0)
+
+    def test_merge_success_parent_contains_child_commits(self) -> None:
+        config, parent, child = self._parent_and_child()
+        child_wt = line_repository_path(config, child, "api")
+        parent_wt = line_repository_path(config, parent, "api")
+        child_head = _commit_text(
+            child_wt, "child.txt", "from child\n", "feat: child work"
+        )
+        merge_line(config, child.id, parent.id)
+        contained = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", child_head, "HEAD"],
+            cwd=parent_wt,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(contained.returncode, 0)
+        ledger = config.ledger_file.read_text(encoding="utf-8")
+        self.assertIn('"phase": "line_merge"', ledger)
+
+    def test_merge_rejects_skip_level_missing_parent_dirty_parent_and_wrong_upstream(
+        self,
+    ) -> None:
+        config, parent, child = self._parent_and_child()
+        grandchild = spawn_line(config, child.id, "fix")
+        with self.assertRaisesRegex(DyroError, "直接父线"):
+            merge_line(config, grandchild.id, parent.id)
+
+        other = create_line(
+            config, line_id="other", branch="feat/other", base="main"
+        )
+        with self.assertRaisesRegex(DyroError, "没有父线"):
+            merge_line(config, other.id, parent.id)
+        with self.assertRaisesRegex(DyroError, "未登记"):
+            merge_line(config, child.id, "missing-parent")
+
+        parent_wt = line_repository_path(config, parent, "api")
+        (parent_wt / "dirty.txt").write_text("pending\n", encoding="utf-8")
+        with self.assertRaisesRegex(DyroError, "不干净"):
+            merge_line(config, child.id, parent.id)
+        (parent_wt / "dirty.txt").unlink()
+
+        child_wt = line_repository_path(config, child, "api")
+        publish_origin_branch(child_wt, child.branch)
+        shell("git", "branch", "--set-upstream-to=origin/feat/onboard", cwd=child_wt)
+        with self.assertRaisesRegex(DyroError, "doctor"):
+            merge_line(config, child.id, parent.id)
+
+    def test_sync_brings_parent_commit_to_child_and_rejects_root(self) -> None:
+        config, parent, child = self._parent_and_child()
+        parent_wt = line_repository_path(config, parent, "api")
+        child_wt = line_repository_path(config, child, "api")
+        parent_head = _commit_text(
+            parent_wt, "from-parent.txt", "synced\n", "feat: parent ahead"
+        )
+        sync_line(config, child.id)
+        contained = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", parent_head, "HEAD"],
+            cwd=child_wt,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(contained.returncode, 0)
+        ledger = config.ledger_file.read_text(encoding="utf-8")
+        self.assertIn('"phase": "line_sync"', ledger)
+        with self.assertRaisesRegex(DyroError, "没有父线"):
+            sync_line(config, parent.id)
+
+    def test_schema_2_line_files_still_parse(self) -> None:
+        config = load(self.root)
+        config.lines_state_dir.mkdir(parents=True, exist_ok=True)
+        path = config.lines_state_dir / "legacy.toml"
+        path.write_text(
+            'schema_version = 2\n'
+            'id = "legacy"\n'
+            'kind = "line"\n'
+            'branch = "feat/legacy"\n'
+            'base = "main"\n'
+            'repositories = ["api"]\n',
+            encoding="utf-8",
+        )
+        line = get_line(config, "legacy")
+        self.assertEqual(line.parent, "")
+        self.assertEqual(line.branch, "feat/legacy")
+        self.assertEqual(line.repositories, ("api",))
+        root = create_line(config, line_id="rootline", branch="feat/rootline", base="main")
+        written = (config.lines_state_dir / "rootline.toml").read_text(encoding="utf-8")
+        self.assertIn("schema_version = 2", written)
+        self.assertNotIn("parent", written)
+        self.assertEqual(root.parent, "")
+
+    def _enable_web_repo(self):
+        web = self.root / "repositories/web"
+        web.mkdir(parents=True)
+        shell("git", "init", "-b", "main", cwd=web)
+        shell("git", "config", "user.name", "Test User", cwd=web)
+        shell("git", "config", "user.email", "test@example.com", cwd=web)
+        (web / "README.md").write_text("web\n", encoding="utf-8")
+        shell("git", "add", "README.md", cwd=web)
+        shell("git", "commit", "-m", "chore: initial", cwd=web)
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8")
+            + '\n[repositories.web]\npath = "repositories/web"\nmount = "clients/web"\n',
+            encoding="utf-8",
+        )
+        return load(self.root), web
+
+    def test_status_rows_after_spawn_has_no_phantom_missing(self) -> None:
+        config, parent, child = self._parent_and_child()
+        rows = status_rows(config)
+        self.assertEqual([row for row in rows if row[2] == "MISSING"], [])
+        self.assertEqual(
+            {(row[0], row[1]) for row in rows if row[0].startswith("line:")},
+            {
+                (f"line:{parent.id}", "api"),
+                (f"line:{child.id} ({parent.id})", "api"),
+            },
+        )
+
+    def test_status_rows_reports_missing_worktree(self) -> None:
+        config, parent, child = self._parent_and_child()
+        shutil.rmtree(line_repository_path(config, child, "api"))
+        rows = status_rows(config)
+        child_rows = [row for row in rows if row[0] == f"line:{child.id} ({parent.id})"]
+        self.assertEqual(len(child_rows), 1)
+        self.assertEqual(child_rows[0][1:], ("api", "MISSING", "-", "-", -1))
+        parent_rows = [row for row in rows if row[0] == f"line:{parent.id}"]
+        self.assertEqual(len(parent_rows), 1)
+        self.assertNotEqual(parent_rows[0][2], "MISSING")
+        self.assertEqual(len([row for row in rows if row[2] == "MISSING"]), 1)
+
+    def test_parent_cycle_rejected(self) -> None:
+        config = load(self.root)
+        config.lines_state_dir.mkdir(parents=True, exist_ok=True)
+        (config.lines_state_dir / "cycle_leaf.toml").write_text(
+            "schema_version = 3\n"
+            'id = "cycle_leaf"\n'
+            'kind = "line"\n'
+            'branch = "feat/cycle_leaf"\n'
+            'base = "main"\n'
+            'parent = "cycle_root"\n'
+            'repositories = ["api"]\n',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(DyroError, "成环"):
+            create_line(
+                config,
+                line_id="cycle_root",
+                branch="feat/cycle_root",
+                base="main",
+                parent="cycle_leaf",
+            )
+
+    def test_spawn_repos_subset(self) -> None:
+        config, _web = self._enable_web_repo()
+        publish_origin_branch(self.anchor, "feat/onboard")
+        parent = create_line(
+            config, line_id="onboard", branch="feat/onboard", base="main"
+        )
+        self.assertEqual(parent.repositories, ("api", "web"))
+        child = spawn_line(config, "onboard", "tryon", repositories=["api"])
+        self.assertEqual(child.repositories, ("api",))
+        self.assertTrue(
+            (line_repository_path(config, child, "api") / ".git").exists()
+        )
+        self.assertFalse((self.root / "versions/onboard_tryon/clients/web").exists())
+
+    def test_merge_push_refused_when_allow_push_false(self) -> None:
+        config, parent, child = self._parent_and_child()
+        self.assertFalse(config.policy.allow_push)
+        with self.assertRaisesRegex(DyroError, "禁止 push"):
+            merge_line(config, child.id, parent.id, push=True)
+
+    def test_merge_successful_dry_run_does_not_mutate(self) -> None:
+        config, parent, child = self._parent_and_child()
+        child_wt = line_repository_path(config, child, "api")
+        parent_wt = line_repository_path(config, parent, "api")
+        child_head = _commit_text(
+            child_wt, "child.txt", "from child\n", "feat: child work"
+        )
+        parent_head = shell_stdout("git", "rev-parse", "HEAD", cwd=parent_wt)
+        parent_status = shell_stdout(
+            "git", "status", "--porcelain=v1", "-uall", cwd=parent_wt
+        )
+        merge_line(config, child.id, parent.id, dry_run=True)
+        self.assertEqual(
+            shell_stdout("git", "rev-parse", "HEAD", cwd=parent_wt), parent_head
+        )
+        self.assertEqual(
+            shell_stdout("git", "rev-parse", "HEAD", cwd=child_wt), child_head
+        )
+        self.assertEqual(
+            shell_stdout("git", "status", "--porcelain=v1", "-uall", cwd=parent_wt),
+            parent_status,
+        )
+        merge_head = subprocess.run(
+            ["git", "rev-parse", "--verify", "-q", "MERGE_HEAD"],
+            cwd=parent_wt,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertNotEqual(merge_head.returncode, 0)
+        if config.ledger_file.exists():
+            self.assertNotIn(
+                '"phase": "line_merge"',
+                config.ledger_file.read_text(encoding="utf-8"),
+            )
+
+    def test_sync_dry_run_does_not_mutate(self) -> None:
+        config, parent, child = self._parent_and_child()
+        parent_wt = line_repository_path(config, parent, "api")
+        child_wt = line_repository_path(config, child, "api")
+        parent_head = _commit_text(
+            parent_wt, "from-parent.txt", "synced\n", "feat: parent ahead"
+        )
+        child_head = shell_stdout("git", "rev-parse", "HEAD", cwd=child_wt)
+        child_status = shell_stdout(
+            "git", "status", "--porcelain=v1", "-uall", cwd=child_wt
+        )
+        sync_line(config, child.id, dry_run=True)
+        self.assertEqual(
+            shell_stdout("git", "rev-parse", "HEAD", cwd=child_wt), child_head
+        )
+        self.assertEqual(
+            shell_stdout("git", "rev-parse", "HEAD", cwd=parent_wt), parent_head
+        )
+        self.assertEqual(
+            shell_stdout("git", "status", "--porcelain=v1", "-uall", cwd=child_wt),
+            child_status,
+        )
+        if config.ledger_file.exists():
+            self.assertNotIn(
+                '"phase": "line_sync"',
+                config.ledger_file.read_text(encoding="utf-8"),
+            )
+
+    def test_merge_rolls_back_committed_first_repo_when_later_commit_fails(self) -> None:
+        config, _web = self._enable_web_repo()
+        publish_origin_branch(self.anchor, "feat/onboard")
+        parent = create_line(
+            config, line_id="onboard", branch="feat/onboard", base="main"
+        )
+        child = spawn_line(config, "onboard", "tryon")
+        self.assertEqual(child.repositories, ("api", "web"))
+        parent_api = line_repository_path(config, parent, "api")
+        parent_web = line_repository_path(config, parent, "web")
+        _commit_text(
+            line_repository_path(config, child, "api"),
+            "child-api.txt",
+            "from child\n",
+            "feat: child api",
+        )
+        _commit_text(
+            line_repository_path(config, child, "web"),
+            "child-web.txt",
+            "from child\n",
+            "feat: child web",
+        )
+        parent_api_head = shell_stdout("git", "rev-parse", "HEAD", cwd=parent_api)
+        parent_web_head = shell_stdout("git", "rev-parse", "HEAD", cwd=parent_web)
+
+        from dyro import workspace as workspace_mod
+
+        original_git = workspace_mod.git
+
+        def flaky_git(repo: Path, *args: str, dry_run: bool = False, timeout: int = 180):
+            if not dry_run and args[:1] == ("commit",) and "clients/web" in str(repo):
+                return Result(
+                    ("git", "-C", str(repo), *args), 1, "simulated commit failure"
+                )
+            return original_git(repo, *args, dry_run=dry_run, timeout=timeout)
+
+        workspace_mod.git = flaky_git  # type: ignore[assignment]
+        try:
+            with self.assertRaisesRegex(DyroError, "提交 web 合并"):
+                merge_line(config, child.id, parent.id)
+        finally:
+            workspace_mod.git = original_git  # type: ignore[assignment]
+
+        self.assertEqual(
+            shell_stdout("git", "rev-parse", "HEAD", cwd=parent_api), parent_api_head
+        )
+        self.assertEqual(
+            shell_stdout("git", "rev-parse", "HEAD", cwd=parent_web), parent_web_head
+        )
+        self.assertEqual(
+            shell_stdout("git", "status", "--porcelain=v1", "-uall", cwd=parent_api),
+            "",
+        )
+        self.assertEqual(
+            shell_stdout("git", "status", "--porcelain=v1", "-uall", cwd=parent_web),
+            "",
+        )
+
 
 class MissingOriginFindingTests(unittest.TestCase):
     def test_recognizes_only_missing_origin_doctor_fails(self) -> None:
