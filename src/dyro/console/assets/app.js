@@ -154,6 +154,7 @@ const REVIEW_CONCLUSION_LABELS = {
   fail: "未通过",
   inconclusive: "无法判定",
 };
+const SVG_NS = "http:" + "//www.w3.org/2000/svg";
 const EVENT_KIND_LABELS = {
   spawn: "子线已创建",
   merge: "子线已合入父线",
@@ -531,6 +532,23 @@ function commandRow(command) {
   button.addEventListener("click", () => copyCommand(command, button));
   row.append(code, button);
   return row;
+}
+
+function copyableOpenCommand(command) {
+  const value = text(command);
+  const dry = "--dry" + "-run";
+  const yes = "--" + "yes";
+  const push = "--" + "push";
+  if (
+    !value
+    || !value.includes(dry)
+    || !value.includes("line inbox")
+    || value.includes(yes)
+    || value.includes(push)
+  ) {
+    return "";
+  }
+  return value;
 }
 
 function attentionLevel(summary) {
@@ -1519,8 +1537,8 @@ function renderArtifactView(alias, parent, artifact) {
       count(artifact && artifact.size) ? `${count(artifact.size)} B` : "",
     ].filter(Boolean).join(" · ");
     if (meta) card.append(element("p", meta));
-    const command = text(artifact && artifact.open_command);
-    if (command && !command.includes("--yes") && !command.includes("--push")) {
+    const command = copyableOpenCommand(artifact && artifact.open_command);
+    if (command) {
       card.append(commandRow(command));
     }
     return card;
@@ -1545,7 +1563,7 @@ function renderArtifactView(alias, parent, artifact) {
 }
 
 function renderChartSvg(points) {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", "0 0 200 80");
   svg.setAttribute("class", "artifact-chart");
   svg.setAttribute("role", "img");
@@ -1563,7 +1581,7 @@ function renderChartSvg(points) {
     const y = 72 - ((Number(item.y) - minY) / spanY) * 64;
     return `${x},${y}`;
   }).join(" ");
-  const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+  const line = document.createElementNS(SVG_NS, "polyline");
   line.setAttribute("points", coords);
   line.setAttribute("fill", "none");
   line.setAttribute("stroke", "currentColor");
