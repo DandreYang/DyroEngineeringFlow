@@ -19,6 +19,7 @@ from typing import Any
 
 from ..canonical import canonical_json_bytes
 from ..hub import registry_home
+from .events import is_safe_event_fact
 from .overview import ConsoleOverviewError
 from .redaction import REDACTED, safe_branch, safe_id, safe_sha256, safe_title
 
@@ -31,7 +32,7 @@ _WARNING_CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,79}$")
 _ATTENTION_KINDS = frozenset(
     {"repair_required", "needs_user", "ready", "paused", "waiting"}
 )
-_LINE_KEYS = frozenset({"id", "kind", "branch", "base", "repository_count"})
+_LINE_KEYS = frozenset({"id", "kind", "branch", "base", "repository_count", "parent"})
 _TASK_KEYS = frozenset(
     {
         "id",
@@ -140,11 +141,25 @@ class IsolatedOverviewService:
     def inspect_proofs(self, alias: str) -> dict[str, object]:
         return self._request({"op": "inspect_proofs", "alias": alias})
 
+    def events(
+        self, alias: str, *, after: str | None = None, limit: int = 50
+    ) -> dict[str, object]:
+        request: dict[str, object] = {"op": "events", "alias": alias, "limit": limit}
+        if after:
+            request["after"] = after
+        return self._request(request)
+
+    def families(self, alias: str) -> dict[str, object]:
+        return self._request({"op": "families", "alias": alias})
+
+    def family(self, alias: str, parent: str) -> dict[str, object]:
+        return self._request({"op": "family", "alias": alias, "parent": parent})
+
     def system(self) -> dict[str, object]:
         return self._request({"op": "system"})
 
     def _request(self, request: Mapping[str, object]) -> dict[str, object]:
-        worker_request = dict(request)
+        worker_request = {key: value for key, value in dict(request).items() if value is not None}
         if self._target_root is not None:
             worker_request["target_root"] = str(self._target_root)
         encoded_request = base64.urlsafe_b64encode(
@@ -318,6 +333,15 @@ class IsolatedOverviewService:
         if expected_operation == "system":
             cls._validate_system(data)
             return
+        if expected_operation == "events":
+            cls._validate_events(data)
+            return
+        if expected_operation == "families":
+            cls._validate_families(data)
+            return
+        if expected_operation == "family":
+            cls._validate_family(data)
+            return
         if expected_operation == "workspace":
             if set(data) != {"workspace", "lines", "tasks", "objectives"}:
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
@@ -362,6 +386,133 @@ class IsolatedOverviewService:
                 not cls._safe_alias(highest.get("alias"))
                 or highest.get("kind") not in _ATTENTION_KINDS
                 or not cls._safe_code(highest.get("reason"))
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_events(cls, data: dict[str, object]) -> None:
+        if set(data) != {"events", "next_cursor"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        events = data["events"]
+        if not isinstance(events, list) or len(events) > 100:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in events:
+            if not isinstance(item, dict) or set(item) != {
+                "seq",
+                "id",
+                "kind",
+                "at",
+                "actor",
+                "subject",
+                "family",
+                "facts",
+            }:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if type(item.get("seq")) is not int or item["seq"] < 0:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            event_id = item.get("id")
+            kind = item.get("kind")
+            at = item.get("at")
+            facts = item.get("facts")
+            if (
+                not isinstance(event_id, str)
+                or len(event_id) > 80
+                or not isinstance(kind, str)
+                or not (kind == "EVENT_REDACTED" or cls._safe_code(kind))
+                or not isinstance(at, str)
+                or len(at) > 40
+                or not (item.get("actor") == "" or cls._safe_alias(item.get("actor")))
+                or not (item.get("subject") == "" or cls._safe_alias(item.get("subject")))
+                or not (item.get("family") == "" or cls._safe_alias(item.get("family")))
+                or not isinstance(facts, dict)
+                or len(facts) > 16
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            for key, value in facts.items():
+                if not is_safe_event_fact(key, value):
+                    raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        cursor = data["next_cursor"]
+        if cursor is not None and (not isinstance(cursor, str) or not _CURSOR.fullmatch(cursor)):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_families(cls, data: dict[str, object]) -> None:
+        if set(data) != {"families"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        families = data["families"]
+        if not isinstance(families, list) or len(families) > 1000:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in families:
+            if not isinstance(item, dict) or set(item) != {
+                "parent",
+                "children",
+                "unread",
+                "dirty",
+                "missing_origin",
+                "in_progress",
+            }:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            children = item.get("children")
+            if (
+                not cls._safe_alias(item.get("parent"))
+                or not isinstance(children, list)
+                or not all(cls._safe_alias(child) for child in children)
+                or not cls._count(item.get("unread"))
+                or not cls._count(item.get("dirty"))
+                or not cls._count(item.get("missing_origin"))
+                or not cls._count(item.get("in_progress"))
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_family(cls, data: dict[str, object]) -> None:
+        if set(data) != {"parent", "members", "nodes", "edges"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if not cls._safe_alias(data.get("parent")):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        members = data["members"]
+        nodes = data["nodes"]
+        edges = data["edges"]
+        if (
+            not isinstance(members, list)
+            or not isinstance(nodes, list)
+            or not isinstance(edges, list)
+            or len(members) > 1000
+            or len(nodes) > 1000
+            or len(edges) > 1000
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for member in members:
+            if member != "operator" and not cls._safe_alias(member):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for node in nodes:
+            if not isinstance(node, dict) or set(node) != {
+                "id",
+                "role",
+                "dirty",
+                "missing_origin",
+                "in_progress",
+                "unread",
+            }:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            node_id = node.get("id")
+            if node_id != "operator" and not cls._safe_alias(node_id):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if (
+                node.get("role") not in {"parent", "child", "operator"}
+                or type(node.get("dirty")) is not bool
+                or type(node.get("missing_origin")) is not bool
+                or type(node.get("in_progress")) is not bool
+                or not cls._count(node.get("unread"))
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for edge in edges:
+            if not isinstance(edge, dict) or set(edge) != {"from", "to", "kind"}:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if (
+                not cls._safe_alias(edge.get("from"))
+                or not cls._safe_alias(edge.get("to"))
+                or edge.get("kind") != "parent"
             ):
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
 
@@ -505,12 +656,14 @@ class IsolatedOverviewService:
         for item in value:
             if not isinstance(item, dict) or set(item) != _LINE_KEYS:
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            parent = item.get("parent")
             if (
                 not cls._safe_alias(item.get("id"))
                 or not cls._safe_code(item.get("kind"))
                 or safe_branch(item.get("branch")) != item.get("branch")
                 or safe_branch(item.get("base")) != item.get("base")
                 or not cls._count(item.get("repository_count"))
+                or not (parent == "" or cls._safe_alias(parent))
             ):
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
 

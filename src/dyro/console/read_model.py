@@ -50,6 +50,7 @@ def _data(snapshot: WorkspaceReadSnapshot) -> dict[str, object]:
                 "branch": safe_branch(line.branch),
                 "base": safe_branch(line.base),
                 "repository_count": line.repository_count,
+                "parent": safe_id(line.parent) if line.parent else "",
             }
             for line in snapshot.lines
         ],

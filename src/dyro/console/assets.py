@@ -27,13 +27,13 @@ ASSET_MANIFEST = {
     ),
     "app.js": (
         "text/javascript; charset=utf-8",
-        "beaa5e872359895d9af8aa0ae17c0ebbf60e369b4df4d46fd1e022164fe427af",
-        33027,
+        "5ee284b3cd590ba114a64b1994ac79de64b7376bd38b5163f74176b704ac0113",
+        47380,
     ),
     "styles.css": (
         "text/css; charset=utf-8",
-        "f004307d19af82a906245affac01e2abc1efb39f0ae467c40cb7443f05262e9b",
-        12621,
+        "dbf956c627803fe47ad910ec79a6a0763e6a40c993fa2e96e5ec79739fcd3432",
+        14676,
     ),
 }
 

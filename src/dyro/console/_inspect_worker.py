@@ -239,6 +239,8 @@ def _decode_request(value: str) -> dict[str, object]:
         "cursor",
         "limit",
         "alias",
+        "after",
+        "parent",
         "target_root",
     }:
         raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
@@ -313,6 +315,30 @@ def main(argv: list[str] | None = None) -> int:
             payload = service.inspect_proofs(alias)
         elif operation == "system":
             payload = service.system()
+        elif operation == "events":
+            alias = request.get("alias")
+            if not isinstance(alias, str):
+                raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID")
+            after = request.get("after")
+            if after is not None and not isinstance(after, str):
+                raise ConsoleOverviewError("EVENT_CURSOR_INVALID")
+            limit = request.get("limit", 50)
+            if type(limit) is not int:
+                raise ConsoleOverviewError("EVENT_LIMIT_INVALID")
+            payload = service.events(alias, after=after, limit=limit)
+        elif operation == "families":
+            alias = request.get("alias")
+            if not isinstance(alias, str):
+                raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID")
+            payload = service.families(alias)
+        elif operation == "family":
+            alias = request.get("alias")
+            parent = request.get("parent")
+            if not isinstance(alias, str):
+                raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID")
+            if not isinstance(parent, str):
+                raise ConsoleOverviewError("FAMILY_PARENT_INVALID")
+            payload = service.family(alias, parent)
         else:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         return _response(payload)

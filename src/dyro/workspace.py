@@ -698,7 +698,7 @@ def spawn_line(
         for repo_id in selected
         if parent.storage_for(repo_id) != "linked-worktree"
     }
-    return create_line(
+    line = create_line(
         config,
         line_id=child_id,
         branch=f"feat/{child_id}",
@@ -710,6 +710,18 @@ def spawn_line(
         parent=parent.id,
         dry_run=dry_run,
     )
+    if not dry_run:
+        from .events import append_event
+
+        append_event(
+            config,
+            kind="spawn",
+            actor=parent.id,
+            subject=line.id,
+            family=parent.id,
+            facts={"parent": parent.id, "child": line.id},
+        )
+    return line
 
 
 @dataclass(frozen=True)
@@ -1069,6 +1081,17 @@ def merge_line(
         dry_run=dry_run,
         extra_ledger={"parent": parent.id, "child": child.id},
     )
+    if not dry_run:
+        from .events import append_event
+
+        append_event(
+            config,
+            kind="merge",
+            actor=child.id,
+            subject=parent.id,
+            family=parent.id,
+            facts={"parent": parent.id, "child": child.id},
+        )
 
 
 def sync_line(
@@ -1098,6 +1121,17 @@ def sync_line(
         dry_run=dry_run,
         extra_ledger={"parent": parent.id, "child": child.id},
     )
+    if not dry_run:
+        from .events import append_event
+
+        append_event(
+            config,
+            kind="sync",
+            actor=parent.id,
+            subject=child.id,
+            family=parent.id,
+            facts={"parent": parent.id, "child": child.id},
+        )
 
 
 def _line_status_scope(line: Line) -> str:

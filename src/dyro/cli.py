@@ -2137,6 +2137,17 @@ def cmd_host_seed(args: argparse.Namespace) -> None:
     workspace, lines = seed_configured_overlays(
         config, force=args.force, dry_run=args.dry_run
     )
+    if not args.dry_run and (workspace.written or any(item.written for _, item in lines)):
+        from .events import append_event
+
+        append_event(
+            config,
+            kind="host_seed",
+            actor="operator",
+            subject="overlay",
+            family="",
+            facts={"written": len(workspace.written) + sum(len(item.written) for _, item in lines)},
+        )
     prefix = "DRY RUN: " if args.dry_run else ""
     if workspace.written:
         print(f"{prefix}已写入 overlay {', '.join(workspace.written)}")
