@@ -141,6 +141,7 @@ from .image_sidecar import (
 )
 from .integrations import (
     INTEGRATION_CHOICES,
+    USER_INTEGRATION_METAVAR,
     IntegrationState,
     install_integration,
     integration_status,
@@ -924,7 +925,7 @@ def _setup_skill_preference() -> bool:
         prompt,
         (
             ("1", option_one),
-            ("2", "稍后手动安装（dyro integration install skill / executor / board / dispatch）"),
+            ("2", "稍后手动安装（dyro integration install skill / executor / review-board / dispatch）"),
         ),
         default=default,
     )
@@ -991,7 +992,7 @@ def _render_setup_personal_preferences(
             print("  - Skills：无法安装：未检测到 Agent 宿主目录")
             print(
                 "      · 确认后会 soft-fail；请安装宿主后运行 "
-                "dyro integration install skill / executor / board / dispatch"
+                "dyro integration install skill / executor / review-board / dispatch"
             )
             return
         plans = []
@@ -4510,7 +4511,12 @@ def build_parser() -> argparse.ArgumentParser:
     integration_install_parser.add_argument(
         "id",
         choices=INTEGRATION_CHOICES,
-        help="skill 为控制面；executor 为执行座位；board 为评审板；dispatch 为派发；codex 为 skill 别名",
+        metavar=USER_INTEGRATION_METAVAR,
+        help=(
+            "review-board 安装会审斜杠 /dyro-review-board 及内部协议；"
+            "board 为遗留内部 id；skill=控制面；executor=执行；"
+            "dispatch=派发；task-merge/line-family=斜杠；codex=skill 别名"
+        ),
     )
     integration_install_parser.add_argument(
         "--yes", action="store_true", help="确认执行已预览的安装或升级"
@@ -4529,7 +4535,12 @@ def build_parser() -> argparse.ArgumentParser:
     integration_sync_parser.add_argument(
         "id",
         choices=INTEGRATION_CHOICES,
-        help="skill 为控制面；executor 为执行座位；board 为评审板；dispatch 为派发；codex 为 skill 别名",
+        metavar=USER_INTEGRATION_METAVAR,
+        help=(
+            "review-board 安装会审斜杠 /dyro-review-board 及内部协议；"
+            "board 为遗留内部 id；skill=控制面；executor=执行；"
+            "dispatch=派发；task-merge/line-family=斜杠；codex=skill 别名"
+        ),
     )
     integration_sync_parser.add_argument(
         "--yes", action="store_true", help="确认执行已预览的同步或升级"
@@ -4544,7 +4555,12 @@ def build_parser() -> argparse.ArgumentParser:
     integration_uninstall_parser = integration_sub.add_parser(
         "uninstall", help="仅卸载仍匹配 ownership manifest 的资产"
     )
-    integration_uninstall_parser.add_argument("id", choices=INTEGRATION_CHOICES)
+    integration_uninstall_parser.add_argument(
+        "id",
+        choices=INTEGRATION_CHOICES,
+        metavar=USER_INTEGRATION_METAVAR,
+        help="review-board 为会审斜杠；board 为遗留内部协议 id；其余与 install 相同",
+    )
     integration_uninstall_parser.add_argument(
         "--yes", action="store_true", help="确认卸载仍完整的自有资产"
     )

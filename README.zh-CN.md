@@ -286,7 +286,8 @@ python3 -m pip install --user --upgrade dyro
 ```
 
 交互式 `dyro setup` 可在个人偏好步骤一次启用第一方 Skill 套件，同时安装首批座位：
-`dyro-control-plane`、`dyro-executor`、`dyro-board` 与 `dyro-dispatch`。已经托管
+`dyro-control-plane`、`dyro-executor`、会审协议加 `/dyro-review-board` 与
+`dyro-dispatch`。`dyro-board` 是内部协议 id，不是第二条斜杠命令。已经托管
 控制面 Skill 的用户会在下次交互启动或包更新后自动补装新座位，此后都会随 Dyro
 自动同步；从未启用过 Dyro Skill 的机器不会被后台静默写入。座位按情景自动戴上，
 戴上不等于同意突变。
@@ -560,7 +561,7 @@ dyro --dry-run task run API-101
 | `objective list/status/explain/tick/attention/plan` | 查看已接受的 Objective 与换工具开场白。写操作在 `objective apply`。 |
 | `proof list/show/verify/export/verify-bundle` | 重绑交付 Proof。`verify` 重绑当前工作区；`verify-bundle` 只核便携完整性。`live` 不是 merge。 |
 | `config get/set` / `agent list/add/test/discover` / `tool list/install/default/pin` / `open` | 安全管理策略、adapter、工具发现与个人启动偏好，或在正确开发线启动 Agent。 |
-| `integration status/install/sync/uninstall` | 管理第一方座位 Skill（`dyro-control-plane`、`dyro-executor`、`dyro-board`、`dyro-dispatch`）。加载座位不是同意改世界。 |
+| `integration status/install/sync/uninstall` | 管理第一方座位 Skill（`dyro-control-plane`、`dyro-executor`、`/dyro-review-board`、`dyro-dispatch`）。`dyro-board` 仍是内部会审协议 id。加载座位不是同意改世界。 |
 | `task create/open/list/board/status/next/graph/explain/attempts/binding` | 创建或进入任务、管理状态，编译/校验任务图，解释调度，查看 provenance，输出精确复核绑定。 |
 | `task run/answer/gates/review/signoff` | 执行任务、回答追问、运行门禁、申请独立复核；需要时记录外部签收。 |
 | `task claim --output` / `task evidence build/execution/review` | 一次性领取任务并以“仅创建”文件交给隔离执行器，构建/导入可移植执行证据包，并导入与回执绑定的复核证据。 |

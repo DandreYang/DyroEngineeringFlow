@@ -289,12 +289,13 @@ python3 -m pip install --user --upgrade dyro
 
 Interactive `dyro setup` can install the first-party Skill bundle during personal
 preferences. That one opt-in installs the first-batch seats: `dyro-control-plane`,
-`dyro-executor`, `dyro-board`, and `dyro-dispatch`. Existing managed control-plane
-installations automatically gain the new companions on the next interactive
-launch or package refresh, and managed Skills then stay synchronized with Dyro
-updates. Machines that have never opted into a Dyro Skill are not modified
-silently. Each seat auto-loads from context; loading a seat is not consent to
-mutate.
+`dyro-executor`, the 会审 protocol plus `/dyro-review-board`, and `dyro-dispatch`.
+`dyro-board` is the internal protocol id, not a second slash command. Existing
+managed control-plane installations automatically gain the new companions on the
+next interactive launch or package refresh, and managed Skills then stay
+synchronized with Dyro updates. Machines that have never opted into a Dyro Skill
+are not modified silently. Each seat auto-loads from context; loading a seat is
+not consent to mutate.
 
 Multi-harness delegation remains separate from the read-only control plane so its
 process/network effects are explicit. Manual installation is still available:
@@ -622,7 +623,7 @@ dyro --dry-run task run API-101
 | `objective list/status/explain/tick/attention/plan` | Inspect accepted Objectives and the switch-tool briefing. Mutations stay on `objective apply`. |
 | `proof list/show/verify/export/verify-bundle` | Rebind delivery Proof. `verify` rebinds the workspace; `verify-bundle` checks portable integrity only. `live` is not merge. |
 | `config get/set` / `agent list/add/test/discover` / `tool list/install/default/pin` / `open` | Safely manage policy, adapters, tool discovery and personal launch preferences, or open an agent in the correct line. |
-| `integration status/install/sync/uninstall` | Manage first-party Skill seats (`dyro-control-plane`, `dyro-executor`, `dyro-board`, `dyro-dispatch`). Loading a seat is not consent to mutate. |
+| `integration status/install/sync/uninstall` | Manage first-party Skill seats (`dyro-control-plane`, `dyro-executor`, `/dyro-review-board`, `dyro-dispatch`). `dyro-board` remains the internal 会审 protocol id. Loading a seat is not consent to mutate. |
 | `task create/open/list/board/status/next/graph/explain/attempts/binding` | Create or enter tasks, manage state, validate the task graph, explain scheduling, inspect provenance, and output review bindings. |
 | `task run/answer/gates/review/signoff` | Run tasks, resolve questions, execute gates, request independent review, and record external sign-off when a Profile requires it. |
 | `task claim --output` / `task evidence build/execution/review` | One-time claim with a create-only runner handoff file, portable execution-evidence build/import, and receipt-bound review import. |

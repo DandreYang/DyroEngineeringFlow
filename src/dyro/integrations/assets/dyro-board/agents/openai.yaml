@@ -1,4 +1,4 @@
 interface:
-  display_name: "Dyro Review Board"
-  short_description: "Adversarial review record, not delivery proof"
-  default_prompt: "Use $dyro-board. Run the signed review-board protocol. Findings are advisory; they are not Proof or task review PASS."
+  display_name: "Dyro Review Board Protocol"
+  short_description: "Internal 会审 protocol, not a user slash"
+  default_prompt: "Load this installed protocol for 会审 / 对抗. This is not a user slash or $ command. Humans run /dyro-review-board. Findings are advisory; they are not Proof or task review PASS."
