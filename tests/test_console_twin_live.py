@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dyro.config import load
-from dyro.console.overview import ConsoleOverviewService
+from dyro.console.overview import ConsoleOverviewError, ConsoleOverviewService
 from dyro.console.twin import TASK_STATUSES
 from dyro.continuation.store import create_objective
 from dyro.events import append_event, read_overlay_events
@@ -324,6 +324,34 @@ class GetTwinFloorBindTests(WorkspaceCase):
         self.assertEqual(len(first_page), 50)
         result = _run_live({"snapshot": data, "events": first_page})
         self._assert_prefix_does_not_invent_running(result)
+        self.assertFalse(result["overlay_complete"])
+
+    def test_workspace_fallback_empty_twin_fail_closes_before_prefix_merge(self) -> None:
+        self._force_inventory_done()
+        service = self._service()
+        with patch.object(
+            service,
+            "_workspace_config",
+            side_effect=ConsoleOverviewError("WORKSPACE_UNAVAILABLE"),
+        ):
+            payload = service.workspace(self.config.name)
+        data = payload["data"]
+        self.assertEqual(data["workspace"]["availability"], "available")
+        task = next(item for item in data["tasks"] if item["id"] == "TASK-A")
+        self.assertEqual(task["status"], "done")
+        twin = data["operator_twin"]
+        self.assertFalse(twin["overlay_complete"])
+        self.assertEqual(twin["projected_seq"], 0)
+        self.assertEqual(twin["running"], [])
+        self.assertEqual(twin["plan"], [])
+        self.assertTrue(all(column["tasks"] == [] for column in twin["phases"]))
+
+        first_page = _prefix_page()
+        self.assertEqual(len(first_page), 50)
+        result = _run_live({"snapshot": data, "events": first_page})
+        self.assertEqual(result["running"], [])
+        self.assertFalse(result["board_landed"])
+        self.assertNotIn("会审已落下", result["rendered"])
         self.assertFalse(result["overlay_complete"])
 
 

@@ -410,7 +410,7 @@ class OperatorTwinProjectionTests(WorkspaceCase):
             {"plan", "phases", "running", "latest_ledger", "projected_seq", "overlay_complete"},
         )
         self.assertEqual(twin["projected_seq"], 0)
-        self.assertTrue(twin["overlay_complete"])
+        self.assertFalse(twin["overlay_complete"])
         self.assertEqual([column["status"] for column in twin["phases"]], [
             "backlog",
             "assigned",

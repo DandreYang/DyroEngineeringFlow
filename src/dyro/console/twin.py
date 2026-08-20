@@ -67,7 +67,7 @@ def empty_operator_twin() -> dict[str, object]:
             "facts": {},
         },
         "projected_seq": 0,
-        "overlay_complete": True,
+        "overlay_complete": False,
     }
 
 
