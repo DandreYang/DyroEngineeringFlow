@@ -112,8 +112,8 @@ class ConsoleServerTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
         payload = json.loads(body)
         self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(payload["data"]["surfaces"], ["overview", "proofs", "system", "events"])
-        self.assertEqual(payload["data"]["capabilities"], ["overview", "proofs", "system", "events"])
+        self.assertEqual(payload["data"]["surfaces"], ["overview", "proofs", "system", "events", "families"])
+        self.assertEqual(payload["data"]["capabilities"], ["overview", "proofs", "system", "events", "families"])
         self.assertEqual(payload["data"]["initial_workspace"], "")
         self.assertIn("session_expires_at", payload["data"])
 
@@ -308,6 +308,25 @@ class ConsoleOverviewServerTests(unittest.TestCase):
                 "edges": [],
             },
         }
+        self.overview.channel.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "8" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {
+                "family": "core",
+                "members": ["core", "core_pay", "operator"],
+                "messages": [],
+                "next_cursor": None,
+            },
+        }
+        self.overview.post_channel.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "7" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {"id": "msg_1", "seq": 1},
+        }
         self.server = create_console_http_server(
             port=0,
             bootstrap_secret="a" * 43,
@@ -468,8 +487,9 @@ class ConsoleOverviewServerTests(unittest.TestCase):
         channel, _, channel_body = self._request(
             "POST", "/api/v1/workspaces/alpha/families/core/channel", headers=headers
         )
-        self.assertEqual(channel, 405)
-        self.assertEqual(json.loads(channel_body)["error"]["code"], "METHOD_NOT_ALLOWED")
+        self.assertEqual(channel, 400)
+        self.assertEqual(json.loads(channel_body)["error"]["code"], "BAD_REQUEST")
+        self.overview.post_channel.assert_not_called()
 
     def test_family_graph_is_authenticated_get_only(self) -> None:
         bearer = self._bearer()
@@ -480,6 +500,82 @@ class ConsoleOverviewServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["data"]["parent"], "core")
         self.overview.family.assert_called_once_with("alpha", "core")
+
+    def test_channel_get_and_post_require_host_and_bearer(self) -> None:
+        from dyro.console.overview import ConsoleOverviewError
+
+        unauthorized, _, body = self._request(
+            "GET", "/api/v1/workspaces/alpha/families/core/channel"
+        )
+        self.assertEqual(unauthorized, 401)
+        self.assertEqual(json.loads(body)["error"]["code"], "UNAUTHORIZED")
+
+        bearer = self._bearer()
+        headers = {"Authorization": f"Bearer {bearer}", "Origin": self.origin}
+        status, _, body = self._request(
+            "GET",
+            "/api/v1/workspaces/alpha/families/core/channel?filter=unacked",
+            headers=headers,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["data"]["family"], "core")
+        self.overview.channel.assert_called_once_with(
+            "alpha", "core", after=None, filter="unacked", limit=50
+        )
+
+        localhost, _, _ = self._request(
+            "GET",
+            "/api/v1/workspaces/alpha/families/core/channel",
+            headers={"Host": "localhost", "Authorization": f"Bearer {bearer}"},
+        )
+        self.assertEqual(localhost, 400)
+
+        unauth_post, _, unauth_body = self._request(
+            "POST",
+            "/api/v1/workspaces/alpha/families/core/channel",
+            body=json.dumps({"kind": "decision", "body": "ok"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Origin": self.origin},
+        )
+        self.assertEqual(unauth_post, 401)
+        self.assertEqual(json.loads(unauth_body)["error"]["code"], "UNAUTHORIZED")
+
+        localhost_post, _, _ = self._request(
+            "POST",
+            "/api/v1/workspaces/alpha/families/core/channel",
+            body=json.dumps({"kind": "decision", "body": "ok"}).encode("utf-8"),
+            headers={
+                "Host": "localhost",
+                "Authorization": f"Bearer {bearer}",
+                "Content-Type": "application/json",
+            },
+        )
+        self.assertEqual(localhost_post, 400)
+
+        posted, _, posted_body = self._request(
+            "POST",
+            "/api/v1/workspaces/alpha/families/core/channel",
+            body=json.dumps({"kind": "decision", "body": "ok"}).encode("utf-8"),
+            headers={**headers, "Content-Type": "application/json"},
+        )
+        self.assertEqual(posted, 200)
+        self.assertEqual(json.loads(posted_body)["data"]["id"], "msg_1")
+        self.overview.post_channel.assert_called_once_with(
+            "alpha", "core", {"kind": "decision", "body": "ok"}
+        )
+
+        self.overview.post_channel.side_effect = ConsoleOverviewError(
+            "FAMILY_POST_FORBIDDEN"
+        )
+        forbidden, _, forbidden_body = self._request(
+            "POST",
+            "/api/v1/workspaces/alpha/families/core/channel",
+            body=json.dumps({"kind": "blocked", "body": "no"}).encode("utf-8"),
+            headers={**headers, "Content-Type": "application/json"},
+        )
+        self.assertEqual(forbidden, 403)
+        self.assertEqual(
+            json.loads(forbidden_body)["error"]["code"], "FAMILY_POST_FORBIDDEN"
+        )
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ projects an explicitly whitelisted summary for the Console.
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -263,26 +263,88 @@ class ConsoleOverviewService:
         return self._envelope(data, set())
 
     def families(self, alias: str) -> dict[str, object]:
-        """Return one-level family cards. Channel unread stays 0 in P1."""
-        from .families import family_cards
+        """Return one-level family cards. Unread is operator-unacked overlay."""
+        from .families import family_cards, family_unread_maps
 
+        config, warning_from_config = self._workspace_config(alias)
         _summary, warning_codes, inventory = self._workspace_inventory(alias)
-        data = {"families": family_cards(inventory["lines"], inventory["tasks"])}
+        warning_codes = set(warning_codes) | warning_from_config
+        card_unread, _members = family_unread_maps(config, inventory["lines"])
+        data = {
+            "families": family_cards(
+                inventory["lines"], inventory["tasks"], unread=card_unread
+            )
+        }
         return self._envelope(data, warning_codes)
 
     def family(self, alias: str, parent: str) -> dict[str, object]:
         """Return ``F(parent)``. Grandchildren are excluded."""
-        from .families import family_payload
+        from .families import family_payload, family_unread_maps
 
         try:
             parent_id = validate_id(parent, "父开发线 ID")
         except ValidationError:
             raise ConsoleOverviewError("FAMILY_PARENT_INVALID") from None
+        config, warning_from_config = self._workspace_config(alias)
         _summary, warning_codes, inventory = self._workspace_inventory(alias)
-        payload = family_payload(inventory["lines"], parent_id, inventory["tasks"])
+        warning_codes = set(warning_codes) | warning_from_config
+        _cards, members = family_unread_maps(config, inventory["lines"])
+        payload = family_payload(
+            inventory["lines"],
+            parent_id,
+            inventory["tasks"],
+            unread=members.get(parent_id, {}),
+        )
         if not payload:
             raise ConsoleOverviewError("FAMILY_NOT_FOUND")
         return self._envelope(payload, warning_codes)
+
+    def channel(
+        self,
+        alias: str,
+        parent: str,
+        *,
+        after: str | None = None,
+        filter: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        """Return a cursor page of the family channel. Overview polling never calls this."""
+        from .families import channel_page
+
+        try:
+            parent_id = validate_id(parent, "父开发线 ID")
+        except ValidationError:
+            raise ConsoleOverviewError("FAMILY_PARENT_INVALID") from None
+        config, warning_codes = self._workspace_config(alias)
+        try:
+            data = channel_page(
+                config,
+                parent_id,
+                secret=self._cursor_secret,
+                after=after,
+                filter_text=filter,
+                limit=limit,
+            )
+        except ConsoleOverviewError:
+            raise
+        return self._envelope(data, warning_codes)
+
+    def post_channel(
+        self,
+        alias: str,
+        parent: str,
+        payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Write one operator overlay signal in the listener process. No git."""
+        from .families import apply_human_channel_post
+
+        try:
+            parent_id = validate_id(parent, "父开发线 ID")
+        except ValidationError:
+            raise ConsoleOverviewError("FAMILY_PARENT_INVALID") from None
+        config, warning_codes = self._workspace_config(alias)
+        data = apply_human_channel_post(config, parent_id, payload)
+        return self._envelope(data, warning_codes)
 
     def system(self) -> dict[str, object]:
         """Return cached update facts. Do not probe PATH or start a network check."""

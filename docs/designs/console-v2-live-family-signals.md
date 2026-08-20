@@ -395,7 +395,7 @@ meta `surfaces` 增加 `events`（P1）与 `families`（P2）。页面按能力�
 
 ### P1 · 事件 + 图
 
-P1 已在本 PR 落地（事件尾、`parent` 投影、一层家族图、SSE `after=`）。P2 / P3 仍未实现。
+P1 已在本 PR 落地（事件尾、`parent` 投影、一层家族图、SSE `after=`）。P3 仍未实现。
 
 - 写入并读取 `.dyro/events.jsonl`。
 - line DTO 投影 `parent`。
@@ -405,6 +405,8 @@ P1 已在本 PR 落地（事件尾、`parent` 投影、一层家族图、SSE `af
 - 复制区只有 dry-run，没有 `--yes`。
 
 ### P2 · 家族频道 + 人类模块
+
+P2 已落地：`channel.jsonl` / `acks`、`line post|inbox|ack`、`next family_unacked`、人类 POST `decision|contract|ack`。
 
 - 计算 `F(P)`，写入 `channel.jsonl` 与对应 `signal` 事件。
 - CLI：`line post` / `inbox` / `ack`。

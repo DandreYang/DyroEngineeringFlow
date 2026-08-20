@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from dyro.config import load
-from dyro.console.families import family_cards, family_payload
+from dyro.console.families import apply_human_channel_post, family_cards, family_payload
+from dyro.console.overview import ConsoleOverviewError
 from dyro.console.read_model import workspace_envelope
-from dyro.families import family_graph, family_members
+from dyro.events import events_path, read_events
+from dyro.families import (
+    FamilyChannelError,
+    ack_channel_message,
+    channel_path,
+    family_graph,
+    family_members,
+    family_unacked,
+    post_channel_message,
+    read_visible_channel,
+)
 from dyro.observations import capture_workspace_read_snapshot
+from dyro.state import append_text
 from dyro.workspace import create_line, spawn_line
 
 from .support import WorkspaceCase
@@ -63,6 +76,129 @@ class OneLevelFamilyTests(WorkspaceCase):
         self.assertEqual(payload["parent"], "core")
         self.assertEqual(payload["members"], ["core", "core_pay", "operator"])
         self.assertFalse(any(node["id"] == "core_pay_fix" for node in payload["nodes"]))
+
+
+class FamilyChannelTests(WorkspaceCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.config = load(self.root)
+        create_line(self.config, line_id="core", branch="feat/core", base="main")
+        spawn_line(self.config, "core", "pay")
+        spawn_line(self.config, "core", "shop")
+        spawn_line(self.config, "core_pay", "fix")
+
+    def test_cousins_see_broadcast_but_not_each_others_directed_posts(self) -> None:
+        broadcast = post_channel_message(
+            self.config,
+            sender="core_pay",
+            kind="ask_sync",
+            body="请同步父线",
+        )
+        directed = post_channel_message(
+            self.config,
+            sender="core_pay",
+            kind="blocked",
+            body="只要父线看见",
+            recipient="core",
+        )
+        self.assertEqual(broadcast["family"], "core")
+        self.assertEqual(directed["family"], "core")
+        shop = {item["id"] for item in read_visible_channel(self.config, "core", viewer="core_shop")}
+        pay = {item["id"] for item in read_visible_channel(self.config, "core", viewer="core_pay")}
+        parent = {item["id"] for item in read_visible_channel(self.config, "core", viewer="core")}
+        operator = {
+            item["id"] for item in read_visible_channel(self.config, "core", viewer="operator")
+        }
+        self.assertIn(broadcast["id"], shop)
+        self.assertNotIn(directed["id"], shop)
+        self.assertIn(directed["id"], pay)
+        self.assertIn(directed["id"], parent)
+        self.assertIn(directed["id"], operator)
+        events, _last = read_events(self.config)
+        signals = [item for item in events if item["kind"] == "signal"]
+        self.assertEqual(
+            [item["facts"]["channel_id"] for item in signals],
+            [broadcast["id"], directed["id"]],
+        )
+
+    def test_grandchild_channel_stays_off_the_grandparent_family(self) -> None:
+        child = post_channel_message(
+            self.config,
+            sender="core_pay",
+            kind="ask_sync",
+            body="请看修复线",
+            recipient="core_pay_fix",
+        )
+        self.assertEqual(child["family"], "core_pay")
+        core_ids = {item["id"] for item in read_visible_channel(self.config, "core")}
+        pay_ids = {item["id"] for item in read_visible_channel(self.config, "core_pay")}
+        self.assertNotIn(child["id"], core_ids)
+        self.assertIn(child["id"], pay_ids)
+
+    def test_unpaired_channel_row_fails_closed_and_is_not_broadcast(self) -> None:
+        append_text(
+            channel_path(self.config, "core"),
+            json.dumps(
+                {
+                    "id": "msg_1",
+                    "seq": 1,
+                    "at": "2026-08-20T12:00:00Z",
+                    "family": "core",
+                    "from": "core_pay",
+                    "to": "",
+                    "kind": "ask_sync",
+                    "body": "半写入",
+                    "retracts": "",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        with self.assertRaises(FamilyChannelError) as raised:
+            read_visible_channel(self.config, "core", viewer="core_shop")
+        self.assertEqual(raised.exception.code, "CHANNEL_LOG_INCONSISTENT")
+        events, _last = read_events(self.config)
+        self.assertFalse(any(item["kind"] == "signal" for item in events))
+
+    def test_operator_post_rejects_non_human_kinds(self) -> None:
+        with self.assertRaises(FamilyChannelError) as raised:
+            post_channel_message(
+                self.config,
+                sender="operator",
+                kind="blocked",
+                body="人类不能发阻塞",
+                family="core",
+            )
+        self.assertEqual(raised.exception.code, "FAMILY_POST_FORBIDDEN")
+        with self.assertRaises(ConsoleOverviewError) as http:
+            apply_human_channel_post(
+                self.config, "core", {"kind": "shipped", "body": "不能发"}
+            )
+        self.assertEqual(http.exception.code, "FAMILY_POST_FORBIDDEN")
+
+    def test_dry_run_post_and_ack_write_nothing(self) -> None:
+        planned = post_channel_message(
+            self.config,
+            sender="core",
+            kind="decision",
+            body="先看一眼",
+            dry_run=True,
+        )
+        self.assertTrue(planned["dry_run"])
+        self.assertFalse(channel_path(self.config, "core").exists())
+        written = post_channel_message(
+            self.config,
+            sender="core",
+            kind="decision",
+            body="先看一眼",
+        )
+        ack = ack_channel_message(self.config, written["id"], dry_run=True)
+        self.assertTrue(ack["dry_run"])
+        unread = family_unacked(self.config)
+        self.assertEqual(unread["count"], 1)
+        self.assertEqual(unread["kind"], "decision")
+        self.assertEqual(unread["family"], "core")
 
 
 if __name__ == "__main__":

@@ -102,6 +102,7 @@ from .continuation.triggers import (
 )
 from .evidence import build_execution_bundle, unpack_execution_bundle
 from .errors import DyroError, ValidationError
+from .families import ack_channel_message, family_unacked, list_inbox, post_channel_message
 from .home import (
     HomeTool,
     _record_for_root,
@@ -387,6 +388,36 @@ def _require_objective_yes(args: argparse.Namespace, label: str) -> None:
         raise DyroError(
             f"{label} 会修改 Objective 状态；请先使用 --dry-run 检查，再加 --yes 执行"
         )
+
+
+def _require_overlay_yes(args: argparse.Namespace, label: str) -> None:
+    if not args.yes and not args.dry_run:
+        raise DyroError(
+            f"{label} 会写入 overlay 家族信号；请先使用 --dry-run 检查，再加 --yes 执行"
+        )
+
+
+def _family_unacked_fields(config: Config) -> dict[str, object]:
+    try:
+        payload = family_unacked(config)
+    except (DyroError, OSError, UnicodeError):
+        payload = {"count": 0, "kind": "", "family": "", "summary": ""}
+    if not isinstance(payload, dict):
+        payload = {"count": 0, "kind": "", "family": "", "summary": ""}
+    return {"family_unacked": payload}
+
+
+def _print_family_unacked_attention(config: Config) -> None:
+    payload = _family_unacked_fields(config)["family_unacked"]
+    if isinstance(payload, dict) and payload.get("count"):
+        print("家族频道有未读信号")
+
+
+def _inbox_viewer(config: Config) -> str:
+    try:
+        return resolve_line(config, interactive=False).id
+    except (DyroError, ValidationError):
+        return ""
 
 
 def _objective_contract_from_args(args: argparse.Namespace, config: Config) -> str:
@@ -2587,6 +2618,7 @@ def cmd_next(args: argparse.Namespace) -> None:
                 diagnostic_commands=[_briefing_command(args, config, "doctor")],
                 mutation_available=bootstrap_applicable,
                 findings=findings,
+                **_family_unacked_fields(config),
                 **_next_push_fields(config),
             )
             return
@@ -2599,6 +2631,7 @@ def cmd_next(args: argparse.Namespace) -> None:
                 "缺失仓库均已配置 remote，可运行："
                 + _briefing_command(args, config, "bootstrap", "--yes")
             )
+        _print_family_unacked_attention(config)
         _print_push_disclosure(config)
         return
     lines = list_lines(config, read_budget=budget)
@@ -2611,10 +2644,12 @@ def cmd_next(args: argparse.Namespace) -> None:
                 summary="Profile 已就绪，但还没有开发线。",
                 commands=[command],
                 mutation_available=True,
+                **_family_unacked_fields(config),
                 **_next_push_fields(config),
             )
             return
         print(f"Profile 已就绪，但还没有开发线。下一步：{command}")
+        _print_family_unacked_attention(config)
         _print_push_disclosure(config)
         return
     if not config.adapters and not installed_launchable_presets():
@@ -2626,6 +2661,7 @@ def cmd_next(args: argparse.Namespace) -> None:
                 commands=[],
                 mutation_available=False,
                 required_inputs=["agent_id", "agent_command"],
+                **_family_unacked_fields(config),
                 **_next_push_fields(config),
             )
             return
@@ -2634,6 +2670,7 @@ def cmd_next(args: argparse.Namespace) -> None:
             "安装本机 Agent 后运行 dyro start，或 "
             + _scoped_command(args, config, "agent", "add", "<id>", "--command", "…")
         )
+        _print_family_unacked_attention(config)
         _print_push_disclosure(config)
         return
     briefing, diagnostic_commands = _workspace_ready_briefing(
@@ -2654,6 +2691,7 @@ def cmd_next(args: argparse.Namespace) -> None:
                 _doctor_finding_payload(item, include_paths=False)
                 for item in missing_origin_failures
             ]
+        payload.update(_family_unacked_fields(config))
         payload.update(_next_push_fields(config))
         _print_control_plane_json("next_step", **payload)
         return
@@ -2661,9 +2699,11 @@ def cmd_next(args: argparse.Namespace) -> None:
         _print_doctor_finding(finding)
     if briefing is None:
         print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。")
+        _print_family_unacked_attention(config)
         _print_push_disclosure(config)
         return
     print(render_briefing_text(briefing))
+    _print_family_unacked_attention(config)
     _print_push_disclosure(config)
 
 
@@ -2788,6 +2828,66 @@ def cmd_line_sync(args: argparse.Namespace) -> None:
         f"{'DRY RUN: ' if args.dry_run else ''}已将父线同步到 {args.child}"
         + (" 并推送" if args.push else "")
     )
+
+
+def cmd_line_post(args: argparse.Namespace) -> None:
+    config = _config(args)
+    _require_overlay_yes(args, "写入家族频道")
+    result = post_channel_message(
+        config,
+        sender=args.sender,
+        kind=args.kind,
+        body=args.body or "",
+        recipient=args.to or "",
+        family=args.family or "",
+        dry_run=args.dry_run,
+    )
+    if args.format == "json":
+        _print_control_plane_json("line_post", **result)
+        return
+    target = result["to"] or "家族广播"
+    prefix = "DRY RUN: " if args.dry_run else ""
+    print(
+        f"{prefix}已从 {result['from']} 向 {target} 发送 {result['kind']} "
+        f"{result['id']}（家族 {result['family']}）"
+    )
+
+
+def cmd_line_inbox(args: argparse.Namespace) -> None:
+    config = _config(args)
+    inbox = list_inbox(
+        config,
+        family=args.family or "",
+        viewer=_inbox_viewer(config),
+        unacked=args.unacked,
+    )
+    if args.format == "json":
+        _print_control_plane_json("line_inbox", **inbox)
+        return
+    messages = inbox["messages"]
+    print(
+        f"家族 {inbox['family']} · 查看者 {inbox['viewer']} · 未读 {inbox['unacked']}"
+    )
+    if not messages:
+        print("没有可展示的家族信号")
+        return
+    for item in messages:
+        target = item["to"] or "广播"
+        flag = "未读" if not item["acked"] else "已读"
+        print(
+            f"{item['id']:10} {item['kind']:10} {item['from']} → {target}  {flag}  {item['body']}"
+        )
+
+
+def cmd_line_ack(args: argparse.Namespace) -> None:
+    config = _config(args)
+    _require_overlay_yes(args, "确认已读家族信号")
+    result = ack_channel_message(config, args.id, dry_run=args.dry_run)
+    if args.format == "json":
+        _print_control_plane_json("line_ack", **result)
+        return
+    prefix = "DRY RUN: " if args.dry_run else ""
+    print(f"{prefix}已确认已读 {result['id']}（家族 {result['family']}）")
 
 
 def cmd_hotfix_create(args: argparse.Namespace) -> None:
@@ -4808,6 +4908,67 @@ def build_parser() -> argparse.ArgumentParser:
     )
     line_sync.add_argument("--yes", action="store_true")
     line_sync.set_defaults(func=cmd_line_sync)
+    line_post = line_sub.add_parser("post", help="向一层家族频道追加 overlay 信号")
+    line_post.add_argument("sender", metavar="LINE", help="发送者线 id；人类用 operator")
+    line_post.add_argument(
+        "--kind",
+        required=True,
+        choices=(
+            "contract",
+            "blocked",
+            "shipped",
+            "ask_sync",
+            "decision",
+            "artifact",
+            "retract",
+        ),
+        help="频道 kind；operator 只能发 decision 或 contract",
+    )
+    line_post.add_argument("--to", default="", help="定向接收者；省略则为家族广播")
+    line_post.add_argument("--body", default="", help="正文；retract 时填被撤回的 msg id")
+    line_post.add_argument(
+        "--family",
+        default="",
+        help="家族父线；operator 广播时必填",
+    )
+    line_post.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只打印计划，不写频道或事件（兼容全局 --dry-run）",
+    )
+    line_post.add_argument("--yes", action="store_true")
+    line_post.add_argument("--format", choices=("text", "json"), default="text")
+    line_post.set_defaults(func=cmd_line_post)
+    line_inbox = line_sub.add_parser("inbox", help="读取一层家族频道可见行")
+    line_inbox.add_argument("--family", default="", help="家族父线；省略则看当前线")
+    line_inbox.add_argument(
+        "--unacked",
+        action="store_true",
+        help="只列出操作者尚未 ack 的行",
+    )
+    line_inbox.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只读；不写频道（兼容全局 --dry-run）",
+    )
+    line_inbox.add_argument("--format", choices=("text", "json"), default="text")
+    line_inbox.set_defaults(func=cmd_line_inbox)
+    line_ack = line_sub.add_parser("ack", help="将一条家族信号标为人类已读")
+    line_ack.add_argument("id", help="频道行 id，例如 msg_1")
+    line_ack.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只打印计划，不写 ack（兼容全局 --dry-run）",
+    )
+    line_ack.add_argument("--yes", action="store_true")
+    line_ack.add_argument("--format", choices=("text", "json"), default="text")
+    line_ack.set_defaults(func=cmd_line_ack)
 
     hotfix = sub.add_parser("hotfix", help="生产 Hotfix 开发线")
     hotfix_sub = hotfix.add_subparsers(dest="hotfix_command", required=True)

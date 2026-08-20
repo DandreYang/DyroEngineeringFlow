@@ -26,7 +26,7 @@ from dyro.hub import load_registry
 from dyro.tasks import load_task, status, task_template
 from dyro.tooling import ToolState, load_tool_preferences
 from dyro.updates import load_update_state
-from dyro.workspace import create_line, get_line, line_repository_path
+from dyro.workspace import create_line, get_line, line_repository_path, spawn_line
 
 from .support import WorkspaceCase, publish_origin_branch
 
@@ -53,6 +53,12 @@ class CliTests(unittest.TestCase):
         self.assertTrue(spawn.dry_run)
         sync = parser.parse_args(["line", "sync", "child", "--dry-run"])
         self.assertTrue(sync.dry_run)
+        post = parser.parse_args(
+            ["line", "post", "core", "--kind", "ask_sync", "--body", "hi", "--dry-run"]
+        )
+        self.assertTrue(post.dry_run)
+        ack = parser.parse_args(["line", "ack", "msg_1", "--dry-run"])
+        self.assertTrue(ack.dry_run)
         seed = parser.parse_args(["host", "seed", "--dry-run"])
         self.assertTrue(seed.dry_run)
         global_merge = parser.parse_args(
@@ -1976,6 +1982,88 @@ class DaemonSelectionTests(WorkspaceCase):
 
         main(["--root", str(self.root), "task", "daemon", "--once", "--parallel", "1"])
         self.assertEqual(status(config, load_task(config, "TASK-ONCE")), "review")
+
+
+class FamilyChannelCliTests(WorkspaceCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.config = load(self.root)
+        create_line(self.config, line_id="core", branch="feat/core", base="main")
+        spawn_line(self.config, "core", "pay")
+
+    def _read_json(self, *argv: str) -> dict[str, object]:
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", str(self.root), *argv, "--format", "json"])
+        return json.loads(output.getvalue())
+
+    def test_dry_run_post_and_ack_write_nothing(self) -> None:
+        from dyro.families import channel_path
+
+        planned = self._read_json(
+            "--dry-run",
+            "line",
+            "post",
+            "core",
+            "--kind",
+            "ask_sync",
+            "--body",
+            "请同步",
+        )
+        self.assertTrue(planned["dry_run"])
+        self.assertFalse(channel_path(self.config, "core").exists())
+        with self.assertRaises(SystemExit):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "line",
+                    "post",
+                    "core",
+                    "--kind",
+                    "ask_sync",
+                    "--body",
+                    "请同步",
+                ]
+            )
+        self.assertFalse(channel_path(self.config, "core").exists())
+        written = self._read_json(
+            "line",
+            "post",
+            "core",
+            "--kind",
+            "ask_sync",
+            "--body",
+            "请同步",
+            "--yes",
+        )
+        ack = self._read_json("line", "ack", written["id"], "--dry-run")
+        self.assertTrue(ack["dry_run"])
+        inbox = self._read_json("line", "inbox", "--family", "core", "--unacked")
+        self.assertEqual(inbox["unacked"], 1)
+        self.assertEqual(inbox["messages"][0]["id"], written["id"])
+
+    def test_next_json_reports_unacked_without_post_or_ack_commands(self) -> None:
+        self._read_json(
+            "line",
+            "post",
+            "core",
+            "--kind",
+            "blocked",
+            "--body",
+            "家族未读",
+            "--yes",
+        )
+        payload = self._read_json("next")
+        commands = json.dumps(payload.get("commands", []))
+        self.assertNotIn("line post", commands)
+        self.assertNotIn("line ack --yes", commands)
+        self.assertNotIn("line ack", commands)
+        unacked = payload["family_unacked"]
+        self.assertEqual(unacked["count"], 1)
+        self.assertEqual(unacked["kind"], "blocked")
+        self.assertEqual(unacked["family"], "core")
+        self.assertNotEqual(payload.get("state"), "repair_required")
 
 
 class VersionTests(unittest.TestCase):

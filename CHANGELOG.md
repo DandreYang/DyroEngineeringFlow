@@ -9,11 +9,18 @@
   one-level family graph, and an SSE event stream with `after=` resume.
   Hidden tabs pause; SSE failure falls back to the existing 5s poll.
   Workspace detail shows the family tree and live event panes. Copy
-  buttons emit dry-run CLI only. Browser stays read-only; P2 channel
-  POST and P3 artifacts are not implemented. Family badges do not claim
+  buttons emit dry-run CLI only. Family badges do not claim
   cleanliness or origin binding. Event `facts` stay IDs, enums, counts,
   short hashes, or reason codes. HMAC `after=` binds a row digest so a
   replaced same-seq row is `EVENT_CURSOR_INVALID`.
+- Console P2: overlay family channel at
+  `.dyro/families/<parent>/channel.jsonl` plus `acks.json`, dual-written
+  with a `signal` event under the same lock. CLI `line post` / `inbox` /
+  `ack` stay under `dyro line`. `next --format json` adds read-only
+  `family_unacked` and never emits `line post` or `line ack --yes`.
+  Console channel pane shows full family history; the browser POST
+  accepts only `decision` / `contract` / `ack` as `operator`. Artifact
+  bytes stay closed (P3). `/dyro-line-family` still does not post.
 - User slash Skill `dyro-line-family` (`/dyro-line-family`) preflights
   `line spawn` / `line merge` / `line sync` and prints one `--yes` command
   for the human. It does not execute the mutation, invent `--push`, or

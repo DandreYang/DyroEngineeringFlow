@@ -175,7 +175,12 @@ def _registry_from_json(
 
 
 def load_registry() -> WorkspaceRegistry:
-    path = _registry_path()
+    return load_registry_from_home(registry_home())
+
+
+def load_registry_from_home(home: Path) -> WorkspaceRegistry:
+    """Load the global workspace list from an explicit Dyro home."""
+    path = Path(home) / REGISTRY_FILE
     if not path.exists() and not path.is_symlink():
         return WorkspaceRegistry()
     if path.is_symlink() or not path.is_file():

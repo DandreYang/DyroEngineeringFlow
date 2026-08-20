@@ -241,6 +241,7 @@ def _decode_request(value: str) -> dict[str, object]:
         "alias",
         "after",
         "parent",
+        "filter",
         "target_root",
     }:
         raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
@@ -339,6 +340,25 @@ def main(argv: list[str] | None = None) -> int:
             if not isinstance(parent, str):
                 raise ConsoleOverviewError("FAMILY_PARENT_INVALID")
             payload = service.family(alias, parent)
+        elif operation == "channel":
+            alias = request.get("alias")
+            parent = request.get("parent")
+            if not isinstance(alias, str):
+                raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID")
+            if not isinstance(parent, str):
+                raise ConsoleOverviewError("FAMILY_PARENT_INVALID")
+            after = request.get("after")
+            if after is not None and not isinstance(after, str):
+                raise ConsoleOverviewError("CHANNEL_CURSOR_INVALID")
+            filter_text = request.get("filter")
+            if filter_text is not None and not isinstance(filter_text, str):
+                raise ConsoleOverviewError("CHANNEL_FILTER_INVALID")
+            limit = request.get("limit", 50)
+            if type(limit) is not int:
+                raise ConsoleOverviewError("CHANNEL_LIMIT_INVALID")
+            payload = service.channel(
+                alias, parent, after=after, filter=filter_text, limit=limit
+            )
         else:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         return _response(payload)
