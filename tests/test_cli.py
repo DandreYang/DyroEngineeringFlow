@@ -2127,6 +2127,6 @@ class VersionTests(unittest.TestCase):
         from dyro import __version__
 
         metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-        self.assertEqual(metadata["project"]["version"], "0.7.7")
-        self.assertEqual(__version__, "0.7.7")
+        self.assertEqual(metadata["project"]["version"], "0.7.8")
+        self.assertEqual(__version__, "0.7.8")
         self.assertEqual(__version__, metadata["project"]["version"])
