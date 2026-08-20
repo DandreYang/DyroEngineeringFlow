@@ -348,8 +348,20 @@ write = ["/usr/bin/true"]
         with self.assertRaisesRegex(DyroError, "plan-only"):
             assert_projections_allow_mutation(load(self.root))
 
-    def test_never_compiled_does_not_block_apply(self) -> None:
-        assert_projections_allow_mutation(load(self.root))
+    def test_never_compiled_fail_closes_apply(self) -> None:
+        with self.assertRaisesRegex(DyroError, "dyro host compile"):
+            assert_projections_allow_mutation(load(self.root))
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        self._write_task(config)
+        create_objective(config, _objective_contract())
+        now = datetime(2026, 8, 15, 4, 0, tzinfo=timezone.utc)
+        wave = build_supervised_wave(config, "release", clock=lambda: now)
+        with self.assertRaisesRegex(DyroError, "dyro host compile"):
+            apply_supervised_wave(config, wave, clock=lambda: now)
+
+    def test_compiled_projections_allow_apply(self) -> None:
+        compile_hosts(load(self.root))
         config = load(self.root)
         create_line(config, line_id="alpha", branch="feat/alpha", base="main")
         self._write_task(config)
@@ -359,6 +371,15 @@ write = ["/usr/bin/true"]
         with patch("dyro.continuation.supervision.run_task", return_value="review"):
             outcomes = apply_supervised_wave(config, wave, clock=lambda: now)
         self.assertEqual(len(outcomes), 1)
+
+    def test_workspace_doctor_does_not_fail_when_host_never_compiled(self) -> None:
+        from dyro.workspace import doctor
+
+        findings = doctor(load(self.root))
+        self.assertFalse(any(item.startswith("FAIL") for item in findings), findings)
+        report = inspect_projections(load(self.root))
+        self.assertFalse(report.compiled)
+        self.assertTrue(report.ok)
 
     def test_stale_projection_fail_closes_apply_to_plan_only(self) -> None:
         compile_hosts(load(self.root))

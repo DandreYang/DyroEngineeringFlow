@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+## 0.7.7 - 2026-08-20
+
+- Linked-worktree lines bind to `origin/<line.branch>` when that remote-tracking
+  ref exists, and never auto-track the parent when starting a local-only line.
+  `doctor` fails a missing `origin/feat/<line>` (not delivery-ready).
+  `setup` / `start` / `next` stay locally ready when every FAIL is that
+  missing-origin finding and disclose it; other FAILs still block.
+- `doctor` fails a line whose `@{upstream}` is not `origin/<line.branch>` even
+  when HEAD still equals that remote SHA. Join completion ignores only
+  missing-origin FAILs so SHA-pinned blueprints can finish before
+  `origin/<line.branch>` exists.
+- `--workspace` path values tell you to use `--root` instead of looking like a
+  missing workspace. Unknown aliases stay case-sensitive and suggest the closest
+  registered name.
+- `status` and `next` disclose when `policy.allow_push` is false: Dyro 不会 push；
+  ordinary `git push` still works.
+- Supervised host apply fails closed until `dyro host compile` has run. Ordinary
+  `dyro doctor` still treats host projections as optional.
+
 ## 0.7.6 - 2026-08-19
 
 - First-party slash Skills `dyro-review-board` (会审 / 对抗审查) and

@@ -81,10 +81,12 @@ def inspect_projections(config: Config, *, user: bool = False) -> HostDoctorRepo
 
 
 def assert_projections_allow_mutation(config: Config) -> None:
-    """Block the next mutation tick only when a compiled projection is stale."""
+    """Fail closed on supervised apply unless workspace projections are compiled and fresh."""
     report = inspect_projections(config, user=False)
     if not report.compiled:
-        return
+        raise DyroError(
+            "宿主投影尚未编译；本次 mutation 已降为 plan-only。请运行 dyro host compile"
+        )
     if not report.ok:
         raise DyroError(
             "宿主投影过期或被手改；本次 mutation 已降为 plan-only。请运行 dyro host compile"

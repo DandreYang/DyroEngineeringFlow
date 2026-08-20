@@ -17,7 +17,7 @@ from dyro.blueprint import (
 from dyro.cli import main
 from dyro.config import load
 from dyro.errors import DyroError, ValidationError
-from dyro.workspace import get_line
+from dyro.workspace import doctor, get_line, is_missing_origin_finding
 
 from .support import shell
 
@@ -174,6 +174,10 @@ class BlueprintJoinTests(unittest.TestCase):
         self.assertEqual(line.branch, "feat/feature-a")
         self.assertEqual(line.base_for("api"), self.api_head)
         self.assertEqual(line.base_for("web"), self.web_head)
+        findings = doctor(config)
+        failures = [item for item in findings if item.startswith("FAIL")]
+        self.assertTrue(failures, findings)
+        self.assertTrue(all(is_missing_origin_finding(item) for item in failures), findings)
         self.assertEqual(
             target.joinpath(".dyro/join.json").read_text(encoding="utf-8").count('"status": "complete"'),
             1,

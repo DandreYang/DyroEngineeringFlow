@@ -11,7 +11,15 @@ from typing import Callable
 
 from ..config import CONFIG_NAME, Config, LoadedProfile, load, load_profile_exact, validate_id
 from ..errors import DyroError, ValidationError
-from ..hub import WorkspaceRecord, load_registry, load_registry_bounded
+from ..hub import (
+    WorkspaceRecord,
+    get_workspace,
+    load_registry,
+    load_registry_bounded,
+    looks_like_workspace_path,
+    unregistered_workspace_error,
+    workspace_path_as_alias_error,
+)
 from ..read_limits import ReadBudget, ReadLimitCode, ReadLimitError
 from ..tasks import list_tasks, worktree_root
 from ..workspace import Line, get_line, line_root, list_lines
@@ -39,8 +47,12 @@ class WorkspaceResolutionFailure(str, Enum):
 
 
 class WorkspaceResolutionError(DyroError):
-    def __init__(self, code: WorkspaceResolutionFailure) -> None:
-        super().__init__(code.value)
+    def __init__(
+        self,
+        code: WorkspaceResolutionFailure,
+        message: str | None = None,
+    ) -> None:
+        super().__init__(message or code.value)
         self.code = code
 
 
@@ -101,11 +113,7 @@ def resolve_workspace(
 ) -> Config:
     """Resolve explicit selector, local Profile, then registered default/unique Profile."""
     if workspace:
-        registry = load_registry()
-        matches = tuple(record for record in registry.workspaces if record.name == workspace)
-        if len(matches) != 1:
-            raise DyroError(f"未登记工作区：{workspace}")
-        return load(matches[0].root)
+        return load(get_workspace(workspace).root)
     location = (start or Path.cwd()).expanduser()
     local_root = _local_profile_root(location)
     if local_root is not None:
@@ -219,12 +227,20 @@ def resolve_workspace_readonly(
 ) -> ResolvedWorkspace:
     """Resolve one workspace without interaction, writes, recovery, or fallback drift."""
     if workspace is not None:
+        if looks_like_workspace_path(workspace):
+            raise workspace_path_as_alias_error(workspace)
         validate_id(workspace, "工作区别名")
         registry = _bounded_registry(budget)
         matches = tuple(item for item in registry.workspaces if item.name == workspace)
         if len(matches) != 1:
             raise WorkspaceResolutionError(
-                WorkspaceResolutionFailure.WORKSPACE_NOT_REGISTERED
+                WorkspaceResolutionFailure.WORKSPACE_NOT_REGISTERED,
+                message=str(
+                    unregistered_workspace_error(
+                        workspace,
+                        tuple(item.name for item in registry.workspaces),
+                    )
+                ),
             )
         record = matches[0]
         return ResolvedWorkspace(

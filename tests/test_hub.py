@@ -40,7 +40,7 @@ from dyro.tooling import (
 from dyro.tasks import task_template
 from dyro.workspace import create_line, get_line
 
-from .support import WorkspaceCase, shell
+from .support import WorkspaceCase, publish_origin_branch, shell
 
 
 class RepositorySelectionParsingTests(unittest.TestCase):
@@ -172,6 +172,7 @@ class HubCliTests(WorkspaceCase):
         super().tearDown()
 
     def _create_line(self) -> None:
+        publish_origin_branch(self.anchor, "feat/alpha")
         create_line(load(self.root), line_id="alpha", branch="feat/alpha", base="main")
 
     def _create_task_worktree(self, task_id: str = "TASK-OPEN") -> None:
@@ -1459,3 +1460,74 @@ write = ["codex"]
         self.assertIn("dyro setup", rendered)
         self.assertIn("dyro workspace add", rendered)
         self.assertFalse(self.hub_home.exists())
+
+
+    def test_workspace_path_as_alias_is_not_missing_workspace(self) -> None:
+        from dyro.errors import ValidationError
+        from dyro.hub import get_workspace
+
+        with self.assertRaisesRegex(ValidationError, "--root"):
+            get_workspace("/tmp/some/workspace")
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            main(["--workspace", str(self.root), "next"])
+        self.assertEqual(raised.exception.code, 2)
+        rendered = stderr.getvalue()
+        self.assertIn("--root", rendered)
+        self.assertNotIn("尚未发现 Dyro 工作区", rendered)
+
+    def test_unknown_alias_suggests_close_registered_name(self) -> None:
+        from dyro.errors import DyroError
+        from dyro.hub import get_workspace
+
+        add_workspace(self.root, name="DyroEngineeringFlow", make_default=True)
+        with self.assertRaisesRegex(DyroError, "你是不是指 DyroEngineeringFlow"):
+            get_workspace("dyroengineeringflow")
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            main(["--workspace", "dyroengineeringflow", "next"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("你是不是指 DyroEngineeringFlow", stderr.getvalue())
+
+    def test_status_and_next_disclose_disabled_push(self) -> None:
+        self._create_line()
+        status_out = StringIO()
+        with redirect_stdout(status_out):
+            main(["--root", str(self.root), "status"])
+        status_text = status_out.getvalue()
+        self.assertIn("Dyro 不会 push", status_text)
+        self.assertIn("git push", status_text)
+        self.assertNotIn("hook", status_text.lower())
+        next_out = StringIO()
+        with redirect_stdout(next_out):
+            main(["--root", str(self.root), "next"])
+        next_text = next_out.getvalue()
+        self.assertIn("Dyro 不会 push", next_text)
+        json_out = StringIO()
+        with redirect_stdout(json_out):
+            main(["--root", str(self.root), "status", "--format", "json"])
+        import json
+        payload = json.loads(json_out.getvalue())
+        self.assertFalse(payload["allow_push"])
+        self.assertIn("Dyro 不会 push", payload["push_note"])
+
+    def test_allow_push_true_omits_scare_text(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                "allow_push = false", "allow_push = true"
+            ),
+            encoding="utf-8",
+        )
+        self._create_line()
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", str(self.root), "status"])
+        self.assertNotIn("Dyro 不会 push", output.getvalue())
+        json_out = StringIO()
+        with redirect_stdout(json_out):
+            main(["--root", str(self.root), "status", "--format", "json"])
+        import json
+        payload = json.loads(json_out.getvalue())
+        self.assertTrue(payload["allow_push"])
+        self.assertNotIn("push_note", payload)
