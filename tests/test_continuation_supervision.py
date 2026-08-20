@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from dyro.config import load
 from dyro.continuation.actions import ActionStatus
+from dyro.host import compile_hosts
 from dyro.continuation.store import (
     create_objective,
     get_objective_action,
@@ -48,6 +49,7 @@ class SupervisedContinuationTests(WorkspaceCase):
         super().setUp()
         self.config = load(self.root)
         create_line(self.config, line_id="alpha", branch="feat/alpha", base="main")
+        compile_hosts(self.config)
         self.task_directory = self._write_task("TASK-A")
         self.now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
 
@@ -198,6 +200,7 @@ class SupervisedContinuationTests(WorkspaceCase):
             encoding="utf-8",
         )
         self.config = load(self.root)
+        compile_hosts(self.config)
         self.task_directory.joinpath("receipt.md").write_text(
             "result: DONE\n", encoding="utf-8"
         )

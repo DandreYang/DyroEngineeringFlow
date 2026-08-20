@@ -6,7 +6,9 @@
 
 - Linked-worktree lines bind to `origin/<line.branch>` when that remote-tracking
   ref exists, and never auto-track the parent when starting a local-only line.
-  `doctor` / `next` treat a missing `origin/feat/<line>` as not delivery-ready.
+  `doctor` fails a missing `origin/feat/<line>` (not delivery-ready).
+  `setup` / `start` / `next` stay locally ready when every FAIL is that
+  missing-origin finding and disclose it; other FAILs still block.
 - `doctor` fails a line whose `@{upstream}` is not `origin/<line.branch>` even
   when HEAD still equals that remote SHA. Join completion ignores only
   missing-origin FAILs so SHA-pinned blueprints can finish before

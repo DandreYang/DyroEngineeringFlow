@@ -111,13 +111,23 @@ class WorkspaceTests(WorkspaceCase):
         with redirect_stdout(output):
             main(["--root", str(self.root), "next"])
         rendered = output.getvalue()
-        self.assertIn("还不能开始任务", rendered)
-        self.assertNotIn("工作区已就绪", rendered)
+        # doctor still FAILs missing origin; next stays ready when that is
+        # the only FAIL and discloses it.
+        self.assertIn("missing origin/feat/local-only", rendered)
+        self.assertNotIn("还不能开始任务", rendered)
+        self.assertIn("工作区已就绪", rendered)
         json_out = StringIO()
         with redirect_stdout(json_out):
             main(["--root", str(self.root), "next", "--format", "json"])
         payload = json.loads(json_out.getvalue())
-        self.assertEqual(payload["state"], "needs_repair")
+        self.assertEqual(payload["state"], "ready")
+        self.assertTrue(
+            any(
+                "missing origin/feat/local-only" in item.get("message", "")
+                for item in payload.get("findings", [])
+            ),
+            payload,
+        )
 
     def test_doctor_fails_when_one_repo_missing_origin_feat(self) -> None:
         web = self.root / "repositories/web"

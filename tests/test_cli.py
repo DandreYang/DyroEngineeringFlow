@@ -27,7 +27,7 @@ from dyro.tooling import ToolState, load_tool_preferences
 from dyro.updates import load_update_state
 from dyro.workspace import create_line, get_line, line_repository_path
 
-from .support import WorkspaceCase
+from .support import WorkspaceCase, publish_origin_branch
 
 
 class CliTests(unittest.TestCase):
@@ -1030,6 +1030,7 @@ class ObjectiveCliTests(WorkspaceCase):
         )
 
     def test_control_plane_workspace_views_have_stable_json_shapes(self) -> None:
+        publish_origin_branch(self.anchor, "feat/alpha")
         doctor_payload = self._read_json("doctor")
         self.assertEqual(doctor_payload["kind"], "doctor")
         self.assertTrue(doctor_payload["passed"])

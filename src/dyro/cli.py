@@ -232,7 +232,14 @@ from .updates import (
     set_auto_patch,
     set_update_enabled,
 )
-from .workspace import create_line, doctor, get_line, list_lines, status_rows
+from .workspace import (
+    create_line,
+    doctor,
+    get_line,
+    is_missing_origin_finding,
+    list_lines,
+    status_rows,
+)
 
 
 CONFIG_TEMPLATE = """schema_version = 1
@@ -1244,7 +1251,12 @@ def _apply_setup_plan(
     findings = doctor(config)
     for finding in findings:
         _print_doctor_finding(finding)
-    if any(finding.startswith("FAIL") for finding in findings):
+    # Missing origin/<line.branch> is not delivery-ready, but setup of a
+    # local-only line is still complete. Other FAILs remain fatal.
+    if any(
+        finding.startswith("FAIL") and not is_missing_origin_finding(finding)
+        for finding in findings
+    ):
         raise DyroError("设置已保存，但 doctor 发现问题；请修复后运行 dyro next")
     skill_outcome = _apply_setup_personal_preferences(preferences)
     _print_setup_completion(
@@ -1472,7 +1484,10 @@ def _non_interactive_setup(args: argparse.Namespace) -> None:
     findings = doctor(config)
     for finding in findings:
         _print_doctor_finding(finding)
-    if any(finding.startswith("FAIL") for finding in findings):
+    if any(
+        finding.startswith("FAIL") and not is_missing_origin_finding(finding)
+        for finding in findings
+    ):
         raise DyroError("setup 已完成基础配置，但 doctor 仍发现结构错误")
     if created or registered is not None:
         _print_setup_completion(config, registered)
@@ -2387,8 +2402,14 @@ def cmd_start(args: argparse.Namespace) -> None:
     config = _config(args)
     findings = doctor(config)
     failures = [finding for finding in findings if finding.startswith("FAIL")]
+    blocking = [
+        finding
+        for finding in failures
+        if not is_missing_origin_finding(finding)
+    ]
     if failures:
         print("\n".join(failures))
+    if blocking:
         raise DyroError(
             "工作区尚未就绪；先修复 doctor 失败项，或运行 dyro bootstrap --yes"
         )
@@ -2441,11 +2462,32 @@ def _print_push_disclosure(config: Config) -> None:
         print(note)
 
 
+def _print_next_workspace_missing(args: argparse.Namespace) -> None:
+    if args.format == "json":
+        _print_control_plane_json(
+            "next_step",
+            state="workspace_missing",
+            summary="尚未发现 Dyro 工作区。",
+            commands=[],
+            mutation_available=False,
+            required_choice="join_existing_or_setup_new",
+        )
+        return
+    print("尚未发现 Dyro 工作区。")
+    print("加入团队项目：dyro join <蓝图地址>")
+    print("设置一个新项目：dyro setup")
+
+
 def cmd_next(args: argparse.Namespace) -> None:
     """Give newcomers one safe, concrete next step without making changes."""
 
     try:
         config = _config(args)
+    except ValidationError as exc:
+        if "未找到" not in str(exc) or CONFIG_NAME not in str(exc):
+            raise
+        _print_next_workspace_missing(args)
+        return
     except WorkspaceResolutionError as exc:
         if (
             getattr(args, "workspace_alias", None)
@@ -2453,24 +2495,18 @@ def cmd_next(args: argparse.Namespace) -> None:
             or exc.code is not WorkspaceResolutionFailure.WORKSPACE_NOT_FOUND
         ):
             raise
-        if args.format == "json":
-            _print_control_plane_json(
-                "next_step",
-                state="workspace_missing",
-                summary="尚未发现 Dyro 工作区。",
-                commands=[],
-                mutation_available=False,
-                required_choice="join_existing_or_setup_new",
-            )
-            return
-        print("尚未发现 Dyro 工作区。")
-        print("加入团队项目：dyro join <蓝图地址>")
-        print("设置一个新项目：dyro setup")
+        _print_next_workspace_missing(args)
         return
     budget = _control_plane_budget(args) if args.format == "json" else None
     findings = doctor(config, read_budget=budget)
     failures = [finding for finding in findings if finding.startswith("FAIL")]
-    if failures:
+    missing_origin_failures = [
+        finding for finding in failures if is_missing_origin_finding(finding)
+    ]
+    blocking_failures = [
+        finding for finding in failures if not is_missing_origin_finding(finding)
+    ]
+    if blocking_failures:
         absent_bootstrap_ids = {
             repo_id
             for repo_id, repository in config.repositories.items()
@@ -2566,9 +2602,16 @@ def cmd_next(args: argparse.Namespace) -> None:
         if briefing is not None:
             payload["briefing"] = briefing
             payload["diagnostic_commands"] = diagnostic_commands
+        if missing_origin_failures:
+            payload["findings"] = [
+                _doctor_finding_payload(item, include_paths=False)
+                for item in missing_origin_failures
+            ]
         payload.update(_next_push_fields(config))
         _print_control_plane_json("next_step", **payload)
         return
+    for finding in missing_origin_failures:
+        _print_doctor_finding(finding)
     if briefing is None:
         print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。")
         _print_push_disclosure(config)

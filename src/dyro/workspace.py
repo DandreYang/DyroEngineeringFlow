@@ -760,8 +760,9 @@ _MISSING_ORIGIN_TOKEN = ": missing origin/"
 def is_missing_origin_finding(finding: str) -> bool:
     """True only for doctor FAILs that mean origin/<line.branch> is absent.
 
-    Join completion and home-open skip these so SHA-pinned / local-only lines
-    can exist before the remote-tracking ref is published. Wrong upstream,
-    wrong branch, missing worktree, common-dir, and symlink FAILs still fail.
+    Join completion, setup post-doctor, start, next, and home-open skip these
+    so SHA-pinned / local-only lines can exist before the remote-tracking ref
+    is published. Wrong upstream, wrong branch, missing worktree, common-dir,
+    and symlink FAILs still fail.
     """
     return finding.startswith("FAIL ") and _MISSING_ORIGIN_TOKEN in finding
