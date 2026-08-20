@@ -740,7 +740,9 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
             upstream = _branch_upstream(worktree, read_budget=read_budget)
             head = _rev_parse(worktree, "HEAD", read_budget=read_budget)
             remote_head = _rev_parse(worktree, expected_remote, read_budget=read_budget)
-            if upstream == expected_remote or (head and head == remote_head):
+            if upstream == expected_remote or (
+                not upstream and head and head == remote_head
+            ):
                 findings.append(
                     f"PASS {line.kind}:{line.id}/{repo_id}: linked to configured anchor"
                 )
@@ -750,3 +752,16 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
                     f"expected upstream {expected_remote}, found {upstream or '-'}"
                 )
     return findings
+
+
+_MISSING_ORIGIN_TOKEN = ": missing origin/"
+
+
+def is_missing_origin_finding(finding: str) -> bool:
+    """True only for doctor FAILs that mean origin/<line.branch> is absent.
+
+    Join completion and home-open skip these so SHA-pinned / local-only lines
+    can exist before the remote-tracking ref is published. Wrong upstream,
+    wrong branch, missing worktree, common-dir, and symlink FAILs still fail.
+    """
+    return finding.startswith("FAIL ") and _MISSING_ORIGIN_TOKEN in finding

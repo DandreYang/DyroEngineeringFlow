@@ -46,6 +46,7 @@ from .workspace import (
     create_line,
     doctor,
     get_line,
+    is_missing_origin_finding,
     line_root,
     list_lines,
     preflight_line,
@@ -752,7 +753,7 @@ def existing_line_workspace(
         finding
         for finding in doctor(config)
         if any(finding.startswith(prefix) for prefix in relevant)
-        and "missing origin/" not in finding
+        and not is_missing_origin_finding(finding)
     ]
     if failures:
         raise DyroError(

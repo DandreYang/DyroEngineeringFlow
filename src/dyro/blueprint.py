@@ -20,7 +20,7 @@ from .errors import DyroError, ValidationError
 from .onboarding import RepositoryInput, render_config
 from .process import git, require_ok, run
 from .state import atomic_write_text, exclusive_lock
-from .workspace import STORAGE_MODES, Line, create_line, doctor, get_line
+from .workspace import STORAGE_MODES, Line, create_line, doctor, get_line, is_missing_origin_finding
 
 
 BLUEPRINT_FILENAME = "dyro-blueprint.toml"
@@ -777,7 +777,14 @@ def apply_join_plan(plan: JoinPlan) -> Config:
             )
         _ensure_line(config, plan)
         findings = doctor(config)
-        failures = [finding for finding in findings if finding.startswith("FAIL")]
+        # Join ignores only missing-origin FAILs: SHA-pinned lines need not
+        # have origin/<line.branch>. Wrong branch, parent-tracking / wrong
+        # upstream, common-dir, missing worktree, and bad symlink still fail.
+        failures = [
+            finding
+            for finding in findings
+            if finding.startswith("FAIL") and not is_missing_origin_finding(finding)
+        ]
         if failures:
             raise DyroError("join 完成后 doctor 仍发现结构错误：\n" + "\n".join(failures))
         atomic_write_text(plan.root / JOIN_STATE_FILE, _join_state(plan, "complete"))

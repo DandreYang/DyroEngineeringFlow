@@ -1,4 +1,5 @@
 from pathlib import Path
+import unittest
 import os
 import subprocess
 
@@ -8,6 +9,7 @@ from dyro.process import Result
 from dyro.workspace import (
     create_line,
     doctor,
+    is_missing_origin_finding,
     line_repository_path,
     list_lines,
     preflight_line,
@@ -167,9 +169,58 @@ class WorkspaceTests(WorkspaceCase):
         shell("git", "branch", "--set-upstream-to=origin/main", cwd=worktree)
         findings = doctor(config)
         self.assertTrue(
-            any(item.startswith("FAIL") and "child" in item for item in findings),
+            any(
+                item.startswith("FAIL")
+                and "child" in item
+                and "expected upstream origin/feat/child" in item
+                for item in findings
+            ),
             findings,
         )
+
+    def test_doctor_fails_when_published_child_still_tracks_parent(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+        import json
+
+        from dyro.cli import main
+
+        publish_origin_branch(self.anchor, "main")
+        publish_origin_branch(self.anchor, "feat/same-sha-child")
+        config = load(self.root)
+        line = create_line(
+            config, line_id="same-sha-child", branch="feat/same-sha-child", base="main"
+        )
+        worktree = line_repository_path(config, line, "api")
+        shell("git", "branch", "--set-upstream-to=origin/main", cwd=worktree)
+        head = shell_stdout("git", "rev-parse", "HEAD", cwd=worktree)
+        remote_feat = shell_stdout(
+            "git", "rev-parse", "origin/feat/same-sha-child", cwd=worktree
+        )
+        parent = shell_stdout("git", "rev-parse", "origin/main", cwd=worktree)
+        self.assertEqual(head, remote_feat)
+        self.assertEqual(head, parent)
+        findings = doctor(config)
+        self.assertTrue(
+            any(
+                item.startswith("FAIL")
+                and "same-sha-child" in item
+                and "expected upstream origin/feat/same-sha-child" in item
+                for item in findings
+            ),
+            findings,
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", str(self.root), "next"])
+        rendered = output.getvalue()
+        self.assertIn("还不能开始任务", rendered)
+        self.assertNotIn("工作区已就绪", rendered)
+        json_out = StringIO()
+        with redirect_stdout(json_out):
+            main(["--root", str(self.root), "next", "--format", "json"])
+        payload = json.loads(json_out.getvalue())
+        self.assertEqual(payload["state"], "needs_repair")
 
     def test_plan_rejects_local_branch_tracking_parent_feat(self) -> None:
         shell("git", "checkout", "-b", "feat/from-parent", cwd=self.anchor)
@@ -316,3 +367,32 @@ class WorkspaceTests(WorkspaceCase):
         shell("git", "checkout", "main", cwd=self.anchor)
         findings = doctor(config)
         self.assertTrue(any("expected feat/reuse-anchor" in item for item in findings), findings)
+
+class MissingOriginFindingTests(unittest.TestCase):
+    def test_recognizes_only_missing_origin_doctor_fails(self) -> None:
+        self.assertTrue(
+            is_missing_origin_finding("FAIL line:alpha/api: missing origin/feat/alpha")
+        )
+        self.assertTrue(
+            is_missing_origin_finding(
+                "FAIL hotfix:cut/api: missing origin/hotfix/cut"
+            )
+        )
+        self.assertFalse(
+            is_missing_origin_finding(
+                "FAIL line:alpha/api: expected upstream origin/feat/alpha, found origin/main"
+            )
+        )
+        self.assertFalse(
+            is_missing_origin_finding("FAIL line:alpha/api: missing worktree")
+        )
+        self.assertFalse(
+            is_missing_origin_finding(
+                "FAIL repository api: missing or not Git: /tmp/api"
+            )
+        )
+        self.assertFalse(
+            is_missing_origin_finding(
+                "PASS line:alpha/api: missing origin/feat/alpha"
+            )
+        )
