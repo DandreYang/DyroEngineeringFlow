@@ -9,6 +9,42 @@ const code = fs.readFileSync(
   "utf8",
 );
 
+function fakeNode(tag) {
+  const node = {
+    tagName: String(tag).toUpperCase(),
+    children: [],
+    className: "",
+    id: "",
+    hidden: false,
+    type: "",
+    textContent: "",
+    dataset: {},
+    classList: {
+      add(...names) {
+        const current = new Set(String(node.className).split(/\s+/).filter(Boolean));
+        for (const name of names) current.add(name);
+        node.className = [...current].join(" ");
+      },
+      toggle(name, force) {
+        const current = new Set(String(node.className).split(/\s+/).filter(Boolean));
+        const on = force === undefined ? !current.has(name) : Boolean(force);
+        if (on) current.add(name);
+        else current.delete(name);
+        node.className = [...current].join(" ");
+      },
+    },
+    append(...items) {
+      for (const item of items) node.children.push(item);
+    },
+    addEventListener() {},
+    replaceWith() {},
+    replaceChildren(...items) {
+      node.children = items.slice();
+    },
+  };
+  return node;
+}
+
 const context = vm.createContext({
   console,
   Set,
@@ -27,6 +63,12 @@ const context = vm.createContext({
   document: {
     hidden: false,
     getElementById: () => null,
+    createElement: (name) => fakeNode(name),
+    createTextNode: (value) => {
+      const node = fakeNode("#text");
+      node.textContent = String(value);
+      return node;
+    },
     addEventListener() {},
   },
   window: {
@@ -49,26 +91,21 @@ context.globalThis = context;
 vm.runInContext(code, context);
 
 const api = context.__dyroTwinLive;
-if (!api || typeof api.mergeTwinFromEvents !== "function" || typeof api.twinFromData !== "function") {
-  throw new Error("mergeTwinFromEvents is not loaded");
+if (
+  !api
+  || typeof api.mergeTwinFromEvents !== "function"
+  || typeof api.twinFromData !== "function"
+  || typeof api.renderOperatorTwin !== "function"
+) {
+  throw new Error("renderOperatorTwin / mergeTwinFromEvents is not loaded");
 }
 
 const input = JSON.parse(fs.readFileSync(0, "utf8"));
 const snapshot = input.snapshot || {};
 const events = Array.isArray(input.events) ? input.events : [];
-const state = api.getState();
-state.twinTasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
-state.operatorTwin = api.twinFromData(snapshot);
-if (input.overlay_complete === false) {
-  state.operatorTwin.overlay_complete = false;
-}
-if (Number.isInteger(input.after_seq)) {
-  state.operatorTwin.projected_seq = input.after_seq;
-}
-state.twinAfterSeq = state.operatorTwin.projected_seq;
-state.twinOverlayComplete = state.operatorTwin.overlay_complete === true;
+api.renderOperatorTwin(snapshot);
 api.mergeTwinFromEvents(events);
-const twin = state.operatorTwin;
+const twin = api.getState().operatorTwin;
 const done = (twin.phases.find((column) => column.status === "done") || { tasks: [] }).tasks.map(
   (task) => task.id,
 );
@@ -80,5 +117,8 @@ process.stdout.write(
     rendered: api.renderedTwinText(twin),
     board_landed: (twin.running || []).some((row) => row.board_landed),
     wave_ids: (twin.plan || []).filter((row) => row.wave_present).map((row) => row.id),
+    projected_seq: twin.projected_seq,
+    overlay_complete: twin.overlay_complete === true,
+    after_seq: api.getState().twinAfterSeq,
   }),
 );

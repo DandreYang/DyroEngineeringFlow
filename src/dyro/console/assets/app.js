@@ -2357,6 +2357,7 @@ if (typeof document !== "undefined" && document.getElementById && document.getEl
 }
 globalThis.__dyroTwinLive = {
   twinFromData,
+  renderOperatorTwin,
   mergeTwinFromEvents,
   applyLiveTwinEvents,
   renderedTwinText,

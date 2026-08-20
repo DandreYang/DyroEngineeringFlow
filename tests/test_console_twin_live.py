@@ -1,12 +1,43 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
+import os
 import shutil
 import subprocess
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from dyro.config import load
+from dyro.console.overview import ConsoleOverviewService
 from dyro.console.twin import TASK_STATUSES
+from dyro.continuation.store import create_objective
+from dyro.events import append_event, read_overlay_events
+from dyro.hub import add_workspace
+from dyro.tasks import load_task, set_status, task_template
+from dyro.workspace import create_line
+
+from .support import WorkspaceCase
+
+
+OBJECTIVE = '''schema_version = 1
+id = "release"
+title = "Release readiness"
+line = "core"
+targets = ["TASK-A"]
+
+[continuation]
+requested_mode = "supervised"
+operations = ["execute", "review"]
+
+[budget]
+max_actions = 5
+max_attempts_per_task = 2
+max_failures = 2
+max_no_progress_cycles = 2
+max_parallel = 1
+'''
 
 
 HARNESS = Path(__file__).resolve().parent / "support" / "console_twin_live.mjs"
@@ -86,7 +117,7 @@ def _event(seq: int, kind: str, subject: str, facts: dict[str, object] | None = 
 
 
 def _prefix_page() -> list[dict[str, object]]:
-    """Oldest 50 rows: early in_progress + board, then fillers. Later done is seq 54."""
+    """Oldest 50 rows: early in_progress + board, then fillers."""
     events = [
         _event(1, "task_status", "TASK-A", {"from_status": "assigned", "to_status": "in_progress"}),
         _event(2, "board", "TASK-A", {"result": "recorded"}),
@@ -113,40 +144,6 @@ def _run_live(payload: dict[str, object]) -> dict[str, object]:
 
 
 class MergeTwinFromEventsTests(unittest.TestCase):
-    def test_prefix_page_does_not_undo_snapshot_done_or_claim_board(self) -> None:
-        first_page = _prefix_page()
-        self.assertEqual(len(first_page), 50)
-        self.assertEqual(first_page[0]["facts"]["to_status"], "in_progress")
-        self.assertEqual(first_page[1]["kind"], "board")
-        self.assertTrue(all(event["seq"] <= 50 for event in first_page))
-        later_done_seq = 54
-        self.assertGreater(later_done_seq, 50)
-        self.assertGreaterEqual(later_done_seq - 2, 51)
-
-        result = _run_live(
-            {
-                "snapshot": _snapshot(projected_seq=later_done_seq, overlay_complete=True),
-                "events": first_page,
-            }
-        )
-        self.assertEqual(result["running"], [])
-        self.assertEqual(result["done_ids"], ["TASK-A"])
-        self.assertFalse(result["board_landed"])
-        self.assertNotIn("会审已落下", result["rendered"])
-
-    def test_truncated_overlay_fail_closes_to_snapshot_not_prefix(self) -> None:
-        result = _run_live(
-            {
-                "snapshot": _snapshot(projected_seq=0, overlay_complete=False),
-                "events": _prefix_page(),
-                "overlay_complete": False,
-                "after_seq": 0,
-            }
-        )
-        self.assertEqual(result["running"], [])
-        self.assertEqual(result["done_ids"], ["TASK-A"])
-        self.assertNotIn("会审已落下", result["rendered"])
-
     def test_ghost_wave_does_not_push_a_lane(self) -> None:
         snapshot = _snapshot(projected_seq=0, overlay_complete=True)
         result = _run_live(
@@ -205,9 +202,129 @@ class MergeTwinFromEventsTests(unittest.TestCase):
         script = APP_JS.read_text(encoding="utf-8")
         self.assertIn("function mergeTwinFromEvents", script)
         self.assertIn("function twinFromData", script)
+        self.assertIn("function renderOperatorTwin", script)
         self.assertIn("function applyLiveTwinEvents", script)
+        self.assertIn("source.overlay_complete === true", script)
+        self.assertIn("state.twinAfterSeq = state.operatorTwin.projected_seq", script)
         self.assertIn("overlayComplete !== true", script)
         self.assertIn("seq <= floor", script)
+
+
+class GetTwinFloorBindTests(WorkspaceCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.config = load(self.root)
+        create_line(self.config, line_id="core", branch="feat/core", base="main")
+        task = self.config.task_specs_dir / "TASK-A"
+        task.mkdir(parents=True)
+        task.joinpath("task.toml").write_text(
+            task_template("TASK-A", "Pay path", "core", "api", "services/api"),
+            encoding="utf-8",
+        )
+        task.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        create_objective(self.config, OBJECTIVE)
+        self.clock = lambda: datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+
+    def _service(self) -> ConsoleOverviewService:
+        home = self.root / "console-state"
+        with patch.dict(os.environ, {"DYRO_HOME": str(home)}):
+            add_workspace(self.root, name=self.config.name, make_default=True)
+        from dyro.hub import load_registry_from_home
+
+        return ConsoleOverviewService(
+            registry_loader=lambda: load_registry_from_home(home),
+            cursor_secret=b"k" * 32,
+        )
+
+    def _early_in_progress_and_board(self) -> None:
+        item = load_task(self.config, "TASK-A")
+        set_status(self.config, item, "assigned")
+        set_status(self.config, item, "in_progress")
+        append_event(
+            self.config,
+            kind="board",
+            actor="core",
+            subject="TASK-A",
+            family="core",
+            facts={"result": "recorded"},
+            clock=self.clock,
+        )
+
+    def _force_inventory_done(self) -> None:
+        item = load_task(self.config, "TASK-A")
+        (item.directory / "status").write_text("done\n", encoding="utf-8")
+
+    def _assert_prefix_does_not_invent_running(self, result: dict[str, object]) -> None:
+        self.assertEqual(result["running"], [])
+        self.assertEqual(result["done_ids"], ["TASK-A"])
+        self.assertFalse(result["board_landed"])
+        self.assertNotIn("会审已落下", result["rendered"])
+
+    def test_workspace_projected_seq_is_the_live_floor_for_the_first_page(self) -> None:
+        self._early_in_progress_and_board()
+        for _ in range(52):
+            append_event(
+                self.config,
+                kind="spawn",
+                actor="core",
+                subject="core_pay",
+                family="core",
+                facts={"parent": "core", "child": "core_pay"},
+                clock=self.clock,
+            )
+        self._force_inventory_done()
+        records, complete = read_overlay_events(self.config)
+        self.assertTrue(complete)
+        self.assertGreater(len(records), 50)
+        last_seq = records[-1]["seq"]
+        self.assertEqual(last_seq, len(records))
+        self.assertGreater(last_seq, 50)
+
+        service = self._service()
+        payload = service.workspace(self.config.name)
+        data = payload["data"]
+        twin = data["operator_twin"]
+        self.assertTrue(twin["overlay_complete"])
+        self.assertEqual(twin["projected_seq"], last_seq)
+        self.assertEqual(twin["running"], [])
+        done = next(column for column in twin["phases"] if column["status"] == "done")
+        self.assertEqual([task["id"] for task in done["tasks"]], ["TASK-A"])
+
+        first_page = service.events(self.config.name)["data"]["events"]
+        self.assertEqual(len(first_page), 50)
+        self.assertTrue(all(event["seq"] <= 50 for event in first_page))
+        self.assertTrue(
+            any(
+                event["kind"] == "task_status" and event["facts"].get("to_status") == "in_progress"
+                for event in first_page
+            )
+        )
+        self.assertTrue(any(event["kind"] == "board" and event["subject"] == "TASK-A" for event in first_page))
+
+        result = _run_live({"snapshot": data, "events": first_page})
+        self._assert_prefix_does_not_invent_running(result)
+        self.assertEqual(result["after_seq"], last_seq)
+        self.assertEqual(result["projected_seq"], last_seq)
+
+    def test_truncated_workspace_get_fail_closes_before_prefix_merge(self) -> None:
+        self._early_in_progress_and_board()
+        events = self.root / ".dyro" / "events.jsonl"
+        events.write_text(events.read_text(encoding="utf-8").rstrip("\n"), encoding="utf-8")
+        self._force_inventory_done()
+        service = self._service()
+        payload = service.workspace(self.config.name)
+        data = payload["data"]
+        twin = data["operator_twin"]
+        self.assertFalse(twin["overlay_complete"])
+        self.assertEqual(twin["running"], [])
+        done = next(column for column in twin["phases"] if column["status"] == "done")
+        self.assertEqual([task["id"] for task in done["tasks"]], ["TASK-A"])
+
+        first_page = _prefix_page()
+        self.assertEqual(len(first_page), 50)
+        result = _run_live({"snapshot": data, "events": first_page})
+        self._assert_prefix_does_not_invent_running(result)
+        self.assertFalse(result["overlay_complete"])
 
 
 if __name__ == "__main__":

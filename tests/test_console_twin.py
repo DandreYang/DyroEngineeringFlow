@@ -277,6 +277,9 @@ class OperatorTwinProjectionTests(WorkspaceCase):
         self.assertFalse(twin["running"][0]["dispatch_present"])
         self.assertFalse(twin["running"][0]["board_landed"])
         self.assertFalse(twin["latest_ledger"]["present"])
+        self.assertFalse(twin["overlay_complete"])
+        got = self._service().workspace(self.config.name)["data"]["operator_twin"]
+        self.assertFalse(got["overlay_complete"])
 
     def test_latest_ledger_line_is_redacted(self) -> None:
         ledger(

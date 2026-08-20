@@ -11,9 +11,11 @@
   line is a single redacted human-visible row. Missing wave / dispatch /
   board / ledger fail closed. Swimlanes do not invent Objectives. 谁在跑
   does not claim a board landed unless a matching `board` event exists for
-  that task. Live ingest does not replay an events prefix over the GET
-  snapshot: 阶段 / 谁在跑 / 会审 stay with the projection, and a truncated
-  overlay fail-closes to the snapshot. Hash stays `#w/<alias>` and
+  that task.   Live ingest does not replay an events prefix over the GET
+  snapshot: `projected_seq` from that GET is the live floor, a
+  truncated overlay sets `overlay_complete` false, 阶段 / 谁在跑 /
+  会审 stay with the projection, and a prefix page cannot invent
+  谁在跑 or 会审已落下. Hash stays `#w/<alias>` and
   `#w/<alias>/family|events|channel`. No new mutation API.
 - Console UI: restyle the local page as a one-level family patchbay. The
   family graph is the signature instrument (parent in camera focus; edges
