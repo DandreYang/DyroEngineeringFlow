@@ -58,21 +58,7 @@ Agent 输出永远是**建议**；进入交付链必须经过 Dyro 契约与独�
 
 ## 3. 对抗评审记录协议（摘要）
 
-第一方座位 `dyro-board` 在用户提出会审 / 对抗 / Go/No-Go 时自动戴上协议；人类命令是 `/dyro-review-board`。记录仍不是 Proof。完整模板见 [可选本地 Agent 派发设计 §6](designs/optional-local-agent-dispatch.md#6-对抗评审记录协议)。
-
-硬规则：
-
-1. 单一共享评审文件  
-2. 每人仅写自己的签名区  
-3. **源码 / 线上契约 > 计划 / 旧评审**  
-4. 无法证明 → 标 `须人工核`  
-5. 终裁合并重复、仲裁冲突、输出 P0/P1/P2 + Go/No-Go + 执行交接  
-
-建议路径：
-
-```text
-docs/reviews/YYYY-MM-DD-<topic>-adversarial-board.md
-```
+第一方座位 `dyro-board` 在用户提出会审 / 对抗 / Go/No-Go 时自动戴上协议；人类命令是 `/dyro-review-board`。记录仍不是 Proof。完整 Record 协议只以 [`dyro-board/SKILL.md`](../src/dyro/integrations/assets/dyro-board/SKILL.md) 为准；不要在此另写一套，也不要把设计稿或旧五条摘要当成现行模板。
 
 ## 4. 写冲突与脏工作区
 

@@ -17,7 +17,9 @@ metadata:
 
 命令名 `/dyro-review-board`、内部 id `dyro-board`、`dyro integration status board`、记录文件名里的 `adversarial-board` 都可以说。
 
-内部 id 仍是 `dyro-board`，不要改，也不要另写一套协议。
+内部 id 仍是 `dyro-board`，不要改，也不要另写一套协议。 Follow
+`dyro-board` exactly; do not invent a second protocol. The protocol now
+requires baseline + seat lifecycle.
 
 ## Same-turn delivery
 
@@ -33,7 +35,8 @@ If this turn also asks to 提交、commit、push、发布、publish、`task merg
    - `dyro-board/SKILL.md` next to this skill's parent directory
    - the installed `dyro-board` skill already on this host
 2. If none of those can be read, stop. Say 会审协议未安装；下一步是 `dyro integration status board`.
-3. Follow that file exactly. Do not start 会审 from this wrapper alone.
+3. Follow `dyro-board` exactly. Do not invent a second protocol. Do not
+   start 会审 from this wrapper alone.
 4. In chat, call the activity 会审 or 对抗审查. Call the output a 记录.
 
 ## Say this to developers
