@@ -2,6 +2,10 @@
 
 P2 adds the overlay channel and operator ack index.  A channel write and its
 matching ``signal`` event share the overlay lock; one side only is fail-closed.
+
+P3 adds overlay artifacts under ``.dyro/families/<parent>/artifacts/``.  The
+index is ``artifacts.jsonl``; bytes are read only for a known id after a path
+jail.  Readers never scan ``outputs/images/``, harness home, or sidecar dirs.
 """
 
 from __future__ import annotations
@@ -53,8 +57,18 @@ MAX_CHANNEL_LIMIT = 100
 MAX_CHANNEL_BODY = 2048
 CHANNEL_FILE = "channel.jsonl"
 ACKS_FILE = "acks.json"
+ARTIFACTS_FILE = "artifacts.jsonl"
+ARTIFACTS_DIR = "artifacts"
 MAX_CHANNEL_LOG_BYTES = 2 * 1024 * 1024
+MAX_ARTIFACT_LOG_BYTES = 2 * 1024 * 1024
+MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
+MAX_ARTIFACT_POINTS = 256
+ARTIFACT_TYPES = frozenset({"review", "image", "chart", "video"})
+REVIEW_CONCLUSIONS = frozenset({"pass", "fail", "inconclusive"})
+IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+_HEX = re.compile(r"^[0-9a-f]+$")
+_DURATION = re.compile(r"^[0-9]{1,4}(?::[0-9]{2}){0,2}s?$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _CREDENTIAL = re.compile(
     r"(?i)(?:"
@@ -74,6 +88,14 @@ _ABSOLUTE_PATH = re.compile(r"(?:^|[^A-Za-z0-9._-])(?:~|/|[A-Za-z]:[\\/])")
 
 class FamilyChannelError(DyroError):
     """Stable, path-free failure while reading or writing a family channel."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+class FamilyArtifactError(DyroError):
+    """Stable, path-free failure while reading overlay family artifacts."""
 
     def __init__(self, code: str) -> None:
         self.code = code
@@ -157,6 +179,14 @@ def channel_path(config: Config, parent_id: str) -> Path:
 
 def acks_path(config: Config, parent_id: str) -> Path:
     return family_dir(config, parent_id) / ACKS_FILE
+
+
+def artifacts_log_path(config: Config, parent_id: str) -> Path:
+    return family_dir(config, parent_id) / ARTIFACTS_FILE
+
+
+def artifacts_dir(config: Config, parent_id: str) -> Path:
+    return family_dir(config, parent_id) / ARTIFACTS_DIR
 
 
 def sanitize_channel_body(value: object, *, allow_empty: bool = False) -> str:
@@ -243,26 +273,35 @@ def family_unacked(
     items = list(lines) if lines is not None else line_records(config)
     best: dict[str, object] | None = None
     count = 0
+    inconsistent: list[str] = []
     for parent_id in family_ids(items):
         try:
             posts = read_visible_channel(config, parent_id, viewer=OPERATOR_ID)
-        except FamilyChannelError:
+            acked = read_acks(config, parent_id)
+        except FamilyChannelError as exc:
+            if exc.code == "CHANNEL_LOG_INCONSISTENT":
+                inconsistent.append(parent_id)
             continue
-        acked = read_acks(config, parent_id)
         for post in posts:
             if post["id"] in acked:
                 continue
             count += 1
             if best is None or _kind_rank(str(post["kind"])) < _kind_rank(str(best["kind"])):
                 best = post
-    if best is None:
-        return {"count": 0, "kind": "", "family": "", "summary": ""}
-    return {
+    payload: dict[str, object] = {
         "count": count,
-        "kind": best["kind"],
-        "family": best["family"],
-        "summary": _safe_summary(str(best.get("body") or best["kind"])),
+        "kind": best["kind"] if best is not None else "",
+        "family": best["family"] if best is not None else "",
+        "summary": (
+            _safe_summary(str(best.get("body") or best["kind"])) if best is not None else ""
+        ),
     }
+    if inconsistent:
+        payload["inconsistent_families"] = inconsistent
+        if not payload["family"]:
+            payload["family"] = inconsistent[0]
+            payload["summary"] = "CHANNEL_LOG_INCONSISTENT"
+    return payload
 
 
 def unread_by_member(
@@ -274,7 +313,9 @@ def unread_by_member(
     try:
         posts = read_visible_channel(config, parent_id, viewer=OPERATOR_ID)
         acked = read_acks(config, parent_id)
-    except FamilyChannelError:
+    except FamilyChannelError as exc:
+        if exc.code == "CHANNEL_LOG_INCONSISTENT":
+            raise
         return {member: 0 for member in members}
     unacked = [post for post in posts if post["id"] not in acked]
     counts = {member: 0 for member in members}
@@ -307,11 +348,18 @@ def post_channel_message(
     if sender not in members or (recipient and recipient not in members):
         raise FamilyChannelError("FAMILY_TO_INVALID")
     retracts = ""
+    facts: dict[str, object] = {}
     if kind == "retract":
         retracts = _message_id(body)
         body = ""
+    elif kind == "artifact":
+        body = sanitize_channel_body(body, allow_empty=True)
+        if body:
+            if not _SAFE_ID.fullmatch(body):
+                raise FamilyChannelError("CHANNEL_BODY_INVALID")
+            facts = {"artifact_id": body}
     else:
-        body = sanitize_channel_body(body, allow_empty=kind == "artifact")
+        body = sanitize_channel_body(body, allow_empty=False)
     record = {
         "from": sender,
         "to": recipient,
@@ -319,6 +367,7 @@ def post_channel_message(
         "body": body,
         "retracts": retracts,
         "family": parent_id,
+        "facts": facts,
     }
     if dry_run:
         return {**record, "id": "msg_0", "seq": 0, "at": "", "dry_run": True}
@@ -446,6 +495,7 @@ def read_visible_channel(
 def retracted_message_ids(config: Config, parent_id: str) -> frozenset[str]:
     validate_id(parent_id, "父开发线 ID")
     with overlay_lock(config):
+        _assert_channel_paired(config, parent_id)
         records = _read_channel_locked(config, parent_id)
     return frozenset(
         str(item["retracts"])
@@ -484,6 +534,7 @@ def channel_at(config: Config, parent_id: str, seq: int) -> dict[str, object] | 
     if type(seq) is not int or seq < 1:
         return None
     with overlay_lock(config):
+        _assert_channel_paired(config, parent_id)
         records = _read_channel_locked(config, parent_id)
     if seq > len(records):
         return None
@@ -518,6 +569,7 @@ def _commit_channel_row(
                 "kind": record["kind"],
                 "body": record["body"],
                 "retracts": record["retracts"],
+                "facts": dict(record.get("facts") or {}),
             }
             append_text(
                 channel_path(config, parent_id),
@@ -631,6 +683,9 @@ def _decode_channel(raw: str) -> dict[str, object]:
         raise FamilyChannelError("CHANNEL_LOG_INVALID")
     seq = decoded.get("seq")
     kind = decoded.get("kind")
+    facts = decoded.get("facts", {})
+    if facts is None:
+        facts = {}
     if (
         type(seq) is not int
         or seq < 1
@@ -643,7 +698,15 @@ def _decode_channel(raw: str) -> dict[str, object]:
         or kind not in CHANNEL_KINDS
         or not isinstance(decoded.get("body"), str)
         or not isinstance(decoded.get("retracts"), str)
+        or not isinstance(facts, dict)
+        or len(facts) > 8
+        or set(facts) - {"artifact_id"}
     ):
+        raise FamilyChannelError("CHANNEL_LOG_INVALID")
+    artifact_id = facts.get("artifact_id", "")
+    if artifact_id is None:
+        artifact_id = ""
+    if not isinstance(artifact_id, str) or (artifact_id and not _SAFE_ID.fullmatch(artifact_id)):
         raise FamilyChannelError("CHANNEL_LOG_INVALID")
     return {
         "id": decoded["id"],
@@ -655,6 +718,7 @@ def _decode_channel(raw: str) -> dict[str, object]:
         "kind": kind,
         "body": decoded["body"],
         "retracts": decoded["retracts"],
+        "facts": {"artifact_id": artifact_id} if artifact_id else {},
     }
 
 
@@ -793,3 +857,386 @@ def _node(
         "in_progress": bool(badge.get("in_progress")),
         "unread": unread_count,
     }
+
+
+def list_family_artifacts(config: Config, parent_id: str) -> list[dict[str, object]]:
+    """Return overlay artifact metadata.  Never scans sidecar or image dirs."""
+    validate_id(parent_id, "父开发线 ID")
+    with overlay_lock(config):
+        records = _read_artifacts_locked(config, parent_id)
+        return [dict(item) for item in records]
+
+
+def read_family_artifact(config: Config, parent_id: str, artifact_id: str) -> dict[str, object]:
+    """Return one overlay artifact.  Unknown ids fail closed."""
+    validate_id(parent_id, "父开发线 ID")
+    artifact_id = _artifact_id(artifact_id)
+    with overlay_lock(config):
+        records = _read_artifacts_locked(config, parent_id)
+        for item in records:
+            if item["id"] == artifact_id:
+                return dict(item)
+    raise FamilyArtifactError("ARTIFACT_NOT_FOUND")
+
+
+def read_family_artifact_bytes(
+    config: Config, parent_id: str, artifact_id: str
+) -> tuple[str, bytes]:
+    """Return jailed image/chart bytes.  Video never streams."""
+    record = read_family_artifact(config, parent_id, artifact_id)
+    media_type = str(record.get("media_type") or "")
+    if record["type"] == "video":
+        raise FamilyArtifactError("ARTIFACT_NOT_BYTES")
+    if record["type"] in {"review"}:
+        raise FamilyArtifactError("ARTIFACT_NOT_BYTES")
+    if record["type"] == "chart" and media_type == "application/json":
+        raise FamilyArtifactError("ARTIFACT_NOT_BYTES")
+    if media_type not in IMAGE_MEDIA_TYPES:
+        raise FamilyArtifactError("ARTIFACT_NOT_BYTES")
+    path = _jailed_artifact_path(config, parent_id, artifact_id)
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise FamilyArtifactError("ARTIFACT_NOT_FOUND") from exc
+    if size > MAX_ARTIFACT_BYTES:
+        raise FamilyArtifactError("ARTIFACT_TOO_LARGE")
+    try:
+        body = path.read_bytes()
+    except OSError as exc:
+        raise FamilyArtifactError("ARTIFACT_NOT_FOUND") from exc
+    detected = _image_media_type(body)
+    if detected != media_type:
+        raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+    return detected, body
+
+
+def plant_family_artifact(
+    config: Config,
+    parent_id: str,
+    *,
+    artifact_id: str,
+    artifact_type: str,
+    title: str = "",
+    conclusion: str = "",
+    bound_hash: str = "",
+    duration: str = "",
+    size: int = 0,
+    points: list[Mapping[str, object]] | None = None,
+    body: bytes = b"",
+    clock: Callable[[], datetime] | None = None,
+) -> dict[str, object]:
+    """Write one overlay artifact for tests and library callers.  Not a CLI."""
+    validate_id(parent_id, "父开发线 ID")
+    artifact_id = _artifact_id(artifact_id)
+    if artifact_type not in ARTIFACT_TYPES:
+        raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+    title = _artifact_title(title)
+    conclusion_text = ""
+    hash12 = ""
+    duration_text = ""
+    media_type = ""
+    stored: bytes | None = None
+    chart_points: list[dict[str, object]] = []
+    stored_size = 0
+    if artifact_type == "review":
+        if body or points or size:
+            raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+        if conclusion not in REVIEW_CONCLUSIONS:
+            raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+        conclusion_text = conclusion
+        hash12 = _bound_hash12(bound_hash)
+    elif artifact_type == "video":
+        if body or points:
+            raise FamilyArtifactError("ARTIFACT_NOT_BYTES")
+        duration_text = _artifact_duration(duration)
+        if type(size) is not int or size < 0 or size > MAX_ARTIFACT_BYTES:
+            raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+        if not duration_text and size <= 0:
+            raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+        stored_size = size
+    elif artifact_type == "image":
+        if points:
+            raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+        media_type = _image_media_type(body)
+        stored = body
+        stored_size = len(body)
+    elif artifact_type == "chart":
+        if points is not None:
+            if body:
+                raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+            chart_points = _artifact_points(points)
+            stored = json.dumps(
+                {"points": chart_points}, ensure_ascii=False, sort_keys=True
+            ).encode("utf-8")
+            media_type = "application/json"
+            stored_size = len(stored)
+        else:
+            media_type = _image_media_type(body)
+            stored = body
+            stored_size = len(body)
+    if stored is not None and len(stored) > MAX_ARTIFACT_BYTES:
+        raise FamilyArtifactError("ARTIFACT_TOO_LARGE")
+    stamp = _utc(clock).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        with overlay_lock(config):
+            records = _read_artifacts_locked(config, parent_id)
+            if any(item["id"] == artifact_id for item in records):
+                raise FamilyArtifactError("ARTIFACT_ID_DUPLICATE")
+            seq = (int(records[-1]["seq"]) + 1) if records else 1
+            row = {
+                "id": artifact_id,
+                "seq": seq,
+                "at": stamp,
+                "family": parent_id,
+                "type": artifact_type,
+                "title": title,
+                "conclusion": conclusion_text,
+                "bound_hash": hash12,
+                "media_type": media_type,
+                "size": stored_size,
+                "duration": duration_text,
+            }
+            if artifact_type == "chart" and media_type == "application/json":
+                row["points"] = chart_points
+            if stored is not None:
+                _write_artifact_bytes_locked(config, parent_id, artifact_id, stored)
+            append_text(
+                artifacts_log_path(config, parent_id),
+                json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n",
+            )
+    except FamilyArtifactError:
+        raise
+    except OSError as exc:
+        raise FamilyArtifactError("ARTIFACT_WRITE_FAILED") from exc
+    return row
+
+
+def _read_artifacts_locked(config: Config, parent_id: str) -> list[dict[str, object]]:
+    path = artifacts_log_path(config, parent_id)
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise FamilyArtifactError("ARTIFACT_LOG_INVALID")
+    if not path.exists():
+        return []
+    try:
+        if path.stat().st_size > MAX_ARTIFACT_LOG_BYTES:
+            raise FamilyArtifactError("ARTIFACT_LOG_INVALID")
+        text = path.read_text(encoding="utf-8")
+    except FamilyArtifactError:
+        raise
+    except OSError as exc:
+        raise FamilyArtifactError("ARTIFACT_LOG_INVALID") from exc
+    if not text:
+        return []
+    if not text.endswith("\n"):
+        raise FamilyArtifactError("ARTIFACT_LOG_INVALID")
+    records: list[dict[str, object]] = []
+    expected = 1
+    for line in text.splitlines():
+        if not line:
+            raise FamilyArtifactError("ARTIFACT_LOG_INVALID")
+        record = _decode_artifact(line)
+        if record["seq"] != expected:
+            raise FamilyArtifactError("ARTIFACT_LOG_INVALID")
+        if record["type"] == "chart" and record["media_type"] == "application/json":
+            if not record.get("points"):
+                record["points"] = _load_chart_points_locked(config, parent_id, str(record["id"]))
+        records.append(record)
+        expected += 1
+    return records
+
+
+def _decode_artifact(raw: str) -> dict[str, object]:
+    try:
+        decoded: Any = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise FamilyArtifactError("ARTIFACT_LOG_INVALID") from exc
+    if not isinstance(decoded, dict):
+        raise FamilyArtifactError("ARTIFACT_LOG_INVALID")
+    required = (
+        "id",
+        "seq",
+        "at",
+        "family",
+        "type",
+        "title",
+        "conclusion",
+        "bound_hash",
+        "media_type",
+        "size",
+        "duration",
+    )
+    if any(key not in decoded for key in required):
+        raise FamilyArtifactError("ARTIFACT_LOG_INVALID")
+    seq = decoded.get("seq")
+    artifact_type = decoded.get("type")
+    size = decoded.get("size")
+    if (
+        type(seq) is not int
+        or seq < 1
+        or not isinstance(decoded.get("id"), str)
+        or not _SAFE_ID.fullmatch(str(decoded.get("id") or ""))
+        or not isinstance(decoded.get("at"), str)
+        or not isinstance(decoded.get("family"), str)
+        or artifact_type not in ARTIFACT_TYPES
+        or not isinstance(decoded.get("title"), str)
+        or not isinstance(decoded.get("conclusion"), str)
+        or not isinstance(decoded.get("bound_hash"), str)
+        or not isinstance(decoded.get("media_type"), str)
+        or type(size) is not int
+        or size < 0
+        or size > MAX_ARTIFACT_BYTES
+        or not isinstance(decoded.get("duration"), str)
+    ):
+        raise FamilyArtifactError("ARTIFACT_LOG_INVALID")
+    points_raw = decoded.get("points")
+    points: list[dict[str, object]] = []
+    if points_raw is not None:
+        points = _artifact_points(points_raw)
+    return {
+        "id": decoded["id"],
+        "seq": seq,
+        "at": decoded["at"],
+        "family": decoded["family"],
+        "type": artifact_type,
+        "title": decoded["title"],
+        "conclusion": decoded["conclusion"],
+        "bound_hash": decoded["bound_hash"],
+        "media_type": decoded["media_type"],
+        "size": size,
+        "duration": decoded["duration"],
+        "points": points,
+    }
+
+
+def _load_chart_points_locked(
+    config: Config, parent_id: str, artifact_id: str
+) -> list[dict[str, object]]:
+    path = _jailed_artifact_path(config, parent_id, artifact_id)
+    try:
+        if path.stat().st_size > MAX_ARTIFACT_BYTES:
+            raise FamilyArtifactError("ARTIFACT_TOO_LARGE")
+        decoded: Any = json.loads(path.read_text(encoding="utf-8"))
+    except FamilyArtifactError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise FamilyArtifactError("ARTIFACT_LOG_INVALID") from exc
+    if not isinstance(decoded, dict) or set(decoded) != {"points"}:
+        raise FamilyArtifactError("ARTIFACT_LOG_INVALID")
+    return _artifact_points(decoded.get("points"))
+
+
+def _write_artifact_bytes_locked(
+    config: Config, parent_id: str, artifact_id: str, body: bytes
+) -> None:
+    directory = artifacts_dir(config, parent_id)
+    if directory.exists() and (directory.is_symlink() or not directory.is_dir()):
+        raise FamilyArtifactError("ARTIFACT_PATH_INVALID")
+    directory.mkdir(parents=True, exist_ok=True)
+    path = _jailed_artifact_path(config, parent_id, artifact_id, must_exist=False)
+    path.write_bytes(body)
+
+
+def _jailed_artifact_path(
+    config: Config, parent_id: str, artifact_id: str, *, must_exist: bool = True
+) -> Path:
+    artifact_id = _artifact_id(artifact_id)
+    directory = artifacts_dir(config, parent_id)
+    if directory.exists() and (directory.is_symlink() or not directory.is_dir()):
+        raise FamilyArtifactError("ARTIFACT_PATH_INVALID")
+    path = directory.joinpath(artifact_id)
+    if path.is_symlink():
+        raise FamilyArtifactError("ARTIFACT_PATH_INVALID")
+    if ".." in artifact_id or "/" in artifact_id or "\\" in artifact_id:
+        raise FamilyArtifactError("ARTIFACT_PATH_INVALID")
+    if must_exist and not path.is_file():
+        raise FamilyArtifactError("ARTIFACT_NOT_FOUND")
+    try:
+        if directory.exists():
+            resolved_dir = directory.resolve()
+            resolved = path.resolve()
+            resolved.relative_to(resolved_dir)
+            if resolved.name != artifact_id:
+                raise FamilyArtifactError("ARTIFACT_PATH_INVALID")
+    except FamilyArtifactError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise FamilyArtifactError("ARTIFACT_PATH_INVALID") from exc
+    return path
+
+
+def _artifact_id(value: object) -> str:
+    if not isinstance(value, str) or not _SAFE_ID.fullmatch(value):
+        raise FamilyArtifactError("ARTIFACT_ID_INVALID")
+    if value in {".", ".."} or "/" in value or "\\" in value:
+        raise FamilyArtifactError("ARTIFACT_PATH_INVALID")
+    try:
+        return validate_id(value, "产物 ID")
+    except ValidationError as exc:
+        raise FamilyArtifactError("ARTIFACT_ID_INVALID") from exc
+
+
+def _artifact_title(value: object) -> str:
+    if not isinstance(value, str):
+        raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+    text = unicodedata.normalize("NFC", value).strip()
+    if (
+        not text
+        or len(text) > 80
+        or _CONTROL.search(text)
+        or _CREDENTIAL.search(text)
+        or _REMOTE.search(text)
+        or _ABSOLUTE_PATH.search(text)
+    ):
+        raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+    return text
+
+
+def _bound_hash12(value: object) -> str:
+    if not isinstance(value, str) or len(value) < 12 or len(value) > 64:
+        raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+    lowered = value.lower()
+    if not _HEX.fullmatch(lowered):
+        raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+    return lowered[:12]
+
+
+def _artifact_duration(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        return ""
+    if not _DURATION.fullmatch(value) or len(value) > 16:
+        raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+    return value
+
+
+def _artifact_points(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list) or len(value) > MAX_ARTIFACT_POINTS:
+        raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+    points: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) != {"x", "y"}:
+            raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+        x_value = item.get("x")
+        y_value = item.get("y")
+        if isinstance(x_value, bool) or isinstance(y_value, bool):
+            raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+        if not isinstance(x_value, (int, float)) or not isinstance(y_value, (int, float)):
+            raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+        points.append({"x": x_value, "y": y_value})
+    return points
+
+
+def _image_media_type(body: object) -> str:
+    if not isinstance(body, (bytes, bytearray)) or not body:
+        raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
+    data = bytes(body)
+    if len(data) > MAX_ARTIFACT_BYTES:
+        raise FamilyArtifactError("ARTIFACT_TOO_LARGE")
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif"
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")

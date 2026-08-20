@@ -28,7 +28,7 @@ READ_TIMEOUT_SECONDS = 5.0
 REQUEST_DEADLINE_SECONDS = 10.0
 MAX_CONCURRENT_REQUESTS = 8
 _CSP = (
-    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; "
+    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; "
     "connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; "
     "form-action 'none'; frame-ancestors 'none'"
 )
@@ -316,12 +316,26 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     "data": {
                         "version": __version__,
                         "surfaces": (
-                            ["overview", "proofs", "system", "events", "families"]
+                            [
+                                "overview",
+                                "proofs",
+                                "system",
+                                "events",
+                                "families",
+                                "artifacts",
+                            ]
                             if self.console.overview_service
                             else []
                         ),
                         "capabilities": (
-                            ["overview", "proofs", "system", "events", "families"]
+                            [
+                                "overview",
+                                "proofs",
+                                "system",
+                                "events",
+                                "families",
+                                "artifacts",
+                            ]
                             if self.console.overview_service
                             else []
                         ),
@@ -463,6 +477,35 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 payload = service.channel(
                     alias, parent, after=after, filter=filter_text, limit=limit
                 )
+            elif len(suffix) == 3 and suffix[0] == "families" and suffix[2] == "artifacts":
+                parent = suffix[1]
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", parent):
+                    self._error(400, "FAMILY_PARENT_INVALID")
+                    return
+                payload = service.artifacts(alias, parent)
+            elif len(suffix) == 4 and suffix[0] == "families" and suffix[2] == "artifacts":
+                parent = suffix[1]
+                artifact_id = suffix[3]
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", parent):
+                    self._error(400, "FAMILY_PARENT_INVALID")
+                    return
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", artifact_id):
+                    self._error(400, "ARTIFACT_ID_INVALID")
+                    return
+                media = service.artifact_bytes(alias, parent, artifact_id)
+                if media is not None:
+                    content_type, body = media
+                    if content_type not in {
+                        "image/png",
+                        "image/jpeg",
+                        "image/gif",
+                        "image/webp",
+                    }:
+                        self._error(400, "ARTIFACT_TYPE_INVALID")
+                        return
+                    self._send(200, body, content_type)
+                    return
+                payload = service.artifact(alias, parent, artifact_id)
             else:
                 self._error(404, "NOT_FOUND")
                 return
@@ -500,11 +543,19 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             "CHANNEL_MESSAGE_AMBIGUOUS",
             "CHANNEL_LOG_INVALID",
             "CHANNEL_ACKS_INVALID",
+            "CHANNEL_LOG_INCONSISTENT",
+            "ARTIFACT_ID_INVALID",
+            "ARTIFACT_PATH_INVALID",
+            "ARTIFACT_TOO_LARGE",
+            "ARTIFACT_TYPE_INVALID",
+            "ARTIFACT_LOG_INVALID",
+            "ARTIFACT_NOT_BYTES",
+            "ARTIFACT_ID_DUPLICATE",
         }:
             return 400
         if code in {"FAMILY_POST_FORBIDDEN"}:
             return 403
-        if code in {"WORKSPACE_NOT_FOUND", "FAMILY_NOT_FOUND"}:
+        if code in {"WORKSPACE_NOT_FOUND", "FAMILY_NOT_FOUND", "ARTIFACT_NOT_FOUND"}:
             return 404
         return 503
 

@@ -346,6 +346,63 @@ class ConsoleOverviewService:
         data = apply_human_channel_post(config, parent_id, payload)
         return self._envelope(data, warning_codes)
 
+    def artifacts(self, alias: str, parent: str) -> dict[str, object]:
+        """Overlay artifact list. Listener or worker may call this; no git."""
+        from .families import artifacts_payload
+
+        try:
+            parent_id = validate_id(parent, "父开发线 ID")
+        except ValidationError:
+            raise ConsoleOverviewError("FAMILY_PARENT_INVALID") from None
+        config, warning_codes = self._workspace_config(alias)
+        try:
+            data = artifacts_payload(config, parent_id, alias=alias)
+        except ConsoleOverviewError:
+            raise
+        return self._envelope(data, warning_codes)
+
+    def artifact(self, alias: str, parent: str, artifact_id: str) -> dict[str, object]:
+        """Overlay artifact metadata. Image bytes use ``artifact_bytes``."""
+        from .families import artifact_payload
+
+        try:
+            parent_id = validate_id(parent, "父开发线 ID")
+            token = validate_id(artifact_id, "产物 ID")
+        except ValidationError:
+            raise ConsoleOverviewError("ARTIFACT_ID_INVALID") from None
+        config, warning_codes = self._workspace_config(alias)
+        try:
+            data = artifact_payload(config, parent_id, token, alias=alias)
+        except ConsoleOverviewError:
+            raise
+        return self._envelope(data, warning_codes)
+
+    def artifact_bytes(
+        self, alias: str, parent: str, artifact_id: str
+    ) -> tuple[str, bytes] | None:
+        """Same-origin image bytes.  Video and review return ``None``."""
+        from .families import artifact_bytes_payload, artifact_payload
+
+        try:
+            parent_id = validate_id(parent, "父开发线 ID")
+            token = validate_id(artifact_id, "产物 ID")
+        except ValidationError:
+            raise ConsoleOverviewError("ARTIFACT_ID_INVALID") from None
+        config, _warning_codes = self._workspace_config(alias)
+        try:
+            meta = artifact_payload(config, parent_id, token, alias=alias)
+            media_type = meta.get("media_type")
+            if meta.get("type") == "video" or media_type not in {
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/webp",
+            }:
+                return None
+            return artifact_bytes_payload(config, parent_id, token)
+        except ConsoleOverviewError:
+            raise
+
     def system(self) -> dict[str, object]:
         """Return cached update facts. Do not probe PATH or start a network check."""
         warnings: set[str] = set()

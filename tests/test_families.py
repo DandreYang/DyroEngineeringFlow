@@ -9,17 +9,28 @@ from dyro.console.overview import ConsoleOverviewError
 from dyro.console.read_model import workspace_envelope
 from dyro.events import read_events
 from dyro.families import (
+    FamilyArtifactError,
     FamilyChannelError,
+    MAX_ARTIFACT_BYTES,
     ack_channel_message,
+    artifacts_dir,
+    artifacts_log_path,
+    channel_at,
     channel_path,
     family_graph,
     family_members,
     family_unacked,
     infer_post_family,
     line_records,
+    list_family_artifacts,
+    plant_family_artifact,
     post_channel_message,
     read_acks,
+    read_family_artifact,
+    read_family_artifact_bytes,
     read_visible_channel,
+    retracted_message_ids,
+    unread_by_member,
 )
 from dyro.observations import capture_workspace_read_snapshot
 from dyro.state import append_text
@@ -203,10 +214,14 @@ class FamilyChannelTests(WorkspaceCase):
             recipient="core_pay_fix",
         )
         self.assertEqual(child["family"], "core_pay")
-        core_ids = {item["id"] for item in read_visible_channel(self.config, "core")}
-        pay_ids = {item["id"] for item in read_visible_channel(self.config, "core_pay")}
-        self.assertNotIn(child["id"], core_ids)
-        self.assertIn(child["id"], pay_ids)
+        self.assertEqual(child["id"], "msg_1")
+        core_rows = read_visible_channel(self.config, "core")
+        pay_rows = read_visible_channel(self.config, "core_pay")
+        self.assertEqual(core_rows, [])
+        core_keys = {(item["family"], item["id"]) for item in core_rows}
+        pay_keys = {(item["family"], item["id"]) for item in pay_rows}
+        self.assertNotIn((child["family"], child["id"]), core_keys)
+        self.assertIn((child["family"], child["id"]), pay_keys)
 
     def test_colliding_msg_ids_are_family_scoped(self) -> None:
         core_row = post_channel_message(
@@ -340,6 +355,209 @@ class FamilyChannelTests(WorkspaceCase):
         self.assertEqual(unread["count"], 1)
         self.assertEqual(unread["kind"], "decision")
         self.assertEqual(unread["family"], "core")
+
+    def test_inconsistent_family_is_surfaced_not_hidden_as_unread_zero(self) -> None:
+        post_channel_message(
+            self.config,
+            sender="core",
+            kind="decision",
+            body="健康家族未读",
+        )
+        append_text(
+            channel_path(self.config, "core_shop"),
+            json.dumps(
+                {
+                    "id": "msg_1",
+                    "seq": 1,
+                    "at": "2026-08-20T12:00:00Z",
+                    "family": "core_shop",
+                    "from": "core_shop",
+                    "to": "",
+                    "kind": "ask_sync",
+                    "body": "半写入",
+                    "retracts": "",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        unread = family_unacked(self.config)
+        self.assertEqual(unread["count"], 1)
+        self.assertEqual(unread["family"], "core")
+        self.assertEqual(unread["inconsistent_families"], ["core_shop"])
+        self.assertNotEqual(unread.get("kind"), "repair_required")
+        with self.assertRaises(FamilyChannelError) as raised:
+            unread_by_member(self.config, "core_shop", line_records(self.config))
+        self.assertEqual(raised.exception.code, "CHANNEL_LOG_INCONSISTENT")
+        healthy = unread_by_member(self.config, "core", line_records(self.config))
+        self.assertGreater(healthy["operator"], 0)
+
+    def test_retract_and_channel_at_fail_closed_when_unpaired(self) -> None:
+        append_text(
+            channel_path(self.config, "core"),
+            json.dumps(
+                {
+                    "id": "msg_1",
+                    "seq": 1,
+                    "at": "2026-08-20T12:00:00Z",
+                    "family": "core",
+                    "from": "core_pay",
+                    "to": "",
+                    "kind": "retract",
+                    "body": "",
+                    "retracts": "msg_1",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        with self.assertRaises(FamilyChannelError) as retracted:
+            retracted_message_ids(self.config, "core")
+        self.assertEqual(retracted.exception.code, "CHANNEL_LOG_INCONSISTENT")
+        with self.assertRaises(FamilyChannelError) as cursor:
+            channel_at(self.config, "core", 1)
+        self.assertEqual(cursor.exception.code, "CHANNEL_LOG_INCONSISTENT")
+
+    def test_http_ack_checks_url_family_before_write(self) -> None:
+        written = post_channel_message(
+            self.config,
+            sender="core_pay",
+            kind="blocked",
+            body="父族广播",
+        )
+        self.assertEqual(written["id"], "msg_1")
+        with self.assertRaises(ConsoleOverviewError) as raised:
+            apply_human_channel_post(
+                self.config, "core_shop", {"kind": "ack", "ack_id": "msg_1"}
+            )
+        self.assertEqual(raised.exception.code, "CHANNEL_MESSAGE_NOT_FOUND")
+        self.assertEqual(read_acks(self.config, "core"), frozenset())
+        self.assertEqual(read_acks(self.config, "core_shop"), frozenset())
+
+
+class FamilyArtifactTests(WorkspaceCase):
+    PNG = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00"
+        b"\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.config = load(self.root)
+        create_line(self.config, line_id="core", branch="feat/core", base="main")
+        spawn_line(self.config, "core", "pay")
+
+    def test_list_and_get_image_bytes_from_overlay_path(self) -> None:
+        planted = plant_family_artifact(
+            self.config,
+            "core",
+            artifact_id="img_1",
+            artifact_type="image",
+            title="复核图",
+            body=self.PNG,
+        )
+        listed = list_family_artifacts(self.config, "core")
+        self.assertEqual([item["id"] for item in listed], ["img_1"])
+        self.assertEqual(listed[0]["type"], "image")
+        media_type, body = read_family_artifact_bytes(self.config, "core", "img_1")
+        self.assertEqual(media_type, "image/png")
+        self.assertEqual(body, self.PNG)
+        self.assertEqual(planted["family"], "core")
+
+    def test_symlink_dotdot_and_oversize_are_rejected(self) -> None:
+        plant_family_artifact(
+            self.config,
+            "core",
+            artifact_id="img_1",
+            artifact_type="image",
+            title="复核图",
+            body=self.PNG,
+        )
+        target = artifacts_dir(self.config, "core") / "img_1"
+        leaked = self.root / "outputs" / "images" / "secret.png"
+        leaked.parent.mkdir(parents=True)
+        leaked.write_bytes(self.PNG)
+        target.unlink()
+        target.symlink_to(leaked)
+        with self.assertRaises(FamilyArtifactError) as linked:
+            read_family_artifact_bytes(self.config, "core", "img_1")
+        self.assertEqual(linked.exception.code, "ARTIFACT_PATH_INVALID")
+
+        with self.assertRaises(FamilyArtifactError) as dotted:
+            read_family_artifact(self.config, "core", "../img_1")
+        self.assertEqual(dotted.exception.code, "ARTIFACT_ID_INVALID")
+
+        plant_family_artifact(
+            self.config,
+            "core",
+            artifact_id="img_2",
+            artifact_type="image",
+            title="过大图",
+            body=self.PNG,
+        )
+        huge = artifacts_dir(self.config, "core") / "img_2"
+        huge.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * (MAX_ARTIFACT_BYTES + 8))
+        with self.assertRaises(FamilyArtifactError) as oversize:
+            read_family_artifact_bytes(self.config, "core", "img_2")
+        self.assertEqual(oversize.exception.code, "ARTIFACT_TOO_LARGE")
+
+    def test_video_metadata_has_no_body_stream(self) -> None:
+        planted = plant_family_artifact(
+            self.config,
+            "core",
+            artifact_id="vid_1",
+            artifact_type="video",
+            title="演示",
+            duration="12s",
+            size=32,
+        )
+        self.assertEqual(planted["type"], "video")
+        self.assertFalse((artifacts_dir(self.config, "core") / "vid_1").exists())
+        with self.assertRaises(FamilyArtifactError) as raised:
+            read_family_artifact_bytes(self.config, "core", "vid_1")
+        self.assertEqual(raised.exception.code, "ARTIFACT_NOT_BYTES")
+
+    def test_missing_artifact_id_fail_closes_and_sidecar_is_not_scanned(self) -> None:
+        planted = self.root / "outputs" / "images" / "sidecar.png"
+        planted.parent.mkdir(parents=True)
+        planted.write_bytes(self.PNG)
+        self.assertEqual(list_family_artifacts(self.config, "core"), [])
+        with self.assertRaises(FamilyArtifactError) as missing:
+            read_family_artifact(self.config, "core", "sidecar")
+        self.assertEqual(missing.exception.code, "ARTIFACT_NOT_FOUND")
+        self.assertFalse(artifacts_log_path(self.config, "core").exists())
+        row = post_channel_message(
+            self.config,
+            sender="core_pay",
+            kind="artifact",
+            body="",
+        )
+        self.assertEqual(row["kind"], "artifact")
+        self.assertEqual(row.get("facts") or {}, {})
+
+    def test_artifact_channel_row_binds_overlay_id(self) -> None:
+        plant_family_artifact(
+            self.config,
+            "core",
+            artifact_id="rev_1",
+            artifact_type="review",
+            title="会审摘要",
+            conclusion="pass",
+            bound_hash="abc123def4567890",
+        )
+        row = post_channel_message(
+            self.config,
+            sender="core_pay",
+            kind="artifact",
+            body="rev_1",
+        )
+        self.assertEqual(row["facts"]["artifact_id"], "rev_1")
+        meta = read_family_artifact(self.config, "core", "rev_1")
+        self.assertEqual(meta["conclusion"], "pass")
+        self.assertEqual(meta["bound_hash"], "abc123def456")
 
 
 if __name__ == "__main__":

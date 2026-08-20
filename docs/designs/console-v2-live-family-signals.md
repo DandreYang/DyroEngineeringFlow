@@ -93,7 +93,7 @@ operator             每个家族组的固定成员
 
 hash 只保存安全 alias 与当前 tab：`#w/<alias>`、`#w/<alias>/family`、`#w/<alias>/events`、`#w/<alias>/channel`。不把 bearer、路径或消息正文写入 URL。
 
-详情里已有的线 / 任务 / 目标清单、独立 Proof inspect 和关闭按钮不变。点击任务仍进入既有 Task 摘要，不新开「任务工作室」。产物栏是频道 / 事件上的 overlay，不是第四个一级 tab；P3 才渲染，P1 / P2 只保留占位文案「产物尚未开放」。
+详情里已有的线 / 任务 / 目标清单、独立 Proof inspect 和关闭按钮不变。点击任务仍进入既有 Task 摘要，不新开「任务工作室」。产物栏是频道 / 事件上的 overlay，不是第四个一级 tab；P1 / P2 只保留占位文案「产物尚未开放」，P3 已落地并按能力渲染。
 
 ---
 
@@ -219,7 +219,7 @@ dyro --workspace example --dry-run line sync core_pay
 
 ## 6. 产物栏
 
-P3 才实现。P1 / P2 的频道行若带 `artifact` kind，只显示「产物尚未开放」和安全 id，不取文件。
+P3 已落地。P1 / P2 的频道行若带 `artifact` kind，只显示「产物尚未开放」和安全 id，不取文件。
 
 权威位置是 overlay，不是产品 git worktree，也不是 Proof store：
 
@@ -369,7 +369,7 @@ dyro --workspace example line ack <id>
 
 其它字段、未知 kind、`to` 落在家族外、空 body 的 `decision` / `contract`，全部拒绝。成功响应是统一 Console 封套，`data` 只含新行 id 与 seq。该 POST 走既有 session、Host、Origin、Content-Length、并发和 10 秒 deadline；body 上限 4 KiB。
 
-meta `surfaces` 增加 `events`（P1）与 `families`（P2）。页面按能力拉取，overview 轮询仍不带这些列表。
+meta `surfaces` 增加 `events`（P1）、`families`（P2）与 `artifacts`（P3）。页面按能力拉取，overview 轮询仍不带这些列表。
 
 ---
 
@@ -395,7 +395,7 @@ meta `surfaces` 增加 `events`（P1）与 `families`（P2）。页面按能力�
 
 ### P1 · 事件 + 图
 
-P1 已在本 PR 落地（事件尾、`parent` 投影、一层家族图、SSE `after=`）。P3 仍未实现。
+P1 已在本列车落地（事件尾、`parent` 投影、一层家族图、SSE `after=`）。P3 已落地。
 
 - 写入并读取 `.dyro/events.jsonl`。
 - line DTO 投影 `parent`。
@@ -416,6 +416,8 @@ P2 已落地：`channel.jsonl` / `acks`、`line post|inbox|ack`、`next family_u
 - `/dyro-line-family` 行为不变，不发帖。
 
 ### P3 · 产物
+
+P3 已落地：overlay 清单与同源图像（bearer `fetch` 后赋 `blob:` URL），视频只出卡片，不扫描 harness home 或 sidecar 输出目录。
 
 - overlay 产物清单与同源图像。
 - 视频只出卡片。

@@ -180,6 +180,24 @@ class IsolatedOverviewService:
         self, alias: str, parent: str, payload: Mapping[str, object]
     ) -> dict[str, object]:
         """Write overlay signals in the listener. Never start the inspection worker."""
+        return self._listener_service().post_channel(alias, parent, payload)
+
+    def artifacts(self, alias: str, parent: str) -> dict[str, object]:
+        """Read overlay artifact metadata in the listener. No worker, no git."""
+        return self._listener_service().artifacts(alias, parent)
+
+    def artifact(self, alias: str, parent: str, artifact_id: str) -> dict[str, object]:
+        """Read one overlay artifact DTO in the listener. No worker, no git."""
+        return self._listener_service().artifact(alias, parent, artifact_id)
+
+    def artifact_bytes(
+        self, alias: str, parent: str, artifact_id: str
+    ) -> tuple[str, bytes] | None:
+        """Read jailed image bytes in the listener. Video never streams."""
+        return self._listener_service().artifact_bytes(alias, parent, artifact_id)
+
+    def _listener_service(self):
+        """Overlay-only Console service in this process. No inspection worker."""
         from ..config import load
         from ..hub import WorkspaceRecord, WorkspaceRegistry, load_registry_from_home
         from .overview import ConsoleOverviewService
@@ -200,11 +218,10 @@ class IsolatedOverviewService:
             def registry_loader() -> WorkspaceRegistry:
                 return load_registry_from_home(home)
 
-        service = ConsoleOverviewService(
+        return ConsoleOverviewService(
             registry_loader=registry_loader,
             cursor_secret=self._cursor_secret,
         )
-        return service.post_channel(alias, parent, payload)
 
     def system(self) -> dict[str, object]:
         return self._request({"op": "system"})
@@ -601,6 +618,7 @@ class IsolatedOverviewService:
                 "retracts",
                 "retracted",
                 "acked",
+                "artifact_id",
             }:
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
             sender = item.get("from")
@@ -609,6 +627,7 @@ class IsolatedOverviewService:
             retracts = item.get("retracts")
             at = item.get("at")
             kind = item.get("kind")
+            artifact_id = item.get("artifact_id")
             if (
                 type(item.get("seq")) is not int
                 or item["seq"] < 0
@@ -626,6 +645,7 @@ class IsolatedOverviewService:
                 or len(retracts) > 80
                 or type(item.get("retracted")) is not bool
                 or type(item.get("acked")) is not bool
+                or not (artifact_id == "" or cls._safe_alias(artifact_id))
             ):
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         cursor = data["next_cursor"]

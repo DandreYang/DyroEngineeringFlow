@@ -32,6 +32,16 @@
   (`parent` or sender), not `F(sender)`. Channel pairing and ack treat
   `msg_N` as per-family; HTTP ack is bound to the URL family, and CLI
   `line ack` fail-closes when the same id exists in more than one family.
+- Console P3: overlay artifact rail on the existing workspace-detail
+  channel/event panes. Authority is
+  `.dyro/families/<parent>/artifacts.jsonl` plus jailed
+  `artifacts/<id>` bytes. Images are same-origin bearer `fetch` then
+  `blob:` URLs (`img-src 'self' blob:`). Video is a card with a
+  copyable `--dry-run` open command; no `<video>` and no `media-src`.
+  Artifact HTTP is GET only. Inspection worker stays read-only and
+  cannot write artifacts. Unpaired channel logs are no longer hidden
+  as unread 0; `msg_N` page keys stay `(family, id)`. Version stays
+  `0.7.7`.
 - User slash Skill `dyro-line-family` (`/dyro-line-family`) preflights
   `line spawn` / `line merge` / `line sync` and prints one `--yes` command
   for the human. It does not execute the mutation, invent `--push`, or
