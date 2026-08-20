@@ -2067,6 +2067,57 @@ class FamilyChannelCliTests(WorkspaceCase):
         self.assertEqual(unacked["family"], "core")
         self.assertNotEqual(payload.get("state"), "repair_required")
 
+    def test_ack_without_family_fails_closed_on_colliding_msg_ids(self) -> None:
+        first = self._read_json(
+            "line",
+            "post",
+            "core",
+            "--kind",
+            "blocked",
+            "--body",
+            "父族",
+            "--yes",
+        )
+        second = self._read_json(
+            "line",
+            "post",
+            "core_pay",
+            "--kind",
+            "blocked",
+            "--to",
+            "core_pay",
+            "--body",
+            "子族",
+            "--yes",
+        )
+        self.assertEqual(first["id"], "msg_1")
+        self.assertEqual(second["id"], "msg_1")
+        self.assertEqual(first["family"], "core")
+        self.assertEqual(second["family"], "core_pay")
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "line",
+                    "ack",
+                    "msg_1",
+                    "--yes",
+                    "--format",
+                    "json",
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(json.loads(stderr.getvalue())["code"], "CHANNEL_MESSAGE_AMBIGUOUS")
+        scoped = self._read_json("line", "ack", "msg_1", "--family", "core_pay", "--yes")
+        self.assertEqual(scoped["family"], "core_pay")
+        self.assertEqual(scoped["id"], "msg_1")
+        inbox_pay = self._read_json("line", "inbox", "--family", "core_pay")
+        inbox_core = self._read_json("line", "inbox", "--family", "core")
+        self.assertEqual(inbox_pay["unacked"], 0)
+        self.assertEqual(inbox_core["unacked"], 1)
+
 
 class VersionTests(unittest.TestCase):
     def test_package_version_matches_pyproject(self) -> None:

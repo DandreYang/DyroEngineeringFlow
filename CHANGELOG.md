@@ -22,7 +22,9 @@
   accepts only `decision` / `contract` / `ack` as `operator`. Artifact
   bytes stay closed (P3). `/dyro-line-family` still does not post.
   CLI `--to operator` uses the same default family as a broadcast
-  (`parent` or sender), not `F(sender)`.
+  (`parent` or sender), not `F(sender)`. Channel pairing and ack treat
+  `msg_N` as per-family; HTTP ack is bound to the URL family, and CLI
+  `line ack` fail-closes when the same id exists in more than one family.
 - User slash Skill `dyro-line-family` (`/dyro-line-family`) preflights
   `line spawn` / `line merge` / `line sync` and prints one `--yes` command
   for the human. It does not execute the mutation, invent `--push`, or

@@ -18,6 +18,7 @@ from dyro.families import (
     infer_post_family,
     line_records,
     post_channel_message,
+    read_acks,
     read_visible_channel,
 )
 from dyro.observations import capture_workspace_read_snapshot
@@ -164,15 +165,23 @@ class FamilyChannelTests(WorkspaceCase):
             recipient="operator",
         )
         self.assertEqual(grandchild["family"], "core_pay")
-        pay_parent = {
-            item["id"]
-            for item in read_visible_channel(self.config, "core_pay", viewer="core_pay")
-        }
-        core_from = {
-            item["from"] for item in read_visible_channel(self.config, "core")
-        }
-        self.assertIn(grandchild["id"], pay_parent)
-        self.assertNotIn("core_pay_fix", core_from)
+        self.assertEqual(broadcast["id"], "msg_1")
+        self.assertEqual(grandchild["id"], "msg_1")
+        core_msg1 = next(
+            item
+            for item in read_visible_channel(self.config, "core")
+            if item["id"] == "msg_1"
+        )
+        pay_msg1 = next(
+            item
+            for item in read_visible_channel(self.config, "core_pay")
+            if item["id"] == "msg_1"
+        )
+        self.assertEqual(core_msg1["family"], "core")
+        self.assertEqual(pay_msg1["family"], "core_pay")
+        self.assertEqual(core_msg1["from"], "core_pay")
+        self.assertEqual(pay_msg1["from"], "core_pay_fix")
+        self.assertEqual(pay_msg1["id"], core_msg1["id"])
 
     def test_to_outside_family_is_rejected(self) -> None:
         with self.assertRaises(FamilyChannelError) as raised:
@@ -198,6 +207,74 @@ class FamilyChannelTests(WorkspaceCase):
         pay_ids = {item["id"] for item in read_visible_channel(self.config, "core_pay")}
         self.assertNotIn(child["id"], core_ids)
         self.assertIn(child["id"], pay_ids)
+
+    def test_colliding_msg_ids_are_family_scoped(self) -> None:
+        core_row = post_channel_message(
+            self.config,
+            sender="core_pay",
+            kind="blocked",
+            body="父族广播",
+        )
+        pay_row = post_channel_message(
+            self.config,
+            sender="core_pay_fix",
+            kind="blocked",
+            body="发给人类",
+            recipient="operator",
+        )
+        self.assertEqual(core_row["id"], "msg_1")
+        self.assertEqual(pay_row["id"], "msg_1")
+        self.assertEqual(core_row["family"], "core")
+        self.assertEqual(pay_row["family"], "core_pay")
+
+        with self.assertRaises(FamilyChannelError) as ambiguous:
+            ack_channel_message(self.config, "msg_1")
+        self.assertEqual(ambiguous.exception.code, "CHANNEL_MESSAGE_AMBIGUOUS")
+
+        http_ack = apply_human_channel_post(
+            self.config, "core_pay", {"kind": "ack", "ack_id": "msg_1"}
+        )
+        self.assertEqual(http_ack["id"], "msg_1")
+        self.assertEqual(read_acks(self.config, "core_pay"), frozenset({"msg_1"}))
+        self.assertEqual(read_acks(self.config, "core"), frozenset())
+
+        scoped = ack_channel_message(self.config, "msg_1", family="core")
+        self.assertEqual(scoped["family"], "core")
+        self.assertEqual(read_acks(self.config, "core"), frozenset({"msg_1"}))
+        self.assertEqual(read_acks(self.config, "core_pay"), frozenset({"msg_1"}))
+
+        with self.assertRaises(ConsoleOverviewError) as wrong_family:
+            apply_human_channel_post(
+                self.config, "core_shop", {"kind": "ack", "ack_id": "msg_1"}
+            )
+        self.assertEqual(wrong_family.exception.code, "CHANNEL_MESSAGE_NOT_FOUND")
+
+        append_text(
+            channel_path(self.config, "core_shop"),
+            json.dumps(
+                {
+                    "id": "msg_1",
+                    "seq": 1,
+                    "at": "2026-08-20T12:00:00Z",
+                    "family": "core_shop",
+                    "from": "core_shop",
+                    "to": "",
+                    "kind": "ask_sync",
+                    "body": "半写入",
+                    "retracts": "",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        with self.assertRaises(FamilyChannelError) as unpaired:
+            read_visible_channel(self.config, "core_shop", viewer="core_shop")
+        self.assertEqual(unpaired.exception.code, "CHANNEL_LOG_INCONSISTENT")
+        still_core = {
+            item["id"] for item in read_visible_channel(self.config, "core")
+        }
+        self.assertIn("msg_1", still_core)
 
     def test_unpaired_channel_row_fails_closed_and_is_not_broadcast(self) -> None:
         append_text(

@@ -329,12 +329,13 @@ def ack_channel_message(
     config: Config,
     message_id: str,
     *,
+    family: str = "",
     clock: Callable[[], datetime] | None = None,
     dry_run: bool = False,
 ) -> dict[str, object]:
     """Mark one row operator-read.  Ack is inbox state, not a channel kind."""
     message_id = _message_id(message_id)
-    located = find_channel_message(config, message_id)
+    located = find_channel_message(config, message_id, family=family)
     if located is None:
         raise FamilyChannelError("CHANNEL_MESSAGE_NOT_FOUND")
     parent_id, row = located
@@ -392,17 +393,40 @@ def list_inbox(
 
 
 def find_channel_message(
-    config: Config, message_id: str
+    config: Config,
+    message_id: str,
+    *,
+    family: str = "",
 ) -> tuple[str, dict[str, object]] | None:
+    """Locate ``message_id``.  Bare ids are per-family; collisions fail closed."""
     message_id = _message_id(message_id)
-    for parent_id in family_ids(line_records(config)):
+    if family:
+        validate_id(family, "父开发线 ID")
+    ids = family_ids(line_records(config))
+    if family:
+        if family not in ids:
+            raise FamilyChannelError("FAMILY_NOT_FOUND")
+        parents = (family,)
+    else:
+        parents = ids
+    matches: list[tuple[str, dict[str, object]]] = []
+    for parent_id in parents:
         try:
-            for post in read_visible_channel(config, parent_id, viewer=OPERATOR_ID):
-                if post["id"] == message_id:
-                    return parent_id, post
+            with overlay_lock(config):
+                records = _read_channel_locked(config, parent_id)
         except FamilyChannelError:
+            if family:
+                raise
             continue
-    return None
+        for post in records:
+            if post["id"] == message_id:
+                matches.append((parent_id, post))
+                break
+    if family:
+        return matches[0] if matches else None
+    if len(matches) > 1:
+        raise FamilyChannelError("CHANNEL_MESSAGE_AMBIGUOUS")
+    return matches[0] if matches else None
 
 
 def read_visible_channel(
@@ -525,7 +549,7 @@ def _replay_unpaired_signals(
     clock: Callable[[], datetime] | None = None,
 ) -> None:
     records = _read_channel_locked(config, parent_id)
-    paired = _signal_channel_ids(config)
+    paired = _signal_channel_ids(config, parent_id)
     for row in records:
         if row["id"] in paired:
             continue
@@ -542,15 +566,18 @@ def _replay_unpaired_signals(
 
 def _assert_channel_paired(config: Config, parent_id: str) -> None:
     records = _read_channel_locked(config, parent_id)
-    paired = _signal_channel_ids(config)
+    paired = _signal_channel_ids(config, parent_id)
     if any(row["id"] not in paired for row in records):
         raise FamilyChannelError("CHANNEL_LOG_INCONSISTENT")
 
 
-def _signal_channel_ids(config: Config) -> set[str]:
+def _signal_channel_ids(config: Config, parent_id: str) -> set[str]:
+    """Channel ids from ``signal`` rows for ``parent_id``.  Lock required."""
     ids: set[str] = set()
     for record in read_event_records_locked(config):
         if record.get("kind") != "signal":
+            continue
+        if record.get("family") != parent_id:
             continue
         facts = record.get("facts")
         if not isinstance(facts, dict):

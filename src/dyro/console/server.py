@@ -497,6 +497,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             "FAMILY_REQUIRED",
             "FAMILY_MEMBER_INVALID",
             "CHANNEL_MESSAGE_NOT_FOUND",
+            "CHANNEL_MESSAGE_AMBIGUOUS",
             "CHANNEL_LOG_INVALID",
             "CHANNEL_ACKS_INVALID",
         }:

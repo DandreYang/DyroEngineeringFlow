@@ -2884,7 +2884,9 @@ def cmd_line_inbox(args: argparse.Namespace) -> None:
 def cmd_line_ack(args: argparse.Namespace) -> None:
     config = _config(args)
     _require_overlay_yes(args, "确认已读家族信号")
-    result = ack_channel_message(config, args.id, dry_run=args.dry_run)
+    result = ack_channel_message(
+        config, args.id, family=args.family or "", dry_run=args.dry_run
+    )
     if args.format == "json":
         _print_control_plane_json("line_ack", **result)
         return
@@ -4961,6 +4963,11 @@ def build_parser() -> argparse.ArgumentParser:
     line_inbox.set_defaults(func=cmd_line_inbox)
     line_ack = line_sub.add_parser("ack", help="将一条家族信号标为人类已读")
     line_ack.add_argument("id", help="频道行 id，例如 msg_1")
+    line_ack.add_argument(
+        "--family",
+        default="",
+        help="家族父线；同号出现在多个家族时必填",
+    )
     line_ack.add_argument(
         "--dry-run",
         dest="dry_run",

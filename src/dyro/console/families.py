@@ -388,7 +388,11 @@ def apply_human_channel_post(
         if kind == "ack":
             if body_raw or to_raw:
                 raise ConsoleOverviewError("FAMILY_POST_INVALID")
-            result = ack_channel_message(config, ack_id, clock=clock)
+            result = ack_channel_message(
+                config, ack_id, family=parent_id, clock=clock
+            )
+            if result["family"] != parent_id:
+                raise ConsoleOverviewError("CHANNEL_MESSAGE_NOT_FOUND")
             return {"id": result["id"], "seq": result["seq"]}
         if ack_id:
             raise ConsoleOverviewError("FAMILY_POST_INVALID")
