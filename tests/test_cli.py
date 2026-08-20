@@ -110,6 +110,8 @@ class CliTests(unittest.TestCase):
             main(["init", str(root), "--name", "demo"])
             self.assertTrue((root / "dyro.toml").exists())
             self.assertTrue((root / ".dyro/tasks").is_dir())
+            self.assertTrue((root / "AGENTS.md").is_file())
+            self.assertTrue((root / "CLAUDE.md").is_file())
             self.assertEqual(load(root).name, "demo")
 
     def test_workspace_list_json_is_structured_and_identifies_the_default(self) -> None:
@@ -210,6 +212,12 @@ class CliTests(unittest.TestCase):
             self.assertTrue((root / ".dyro/tasks").is_dir())
             self.assertEqual(get_line(config, "dev").branch, "feat/dev")
             self.assertTrue((root / "versions/dev/api").is_dir())
+            self.assertTrue((root / "AGENTS.md").is_file())
+            self.assertTrue((root / "CLAUDE.md").is_file())
+            self.assertTrue((root / "versions/dev/AGENTS.md").is_file())
+            self.assertTrue((root / "versions/dev/CLAUDE.md").is_file())
+            self.assertFalse((root / "versions/dev/api/AGENTS.md").exists())
+            self.assertFalse((repository / "AGENTS.md").exists())
 
             registry = load_registry()
             self.assertEqual(registry.default, "demo")

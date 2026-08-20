@@ -680,6 +680,9 @@ def cmd_init(args: argparse.Namespace) -> None:
     atomic_write_text(config_file, content)
     for relative in (".dyro/tasks", ".dyro/lines", ".dyro/hotfixes", ".dyro/changes"):
         (root / relative).mkdir(parents=True, exist_ok=True)
+    from .instructions import seed_workspace_overlay
+
+    seed_workspace_overlay(root)
     print(f"已初始化 {root}")
     if args.discover:
         print(
@@ -1235,6 +1238,9 @@ def _apply_setup_plan(
     registration = _register_setup_workspace(
         config, register=register, make_default=make_default
     )
+    from .instructions import seed_workspace_overlay
+
+    seed_workspace_overlay(config.root)
     if plan.needs_bootstrap:
         for message in bootstrap(config, branch=plan.default_base):
             print(message)
@@ -1308,6 +1314,9 @@ def _interactive_setup(args: argparse.Namespace) -> None:
             register=registration is not None,
             make_default=preferences.make_default_workspace,
         )
+        from .instructions import seed_workspace_overlay
+
+        seed_workspace_overlay(config.root)
         skill_outcome = _apply_setup_personal_preferences(preferences)
         _print_setup_completion(
             config, record, preferences, skill_outcome=skill_outcome
@@ -1454,6 +1463,9 @@ def _non_interactive_setup(args: argparse.Namespace) -> None:
         _render_setup_registration_plan(registration)
     if not args.dry_run:
         _ensure_state_directories(config.root)
+        from .instructions import seed_workspace_overlay
+
+        seed_workspace_overlay(config.root)
         registered = _register_setup_workspace(
             config,
             register=not args.no_register,
@@ -2116,6 +2128,27 @@ def cmd_host_doctor(args: argparse.Namespace) -> None:
         print(render_doctor_text(report), end="")
     if not report.ok:
         raise DyroError("宿主投影过期或被手改")
+
+
+def cmd_host_seed(args: argparse.Namespace) -> None:
+    from .instructions import seed_configured_overlays
+
+    config = _config(args)
+    workspace, lines = seed_configured_overlays(
+        config, force=args.force, dry_run=args.dry_run
+    )
+    prefix = "DRY RUN: " if args.dry_run else ""
+    if workspace.written:
+        print(f"{prefix}已写入 overlay {', '.join(workspace.written)}")
+    if workspace.skipped:
+        print(f"{prefix}已跳过 overlay {', '.join(workspace.skipped)}（已存在）")
+    if not workspace.written and not workspace.skipped:
+        print(f"{prefix}overlay 未写入说明文件")
+    for line_id, outcome in lines:
+        if outcome.written:
+            print(f"{prefix}已写入开发线 {line_id} {', '.join(outcome.written)}")
+        if outcome.skipped and args.force:
+            print(f"{prefix}已跳过开发线 {line_id} {', '.join(outcome.skipped)}")
 
 
 def cmd_tool_list(args: argparse.Namespace) -> None:
@@ -4399,6 +4432,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     host_doctor.add_argument("--format", choices=("text", "json"), default="text")
     host_doctor.set_defaults(func=cmd_host_doctor)
+    host_seed = host_sub.add_parser(
+        "seed",
+        help="在 overlay 根写入缺失的 AGENTS.md 与 CLAUDE.md；已有文件不覆盖",
+    )
+    host_seed.add_argument(
+        "--force",
+        action="store_true",
+        help="覆盖已有 AGENTS.md/CLAUDE.md；必须显式指定",
+    )
+    host_seed.set_defaults(func=cmd_host_seed)
 
     agent_test = agent_sub.add_parser(
         "test", help="仅检查 adapter 可执行文件是否可用，不启动 Agent"

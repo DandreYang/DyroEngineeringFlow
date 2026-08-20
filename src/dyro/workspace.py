@@ -616,6 +616,10 @@ def create_line(
                 detail = "; ".join(recovery_failures)
                 raise DyroError(f"{exc}\n自动清理未完全成功：{detail}") from exc
         raise
+    if not dry_run:
+        from .instructions import seed_line_overlay
+
+        seed_line_overlay(line_root(config, line), line_id=line.id, branch=line.branch)
     return line
 
 
@@ -1185,6 +1189,11 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
         findings.append(f"FAIL external Profile requires {requirement}")
     root_git = _is_git_repo(config.root, read_budget=read_budget)
     findings.append(("WARN" if root_git else "PASS") + " workspace root " + ("is a Git repository" if root_git else "is not a Git repository"))
+    from .instructions import overlay_instruction_warning
+
+    overlay_warning = overlay_instruction_warning(config.root)
+    if overlay_warning:
+        findings.append(overlay_warning)
     for repo_id in sorted(config.repositories):
         anchor = repository_path(config, repo_id)
         if _is_git_repo(anchor, read_budget=read_budget):

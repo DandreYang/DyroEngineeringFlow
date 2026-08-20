@@ -769,6 +769,9 @@ def apply_join_plan(plan: JoinPlan) -> Config:
         _validate_workspace_paths(config, plan)
         for relative in (".dyro/tasks", ".dyro/lines", ".dyro/hotfixes", ".dyro/changes"):
             (plan.root / relative).mkdir(parents=True, exist_ok=True)
+        from .instructions import seed_workspace_overlay
+
+        seed_workspace_overlay(plan.root)
         for repository_id, repository in plan.document.blueprint.repositories.items():
             _clone_anchor(
                 plan.root / repository.path,

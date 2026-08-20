@@ -14,6 +14,13 @@
   `policy.allow_push`.
 - `dyro line sync <child>` merges the parent into the child the same way.
   `line list` / `status` show the parent id when set.
+- New `setup` / `join` / `init` workspaces get thin overlay-root `AGENTS.md`
+  and `CLAUDE.md` (same body). They point at host-compiled SKILL.md and
+  `dyro next`; they are not the gate. Installing or upgrading Dyro does not
+  rewrite existing workspaces. `dyro doctor` WARNs when both files are
+  missing; `dyro host seed` creates missing files only (`--force` overwrites).
+- `line spawn` / `create` write overlay personas at `versions/<line>/` (not
+  inside product Git worktrees). Must-track `origin/<line.branch>`.
 
 ## 0.7.7 - 2026-08-20
 

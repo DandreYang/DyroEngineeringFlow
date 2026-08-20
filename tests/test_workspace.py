@@ -12,6 +12,7 @@ from dyro.workspace import (
     get_line,
     is_missing_origin_finding,
     line_repository_path,
+    line_root,
     list_lines,
     merge_line,
     preflight_line,
@@ -424,6 +425,17 @@ class LineFamilyTests(WorkspaceCase):
         self.assertIn(upstream, ("", "-"))
         self.assertNotEqual(upstream, "origin/feat/onboard")
         self.assertNotEqual(upstream, "feat/onboard")
+        overlay = line_root(config, child)
+        self.assertTrue((overlay / "AGENTS.md").is_file())
+        self.assertTrue((overlay / "CLAUDE.md").is_file())
+        self.assertIn("origin/feat/onboard_tryon", (overlay / "AGENTS.md").read_text())
+        self.assertEqual(
+            (overlay / "AGENTS.md").read_text(encoding="utf-8"),
+            (overlay / "CLAUDE.md").read_text(encoding="utf-8"),
+        )
+        self.assertFalse((worktree / "AGENTS.md").exists())
+        self.assertFalse((worktree / "CLAUDE.md").exists())
+        self.assertFalse((self.anchor / "AGENTS.md").exists())
         full = spawn_line(config, "onboard", "onboard_extra")
         self.assertEqual(full.id, "onboard_extra")
         self.assertEqual(full.parent, "onboard")
