@@ -91,12 +91,24 @@ class FirstBatchSeatTests(unittest.TestCase):
                 for line in frontmatter.splitlines()
                 if line.strip()
             }
-            self.assertEqual(keys, {"name", "description"}, msg=seat.skill_name)
+            expected_keys = {"name", "description"}
+            if seat.integration_id == BOARD_ID:
+                expected_keys = {"name", "description", "user-invocable"}
+                self.assertIn("user-invocable: false", frontmatter)
+                self.assertNotIn("user-invocable: true", frontmatter)
+                self.assertNotIn("/dyro-board", content)
+                self.assertIn("/dyro-review-board", content)
+            self.assertEqual(keys, expected_keys, msg=seat.skill_name)
             self.assertIn(f"name: {seat.skill_name}", frontmatter)
             lowered = content.lower()
             for term in seat.trigger_terms:
                 self.assertIn(term.lower(), lowered, msg=f"{seat.skill_name}: {term}")
-            self.assertIn(f"${seat.skill_name}", metadata.read_text(encoding="utf-8"))
+            metadata_text = metadata.read_text(encoding="utf-8")
+            if seat.integration_id == BOARD_ID:
+                self.assertNotIn("$dyro-board", metadata_text)
+                self.assertIn("/dyro-review-board", metadata_text)
+            else:
+                self.assertIn(f"${seat.skill_name}", metadata_text)
             description = frontmatter.split("description:", 1)[1].strip()
             self.assertLessEqual(len(description), 1024, msg=seat.skill_name)
             self.assertNotIn("~/", content)
@@ -136,6 +148,18 @@ class FirstBatchSeatTests(unittest.TestCase):
             self.assertIn("disable-model-invocation: true", content)
             self.assertIn("user-invocable: true", content)
             self.assertNotIn("TODO", content)
+        board = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "dyro"
+            / "integrations"
+            / "assets"
+            / "dyro-board"
+            / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("user-invocable: false", board)
+        self.assertNotIn("user-invocable: true", board)
+        self.assertNotIn("/dyro-board", board)
 
     def test_wheel_package_data_lists_every_first_batch_skill(self) -> None:
         metadata = Path(__file__).resolve().parents[1].joinpath("pyproject.toml")

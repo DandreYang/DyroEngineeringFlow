@@ -18,7 +18,8 @@ Load immediately when any of these are true:
 - The user says to implement, fix, finish, 修这个, 做完, or 继续写.
 
 Do not load this seat at a workspace or line root. Use `dyro-control-plane`
-there. Do not load it for 会审 / 对抗; that is `dyro-board`.
+there. Do not load it for 会审 / 对抗; that auto-loads the `dyro-board`
+protocol. Humans run `/dyro-review-board`.
 
 ## Write boundary
 
