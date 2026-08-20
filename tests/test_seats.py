@@ -114,10 +114,16 @@ class FirstBatchSeatTests(unittest.TestCase):
         names = {seat.skill_name for seat in SEATS}
         self.assertNotIn("dyro-review-board", names)
         self.assertNotIn("dyro-task-merge", names)
+        self.assertNotIn("dyro-line-family", names)
         metadata = Path(__file__).resolve().parents[1].joinpath("pyproject.toml")
         text = metadata.read_text(encoding="utf-8")
-        for skill_name in ("dyro-review-board", "dyro-task-merge"):
+        for skill_name in (
+            "dyro-review-board",
+            "dyro-task-merge",
+            "dyro-line-family",
+        ):
             self.assertIn(f"assets/{skill_name}/SKILL.md", text)
+            self.assertIn(f"assets/{skill_name}/agents/openai.yaml", text)
             content = (
                 Path(__file__).resolve().parents[1]
                 / "src"
@@ -128,6 +134,7 @@ class FirstBatchSeatTests(unittest.TestCase):
                 / "SKILL.md"
             ).read_text(encoding="utf-8")
             self.assertIn("disable-model-invocation: true", content)
+            self.assertIn("user-invocable: true", content)
             self.assertNotIn("TODO", content)
 
     def test_wheel_package_data_lists_every_first_batch_skill(self) -> None:

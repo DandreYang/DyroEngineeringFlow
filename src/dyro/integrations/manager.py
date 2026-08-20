@@ -53,6 +53,9 @@ REVIEW_BOARD_ASSET_VERSION = 1
 TASK_MERGE_INTEGRATION_ID = "task-merge"
 TASK_MERGE_SKILL_NAME = "dyro-task-merge"
 TASK_MERGE_ASSET_VERSION = 1
+LINE_FAMILY_INTEGRATION_ID = "line-family"
+LINE_FAMILY_SKILL_NAME = "dyro-line-family"
+LINE_FAMILY_ASSET_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 2
 LEGACY_MANIFEST_SCHEMA_VERSION = 1
 _SHA256_PREFIX = "sha256:"
@@ -99,6 +102,11 @@ TASK_MERGE_SPEC = SkillIntegrationSpec(
     skill_name=TASK_MERGE_SKILL_NAME,
     asset_version=TASK_MERGE_ASSET_VERSION,
 )
+LINE_FAMILY_SPEC = SkillIntegrationSpec(
+    integration_id=LINE_FAMILY_INTEGRATION_ID,
+    skill_name=LINE_FAMILY_SKILL_NAME,
+    asset_version=LINE_FAMILY_ASSET_VERSION,
+)
 SKILL_INTEGRATIONS: tuple[SkillIntegrationSpec, ...] = (
     CONTROL_PLANE_SPEC,
     DISPATCH_SPEC,
@@ -106,6 +114,7 @@ SKILL_INTEGRATIONS: tuple[SkillIntegrationSpec, ...] = (
     BOARD_SPEC,
     REVIEW_BOARD_SPEC,
     TASK_MERGE_SPEC,
+    LINE_FAMILY_SPEC,
 )
 INTEGRATION_CHOICES: tuple[str, ...] = tuple(
     choice

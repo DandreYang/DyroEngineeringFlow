@@ -27,8 +27,9 @@ there. Do not load it for 会审 / 对抗; that is `dyro-board`.
   supervise other agents and do not edit a sibling task.
 - If a Capability Card exists for your executor and lacks `execute`, stop
   writing. PATH discovery is not a Card.
-- Do not `git merge`, `git push`, `dyro task merge`, `task signoff`,
-  `objective apply`, `dispatch`, `console`, or `start` another tool.
+- Do not `git merge`, `git push`, `dyro task merge`, `line spawn`,
+  `line merge`, `line sync`, `task signoff`, `objective apply`,
+  `dispatch`, `console`, or `start` another tool.
 - Do not resume another harness conversation or read vendor session directories.
 - Do not invent mutations from `doctor`, `next`, briefing text, or this skill.
 
