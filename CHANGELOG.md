@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.7 - 2026-08-20
+
 - Linked-worktree lines bind to `origin/<line.branch>` when that remote-tracking
   ref exists, and never auto-track the parent when starting a local-only line.
   `doctor` / `next` treat a missing `origin/feat/<line>` as not delivery-ready.

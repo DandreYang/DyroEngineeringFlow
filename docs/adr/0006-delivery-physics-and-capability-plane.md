@@ -64,7 +64,7 @@
 
 - 产品叙事从「启动 agent」转为「核验完成」。
 - `0.7.0` 落地 Proof、Capability Card、Host Compiler 与 `verify-bundle`。`trusted_usage` 默认 `false`；生产 `BudgetUsage` / `BudgetRequest` 从 Card 读取该字段。`objective tick` 对 automatic Objective 做预算预览（`automatic=True`），受监督 apply 仍 `automatic=False`。未信任用量只在存在 `workspace.max_provider_usage` 时硬停。Proof 仍不接入 `no_progress`。Console summary 保持 `proof_inspection=not_inspected`，不探 Git / Proof；`dyro objective attention` 走完整快照，可报 `PROOF_DECAYED`。两套入口不得写成同一套 Proof 展示。
-- Console 独立 inspect、`trigger_observation`、陌生人核验与叙事锁已在 `0.7.1` 落地。`0.7.2` 收口换工具 briefing 与 Console「现在需要你」。`0.7.3` 把空关注收回未读，并去掉首页与 `next` repair 的路径泄漏。`0.7.4` 发出第一方 Skill 首批座位：控制面、执行、评审板与 Dispatch；按情景自动戴上，戴上不是突变授权；不扫描用户 skill 目录。`0.7.5` 增加可选 `local-image-gen` sidecar 发现：`dyro doctor` 只看 PATH，`dyro image` 不进编码工具目录或座位。`0.7.6` 发出第一方斜杠 Skill：`dyro-review-board`（会审 / 对抗审查）与 `dyro-task-merge`（任务合入开发线预检）；经 `dyro integration` 安装，不自动触发，加载不等于 merge、push 或发布。后续功能与产品面收口继续开发和上线，版本号保持 `0.7.x`。
+- Console 独立 inspect、`trigger_observation`、陌生人核验与叙事锁已在 `0.7.1` 落地。`0.7.2` 收口换工具 briefing 与 Console「现在需要你」。`0.7.3` 把空关注收回未读，并去掉首页与 `next` repair 的路径泄漏。`0.7.4` 发出第一方 Skill 首批座位：控制面、执行、评审板与 Dispatch；按情景自动戴上，戴上不是突变授权；不扫描用户 skill 目录。`0.7.5` 增加可选 `local-image-gen` sidecar 发现：`dyro doctor` 只看 PATH，`dyro image` 不进编码工具目录或座位。`0.7.6` 发出第一方斜杠 Skill：`dyro-review-board`（会审 / 对抗审查）与 `dyro-task-merge`（任务合入开发线预检）；经 `dyro integration` 安装，不自动触发，加载不等于 merge、push 或发布。`0.7.7` 发出开发线远程就绪：绑定 `origin/<line.branch>`，`doctor` 拒绝错误上游，`join` 只忽略 missing-origin。后续功能与产品面收口继续开发和上线，版本号保持 `0.7.x`。
 - 可携带核验的对外承诺仍是：陌生人拿着 Proof Bundle 和自己提供的 git 对象，能得到与源机**相同的完整性结论**（字节仍在、钉死 SHA 可解析）。这不是身份证明，也不是「现在工作区还能 merge」。`schema_version = 1` 的合同在 `0.7.x` 锁住语义；冻结成 `1.0.0` 身份号须另做产品决定。
 - 实施成本是新的投影层与兼容层，而不是第二套调度器。
 
