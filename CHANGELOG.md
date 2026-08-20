@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Tighten the internal `dyro-board` Record protocol: declare a
+  production-line baseline (not `master`/`main`), close prior P0/P1,
+  re-check seat claims before arbitration, wait ≥ 10 minutes before
+  marking a seat `逾期未交`, and record the full test command plus raw
+  output. The `/dyro-review-board` wrapper still follows that file only
+  and refuses same-turn delivery. Version unchanged.
 - Hide the internal `dyro-board` protocol from slash / `$` skill pickers.
   `/dyro-review-board` is the only human-facing 会审 command. The protocol
   asset still installs as a non-invocable companion of `review-board` (and
