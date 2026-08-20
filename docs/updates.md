@@ -62,7 +62,8 @@ the managed bundle through the fresh `dyro` entry point. Interactive `dyro`,
 `dyro home`, and `dyro start` launches also repair outdated managed Skills.
 The control-plane opt-in covers first-party companions, so an existing managed
 control plane automatically gains `dyro-dispatch`, `dyro-executor`, and
-`dyro-board`. A machine with no prior Dyro Skill ownership remains untouched.
+the 会审 protocol plus `/dyro-review-board`. `dyro-board` stays the internal
+protocol id. A machine with no prior Dyro Skill ownership remains untouched.
 Manual control-plane commands are:
 
 ```bash
@@ -86,8 +87,11 @@ dyro integration install dispatch --dry-run
 dyro integration install dispatch --yes
 dyro integration sync dispatch --yes
 dyro integration install executor --yes
-dyro integration install board --yes
+dyro integration install review-board --yes
 ```
+
+`dyro integration install board` is a legacy id for the same 会审 surface plus
+protocol. `dyro integration status board` still inspects the protocol seat.
 
 Editable source installations are deliberately rejected. Update those through
 their Git checkout so a convenience command cannot replace a development

@@ -1,9 +1,12 @@
 ---
 name: dyro-board
-description: Run Dyro's first-party adversarial review-board protocol. Use when the user asks for multi-model review, 会审, 对抗, 能不能发, Go/No-Go, or P0/P1 arbitration. Auto-load this board seat. Findings are advisory records, not Proof and not a task review PASS.
+description: Internal Dyro 会审 protocol (not a user slash; humans run /dyro-review-board). Auto-load this board seat for multi-model review, 会审, 对抗, 能不能发, Go/No-Go, or P0/P1 arbitration. Findings are advisory records, not Proof and not a task review PASS.
+user-invocable: false
 ---
 
 # Dyro Review Board
+
+This file is the protocol, not a user slash. Humans run `/dyro-review-board`.
 
 Run the first-party adversarial record protocol. Auto-load this seat when the
 user asks for a board, 会审, 对抗, release Go/No-Go, or P0/P1 arbitration. Do

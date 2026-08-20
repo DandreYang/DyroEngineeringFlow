@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Hide the internal `dyro-board` protocol from slash / `$` skill pickers.
+  `/dyro-review-board` is the only human-facing 会审 command. The protocol
+  asset still installs as a non-invocable companion of `review-board` (and
+  with the board seat). `dyro integration install board` is a legacy id for
+  that same surface plus protocol; `dyro integration status board` still
+  inspects the protocol. The wrapper still refuses same-turn commit, push,
+  merge, or publish.
 - Add design `docs/designs/console-v2-live-family-signals.md` for live
   events, one-level line families, and overlay family signals. It extends
   the local Web Console and ADR 0005; it does not replace them.

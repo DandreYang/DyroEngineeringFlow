@@ -14,6 +14,8 @@ from unittest.mock import patch
 from dyro.cli import main
 from dyro.errors import DyroError
 from dyro.integrations import (
+    INTEGRATION_CHOICES,
+    USER_INTEGRATION_CHOICES,
     IntegrationState,
     install_integration,
     integration_status,
@@ -272,6 +274,116 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertFalse(self.dispatch_mirror.exists())
         self.assertFalse(
             self.dispatch_avatar.exists() or self.dispatch_avatar.is_symlink()
+        )
+
+    def test_review_board_is_the_only_invocable_board_slash(self) -> None:
+        board = (manager._asset_root("board") / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        review = (manager._asset_root("review-board") / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        board_meta = (
+            manager._asset_root("board") / "agents" / "openai.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("user-invocable: false", board)
+        self.assertNotIn("user-invocable: true", board)
+        self.assertNotIn("/dyro-board", board)
+        self.assertNotIn("$dyro-board", board)
+        self.assertNotIn("$dyro-board", board_meta)
+        self.assertIn("/dyro-review-board", board)
+        self.assertIn("/dyro-review-board", board_meta)
+        self.assertIn("user-invocable: true", review)
+        self.assertIn("disable-model-invocation: true", review)
+        self.assertIn("dyro-board/SKILL.md", review)
+        self.assertIn("Refuse those delivery actions", review)
+        self.assertNotIn("--yes", review)
+        self.assertNotIn("board", USER_INTEGRATION_CHOICES)
+        self.assertIn("review-board", USER_INTEGRATION_CHOICES)
+        self.assertIn("board", INTEGRATION_CHOICES)
+
+    def test_review_board_install_also_installs_protocol(self) -> None:
+        installed = install_integration("review-board", yes=True)
+        self.assertEqual(installed.status.state, IntegrationState.CURRENT)
+        self.assertEqual(
+            integration_status("board").state, IntegrationState.CURRENT
+        )
+        review_avatar = self.codex_home / "skills" / "dyro-review-board"
+        protocol = review_avatar.parent / "dyro-board" / "SKILL.md"
+        self.assertTrue(review_avatar.is_symlink())
+        self.assertTrue(protocol.is_file())
+        self.assertIn("user-invocable: false", protocol.read_text(encoding="utf-8"))
+        self.assertTrue(
+            any("同时安装 board" in change for change in installed.changes),
+            msg=installed.changes,
+        )
+
+    def test_legacy_board_install_installs_review_board_surface(self) -> None:
+        installed = install_integration("board", yes=True)
+        self.assertEqual(installed.status.state, IntegrationState.CURRENT)
+        self.assertEqual(
+            integration_status("review-board").state, IntegrationState.CURRENT
+        )
+        self.assertTrue(
+            (self.codex_home / "skills" / "dyro-review-board" / "SKILL.md").is_file()
+        )
+        self.assertTrue(
+            any("同时安装 review-board" in change for change in installed.changes),
+            msg=installed.changes,
+        )
+
+    def test_sync_current_review_board_installs_missing_protocol(self) -> None:
+        install_integration("review-board", yes=True)
+        uninstall_integration("board", yes=True)
+        self.assertEqual(
+            integration_status("review-board").state, IntegrationState.CURRENT
+        )
+        self.assertEqual(integration_status("board").state, IntegrationState.ABSENT)
+
+        plan = sync_managed_skill("review-board", yes=True, allow_first_install=False)
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(integration_status("board").state, IntegrationState.CURRENT)
+        self.assertTrue(
+            any("同时安装 board" in change for change in plan.changes),
+            msg=plan.changes,
+        )
+
+    def test_legacy_board_status_stays_on_protocol_id(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["integration", "status", "board", "--format", "json"])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["integration"], "board")
+        self.assertEqual(payload["state"], "absent")
+
+        install_integration("board", yes=True)
+        current = StringIO()
+        with redirect_stdout(current):
+            main(["integration", "status", "board", "--format", "json"])
+        installed = json.loads(current.getvalue())
+        self.assertEqual(installed["integration"], "board")
+        self.assertEqual(installed["state"], "current")
+
+    def test_integration_install_help_hides_board_slash_sibling(self) -> None:
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            redirect_stdout(stdout),
+            patch("sys.stderr", stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(["integration", "install", "--help"])
+        self.assertEqual(raised.exception.code, 0)
+        text = stdout.getvalue() + stderr.getvalue()
+        collapsed = re.sub(r"\s+", "", text)
+        self.assertNotIn("/dyro-board", collapsed)
+        self.assertNotIn("$dyro-board", text)
+        self.assertIn("/dyro-review-board", collapsed)
+        self.assertIn("review-board", text)
+        self.assertNotIn(
+            "{skill,codex,dispatch,executor,board,review-board",
+            text,
         )
 
     def test_executor_and_board_skills_install_independently(self) -> None:

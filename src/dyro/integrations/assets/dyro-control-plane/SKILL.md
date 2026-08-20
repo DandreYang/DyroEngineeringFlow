@@ -7,7 +7,7 @@ description: Inspect Dyro control-plane state and prepare bounded read-only expl
 
 Treat Dyro as the delivery control plane. Run only the allowlisted observations below, prefer their JSON output, and leave every state-changing action to the user in Dyro.
 
-Auto-load this navigator seat at a workspace or line root, after switching tools, or when the user asks 下一步 / 堵住了 / status. Loading the seat is not consent to mutate. Writing in a task worktree is `dyro-executor`. 会审 / 对抗 is `dyro-board`. Parallel harnesses are `dyro-dispatch`.
+Auto-load this navigator seat at a workspace or line root, after switching tools, or when the user asks 下一步 / 堵住了 / status. Loading the seat is not consent to mutate. Writing in a task worktree is `dyro-executor`. 会审 / 对抗 auto-loads the `dyro-board` protocol; the human command is `/dyro-review-board`. Parallel harnesses are `dyro-dispatch`.
 
 ## Read-only routing
 
@@ -48,7 +48,7 @@ Keep the handoff short and separate evidence from judgment:
 
 Only hand off a workspace-scoped mutation when the returned command retains an explicit `--workspace <alias>` or absolute `--root <path>` selector. Never reconstruct, shorten, retarget, or strip that selector. When `next.commands` is empty or `mutation_available` is false, do not manufacture a mutation from `diagnostic_commands`, findings, or prose.
 
-If the user asks for 会审, 对抗, or Go/No-Go, follow `dyro-board` instead of inventing P0 here. A CLI summary alone is never final runtime or production acceptance.
+If the user asks for 会审, 对抗, or Go/No-Go, follow the `dyro-board` protocol (human command `/dyro-review-board`) instead of inventing P0 here. A CLI summary alone is never final runtime or production acceptance.
 
 ## Hard safety boundary
 
