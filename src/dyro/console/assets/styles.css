@@ -392,6 +392,31 @@ footer { border-top: 1px solid var(--border); color: var(--muted); font-size: .8
   width: 100%;
 }
 .channel-toolbar select { max-width: 100%; }
+.artifact-rail {
+  border-top: 1px solid var(--border);
+  margin-top: .75rem;
+  padding-top: .65rem;
+}
+.artifact-rail h4 { font-size: .82rem; margin: 0 0 .4rem; }
+.artifact-rail-list { display: grid; gap: .5rem; }
+.artifact-card, .artifact-attachment {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: .4rem;
+  padding: .45rem .55rem;
+}
+.artifact-image {
+  display: block;
+  max-width: 100%;
+  margin-top: .35rem;
+}
+.artifact-chart {
+  color: var(--accent);
+  display: block;
+  height: 5rem;
+  margin-top: .35rem;
+  width: 100%;
+}
 
 @media (max-width: 767px) {
   .live-panes { grid-template-columns: 1fr; }

@@ -412,6 +412,8 @@ def _print_family_unacked_attention(config: Config) -> None:
     payload = _family_unacked_fields(config)["family_unacked"]
     if isinstance(payload, dict) and payload.get("count"):
         print("家族频道有未读信号")
+    if isinstance(payload, dict) and payload.get("inconsistent_families"):
+        print("家族频道日志不一致")
 
 
 def _inbox_viewer(config: Config) -> str:

@@ -297,6 +297,13 @@ def main(argv: list[str] | None = None) -> int:
             service_arguments["registry_loader"] = lambda: target_registry
         service = ConsoleOverviewService(**service_arguments)
         operation = request.get("op")
+        if operation in {
+            "post_channel",
+            "artifact_write",
+            "artifacts_write",
+            "put_artifact",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         if operation == "overview":
             payload = service.page(
                 cursor=request.get("cursor"),

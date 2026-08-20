@@ -551,6 +551,45 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
             )
         )
 
+    def test_worker_cannot_serve_or_write_artifacts_via_a_mutation_op(self) -> None:
+        from dyro.config import load
+        from dyro.families import plant_family_artifact
+        from dyro.workspace import create_line
+
+        config = load(self.root)
+        create_line(config, line_id="core", branch="feat/core", base="main")
+        plant_family_artifact(
+            config,
+            "core",
+            artifact_id="img_1",
+            artifact_type="image",
+            title="复核图",
+            body=(
+                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+                b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00"
+                b"\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+            ),
+        )
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+        )
+        with patch.object(service, "_run_worker", side_effect=AssertionError("worker")):
+            listed = service.artifacts("demo", "core")
+        self.assertEqual(listed["data"]["artifacts"][0]["id"], "img_1")
+        with patch.object(service, "_run_worker", side_effect=AssertionError("worker")):
+            media = service.artifact_bytes("demo", "core", "img_1")
+        self.assertIsNotNone(media)
+        self.assertEqual(media[0], "image/png")
+        for operation in ("post_channel", "artifact_write", "artifacts", "put_artifact"):
+            with self.subTest(operation=operation):
+                with self.assertRaises(ConsoleOverviewError) as raised:
+                    service._request(
+                        {"op": operation, "alias": "demo", "parent": "core"}
+                    )
+                self.assertEqual(raised.exception.code, "OVERVIEW_UNAVAILABLE")
+
 
 if __name__ == "__main__":
     unittest.main()

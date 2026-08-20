@@ -24,6 +24,8 @@ const state = {
   channelKind: "",
   channelFrom: "",
   channelUnacked: false,
+  artifactItems: [],
+  artifactBlobs: new Map(),
 };
 const HEALTH_LABELS = { healthy: "健康", degraded: "需关注", unavailable: "不可用" };
 const FRESHNESS_LABELS = { fresh: "读取完整", partial: "部分可读", stale: "待刷新" };
@@ -135,7 +137,24 @@ const ERROR_LABELS = {
   FAMILY_POST_INVALID: "家族频道请求无效",
   CHANNEL_CURSOR_INVALID: "频道游标已失效，已从头读取",
   CHANNEL_BODY_INVALID: "家族信号正文不接受",
+  CHANNEL_LOG_INCONSISTENT: "家族频道日志不一致",
+  ARTIFACT_NOT_FOUND: "产物不存在",
+  ARTIFACT_UNAVAILABLE: "产物不可用",
+  ARTIFACT_TOO_LARGE: "产物超出大小上限",
+  ARTIFACT_PATH_INVALID: "产物路径无效",
 };
+const ARTIFACT_TYPE_LABELS = {
+  review: "复核",
+  image: "图像",
+  chart: "图表",
+  video: "视频",
+};
+const REVIEW_CONCLUSION_LABELS = {
+  pass: "通过",
+  fail: "未通过",
+  inconclusive: "无法判定",
+};
+const SVG_NS = "http:" + "//www.w3.org/2000/svg";
 const EVENT_KIND_LABELS = {
   spawn: "子线已创建",
   merge: "子线已合入父线",
@@ -515,6 +534,23 @@ function commandRow(command) {
   return row;
 }
 
+function copyableOpenCommand(command) {
+  const value = text(command);
+  const dry = "--dry" + "-run";
+  const yes = "--" + "yes";
+  const push = "--" + "push";
+  if (
+    !value
+    || !value.includes(dry)
+    || !value.includes("line inbox")
+    || value.includes(yes)
+    || value.includes(push)
+  ) {
+    return "";
+  }
+  return value;
+}
+
 function attentionLevel(summary) {
   const attention = summary.attention_counts || {};
   if (count(attention.repair_required)) return "danger";
@@ -883,7 +919,11 @@ function renderFamilyTree(alias, lines, tasks) {
         const tree = $("family-tree");
         if (tree) tree.replaceWith(renderFamilyGraph(alias, lines, parent, tasks));
         resetChannelState();
+        resetArtifactState();
         loadChannel(alias, parent).catch((error) => {
+          if (error && error.message === "SESSION_EXPIRED") expireSession();
+        });
+        loadArtifacts(alias, parent).catch((error) => {
           if (error && error.message === "SESSION_EXPIRED") expireSession();
         });
         refreshFamilyUnread(alias, parent).catch(() => {});
@@ -1143,12 +1183,14 @@ function renderEventPane() {
   section.append(element("h3", "事件"));
   if (!hasSurface("events")) {
     section.append(element("p", "事件流尚未开放。"));
+    section.append(renderArtifactRail(state.detailAlias, "event-artifact-rail"));
     return section;
   }
   const list = element("ul");
   list.id = "event-list";
   list.className = "event-list";
   section.append(list);
+  section.append(renderArtifactRail(state.detailAlias, "event-artifact-rail"));
   return section;
 }
 
@@ -1156,6 +1198,22 @@ function resetChannelState() {
   state.channelItems = [];
   state.channelCursor = "";
   state.channelMembers = [];
+}
+
+function resetArtifactState() {
+  for (const url of state.artifactBlobs.values()) {
+    if (typeof url === "string" && url.startsWith("blob:")) URL.revokeObjectURL(url);
+  }
+  state.artifactBlobs = new Map();
+  state.artifactItems = [];
+}
+
+function channelRowKey(message) {
+  return `${text(message && message.family)}\0${text(message && message.id)}`;
+}
+
+function artifactRowKey(family, id) {
+  return `${text(family)}\0${text(id)}`;
 }
 
 function channelFilterText() {
@@ -1168,15 +1226,15 @@ function channelFilterText() {
 
 function describeChannelMessage(message) {
   const kind = text(message && message.kind);
-  const label = kind === "artifact"
-    ? "产物尚未开放"
-    : displayLabel(kind, CHANNEL_KIND_LABELS);
+  const label = displayLabel(kind, CHANNEL_KIND_LABELS);
   const sender = text(message && message.from) || "未提供";
   const recipient = text(message && message.to);
   const who = recipient ? `${sender} → ${recipient}` : `${sender} → 广播`;
   const when = text(message && message.at);
   const local = when ? new Date(when).toLocaleString("zh-CN") : "";
-  const body = kind === "artifact" ? text(message && message.id) : text(message && message.body);
+  const body = kind === "artifact"
+    ? text(message && message.artifact_id) || text(message && message.id)
+    : text(message && message.body);
   const flags = [
     message && message.retracted ? "已撤回" : "",
     message && message.acked ? "已读" : "未读",
@@ -1186,12 +1244,12 @@ function describeChannelMessage(message) {
 
 function appendChannelMessages(messages) {
   if (!Array.isArray(messages) || !messages.length) return;
-  const seen = new Set(state.channelItems.map((item) => text(item.id)));
+  const seen = new Set(state.channelItems.map(channelRowKey));
   for (const message of messages) {
-    const id = text(message && message.id);
-    if (!id || seen.has(id)) continue;
+    const key = channelRowKey(message);
+    if (!text(message && message.id) || seen.has(key)) continue;
     state.channelItems.push(message);
-    seen.add(id);
+    seen.add(key);
   }
 }
 
@@ -1223,7 +1281,7 @@ function renderChannelMessages() {
     if (!message.acked) item.classList.add("unacked");
     item.append(element("p", describeChannelMessage(message)));
     if (text(message.kind) === "artifact") {
-      item.append(element("p", `产物尚未开放 · ${text(message.id)}`));
+      item.append(renderArtifactAttachment(alias, parent, message));
     }
     if (!message.acked && SAFE_ID.test(alias) && SAFE_ID.test(parent)) {
       const ack = element("button", "标为已读");
@@ -1368,7 +1426,7 @@ function renderChannelPane(alias) {
   section.append(element("h3", "频道"));
   if (!hasSurface("families")) {
     section.append(element("p", "尚未开放"));
-    section.append(element("p", "产物尚未开放"));
+    section.append(renderArtifactRail(alias, "channel-artifact-rail"));
     return section;
   }
   section.append(element("p", "人类身份固定为 operator。"));
@@ -1395,8 +1453,199 @@ function renderChannelPane(alias) {
   if (SAFE_ID.test(alias) && SAFE_ID.test(parent)) {
     section.append(renderChannelCompose(alias, parent, members));
   }
-  section.append(element("p", "产物尚未开放"));
+  section.append(renderArtifactRail(alias, "channel-artifact-rail"));
   return section;
+}
+
+function renderArtifactRail(alias, railId) {
+  const section = element("div");
+  section.className = "artifact-rail";
+  section.id = railId;
+  section.append(element("h4", "产物"));
+  if (!hasSurface("artifacts")) {
+    section.append(element("p", "产物尚未开放"));
+    return section;
+  }
+  const list = element("div");
+  list.className = "artifact-rail-list";
+  section.append(list);
+  fillArtifactRail(list, alias);
+  return section;
+}
+
+function fillArtifactRail(list, alias) {
+  if (!list) return;
+  list.replaceChildren();
+  if (!hasSurface("artifacts")) {
+    list.append(element("p", "产物尚未开放"));
+    return;
+  }
+  if (!state.artifactItems.length) {
+    list.append(element("p", "这个家族还没有 overlay 产物。"));
+    return;
+  }
+  for (const artifact of state.artifactItems) {
+    list.append(renderArtifactView(alias, state.familyParent, artifact));
+  }
+}
+
+function renderArtifactRails(alias) {
+  for (const railId of ["channel-artifact-rail", "event-artifact-rail"]) {
+    const rail = $(railId);
+    if (!rail) continue;
+    const list = rail.querySelector(".artifact-rail-list");
+    if (list) fillArtifactRail(list, alias);
+  }
+}
+
+function renderArtifactAttachment(alias, parent, message) {
+  const wrap = element("div");
+  wrap.className = "artifact-attachment";
+  if (!hasSurface("artifacts")) {
+    wrap.append(element("p", `产物尚未开放 · ${text(message.id)}`));
+    return wrap;
+  }
+  const artifactId = text(message && message.artifact_id);
+  if (!SAFE_ID.test(artifactId)) {
+    wrap.append(element("p", "产物不可用"));
+    return wrap;
+  }
+  const artifact = state.artifactItems.find((item) => text(item.id) === artifactId);
+  if (!artifact) {
+    wrap.append(element("p", "产物不可用"));
+    return wrap;
+  }
+  wrap.append(renderArtifactView(alias, parent, artifact));
+  return wrap;
+}
+
+function renderArtifactView(alias, parent, artifact) {
+  const card = element("div");
+  card.className = "artifact-card";
+  const kind = text(artifact && artifact.type);
+  const title = text(artifact && artifact.title) || text(artifact && artifact.id);
+  card.append(element("p", `${displayLabel(kind, ARTIFACT_TYPE_LABELS)} · ${title}`));
+  if (kind === "review") {
+    const conclusion = displayLabel(text(artifact && artifact.conclusion), REVIEW_CONCLUSION_LABELS);
+    const bound = text(artifact && artifact.bound_hash).slice(0, 12);
+    card.append(element("p", bound ? `${conclusion} · ${bound}` : conclusion));
+    return card;
+  }
+  if (kind === "video") {
+    const meta = [
+      text(artifact && artifact.duration),
+      count(artifact && artifact.size) ? `${count(artifact.size)} B` : "",
+    ].filter(Boolean).join(" · ");
+    if (meta) card.append(element("p", meta));
+    const command = copyableOpenCommand(artifact && artifact.open_command);
+    if (command) {
+      card.append(commandRow(command));
+    }
+    return card;
+  }
+  if (kind === "chart") {
+    const points = Array.isArray(artifact && artifact.points) ? artifact.points : [];
+    if (points.length) {
+      card.append(renderChartSvg(points));
+      return card;
+    }
+  }
+  if (kind === "image" || kind === "chart") {
+    const img = document.createElement("img");
+    img.alt = title;
+    img.className = "artifact-image";
+    bindArtifactImage(img, alias, parent, text(artifact && artifact.id));
+    card.append(img);
+    return card;
+  }
+  card.append(element("p", "产物不可用"));
+  return card;
+}
+
+function renderChartSvg(points) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 200 80");
+  svg.setAttribute("class", "artifact-chart");
+  svg.setAttribute("role", "img");
+  const xs = points.map((item) => Number(item.x)).filter((value) => Number.isFinite(value));
+  const ys = points.map((item) => Number(item.y)).filter((value) => Number.isFinite(value));
+  if (!xs.length || !ys.length) return svg;
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const spanX = maxX - minX || 1;
+  const spanY = maxY - minY || 1;
+  const coords = points.map((item) => {
+    const x = 8 + ((Number(item.x) - minX) / spanX) * 184;
+    const y = 72 - ((Number(item.y) - minY) / spanY) * 64;
+    return `${x},${y}`;
+  }).join(" ");
+  const line = document.createElementNS(SVG_NS, "polyline");
+  line.setAttribute("points", coords);
+  line.setAttribute("fill", "none");
+  line.setAttribute("stroke", "currentColor");
+  line.setAttribute("stroke-width", "2");
+  svg.append(line);
+  return svg;
+}
+
+function bindArtifactImage(img, alias, parent, artifactId) {
+  if (!SAFE_ID.test(alias) || !SAFE_ID.test(parent) || !SAFE_ID.test(artifactId)) {
+    img.alt = "产物不可用";
+    return;
+  }
+  const key = artifactRowKey(parent, artifactId);
+  const cached = state.artifactBlobs.get(key);
+  if (cached) {
+    img.src = cached;
+    return;
+  }
+  fetchArtifactBytes(alias, parent, artifactId).then((url) => {
+    if (!url) {
+      img.alt = "产物不可用";
+      return;
+    }
+    state.artifactBlobs.set(key, url);
+    img.src = url;
+  }).catch((error) => {
+    if (error && error.message === "SESSION_EXPIRED") expireSession();
+    img.alt = "产物不可用";
+  });
+}
+
+async function fetchArtifactBytes(alias, parent, artifactId) {
+  const response = await fetch(
+    `/api/v1/workspaces/${encodeURIComponent(alias)}/families/${encodeURIComponent(parent)}/artifacts/${encodeURIComponent(artifactId)}`,
+    {
+      headers: { Authorization: `Bearer ${state.bearer}` },
+      cache: "no-store",
+      credentials: "omit",
+    },
+  );
+  if (response.status === 401) throw new Error("SESSION_EXPIRED");
+  if (!response.ok) throw new Error("ARTIFACT_UNAVAILABLE");
+  const type = text(response.headers.get("Content-Type"));
+  if (!type.startsWith("image/")) throw new Error("ARTIFACT_UNAVAILABLE");
+  const blob = await response.blob();
+  return URL.createObjectURL(blob);
+}
+
+async function loadArtifacts(alias, parent) {
+  if (!hasSurface("artifacts") || document.hidden || !SAFE_ID.test(alias) || !SAFE_ID.test(parent)) {
+    renderArtifactRails(alias);
+    return;
+  }
+  const payload = await request(
+    `/api/v1/workspaces/${encodeURIComponent(alias)}/families/${encodeURIComponent(parent)}/artifacts`,
+    `artifacts:${alias}:${parent}`,
+  );
+  if (!payload || !payload.data) return;
+  state.artifactItems = Array.isArray(payload.data.artifacts)
+    ? payload.data.artifacts.filter((item) => item && SAFE_ID.test(text(item.id)))
+    : [];
+  renderArtifactRails(alias);
+  renderChannelMessages();
 }
 
 function reloadOpenChannel() {
@@ -1518,6 +1767,7 @@ function resetEventState() {
   state.liveEdges = new Set();
   state.sseFailed = false;
   resetChannelState();
+  resetArtifactState();
 }
 
 async function loadWorkspace(alias, silent = false) {
@@ -1564,6 +1814,7 @@ async function loadWorkspace(alias, silent = false) {
     if (state.familyParent) {
       await refreshFamilyUnread(alias, state.familyParent);
       await loadChannel(alias, state.familyParent);
+      await loadArtifacts(alias, state.familyParent);
     }
   } catch (error) {
     if (error && error.message === "SESSION_EXPIRED") {

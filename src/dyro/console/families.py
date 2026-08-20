@@ -15,20 +15,27 @@ from ..families import (
     CHANNEL_KINDS,
     DEFAULT_CHANNEL_LIMIT,
     HUMAN_POST_KINDS,
+    IMAGE_MEDIA_TYPES,
     MAX_CHANNEL_LIMIT,
     OPERATOR_ID,
     OPERATOR_POST_KINDS,
+    FamilyArtifactError,
     FamilyChannelError,
+    _projected_title,
     ack_channel_message,
     channel_at,
     family_children,
     family_graph,
     family_ids,
     family_members,
+    find_channel_message,
     infer_post_family,
     line_records,
+    list_family_artifacts,
     post_channel_message,
     read_acks,
+    read_family_artifact,
+    read_family_artifact_bytes,
     read_visible_channel,
     retracted_message_ids,
     unread_by_member,
@@ -142,7 +149,10 @@ def family_unread_maps(
         safe_parent = _line_id(parent_id)
         if not safe_parent:
             continue
-        counts = unread_by_member(config, safe_parent, lines)
+        try:
+            counts = unread_by_member(config, safe_parent, lines)
+        except FamilyChannelError as exc:
+            raise ConsoleOverviewError(exc.code) from exc
         members[safe_parent] = counts
         cards[safe_parent] = counts.get(OPERATOR_ID, 0)
     return cards, members
@@ -157,6 +167,7 @@ def channel_cursor_digest(record: Mapping[str, object]) -> str:
         "family": record.get("family", ""),
         "body": record.get("body", ""),
         "retracts": record.get("retracts", ""),
+        "facts": record.get("facts") if isinstance(record.get("facts"), dict) else {},
     }
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
@@ -264,6 +275,7 @@ def project_channel_message(
             "retracts": "",
             "retracted": False,
             "acked": False,
+            "artifact_id": "",
         }
     sender = _member_token(record.get("from"))
     recipient = record.get("to")
@@ -273,6 +285,9 @@ def project_channel_message(
     if len(body) > 2048:
         body = ""
     retracts = record.get("retracts") if isinstance(record.get("retracts"), str) else ""
+    facts = record.get("facts") if isinstance(record.get("facts"), dict) else {}
+    artifact_raw = facts.get("artifact_id")
+    artifact_id = _line_id(artifact_raw) if isinstance(artifact_raw, str) and artifact_raw else ""
     return {
         "id": message_id,
         "seq": seq,
@@ -285,6 +300,7 @@ def project_channel_message(
         "retracts": retracts,
         "retracted": message_id in retracted_ids,
         "acked": message_id in acked,
+        "artifact_id": artifact_id,
     }
 
 
@@ -303,17 +319,17 @@ def channel_page(
     if parent_id not in family_ids(lines):
         raise ConsoleOverviewError("FAMILY_NOT_FOUND")
     after_seq = 0
-    if after:
-        after_seq, message_id, digest = decode_channel_cursor(secret, after)
-        current = channel_at(config, parent_id, after_seq)
-        if (
-            current is None
-            or current.get("id") != message_id
-            or channel_cursor_digest(current) != digest
-        ):
-            raise ConsoleOverviewError("CHANNEL_CURSOR_INVALID")
     filters = parse_channel_filter(filter_text)
     try:
+        if after:
+            after_seq, message_id, digest = decode_channel_cursor(secret, after)
+            current = channel_at(config, parent_id, after_seq)
+            if (
+                current is None
+                or current.get("id") != message_id
+                or channel_cursor_digest(current) != digest
+            ):
+                raise ConsoleOverviewError("CHANNEL_CURSOR_INVALID")
         records = [
             item
             for item in read_visible_channel(config, parent_id, viewer=OPERATOR_ID)
@@ -388,11 +404,12 @@ def apply_human_channel_post(
         if kind == "ack":
             if body_raw or to_raw:
                 raise ConsoleOverviewError("FAMILY_POST_INVALID")
+            located = find_channel_message(config, ack_id, family=parent_id)
+            if located is None or located[0] != parent_id:
+                raise ConsoleOverviewError("CHANNEL_MESSAGE_NOT_FOUND")
             result = ack_channel_message(
                 config, ack_id, family=parent_id, clock=clock
             )
-            if result["family"] != parent_id:
-                raise ConsoleOverviewError("CHANNEL_MESSAGE_NOT_FOUND")
             return {"id": result["id"], "seq": result["seq"]}
         if ack_id:
             raise ConsoleOverviewError("FAMILY_POST_INVALID")
@@ -414,3 +431,87 @@ def apply_human_channel_post(
     except FamilyChannelError as exc:
         raise ConsoleOverviewError(exc.code) from exc
     return {"id": result["id"], "seq": result["seq"]}
+
+
+def project_artifact(
+    record: Mapping[str, object],
+    *,
+    alias: str,
+    parent_id: str,
+) -> dict[str, object]:
+    artifact_id = _line_id(record.get("id"))
+    artifact_type = record.get("type")
+    title = _projected_title(record.get("title") if isinstance(record.get("title"), str) else "")
+    conclusion = record.get("conclusion") if isinstance(record.get("conclusion"), str) else ""
+    bound_hash = record.get("bound_hash") if isinstance(record.get("bound_hash"), str) else ""
+    media_type = record.get("media_type") if isinstance(record.get("media_type"), str) else ""
+    size = record.get("size")
+    duration = record.get("duration") if isinstance(record.get("duration"), str) else ""
+    points_raw = record.get("points")
+    points: list[dict[str, object]] = []
+    if isinstance(points_raw, list):
+        for item in points_raw[:256]:
+            if not isinstance(item, Mapping):
+                continue
+            x_value = item.get("x")
+            y_value = item.get("y")
+            if isinstance(x_value, (int, float)) and isinstance(y_value, (int, float)):
+                if isinstance(x_value, bool) or isinstance(y_value, bool):
+                    continue
+                points.append({"x": x_value, "y": y_value})
+    open_command = ""
+    if artifact_type == "video" and alias and parent_id:
+        open_command = f"dyro --workspace {alias} --dry-run line inbox --family {parent_id}"
+    return {
+        "id": artifact_id,
+        "type": artifact_type if artifact_type in {"review", "image", "chart", "video"} else "",
+        "title": title[:80],
+        "conclusion": conclusion if conclusion in {"pass", "fail", "inconclusive"} else "",
+        "bound_hash": bound_hash[:12],
+        "media_type": media_type if media_type in IMAGE_MEDIA_TYPES or media_type == "application/json" else "",
+        "size": size if type(size) is int and size >= 0 else 0,
+        "duration": duration[:16],
+        "points": points,
+        "open_command": open_command,
+    }
+
+
+def artifacts_payload(config: Config, parent_id: str, *, alias: str) -> dict[str, object]:
+    lines = line_records(config)
+    if parent_id not in family_ids(lines):
+        raise ConsoleOverviewError("FAMILY_NOT_FOUND")
+    try:
+        records = list_family_artifacts(config, parent_id)
+    except FamilyArtifactError as exc:
+        raise ConsoleOverviewError(exc.code) from exc
+    return {
+        "family": parent_id,
+        "artifacts": [
+            project_artifact(item, alias=alias, parent_id=parent_id) for item in records
+        ],
+    }
+
+
+def artifact_payload(
+    config: Config, parent_id: str, artifact_id: str, *, alias: str
+) -> dict[str, object]:
+    lines = line_records(config)
+    if parent_id not in family_ids(lines):
+        raise ConsoleOverviewError("FAMILY_NOT_FOUND")
+    try:
+        record = read_family_artifact(config, parent_id, artifact_id)
+    except FamilyArtifactError as exc:
+        raise ConsoleOverviewError(exc.code) from exc
+    return project_artifact(record, alias=alias, parent_id=parent_id)
+
+
+def artifact_bytes_payload(
+    config: Config, parent_id: str, artifact_id: str
+) -> tuple[str, bytes]:
+    lines = line_records(config)
+    if parent_id not in family_ids(lines):
+        raise ConsoleOverviewError("FAMILY_NOT_FOUND")
+    try:
+        return read_family_artifact_bytes(config, parent_id, artifact_id)
+    except FamilyArtifactError as exc:
+        raise ConsoleOverviewError(exc.code) from exc
