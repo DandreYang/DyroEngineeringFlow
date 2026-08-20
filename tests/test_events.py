@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-import json
-import unittest
-
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from io import StringIO
+import json
+import unittest
 from unittest.mock import patch
 
 from dyro.cli import build_parser, cmd_host_seed
