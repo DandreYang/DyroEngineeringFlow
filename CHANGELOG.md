@@ -10,7 +10,10 @@
   Hidden tabs pause; SSE failure falls back to the existing 5s poll.
   Workspace detail shows the family tree and live event panes. Copy
   buttons emit dry-run CLI only. Browser stays read-only; P2 channel
-  POST and P3 artifacts are not implemented.
+  POST and P3 artifacts are not implemented. Family badges do not claim
+  cleanliness or origin binding. Event `facts` stay IDs, enums, counts,
+  short hashes, or reason codes. HMAC `after=` binds a row digest so a
+  replaced same-seq row is `EVENT_CURSOR_INVALID`.
 - User slash Skill `dyro-line-family` (`/dyro-line-family`) preflights
   `line spawn` / `line merge` / `line sync` and prints one `--yes` command
   for the human. It does not execute the mutation, invent `--push`, or

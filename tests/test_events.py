@@ -4,14 +4,21 @@ from datetime import datetime, timezone
 import json
 import unittest
 
+from contextlib import redirect_stdout
+from datetime import datetime, timezone
+from io import StringIO
+from unittest.mock import patch
+
+from dyro.cli import build_parser, cmd_host_seed
 from dyro.config import load
-from dyro.console.events import decode_event_cursor, event_page
+from dyro.console.events import decode_event_cursor, event_page, project_event
 from dyro.console.overview import ConsoleOverviewError
 from dyro.events import EventLogError, append_event, read_events
-from dyro.tasks import set_status, task_template
-from dyro.workspace import create_line, spawn_line
+from dyro.process import Result
+from dyro.tasks import _execute_task_agent, load_task, set_status, task_template
+from dyro.workspace import create_line, line_repository_path, merge_line, spawn_line, sync_line
 
-from .support import WorkspaceCase
+from .support import WorkspaceCase, publish_origin_branch, shell
 
 
 class WorkspaceEventLogTests(WorkspaceCase):
@@ -162,9 +169,10 @@ class WorkspaceEventLogTests(WorkspaceCase):
         page = event_page(self.config, secret=secret, after=None, limit=50)
         cursor = page["next_cursor"]
         self.assertTrue(cursor)
-        after_seq, event_id = decode_event_cursor(secret, cursor)
+        after_seq, event_id, digest = decode_event_cursor(secret, cursor)
         self.assertEqual(after_seq, 1)
         self.assertEqual(event_id, "evt_1")
+        self.assertEqual(len(digest), 64)
         resumed = event_page(self.config, secret=secret, after=cursor, limit=50)
         self.assertEqual(resumed["events"], [])
         with self.assertRaisesRegex(ConsoleOverviewError, "EVENT_CURSOR_INVALID"):
@@ -173,6 +181,204 @@ class WorkspaceEventLogTests(WorkspaceCase):
         path.write_text("", encoding="utf-8")
         with self.assertRaisesRegex(ConsoleOverviewError, "EVENT_CURSOR_INVALID"):
             event_page(self.config, secret=secret, after=cursor, limit=50)
+
+    def test_hmac_after_cursor_rejects_replaced_same_seq_row(self) -> None:
+        append_event(
+            self.config,
+            kind="spawn",
+            actor="core",
+            subject="core_pay",
+            family="core",
+            facts={"parent": "core", "child": "core_pay"},
+            clock=self.clock,
+        )
+        secret = b"k" * 32
+        cursor = event_page(self.config, secret=secret, after=None, limit=50)["next_cursor"]
+        self.assertTrue(cursor)
+        replacement = {
+            "actor": "core",
+            "at": "2026-08-20T12:00:01Z",
+            "family": "core",
+            "facts": {"parent": "core", "child": "core_pay"},
+            "id": "evt_1",
+            "kind": "sync",
+            "seq": 1,
+            "subject": "core_pay",
+        }
+        path = self.root / ".dyro" / "events.jsonl"
+        path.write_text(
+            json.dumps(replacement, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ConsoleOverviewError, "EVENT_CURSOR_INVALID"):
+            event_page(self.config, secret=secret, after=cursor, limit=50)
+
+    def test_project_event_drops_path_prompt_and_nested_facts(self) -> None:
+        projected = project_event(
+            {
+                "seq": 1,
+                "id": "evt_1",
+                "kind": "spawn",
+                "at": "2026-08-20T12:00:00Z",
+                "actor": "core",
+                "subject": "core_pay",
+                "family": "core",
+                "facts": {
+                    "parent": "core",
+                    "child": "core_pay",
+                    "path": "/tmp/secret",
+                    "prompt": "please prepare notes without any slash token",
+                    "nested": {"argv": ["dyro", "next"]},
+                },
+            }
+        )
+        self.assertEqual(projected["facts"], {"parent": "core", "child": "core_pay"})
+
+    def _event_kinds(self) -> list[str]:
+        path = self.root / ".dyro" / "events.jsonl"
+        if not path.is_file():
+            return []
+        return [
+            json.loads(line)["kind"]
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+
+    def _parent_and_child(self):
+        publish_origin_branch(self.anchor, "feat/core")
+        parent = create_line(self.config, line_id="core", branch="feat/core", base="main")
+        child = spawn_line(self.config, "core", "pay")
+        return parent, child
+
+    def test_merge_and_sync_write_events_dry_run_and_failed_preflight_do_not(
+        self,
+    ) -> None:
+        from dyro.errors import DyroError
+
+        parent, child = self._parent_and_child()
+        self.assertEqual(self._event_kinds(), ["spawn"])
+        child_wt = line_repository_path(self.config, child, "api")
+        (child_wt / "child.txt").write_text("from child\n", encoding="utf-8")
+        shell("git", "add", "child.txt", cwd=child_wt)
+        shell("git", "commit", "-m", "feat: child work", cwd=child_wt)
+
+        merge_line(self.config, child.id, parent.id, dry_run=True)
+        self.assertEqual(self._event_kinds(), ["spawn"])
+
+        parent_wt = line_repository_path(self.config, parent, "api")
+        (parent_wt / "dirty.txt").write_text("pending\n", encoding="utf-8")
+        with self.assertRaisesRegex(DyroError, "不干净"):
+            merge_line(self.config, child.id, parent.id)
+        self.assertEqual(self._event_kinds(), ["spawn"])
+        (parent_wt / "dirty.txt").unlink()
+
+        merge_line(self.config, child.id, parent.id)
+        self.assertEqual(self._event_kinds(), ["spawn", "merge"])
+
+        sync_line(self.config, child.id, dry_run=True)
+        self.assertEqual(self._event_kinds(), ["spawn", "merge"])
+        sync_line(self.config, child.id)
+        self.assertEqual(self._event_kinds(), ["spawn", "merge", "sync"])
+
+    def test_dispatch_start_and_end_write_events_dry_run_does_not(self) -> None:
+        create_line(self.config, line_id="core", branch="feat/core", base="main")
+        task_dir = self.config.task_specs_dir / "TASK-A"
+        task_dir.mkdir(parents=True)
+        task_dir.joinpath("task.toml").write_text(
+            task_template("TASK-A", "Prepare release", "core", "api", "services/api"),
+            encoding="utf-8",
+        )
+        task_dir.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task = load_task(self.config, "TASK-A")
+        result = Result(("dyro", "task-dispatch", "codex", "TASK-A"), 0, "")
+        with (
+            patch("dyro.task_dispatch.is_dispatch_write_ready", return_value=True),
+            patch(
+                "dyro.task_dispatch.run_task_bound_dispatch",
+                return_value=result,
+            ),
+        ):
+            _execute_task_agent(
+                self.config,
+                task,
+                workspace=self.root,
+                prompt="do-work",
+                log_name="executor.log",
+                dry_run=True,
+            )
+            self.assertEqual(self._event_kinds(), [])
+            _execute_task_agent(
+                self.config,
+                task,
+                workspace=self.root,
+                prompt="do-work",
+                log_name="executor.log",
+                dry_run=False,
+            )
+        page, _last = read_events(self.config)
+        self.assertEqual([item["kind"] for item in page], ["dispatch", "dispatch"])
+        self.assertEqual(page[0]["facts"]["phase"], "start")
+        self.assertEqual(page[1]["facts"]["phase"], "end")
+        self.assertEqual(page[1]["facts"]["status"], "idle")
+
+    def test_host_seed_writes_an_event_and_dry_run_does_not(self) -> None:
+        parser = build_parser()
+        dry = parser.parse_args(["--root", str(self.root), "host", "seed", "--dry-run"])
+        with redirect_stdout(StringIO()):
+            cmd_host_seed(dry)
+        self.assertEqual(self._event_kinds(), [])
+        seeded = parser.parse_args(["--root", str(self.root), "host", "seed"])
+        with redirect_stdout(StringIO()):
+            cmd_host_seed(seeded)
+        page, _last = read_events(self.config)
+        self.assertEqual(page[0]["kind"], "host_seed")
+        self.assertGreater(page[0]["facts"]["written"], 0)
+
+    def test_apply_supervised_wave_writes_an_event(self) -> None:
+        from dyro.continuation.store import create_objective
+        from dyro.continuation.supervision import apply_supervised_wave, build_supervised_wave
+        from dyro.host import compile_hosts
+
+        compile_hosts(self.config)
+        create_line(self.config, line_id="alpha", branch="feat/alpha", base="main")
+        task_dir = self.config.task_specs_dir / "TASK-A"
+        task_dir.mkdir(parents=True)
+        task_dir.joinpath("task.toml").write_text(
+            task_template("TASK-A", "Task A", "alpha", "api", "services/api").replace(
+                'agent = "codex"', 'agent = "noop"'
+            ),
+            encoding="utf-8",
+        )
+        task_dir.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        task_dir.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
+        create_objective(
+            self.config,
+            '''schema_version = 1
+id = "release"
+title = "Release"
+line = "alpha"
+targets = ["TASK-A"]
+
+[continuation]
+requested_mode = "supervised"
+operations = ["execute", "review"]
+
+[budget]
+max_actions = 20
+max_attempts_per_task = 2
+max_failures = 3
+max_no_progress_cycles = 2
+max_parallel = 1
+''',
+        )
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        wave = build_supervised_wave(self.config, "release", clock=lambda: now)
+        apply_supervised_wave(self.config, wave, clock=lambda: now)
+        kinds = self._event_kinds()
+        self.assertIn("objective_wave", kinds)
+        page, _last = read_events(self.config)
+        wave_events = [item for item in page if item["kind"] == "objective_wave"]
+        self.assertEqual(wave_events[0]["facts"]["mode"], "apply")
 
 
 if __name__ == "__main__":

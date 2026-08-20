@@ -474,6 +474,39 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
                 self.assertNotIn("git", str(error.exception))
                 self.assertNotIn("argv", str(error.exception))
 
+    def test_parent_rejects_digest_consistent_events_with_path_in_facts(self) -> None:
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+        )
+        valid = service.events("demo")
+        payload = deepcopy(valid)
+        payload["data"]["events"] = [
+            {
+                "seq": 1,
+                "id": "evt_1",
+                "kind": "spawn",
+                "at": "2026-08-20T12:00:00Z",
+                "actor": "core",
+                "subject": "core_pay",
+                "family": "core",
+                "facts": {"parent": "core", "path": "/tmp/secret"},
+            }
+        ]
+        payload["snapshot_sha256"] = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "schema_version": 1,
+                    "freshness": payload["freshness"],
+                    "data": payload["data"],
+                }
+            )
+        ).hexdigest()
+        raw = json.dumps({"ok": True, "payload": payload}).encode("utf-8")
+        with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_UNAVAILABLE"):
+            service._parse_worker_output(raw, expected_operation="events")
+
     def test_isolated_command_allowlist_rejects_task_next(self) -> None:
         self.assertTrue(
             IsolatedOverviewService._safe_command(

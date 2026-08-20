@@ -17,7 +17,7 @@ def family_badges(
     lines: Sequence[Mapping[str, object]],
     tasks: Sequence[Mapping[str, object]],
 ) -> dict[str, dict[str, object]]:
-    """P1 badges: in-progress from tasks; dirty / missing-origin stay false."""
+    """P1 badges: in-progress from tasks; dirty / missing-origin are uninspected."""
     in_progress: set[str] = set()
     for task in tasks:
         if task.get("status") == "in_progress":

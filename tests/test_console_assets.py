@@ -116,6 +116,9 @@ class ConsoleAssetTests(unittest.TestCase):
         self.assertIn("产物尚未开放".encode(), script.body)
         self.assertIn("document.hidden".encode(), script.body)
         self.assertIn("刚有合入或同步".encode(), script.body)
+        self.assertIn("未检查".encode(), script.body)
+        self.assertNotIn("干净".encode(), script.body)
+        self.assertNotIn("远端已绑定".encode(), script.body)
 
 
 if __name__ == "__main__":

@@ -858,9 +858,10 @@ function familyBadges(id, tasks) {
     return marks;
   }
   const busy = lineInProgress(tasks, id);
+  // Git cleanliness and origin binding are not inspected in P1.
   for (const label of [
-    "干净",
-    "远端已绑定",
+    "未检查",
+    "未检查",
     busy ? "进行中" : "空闲",
     "未读 0",
   ]) {

@@ -19,6 +19,7 @@ from typing import Any
 
 from ..canonical import canonical_json_bytes
 from ..hub import registry_home
+from .events import is_safe_event_fact
 from .overview import ConsoleOverviewError
 from .redaction import REDACTED, safe_branch, safe_id, safe_sha256, safe_title
 
@@ -427,6 +428,9 @@ class IsolatedOverviewService:
                 or len(facts) > 16
             ):
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            for key, value in facts.items():
+                if not is_safe_event_fact(key, value):
+                    raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         cursor = data["next_cursor"]
         if cursor is not None and (not isinstance(cursor, str) or not _CURSOR.fullmatch(cursor)):
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
