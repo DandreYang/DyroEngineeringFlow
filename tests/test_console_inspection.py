@@ -115,6 +115,35 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         self.assertIn("core_pay_fix", pay["data"]["members"])
         self.assertNotIn("core", pay["data"]["members"])
 
+        empty = service.channel("demo", "core")
+        self.assertEqual(empty["data"]["family"], "core")
+        self.assertEqual(empty["data"]["messages"], [])
+        with patch.object(service, "_run_worker", side_effect=AssertionError("worker")):
+            posted = service.post_channel(
+                "demo",
+                "core",
+                {"kind": "decision", "body": "先同步 core_pay"},
+            )
+        self.assertEqual(posted["data"]["id"], "msg_1")
+        with self.assertRaises(ConsoleOverviewError) as raised:
+            service.post_channel("demo", "core", {"kind": "blocked", "body": "禁止"})
+        self.assertEqual(raised.exception.code, "FAMILY_POST_FORBIDDEN")
+        reader = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+        )
+        page = reader.channel("demo", "core")
+        self.assertEqual(page["data"]["messages"][0]["from"], "operator")
+        self.assertEqual(page["data"]["messages"][0]["kind"], "decision")
+        events = reader.events("demo")
+        self.assertTrue(
+            any(
+                item["kind"] == "signal" and item["facts"].get("channel_id") == "msg_1"
+                for item in events["data"]["events"]
+            )
+        )
+
     def test_default_workspace_budget_tolerates_process_startup_overhead(self) -> None:
         clock = [0.0]
         record = WorkspaceRecord(name="demo", root=self.root)

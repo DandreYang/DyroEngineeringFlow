@@ -35,8 +35,10 @@ Do not run any of:
 - `task merge`, `task signoff`, `task gates`, `task review`, `task run`
 - `objective apply`, `dispatch`, `console`, push, publish
 - `line create` / hotfix or Change Set creation
+- `line post` / `line inbox` / `line ack`
 
 Do not invent `--yes` or `--push`. Do not add `--push`.
+This slash does not send family signals and must not call `line post`, `inbox`, or `ack`.
 Default is no push; `policy.allow_push` is not permission to invent it.
 Do not restore a drifted line branch. Do not add `--include-paths`.
 

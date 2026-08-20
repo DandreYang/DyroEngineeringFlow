@@ -17,6 +17,13 @@ const state = {
   liveEdges: new Set(),
   sseFailed: false,
   familyParent: "",
+  channelItems: [],
+  channelCursor: "",
+  channelMembers: [],
+  channelView: "list",
+  channelKind: "",
+  channelFrom: "",
+  channelUnacked: false,
 };
 const HEALTH_LABELS = { healthy: "健康", degraded: "需关注", unavailable: "不可用" };
 const FRESHNESS_LABELS = { fresh: "读取完整", partial: "部分可读", stale: "待刷新" };
@@ -124,6 +131,10 @@ const ERROR_LABELS = {
   EVENT_CURSOR_INVALID: "事件游标已失效，已从头读取",
   EVENT_STREAM_UNAVAILABLE: "实时事件流不可用，已回退轮询",
   FAMILY_NOT_FOUND: "没有可展示的一层家族",
+  FAMILY_POST_FORBIDDEN: "人类模块不能发送这种家族信号",
+  FAMILY_POST_INVALID: "家族频道请求无效",
+  CHANNEL_CURSOR_INVALID: "频道游标已失效，已从头读取",
+  CHANNEL_BODY_INVALID: "家族信号正文不接受",
 };
 const EVENT_KIND_LABELS = {
   spawn: "子线已创建",
@@ -137,6 +148,16 @@ const EVENT_KIND_LABELS = {
   host_seed: "已写入 overlay",
   EVENT_REDACTED: "已脱敏事件",
 };
+const CHANNEL_KIND_LABELS = {
+  contract: "约定",
+  blocked: "阻塞",
+  shipped: "声称已交付",
+  ask_sync: "请求同步",
+  decision: "决定",
+  artifact: "产物",
+  retract: "撤回",
+};
+
 const UPDATE_KIND_LABELS = {
   none: "无已缓存更新",
   patch: "有补丁更新",
@@ -295,6 +316,26 @@ async function request(path, key) {
   }
   const received = response.headers.get("ETag");
   if (received) state.etags.set(key, received);
+  return body;
+}
+
+async function requestWrite(path, payload) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${state.bearer}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+    credentials: "omit",
+  });
+  const body = await response.json().catch(() => null);
+  if (response.status === 401) throw new Error("SESSION_EXPIRED");
+  if (!response.ok || !body) {
+    const code = text(body && body.error && body.error.code) || "LOCAL_READ_UNAVAILABLE";
+    throw new Error(code);
+  }
   return body;
 }
 
@@ -841,6 +882,11 @@ function renderFamilyTree(alias, lines, tasks) {
         state.familyParent = parent;
         const tree = $("family-tree");
         if (tree) tree.replaceWith(renderFamilyGraph(alias, lines, parent, tasks));
+        resetChannelState();
+        loadChannel(alias, parent).catch((error) => {
+          if (error && error.message === "SESSION_EXPIRED") expireSession();
+        });
+        refreshFamilyUnread(alias, parent).catch(() => {});
       });
       nav.append(button);
     }
@@ -850,25 +896,23 @@ function renderFamilyTree(alias, lines, tasks) {
   return section;
 }
 
-function familyBadges(id, tasks) {
+function familyBadges(id, tasks, unread = 0) {
   const marks = element("p");
   marks.className = "family-badges";
+  const unreadBadge = element("span", `未读 ${count(unread)}`);
+  unreadBadge.className = "family-badge family-unread";
   if (id === "operator") {
-    marks.append(element("span", "未读 0"));
+    marks.append(unreadBadge);
     return marks;
   }
   const busy = lineInProgress(tasks, id);
-  // Git cleanliness and origin binding are not inspected in P1.
-  for (const label of [
-    "未检查",
-    "未检查",
-    busy ? "进行中" : "空闲",
-    "未读 0",
-  ]) {
+  // Git cleanliness and origin binding are not inspected. Unread is overlay-only.
+  for (const label of ["未检查", "未检查", busy ? "进行中" : "空闲"]) {
     const badge = element("span", label);
     badge.className = "family-badge";
     marks.append(badge);
   }
+  marks.append(unreadBadge);
   return marks;
 }
 
@@ -887,6 +931,7 @@ function renderFamilyGraph(alias, lines, parent, tasks) {
   for (const id of members) {
     const item = element("li");
     item.className = "family-node";
+    item.dataset.member = id;
     item.dataset.role = id === parent ? "parent" : id === "operator" ? "operator" : "child";
     const title = element("strong", id);
     const role = element(
@@ -1107,14 +1152,332 @@ function renderEventPane() {
   return section;
 }
 
-function renderChannelPane() {
+function resetChannelState() {
+  state.channelItems = [];
+  state.channelCursor = "";
+  state.channelMembers = [];
+}
+
+function channelFilterText() {
+  const parts = [];
+  if (state.channelUnacked) parts.push("unacked");
+  if (state.channelKind) parts.push(`kind:${state.channelKind}`);
+  if (state.channelFrom) parts.push(`from:${state.channelFrom}`);
+  return parts.join(",");
+}
+
+function describeChannelMessage(message) {
+  const kind = text(message && message.kind);
+  const label = kind === "artifact"
+    ? "产物尚未开放"
+    : displayLabel(kind, CHANNEL_KIND_LABELS);
+  const sender = text(message && message.from) || "未提供";
+  const recipient = text(message && message.to);
+  const who = recipient ? `${sender} → ${recipient}` : `${sender} → 广播`;
+  const when = text(message && message.at);
+  const local = when ? new Date(when).toLocaleString("zh-CN") : "";
+  const body = kind === "artifact" ? text(message && message.id) : text(message && message.body);
+  const flags = [
+    message && message.retracted ? "已撤回" : "",
+    message && message.acked ? "已读" : "未读",
+  ].filter(Boolean).join(" · ");
+  return [local, label, who, flags, body].filter(Boolean).join(" · ");
+}
+
+function appendChannelMessages(messages) {
+  if (!Array.isArray(messages) || !messages.length) return;
+  const seen = new Set(state.channelItems.map((item) => text(item.id)));
+  for (const message of messages) {
+    const id = text(message && message.id);
+    if (!id || seen.has(id)) continue;
+    state.channelItems.push(message);
+    seen.add(id);
+  }
+}
+
+function visibleChannelMessages() {
+  const items = [...state.channelItems];
+  if (state.channelView === "list") {
+    items.sort((left, right) => Number(Boolean(left.acked)) - Number(Boolean(right.acked)) || left.seq - right.seq);
+  } else {
+    items.sort((left, right) => left.seq - right.seq);
+  }
+  return items;
+}
+
+function renderChannelMessages() {
+  const list = $("channel-list");
+  if (!list) return;
+  list.replaceChildren();
+  const items = visibleChannelMessages();
+  if (!items.length) {
+    list.append(element("li", "还没有家族信号。"));
+    return;
+  }
+  const alias = state.detailAlias;
+  const parent = state.familyParent;
+  for (const message of items) {
+    const item = element("li");
+    item.className = "channel-item";
+    if (message.retracted) item.classList.add("retracted");
+    if (!message.acked) item.classList.add("unacked");
+    item.append(element("p", describeChannelMessage(message)));
+    if (text(message.kind) === "artifact") {
+      item.append(element("p", `产物尚未开放 · ${text(message.id)}`));
+    }
+    if (!message.acked && SAFE_ID.test(alias) && SAFE_ID.test(parent)) {
+      const ack = element("button", "标为已读");
+      ack.type = "button";
+      ack.className = "secondary";
+      ack.addEventListener("click", () => {
+        postHumanChannel(alias, parent, { kind: "ack", ack_id: text(message.id) }).catch((error) => {
+          if (error && error.message === "SESSION_EXPIRED") expireSession();
+        });
+      });
+      item.append(ack);
+    }
+    const sender = text(message.from);
+    const retractFrom = sender && sender !== "operator" ? sender : parent;
+    if (
+      alias &&
+      retractFrom &&
+      SAFE_ID.test(alias) &&
+      SAFE_ID.test(retractFrom) &&
+      text(message.kind) !== "retract" &&
+      text(message.id)
+    ) {
+      item.append(commandRow(
+        `dyro --workspace ${alias} --dry-run line post ${retractFrom} --kind retract --body ${text(message.id)}`,
+      ));
+    }
+    list.append(item);
+  }
+}
+
+function fillSelect(node, entries, selected) {
+  if (!node) return;
+  node.replaceChildren();
+  for (const [value, label] of entries) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    if (value === selected) option.selected = true;
+    node.append(option);
+  }
+}
+
+function renderChannelFilters(members) {
+  const bar = element("div");
+  bar.className = "channel-toolbar";
+  const views = element("div");
+  views.className = "channel-views";
+  views.setAttribute("role", "tablist");
+  for (const [id, label] of [["list", "列表"], ["timeline", "时间线"]]) {
+    const button = element("button", label);
+    button.type = "button";
+    button.className = "secondary";
+    if (state.channelView === id) button.setAttribute("aria-current", "true");
+    button.addEventListener("click", () => {
+      state.channelView = id;
+      for (const item of views.querySelectorAll("button")) {
+        if (item.textContent === label) item.setAttribute("aria-current", "true");
+        else item.removeAttribute("aria-current");
+      }
+      renderChannelMessages();
+    });
+    views.append(button);
+  }
+  const kind = element("select");
+  kind.id = "channel-filter-kind";
+  fillSelect(
+    kind,
+    [["", "全部 kind"], ...Object.entries(CHANNEL_KIND_LABELS)],
+    state.channelKind,
+  );
+  kind.addEventListener("change", () => {
+    state.channelKind = text(kind.value);
+    reloadOpenChannel();
+  });
+  const from = element("select");
+  from.id = "channel-filter-from";
+  fillSelect(
+    from,
+    [["", "全部发送者"], ...members.filter((id) => id).map((id) => [id, id])],
+    state.channelFrom,
+  );
+  from.addEventListener("change", () => {
+    state.channelFrom = text(from.value);
+    reloadOpenChannel();
+  });
+  const unacked = element("label");
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.checked = state.channelUnacked;
+  box.addEventListener("change", () => {
+    state.channelUnacked = Boolean(box.checked);
+    reloadOpenChannel();
+  });
+  unacked.append(box, document.createTextNode("未读"));
+  bar.append(views, kind, from, unacked);
+  return bar;
+}
+
+function renderChannelCompose(alias, parent, members) {
+  const form = element("div");
+  form.className = "channel-compose";
+  form.append(element("p", "以 operator 身份发送。页面不能假扮开发线。"));
+  const kind = element("select");
+  kind.id = "channel-post-kind";
+  fillSelect(kind, [["decision", "决定"], ["contract", "约定"]], "decision");
+  const to = element("select");
+  to.id = "channel-post-to";
+  fillSelect(
+    to,
+    [["", "全家族"], ...members.filter((id) => id && id !== "operator").map((id) => [id, id])],
+    "",
+  );
+  const body = element("textarea");
+  body.id = "channel-post-body";
+  body.rows = 3;
+  body.maxLength = 2048;
+  const send = element("button", "发送决定");
+  send.type = "button";
+  kind.addEventListener("change", () => {
+    send.textContent = kind.value === "contract" ? "发送约定" : "发送决定";
+  });
+  send.addEventListener("click", () => {
+    postHumanChannel(alias, parent, {
+      kind: text(kind.value),
+      to: text(to.value),
+      body: text(body.value),
+    }).then(() => {
+      body.value = "";
+    }).catch((error) => {
+      if (error && error.message === "SESSION_EXPIRED") expireSession();
+    });
+  });
+  form.append(kind, to, body, send);
+  form.append(element("p", "页面不能 merge、push 或改任务状态。撤回只能复制 dry-run CLI。"));
+  return form;
+}
+
+function renderChannelPane(alias) {
   const section = element("section");
   section.className = "live-pane channel-pane";
   section.id = "channel-pane";
   section.append(element("h3", "频道"));
-  section.append(element("p", "尚未开放"));
+  if (!hasSurface("families")) {
+    section.append(element("p", "尚未开放"));
+    section.append(element("p", "产物尚未开放"));
+    return section;
+  }
+  section.append(element("p", "人类身份固定为 operator。"));
+  const parent = state.familyParent;
+  const members = state.channelMembers.length ? state.channelMembers : [];
+  section.append(renderChannelFilters(members));
+  const list = element("ul");
+  list.id = "channel-list";
+  list.className = "channel-list";
+  section.append(list);
+  const more = element("button", "加载更多");
+  more.type = "button";
+  more.id = "channel-more";
+  more.className = "secondary";
+  more.hidden = !state.channelCursor;
+  more.addEventListener("click", () => {
+    if (parent) {
+      loadChannel(alias, parent).catch((error) => {
+        if (error && error.message === "SESSION_EXPIRED") expireSession();
+      });
+    }
+  });
+  section.append(more);
+  if (SAFE_ID.test(alias) && SAFE_ID.test(parent)) {
+    section.append(renderChannelCompose(alias, parent, members));
+  }
   section.append(element("p", "产物尚未开放"));
   return section;
+}
+
+function reloadOpenChannel() {
+  const alias = state.detailAlias;
+  const parent = state.familyParent;
+  if (!alias || !parent) return;
+  resetChannelState();
+  loadChannel(alias, parent).catch((error) => {
+    if (error && error.message === "SESSION_EXPIRED") expireSession();
+  });
+}
+
+async function loadChannel(alias, parent) {
+  if (!hasSurface("families") || document.hidden || !SAFE_ID.test(alias) || !SAFE_ID.test(parent)) {
+    return;
+  }
+  const filter = channelFilterText();
+  const params = new URLSearchParams();
+  if (state.channelCursor) params.set("after", state.channelCursor);
+  if (filter) params.set("filter", filter);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const key = `channel:${alias}:${parent}:${state.channelCursor || "0"}:${filter || "all"}`;
+  const payload = await request(
+    `/api/v1/workspaces/${encodeURIComponent(alias)}/families/${encodeURIComponent(parent)}/channel${query}`,
+    key,
+  );
+  if (!payload || !payload.data) return;
+  state.channelMembers = Array.isArray(payload.data.members) ? payload.data.members.map((item) => text(item)).filter(Boolean) : [];
+  appendChannelMessages(Array.isArray(payload.data.messages) ? payload.data.messages : []);
+  const cursor = text(payload.data.next_cursor);
+  const received = Array.isArray(payload.data.messages) ? payload.data.messages.length : 0;
+  state.channelCursor = received ? cursor : "";
+  const more = $("channel-more");
+  if (more) more.hidden = !state.channelCursor || !received;
+  const from = $("channel-filter-from");
+  if (from) {
+    fillSelect(
+      from,
+      [["", "全部发送者"], ...state.channelMembers.map((id) => [id, id])],
+      state.channelFrom,
+    );
+  }
+  const composeTo = $("channel-post-to");
+  if (composeTo) {
+    fillSelect(
+      composeTo,
+      [["", "全家族"], ...state.channelMembers.filter((id) => id !== "operator").map((id) => [id, id])],
+      text(composeTo.value),
+    );
+  }
+  renderChannelMessages();
+}
+
+async function postHumanChannel(alias, parent, payload) {
+  if (!SAFE_ID.test(alias) || !SAFE_ID.test(parent)) return;
+  await requestWrite(
+    `/api/v1/workspaces/${encodeURIComponent(alias)}/families/${encodeURIComponent(parent)}/channel`,
+    payload,
+  );
+  resetChannelState();
+  await loadChannel(alias, parent);
+  await refreshFamilyUnread(alias, parent);
+}
+
+async function refreshFamilyUnread(alias, parent) {
+  if (!hasSurface("families") || !SAFE_ID.test(alias) || !SAFE_ID.test(parent)) return;
+  try {
+    const payload = await request(
+      `/api/v1/workspaces/${encodeURIComponent(alias)}/families/${encodeURIComponent(parent)}`,
+      `family:${alias}:${parent}`,
+    );
+    const nodes = payload && payload.data && Array.isArray(payload.data.nodes) ? payload.data.nodes : [];
+    const tree = $("family-tree");
+    if (!tree) return;
+    for (const node of nodes) {
+      const unread = tree.querySelector(`[data-member="${text(node.id)}"] .family-unread`);
+      if (unread) unread.textContent = `未读 ${count(node.unread)}`;
+    }
+  } catch (error) {
+    if (error && error.message === "SESSION_EXPIRED") throw error;
+  }
 }
 
 function renderLivePanes(alias, data) {
@@ -1144,7 +1507,7 @@ function renderLivePanes(alias, data) {
   root.append(tabs);
   const lines = Array.isArray(data && data.lines) ? data.lines : [];
   const tasks = Array.isArray(data && data.tasks) ? data.tasks : [];
-  root.append(renderFamilyTree(alias, lines, tasks), renderEventPane(), renderChannelPane());
+  root.append(renderFamilyTree(alias, lines, tasks), renderEventPane(), renderChannelPane(alias));
   return root;
 }
 
@@ -1154,12 +1517,15 @@ function resetEventState() {
   state.eventItems = [];
   state.liveEdges = new Set();
   state.sseFailed = false;
+  resetChannelState();
 }
 
 async function loadWorkspace(alias, silent = false) {
   if (!SAFE_ID.test(alias)) return;
   if (state.detailAlias && state.detailAlias !== alias) {
     resetEventState();
+  } else {
+    resetChannelState();
   }
   try {
     const payload = await request(`/api/v1/workspaces/${encodeURIComponent(alias)}`, `workspace:${alias}`);
@@ -1191,9 +1557,14 @@ async function loadWorkspace(alias, silent = false) {
     content.append(await loadProofInspect(alias));
     content.append(renderLivePanes(alias, payload.data));
     renderEventList();
+    renderChannelMessages();
     detail.hidden = false;
     $("detail-heading").focus();
     await startEventLive(alias);
+    if (state.familyParent) {
+      await refreshFamilyUnread(alias, state.familyParent);
+      await loadChannel(alias, state.familyParent);
+    }
   } catch (error) {
     if (error && error.message === "SESSION_EXPIRED") {
       expireSession();

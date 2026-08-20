@@ -128,6 +128,7 @@ class IntegrationManagerTests(unittest.TestCase):
             "objective attention <id> --format json",
             "objective explain <id> --format json",
             "objective plan <id> --format json",
+            "line inbox --unacked --format json",
         ):
             self.assertIn(command, content)
         for forbidden_action in (
@@ -137,6 +138,8 @@ class IntegrationManagerTests(unittest.TestCase):
             "`line spawn`",
             "`line merge`",
             "`line sync`",
+            "`line post`",
+            "`line ack`",
         ):
             self.assertIn(forbidden_action, content)
         self.assertNotIn("`image`", content)
@@ -218,6 +221,12 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertIn("wrong upstream", content)
         self.assertIn("missing worktree", content)
         self.assertIn("the real gate", content)
+        self.assertNotIn("line post <", content)
+        self.assertNotIn("line ack --yes", content)
+        self.assertIn("`line post`", content)
+        self.assertIn("`line inbox`", content)
+        self.assertIn("`line ack`", content)
+        self.assertIn("must not call `line post`", content)
         self.assertIn("$dyro-line-family", metadata.read_text(encoding="utf-8"))
         for line in metadata.read_text(encoding="utf-8").splitlines():
             if ": " in line:

@@ -363,6 +363,35 @@ footer { border-top: 1px solid var(--border); color: var(--muted); font-size: .8
 .event-list { list-style: none; max-height: 16rem; overflow: auto; padding: 0; }
 .event-list li { border-top: 1px solid var(--border); padding: .35rem 0; }
 .event-list li:first-child { border-top: 0; }
+.channel-toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  margin: .5rem 0;
+}
+.channel-views { display: flex; gap: .35rem; }
+.channel-list { list-style: none; max-height: 16rem; overflow: auto; padding: 0; }
+.channel-item { border-top: 1px solid var(--border); padding: .4rem 0; }
+.channel-item:first-child { border-top: 0; }
+.channel-item.retracted { text-decoration: line-through; }
+.channel-item.unacked { font-weight: 600; }
+.channel-compose {
+  display: grid;
+  gap: .45rem;
+  margin-top: .75rem;
+}
+.channel-compose select,
+.channel-compose textarea {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: .35rem;
+  color: var(--text);
+  font: inherit;
+  padding: .35rem .45rem;
+  width: 100%;
+}
+.channel-toolbar select { max-width: 100%; }
 
 @media (max-width: 767px) {
   .live-panes { grid-template-columns: 1fr; }

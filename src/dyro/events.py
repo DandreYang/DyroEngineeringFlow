@@ -222,6 +222,59 @@ def event_at(config: Config, seq: int) -> dict[str, object] | None:
     return records[seq - 1]
 
 
+def overlay_lock(config: Config):
+    """Shared overlay lock for ``events.jsonl`` and family channel writes."""
+    return exclusive_lock(config.root / EVENTS_LOCK)
+
+
+def read_event_records_locked(config: Config) -> list[dict[str, object]]:
+    """Read the event log.  Caller must already hold ``overlay_lock``."""
+    return _read_locked_records(events_path(config))
+
+
+def append_event_locked(
+    config: Config,
+    *,
+    kind: str,
+    actor: str,
+    subject: str,
+    family: str = "",
+    facts: Mapping[str, object] | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> dict[str, object]:
+    """Append one event.  Caller must already hold ``overlay_lock``."""
+    if kind not in EVENT_KINDS:
+        raise EventLogError("EVENT_WRITE_INVALID")
+    actor = _safe_token(actor)
+    subject = _safe_token(subject)
+    family = _safe_token(family, allow_empty=True)
+    cleaned = _clean_facts(facts)
+    stamp = _utc(clock).strftime("%Y-%m-%dT%H:%M:%SZ")
+    path = events_path(config)
+    try:
+        records = _read_locked_records(path)
+        seq = (records[-1]["seq"] + 1) if records else 1
+        record = {
+            "seq": seq,
+            "id": f"evt_{seq}",
+            "kind": kind,
+            "at": stamp,
+            "actor": actor,
+            "subject": subject,
+            "family": family,
+            "facts": cleaned,
+        }
+        append_text(
+            path,
+            json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n",
+        )
+    except EventLogError:
+        raise
+    except OSError as exc:
+        raise EventLogError("EVENT_WRITE_FAILED") from exc
+    return record
+
+
 def append_event(
     config: Config,
     *,
@@ -233,35 +286,18 @@ def append_event(
     clock: Callable[[], datetime] | None = None,
 ) -> dict[str, object]:
     """Append one typed event.  Dry-run callers must not invoke this."""
-    if kind not in EVENT_KINDS:
-        raise EventLogError("EVENT_WRITE_INVALID")
-    actor = _safe_token(actor)
-    subject = _safe_token(subject)
-    family = _safe_token(family, allow_empty=True)
-    cleaned = _clean_facts(facts)
-    stamp = _utc(clock).strftime("%Y-%m-%dT%H:%M:%SZ")
-    path = events_path(config)
-    lock = config.root / EVENTS_LOCK
     try:
-        with exclusive_lock(lock):
-            records = _read_locked_records(path)
-            seq = (records[-1]["seq"] + 1) if records else 1
-            record = {
-                "seq": seq,
-                "id": f"evt_{seq}",
-                "kind": kind,
-                "at": stamp,
-                "actor": actor,
-                "subject": subject,
-                "family": family,
-                "facts": cleaned,
-            }
-            append_text(
-                path,
-                json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n",
+        with overlay_lock(config):
+            return append_event_locked(
+                config,
+                kind=kind,
+                actor=actor,
+                subject=subject,
+                family=family,
+                facts=facts,
+                clock=clock,
             )
     except EventLogError:
         raise
     except OSError as exc:
         raise EventLogError("EVENT_WRITE_FAILED") from exc
-    return record

@@ -155,6 +155,57 @@ class IsolatedOverviewService:
     def family(self, alias: str, parent: str) -> dict[str, object]:
         return self._request({"op": "family", "alias": alias, "parent": parent})
 
+    def channel(
+        self,
+        alias: str,
+        parent: str,
+        *,
+        after: str | None = None,
+        filter: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        request: dict[str, object] = {
+            "op": "channel",
+            "alias": alias,
+            "parent": parent,
+            "limit": limit,
+        }
+        if after:
+            request["after"] = after
+        if filter:
+            request["filter"] = filter
+        return self._request(request)
+
+    def post_channel(
+        self, alias: str, parent: str, payload: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Write overlay signals in the listener. Never start the inspection worker."""
+        from ..config import load
+        from ..hub import WorkspaceRecord, WorkspaceRegistry, load_registry_from_home
+        from .overview import ConsoleOverviewService
+
+        if self._target_root is not None:
+            config = load(self._target_root)
+            registry = WorkspaceRegistry(
+                default=config.name,
+                workspaces=(WorkspaceRecord(name=config.name, root=config.root),),
+            )
+
+            def registry_loader() -> WorkspaceRegistry:
+                return registry
+
+        else:
+            home = self._registry_state_home
+
+            def registry_loader() -> WorkspaceRegistry:
+                return load_registry_from_home(home)
+
+        service = ConsoleOverviewService(
+            registry_loader=registry_loader,
+            cursor_secret=self._cursor_secret,
+        )
+        return service.post_channel(alias, parent, payload)
+
     def system(self) -> dict[str, object]:
         return self._request({"op": "system"})
 
@@ -342,6 +393,9 @@ class IsolatedOverviewService:
         if expected_operation == "family":
             cls._validate_family(data)
             return
+        if expected_operation == "channel":
+            cls._validate_channel(data)
+            return
         if expected_operation == "workspace":
             if set(data) != {"workspace", "lines", "tasks", "objectives"}:
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
@@ -515,6 +569,68 @@ class IsolatedOverviewService:
                 or edge.get("kind") != "parent"
             ):
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_channel(cls, data: dict[str, object]) -> None:
+        if set(data) != {"family", "members", "messages", "next_cursor"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if not cls._safe_alias(data.get("family")):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        members = data["members"]
+        messages = data["messages"]
+        if (
+            not isinstance(members, list)
+            or not isinstance(messages, list)
+            or len(members) > 1000
+            or len(messages) > 100
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for member in members:
+            if member != "operator" and not cls._safe_alias(member):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in messages:
+            if not isinstance(item, dict) or set(item) != {
+                "id",
+                "seq",
+                "at",
+                "family",
+                "from",
+                "to",
+                "kind",
+                "body",
+                "retracts",
+                "retracted",
+                "acked",
+            }:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            sender = item.get("from")
+            recipient = item.get("to")
+            body = item.get("body")
+            retracts = item.get("retracts")
+            at = item.get("at")
+            kind = item.get("kind")
+            if (
+                type(item.get("seq")) is not int
+                or item["seq"] < 0
+                or not isinstance(item.get("id"), str)
+                or len(str(item.get("id"))) > 80
+                or not isinstance(at, str)
+                or len(at) > 40
+                or not (item.get("family") == "" or cls._safe_alias(item.get("family")))
+                or not (sender == "operator" or cls._safe_alias(sender))
+                or not (recipient == "" or recipient == "operator" or cls._safe_alias(recipient))
+                or not (kind == "EVENT_REDACTED" or cls._safe_code(kind))
+                or not isinstance(body, str)
+                or len(body) > 2048
+                or not isinstance(retracts, str)
+                or len(retracts) > 80
+                or type(item.get("retracted")) is not bool
+                or type(item.get("acked")) is not bool
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        cursor = data["next_cursor"]
+        if cursor is not None and (not isinstance(cursor, str) or not _CURSOR.fullmatch(cursor)):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
 
     @classmethod
     def _validate_system(cls, data: dict[str, object]) -> None:
