@@ -183,6 +183,24 @@ def _read_locked_records(path: Path) -> list[dict[str, object]]:
     return records
 
 
+def read_overlay_events(config: object) -> tuple[tuple[dict[str, object], ...], bool]:
+    """Read overlay events without creating a lock or inventing rows.
+
+    A missing file is a complete empty log.  Truncation, replacement, or
+    an unreadable path is incomplete: callers must fail closed to the
+    snapshot and must not replay a readable prefix.
+    """
+    try:
+        path = events_path(config)  # type: ignore[arg-type]
+        if path.is_symlink():
+            return (), False
+        if not path.exists():
+            return (), True
+        return tuple(_read_locked_records(path)), True
+    except (EventLogError, OSError, TypeError, AttributeError):
+        return (), False
+
+
 def read_events_fail_closed(config: object) -> tuple[dict[str, object], ...]:
     """Read overlay events without creating a lock or inventing rows.
 
@@ -190,11 +208,8 @@ def read_events_fail_closed(config: object) -> tuple[dict[str, object], ...]:
     path returns no rows.  Callers must not treat emptiness as proof that
     no work happened.
     """
-    try:
-        path = events_path(config)  # type: ignore[arg-type]
-        return tuple(_read_locked_records(path))
-    except (EventLogError, OSError, TypeError, AttributeError):
-        return ()
+    records, complete = read_overlay_events(config)
+    return records if complete else ()
 
 
 def read_events(

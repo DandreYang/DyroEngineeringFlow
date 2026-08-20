@@ -419,7 +419,7 @@ class IsolatedOverviewService:
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
             cls._validate_summary(data["workspace"])
             cls._validate_inventory(data)
-            cls._validate_operator_twin(data["operator_twin"])
+            cls._validate_operator_twin(data["operator_twin"], data)
             return
         if set(data) == {"workspace"}:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
@@ -788,12 +788,14 @@ class IsolatedOverviewService:
         cls._validate_objectives(data["objectives"])
 
     @classmethod
-    def _validate_operator_twin(cls, value: object) -> None:
+    def _validate_operator_twin(cls, value: object, inventory: Mapping[str, object]) -> None:
         if not isinstance(value, dict) or set(value) != {
             "plan",
             "phases",
             "running",
             "latest_ledger",
+            "projected_seq",
+            "overlay_complete",
         }:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         plan = value["plan"]
@@ -807,10 +809,28 @@ class IsolatedOverviewService:
             or len(plan) > 1000
             or len(phases) != len(TASK_STATUSES)
             or len(running) > 1000
+            or not cls._count(value.get("projected_seq"))
+            or type(value.get("overlay_complete")) is not bool
         ):
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        objective_ids = {
+            item.get("id")
+            for item in inventory.get("objectives", [])
+            if isinstance(item, dict)
+        }
+        task_ids = {
+            item.get("id")
+            for item in inventory.get("tasks", [])
+            if isinstance(item, dict)
+        }
         for item in plan:
             cls._validate_twin_plan_row(item)
+            if item.get("id") not in objective_ids:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            task_ids_row = item.get("task_ids")
+            if not isinstance(task_ids_row, list) or any(task_id not in task_ids for task_id in task_ids_row):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        in_progress_ids: set[object] = set()
         for index, item in enumerate(phases):
             if not isinstance(item, dict) or set(item) != {"status", "tasks"}:
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
@@ -821,8 +841,12 @@ class IsolatedOverviewService:
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
             for task in tasks:
                 cls._validate_twin_task_card(task, expected_status=TASK_STATUSES[index])
+                if TASK_STATUSES[index] == "in_progress":
+                    in_progress_ids.add(task.get("id"))
         for item in running:
             cls._validate_twin_running_row(item)
+            if item.get("id") not in in_progress_ids:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         cls._validate_twin_ledger(ledger)
 
     @classmethod

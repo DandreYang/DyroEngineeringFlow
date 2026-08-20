@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 import unittest
@@ -180,6 +181,54 @@ class OperatorTwinProjectionTests(WorkspaceCase):
         self.assertEqual(twin["running"][0]["dispatch_state"], "idle")
         self.assertFalse(twin["running"][0]["board_landed"])
 
+    def test_who_is_running_does_not_claim_a_board_for_another_task(self) -> None:
+        item = __import__("dyro.tasks", fromlist=["load_task"]).load_task(self.config, "TASK-A")
+        set_status(self.config, item, "assigned")
+        set_status(self.config, item, "in_progress")
+        other = self.config.task_specs_dir / "TASK-B"
+        other.mkdir(parents=True)
+        other.joinpath("task.toml").write_text(
+            task_template("TASK-B", "Other path", "core", "api", "services/api"),
+            encoding="utf-8",
+        )
+        other.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        inventory = {
+            "tasks": [
+                {
+                    "id": "TASK-A",
+                    "title": "Pay path",
+                    "line": "core",
+                    "status": "in_progress",
+                    "executor": "noop",
+                },
+                {
+                    "id": "TASK-B",
+                    "title": "Other path",
+                    "line": "core",
+                    "status": "backlog",
+                    "executor": "noop",
+                },
+            ],
+            "objectives": [],
+        }
+        for subject, facts in (
+            ("ghost-task", {"result": "recorded"}),
+            ("TASK-B", {"task_id": "TASK-B", "result": "recorded"}),
+        ):
+            with self.subTest(subject=subject):
+                append_event(
+                    self.config,
+                    kind="board",
+                    actor="core",
+                    subject=subject,
+                    family="core",
+                    facts=facts,
+                    clock=self.clock,
+                )
+                twin = project_operator_twin(self.config, inventory)
+                self.assertEqual(twin["running"][0]["id"], "TASK-A")
+                self.assertFalse(twin["running"][0]["board_landed"])
+
     def test_truncated_events_and_ledger_fail_closed(self) -> None:
         append_event(
             self.config,
@@ -255,6 +304,21 @@ class OperatorTwinProjectionTests(WorkspaceCase):
         self.assertNotIn("--yes", rendered)
         self.assertNotIn(str(self.root), rendered)
 
+    def test_latest_ledger_drops_blocked_keys_even_when_values_are_safe_tokens(self) -> None:
+        ledger(
+            self.config,
+            "TASK-A",
+            "execution_heads",
+            prompt="apply",
+            argv="codex",
+            parent="core",
+        )
+        twin = project_operator_twin(self.config, {"tasks": [], "objectives": []})
+        facts = twin["latest_ledger"]["facts"]
+        self.assertNotIn("prompt", facts)
+        self.assertNotIn("argv", facts)
+        self.assertEqual(facts.get("parent"), "core")
+
     def test_milestone_does_not_invent_a_fourth_state(self) -> None:
         twin = project_operator_twin(
             self.config,
@@ -279,6 +343,31 @@ class OperatorTwinProjectionTests(WorkspaceCase):
         service.workspace(self.config.name)
         after = {path.relative_to(self.root) for path in self.root.rglob("*") if path.is_file()}
         self.assertEqual(before, after)
+
+    def test_workspace_get_does_not_append_events_or_ledger_in_place(self) -> None:
+        append_event(
+            self.config,
+            kind="spawn",
+            actor="core",
+            subject="core_pay",
+            family="core",
+            facts={"parent": "core", "child": "core_pay"},
+            clock=self.clock,
+        )
+        ledger(
+            self.config,
+            "TASK-A",
+            "execution_heads",
+            task_heads_sha256="ab" * 32,
+            parent="core",
+        )
+        events = self.root / ".dyro" / "events.jsonl"
+        ledger_path = self.config.ledger_file
+        before_events = hashlib.sha256(events.read_bytes()).hexdigest()
+        before_ledger = hashlib.sha256(ledger_path.read_bytes()).hexdigest()
+        self._service().workspace(self.config.name)
+        self.assertEqual(hashlib.sha256(events.read_bytes()).hexdigest(), before_events)
+        self.assertEqual(hashlib.sha256(ledger_path.read_bytes()).hexdigest(), before_ledger)
 
     def test_task_status_events_do_not_invent_phase_cards(self) -> None:
         append_event(
@@ -313,6 +402,12 @@ class OperatorTwinProjectionTests(WorkspaceCase):
 
     def test_empty_twin_shape_is_stable(self) -> None:
         twin = empty_operator_twin()
+        self.assertEqual(
+            set(twin),
+            {"plan", "phases", "running", "latest_ledger", "projected_seq", "overlay_complete"},
+        )
+        self.assertEqual(twin["projected_seq"], 0)
+        self.assertTrue(twin["overlay_complete"])
         self.assertEqual([column["status"] for column in twin["phases"]], [
             "backlog",
             "assigned",
@@ -345,7 +440,12 @@ class IsolatedOperatorTwinTests(WorkspaceCase):
         )
         payload = service.workspace("demo")
         twin = payload["data"]["operator_twin"]
-        self.assertEqual(set(twin), {"plan", "phases", "running", "latest_ledger"})
+        self.assertEqual(
+            set(twin),
+            {"plan", "phases", "running", "latest_ledger", "projected_seq", "overlay_complete"},
+        )
+        self.assertTrue(twin["overlay_complete"])
+        self.assertEqual(twin["projected_seq"], 0)
         self.assertFalse(twin["latest_ledger"]["present"])
         self.assertNotIn(str(self.root), repr(payload))
 

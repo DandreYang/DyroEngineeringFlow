@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from pathlib import Path
 import re
 
-from ..events import read_events_fail_closed
+from ..events import read_overlay_events
 from .redaction import REDACTED, safe_id, safe_title
 
 
@@ -66,6 +66,8 @@ def empty_operator_twin() -> dict[str, object]:
             "phase": "",
             "facts": {},
         },
+        "projected_seq": 0,
+        "overlay_complete": True,
     }
 
 
@@ -207,7 +209,12 @@ def project_operator_twin(
     latest_wave: dict[str, Mapping[str, object]] = {}
     latest_dispatch: dict[str, Mapping[str, object]] = {}
     board_tasks: set[str] = set()
-    for event in read_events_fail_closed(config):
+    records, overlay_complete = read_overlay_events(config)
+    projected_seq = 0
+    if overlay_complete and records:
+        last_seq = records[-1].get("seq")
+        projected_seq = last_seq if type(last_seq) is int and last_seq >= 0 else 0
+    for event in records if overlay_complete else ():
         kind = event.get("kind")
         if kind == "objective_wave":
             objective_id = _objective_id(event, objective_ids)
@@ -300,4 +307,6 @@ def project_operator_twin(
         )
     twin["running"] = running
     twin["latest_ledger"] = _project_latest_ledger(config)
+    twin["projected_seq"] = projected_seq
+    twin["overlay_complete"] = overlay_complete
     return twin

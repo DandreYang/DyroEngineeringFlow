@@ -28,6 +28,8 @@ const state = {
   artifactBlobs: new Map(),
   operatorTwin: null,
   twinTasks: [],
+  twinAfterSeq: 0,
+  twinOverlayComplete: false,
 };
 const HEALTH_LABELS = { healthy: "健康", degraded: "需关注", unavailable: "不可用" };
 const FRESHNESS_LABELS = { fresh: "读取完整", partial: "部分可读", stale: "待刷新" };
@@ -196,7 +198,9 @@ const UPDATE_KIND_LABELS = {
   major: "有主版本更新",
 };
 
-const $ = (id) => document.getElementById(id);
+const $ = (id) => (typeof document !== "undefined" && document.getElementById
+  ? document.getElementById(id)
+  : null);
 
 function setStatus(message, error = false) {
   const node = $("session-status");
@@ -738,20 +742,41 @@ function emptyTwin() {
     phases: TASK_STATUS_ORDER.map((status) => ({ status, tasks: [] })),
     running: [],
     latest_ledger: { present: false, at: "", task_id: "", phase: "", facts: {} },
+    projected_seq: 0,
+    overlay_complete: false,
+  };
+}
+
+function copyTwin(twin) {
+  const source = twin && typeof twin === "object" ? twin : emptyTwin();
+  return {
+    plan: Array.isArray(source.plan) ? source.plan.map((row) => ({
+      ...row,
+      task_ids: Array.isArray(row && row.task_ids) ? row.task_ids.slice() : [],
+    })) : [],
+    phases: Array.isArray(source.phases)
+      ? source.phases.map((column) => ({
+        status: text(column && column.status),
+        tasks: Array.isArray(column && column.tasks)
+          ? column.tasks.map((task) => ({ ...task }))
+          : [],
+      }))
+      : emptyTwin().phases,
+    running: Array.isArray(source.running) ? source.running.map((row) => ({ ...row })) : [],
+    latest_ledger: source.latest_ledger && typeof source.latest_ledger === "object"
+      ? { ...source.latest_ledger, facts: { ...(source.latest_ledger.facts || {}) } }
+      : emptyTwin().latest_ledger,
+    projected_seq: Number.isInteger(source.projected_seq) && source.projected_seq >= 0
+      ? source.projected_seq
+      : 0,
+    overlay_complete: source.overlay_complete === true,
   };
 }
 
 function twinFromData(data) {
   const twin = data && data.operator_twin;
   if (!twin || typeof twin !== "object") return emptyTwin();
-  return {
-    plan: Array.isArray(twin.plan) ? twin.plan : [],
-    phases: Array.isArray(twin.phases) ? twin.phases : emptyTwin().phases,
-    running: Array.isArray(twin.running) ? twin.running : [],
-    latest_ledger: twin.latest_ledger && typeof twin.latest_ledger === "object"
-      ? twin.latest_ledger
-      : emptyTwin().latest_ledger,
-  };
+  return copyTwin(twin);
 }
 
 function findTwinTask(taskId) {
@@ -1023,15 +1048,20 @@ function buildOperatorTwin() {
 function renderOperatorTwin(data) {
   state.operatorTwin = twinFromData(data);
   state.twinTasks = Array.isArray(data && data.tasks) ? data.tasks : [];
+  state.twinAfterSeq = state.operatorTwin.projected_seq;
+  state.twinOverlayComplete = state.operatorTwin.overlay_complete === true;
   return buildOperatorTwin();
 }
 
-function mergeTwinFromEvents(events) {
-  const twin = state.operatorTwin;
-  if (!twin || !Array.isArray(events) || !events.length) return;
+function applyLiveTwinEvents(twin, events, afterSeq, overlayComplete) {
+  if (!twin || overlayComplete !== true || !Array.isArray(events) || !events.length) return false;
+  const floor = Number.isInteger(afterSeq) && afterSeq >= 0 ? afterSeq : 0;
   const planById = new Map((twin.plan || []).map((row) => [text(row && row.id), row]));
   let changed = false;
+  let maxSeq = floor;
   for (const event of events) {
+    const seq = event && event.seq;
+    if (!Number.isInteger(seq) || seq <= floor) continue;
     const kind = text(event && event.kind);
     const subject = text(event && event.subject);
     const actor = text(event && event.actor);
@@ -1069,8 +1099,24 @@ function mergeTwinFromEvents(events) {
       row.board_landed = true;
       changed = true;
     }
+    if (seq > maxSeq) maxSeq = seq;
   }
-  if (!changed) return;
+  if (changed) twin.projected_seq = maxSeq;
+  return changed;
+}
+
+function renderedTwinText(twin) {
+  const bits = [];
+  for (const row of twin && Array.isArray(twin.running) ? twin.running : []) {
+    bits.push(row && row.board_landed ? "会审已落下" : "未见会审记录");
+  }
+  return bits.join("\n");
+}
+
+function mergeTwinFromEvents(events) {
+  const twin = state.operatorTwin;
+  if (!applyLiveTwinEvents(twin, events, state.twinAfterSeq, state.twinOverlayComplete)) return;
+  state.twinAfterSeq = twin.projected_seq;
   const current = $("operator-twin");
   if (current) current.replaceWith(buildOperatorTwin());
 }
@@ -2306,4 +2352,14 @@ async function start() {
   }
 }
 
-start();
+if (typeof document !== "undefined" && document.getElementById && document.getElementById("refresh")) {
+  start();
+}
+globalThis.__dyroTwinLive = {
+  twinFromData,
+  mergeTwinFromEvents,
+  applyLiveTwinEvents,
+  renderedTwinText,
+  emptyTwin,
+  getState: () => state,
+};
