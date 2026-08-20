@@ -1176,9 +1176,9 @@ def status_rows(
                 branch, head, upstream, dirty = _short_status(
                     path, read_budget=read_budget
                 )
-            rows.append((_line_status_scope(line), repo_id, branch, head, upstream, dirty))
-        else:
-            rows.append((_line_status_scope(line), repo_id, "MISSING", "-", "-", -1))
+                rows.append((_line_status_scope(line), repo_id, branch, head, upstream, dirty))
+            else:
+                rows.append((_line_status_scope(line), repo_id, "MISSING", "-", "-", -1))
     return rows
 
 

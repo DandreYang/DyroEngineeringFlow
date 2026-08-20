@@ -4441,6 +4441,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="覆盖已有 AGENTS.md/CLAUDE.md；必须显式指定",
     )
+    host_seed.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只打印将写入的路径，不落盘（兼容全局 --dry-run）",
+    )
     host_seed.set_defaults(func=cmd_host_seed)
 
     agent_test = agent_sub.add_parser(
@@ -4739,6 +4746,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--repos",
         help="逗号分隔的仓库子集；默认继承父线全部仓库",
     )
+    line_spawn.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只打印计划，不创建子线或工作树（兼容全局 --dry-run）",
+    )
     line_spawn.add_argument("--yes", action="store_true")
     line_spawn.set_defaults(func=cmd_line_spawn)
     line_merge = line_sub.add_parser(
@@ -4756,6 +4770,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="合并后推送父线分支；需 policy.allow_push",
     )
+    line_merge.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="探测合入但不提交（兼容全局 --dry-run）",
+    )
     line_merge.add_argument("--yes", action="store_true")
     line_merge.set_defaults(func=cmd_line_merge)
     line_sync = line_sub.add_parser(
@@ -4766,6 +4787,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--push",
         action="store_true",
         help="同步后推送子线分支；需 policy.allow_push",
+    )
+    line_sync.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="探测同步但不提交（兼容全局 --dry-run）",
     )
     line_sync.add_argument("--yes", action="store_true")
     line_sync.set_defaults(func=cmd_line_sync)

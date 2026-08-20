@@ -21,6 +21,9 @@
   missing; `dyro host seed` creates missing files only (`--force` overwrites).
 - `line spawn` / `create` write overlay personas at `versions/<line>/` (not
   inside product Git worktrees). Must-track `origin/<line.branch>`.
+- `status` no longer appends a phantom MISSING row after every line; a missing
+  worktree is reported on that repo only. `dyro line spawn|merge|sync` and
+  `dyro host seed` accept `--dry-run` after the verb, not only the global flag.
 
 ## 0.7.7 - 2026-08-20
 

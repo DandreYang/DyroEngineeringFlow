@@ -14,6 +14,7 @@ from dyro.cli import (
     _route_experiment_surface,
     _setup_default_tool,
     _setup_provider_preset,
+    build_parser,
     main,
 )
 from dyro.changesets import get_changeset
@@ -41,6 +42,23 @@ class CliTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.registry_environment.stop()
         self.registry_tmp.cleanup()
+
+    def test_line_family_and_host_seed_accept_trailing_dry_run(self) -> None:
+        parser = build_parser()
+        merge = parser.parse_args(
+            ["line", "merge", "child", "--into", "parent", "--dry-run"]
+        )
+        self.assertTrue(merge.dry_run)
+        spawn = parser.parse_args(["line", "spawn", "parent", "child", "--dry-run"])
+        self.assertTrue(spawn.dry_run)
+        sync = parser.parse_args(["line", "sync", "child", "--dry-run"])
+        self.assertTrue(sync.dry_run)
+        seed = parser.parse_args(["host", "seed", "--dry-run"])
+        self.assertTrue(seed.dry_run)
+        global_merge = parser.parse_args(
+            ["--dry-run", "line", "merge", "child", "--into", "parent"]
+        )
+        self.assertTrue(global_merge.dry_run)
 
     def test_runtime_is_not_an_experiment_surface(self) -> None:
         routed = _route_experiment_surface(
