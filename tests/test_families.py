@@ -4,7 +4,12 @@ import json
 import unittest
 
 from dyro.config import load
-from dyro.console.families import apply_human_channel_post, family_cards, family_payload
+from dyro.console.families import (
+    apply_human_channel_post,
+    family_cards,
+    family_payload,
+    project_artifact,
+)
 from dyro.console.overview import ConsoleOverviewError
 from dyro.console.read_model import workspace_envelope
 from dyro.events import read_events
@@ -558,6 +563,73 @@ class FamilyArtifactTests(WorkspaceCase):
         meta = read_family_artifact(self.config, "core", "rev_1")
         self.assertEqual(meta["conclusion"], "pass")
         self.assertEqual(meta["bound_hash"], "abc123def456")
+
+    def test_planted_path_title_is_blanked_and_not_returned(self) -> None:
+        planted_title = "/home/core/.ssh/id_rsa"
+        path = artifacts_log_path(self.config, "core")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = {
+            "id": "rev_1",
+            "seq": 1,
+            "at": "2026-08-20T00:00:00Z",
+            "family": "core",
+            "type": "review",
+            "title": planted_title,
+            "conclusion": "pass",
+            "bound_hash": "abc123def456",
+            "media_type": "",
+            "size": 0,
+            "duration": "",
+        }
+        path.write_text(
+            json.dumps(raw, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        listed = list_family_artifacts(self.config, "core")
+        self.assertEqual([item["id"] for item in listed], ["rev_1"])
+        self.assertNotIn(planted_title, json.dumps(listed, ensure_ascii=False))
+        projected = project_artifact(raw, alias="demo", parent_id="core")
+        self.assertEqual(projected["title"], "")
+        self.assertNotIn(planted_title, json.dumps(projected, ensure_ascii=False))
+
+    def test_artifact_id_rejects_dotdot_substring(self) -> None:
+        with self.assertRaises(FamilyArtifactError) as planted:
+            plant_family_artifact(
+                self.config,
+                "core",
+                artifact_id="foo..bar",
+                artifact_type="review",
+                title="摘要",
+                conclusion="pass",
+                bound_hash="abc123def456",
+            )
+        self.assertEqual(planted.exception.code, "ARTIFACT_PATH_INVALID")
+        path = artifacts_log_path(self.config, "core")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "id": "foo..bar",
+                    "seq": 1,
+                    "at": "2026-08-20T00:00:00Z",
+                    "family": "core",
+                    "type": "review",
+                    "title": "摘要",
+                    "conclusion": "pass",
+                    "bound_hash": "abc123def456",
+                    "media_type": "",
+                    "size": 0,
+                    "duration": "",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(FamilyArtifactError) as listed:
+            list_family_artifacts(self.config, "core")
+        self.assertEqual(listed.exception.code, "ARTIFACT_LOG_INVALID")
 
 
 if __name__ == "__main__":

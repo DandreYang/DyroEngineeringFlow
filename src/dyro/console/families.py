@@ -21,6 +21,7 @@ from ..families import (
     OPERATOR_POST_KINDS,
     FamilyArtifactError,
     FamilyChannelError,
+    _projected_title,
     ack_channel_message,
     channel_at,
     family_children,
@@ -440,7 +441,7 @@ def project_artifact(
 ) -> dict[str, object]:
     artifact_id = _line_id(record.get("id"))
     artifact_type = record.get("type")
-    title = record.get("title") if isinstance(record.get("title"), str) else ""
+    title = _projected_title(record.get("title") if isinstance(record.get("title"), str) else "")
     conclusion = record.get("conclusion") if isinstance(record.get("conclusion"), str) else ""
     bound_hash = record.get("bound_hash") if isinstance(record.get("bound_hash"), str) else ""
     media_type = record.get("media_type") if isinstance(record.get("media_type"), str) else ""

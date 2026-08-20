@@ -1073,8 +1073,6 @@ def _decode_artifact(raw: str) -> dict[str, object]:
     if (
         type(seq) is not int
         or seq < 1
-        or not isinstance(decoded.get("id"), str)
-        or not _SAFE_ID.fullmatch(str(decoded.get("id") or ""))
         or not isinstance(decoded.get("at"), str)
         or not isinstance(decoded.get("family"), str)
         or artifact_type not in ARTIFACT_TYPES
@@ -1088,17 +1086,21 @@ def _decode_artifact(raw: str) -> dict[str, object]:
         or not isinstance(decoded.get("duration"), str)
     ):
         raise FamilyArtifactError("ARTIFACT_LOG_INVALID")
+    try:
+        artifact_id = _artifact_id(decoded.get("id"))
+    except FamilyArtifactError as exc:
+        raise FamilyArtifactError("ARTIFACT_LOG_INVALID") from exc
     points_raw = decoded.get("points")
     points: list[dict[str, object]] = []
     if points_raw is not None:
         points = _artifact_points(points_raw)
     return {
-        "id": decoded["id"],
+        "id": artifact_id,
         "seq": seq,
         "at": decoded["at"],
         "family": decoded["family"],
         "type": artifact_type,
-        "title": decoded["title"],
+        "title": _projected_title(decoded.get("title")),
         "conclusion": decoded["conclusion"],
         "bound_hash": decoded["bound_hash"],
         "media_type": decoded["media_type"],
@@ -1167,7 +1169,7 @@ def _jailed_artifact_path(
 def _artifact_id(value: object) -> str:
     if not isinstance(value, str) or not _SAFE_ID.fullmatch(value):
         raise FamilyArtifactError("ARTIFACT_ID_INVALID")
-    if value in {".", ".."} or "/" in value or "\\" in value:
+    if value in {".", ".."} or ".." in value or "/" in value or "\\" in value:
         raise FamilyArtifactError("ARTIFACT_PATH_INVALID")
     try:
         return validate_id(value, "产物 ID")
@@ -1189,6 +1191,13 @@ def _artifact_title(value: object) -> str:
     ):
         raise FamilyArtifactError("ARTIFACT_TYPE_INVALID")
     return text
+
+
+def _projected_title(value: object) -> str:
+    try:
+        return _artifact_title(value)
+    except FamilyArtifactError:
+        return ""
 
 
 def _bound_hash12(value: object) -> str:
