@@ -355,9 +355,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/api/v1/workspaces/"):
             if self.command == "POST":
-                if self._authorized_session() is None:
+                remainder = parsed.path.removeprefix("/api/v1/workspaces/")
+                parts = remainder.split("/")
+                if len(parts) == 4 and parts[1] == "families" and parts[3] == "channel":
+                    if self._authorized_session() is None:
+                        return
+                    self._channel_post(parsed.path)
                     return
-                self._channel_post(parsed.path)
+                self._method_not_allowed()
                 return
             if self.command != "GET":
                 self._method_not_allowed()

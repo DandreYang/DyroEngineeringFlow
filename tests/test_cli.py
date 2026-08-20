@@ -2011,6 +2011,8 @@ class FamilyChannelCliTests(WorkspaceCase):
             "请同步",
         )
         self.assertTrue(planned["dry_run"])
+        self.assertEqual(planned["kind"], "line_post")
+        self.assertEqual(planned["channel_kind"], "ask_sync")
         self.assertFalse(channel_path(self.config, "core").exists())
         with self.assertRaises(SystemExit):
             main(

@@ -7,7 +7,7 @@ from dyro.config import load
 from dyro.console.families import apply_human_channel_post, family_cards, family_payload
 from dyro.console.overview import ConsoleOverviewError
 from dyro.console.read_model import workspace_envelope
-from dyro.events import events_path, read_events
+from dyro.events import read_events
 from dyro.families import (
     FamilyChannelError,
     ack_channel_message,

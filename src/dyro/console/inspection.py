@@ -190,7 +190,10 @@ class IsolatedOverviewService:
                 default=config.name,
                 workspaces=(WorkspaceRecord(name=config.name, root=config.root),),
             )
-            registry_loader = lambda: registry
+
+            def registry_loader() -> WorkspaceRegistry:
+                return registry
+
         else:
             home = self._registry_state_home
 

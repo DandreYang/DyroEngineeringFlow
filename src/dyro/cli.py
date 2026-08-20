@@ -2843,7 +2843,9 @@ def cmd_line_post(args: argparse.Namespace) -> None:
         dry_run=args.dry_run,
     )
     if args.format == "json":
-        _print_control_plane_json("line_post", **result)
+        payload = dict(result)
+        payload["channel_kind"] = payload.pop("kind", "")
+        _print_control_plane_json("line_post", **payload)
         return
     target = result["to"] or "家族广播"
     prefix = "DRY RUN: " if args.dry_run else ""
