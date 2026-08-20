@@ -25,6 +25,37 @@ from dyro.integrations import (
 from dyro.integrations import manager
 
 
+def _record_protocol_section(skill: str) -> str:
+    start = skill.index("## Record protocol")
+    rest = skill[start:]
+    match = re.search(r"\n## ", rest[1:])
+    return rest if match is None else rest[: match.start() + 1]
+
+
+def _plain_record(skill: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[*_]", "", _record_protocol_section(skill)))
+
+
+def _has_prior_closeout(plain: str) -> bool:
+    return (
+        re.search(r"(?:^|\s)0b\.", plain) is not None
+        and "same development line / same topic" in plain
+        and "已闭环" in plain
+        and "未闭环" in plain
+    )
+
+
+def _has_empty_api_polarity(plain: str) -> bool:
+    return "is not enough to declare a seat dead" in plain
+
+
+def _has_test_verdict_polarity(plain: str) -> bool:
+    return (
+        "pipeline/redirect hid the exit code" in plain
+        and "must not assert pass" in plain
+    )
+
+
 class IntegrationManagerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="dyro-integrations-")
@@ -315,28 +346,69 @@ class IntegrationManagerTests(unittest.TestCase):
             encoding="utf-8"
         )
         collapsed = re.sub(r"\s+", " ", board)
+        record = _record_protocol_section(board)
+        plain = _plain_record(board)
         self.assertIn("## Record protocol", board)
         self.assertIn("<repo> <ref> <sha> <date>", board)
         self.assertIn("production line", collapsed)
         self.assertIn("origin/release", board)
         self.assertIn("Must not default to `master`/`main`", collapsed)
-        self.assertIn("existing", board)
-        self.assertIn("review-directory convention", collapsed)
+        self.assertIn("existing review-directory convention", plain)
         self.assertIn("docs/reviews/YYYY-MM-DD-<topic>-adversarial-board.md", board)
+        self.assertIn("prior-board directory wins", plain)
         self.assertIn("signed section", collapsed)
         self.assertIn("same-batch seat opinions", collapsed)
         self.assertIn("re-check every seat claim", collapsed)
         self.assertIn("未复核·转述", board)
         self.assertIn("须人工核", board)
+        self.assertTrue(_has_prior_closeout(plain), msg=plain)
+        self.assertIn("已检索·无先前会审", record)
+        self.assertFalse(
+            _has_prior_closeout(plain.replace("0b.", "1b.", 1)),
+            msg="dropping 0b must fail the close-out pin",
+        )
+        self.assertFalse(
+            _has_prior_closeout(
+                plain.replace("已闭环", "", 1).replace("未闭环", "", 1)
+            ),
+            msg="deleting 已闭环 / 未闭环 must fail the close-out pin",
+        )
         self.assertIn("ListAgents", board)
         self.assertIn("TaskOutput", board)
+        self.assertTrue(_has_empty_api_polarity(plain), msg=plain)
+        self.assertNotIn("is enough to declare a seat dead", plain)
+        self.assertFalse(
+            _has_empty_api_polarity(
+                plain.replace(
+                    "is not enough to declare a seat dead",
+                    "is enough to declare a seat dead",
+                    1,
+                )
+            ),
+            msg="flipping empty-API polarity to 'is enough' must fail",
+        )
         self.assertIn("wait window", collapsed)
         self.assertIn("10 minutes", collapsed)
+        self.assertIn("first dispatch", plain)
         self.assertIn("must not publish arbitration", collapsed)
         self.assertIn("逾期未交", board)
-        self.assertIn("revised", board)
+        self.assertIn("revised record", plain)
         self.assertIn("the full command", collapsed)
         self.assertIn("raw output", collapsed)
+        self.assertTrue(_has_test_verdict_polarity(plain), msg=plain)
+        self.assertNotIn("must assert pass", plain)
+        self.assertFalse(
+            _has_test_verdict_polarity(
+                plain.replace("must not assert pass", "must assert pass", 1)
+            ),
+            msg="inverting 'must not assert pass' must fail",
+        )
+        self.assertFalse(
+            _has_test_verdict_polarity(
+                plain.replace("pipeline/redirect hid the exit code", "", 1)
+            ),
+            msg="deleting pipeline/redirect hid-exit-code must fail",
+        )
         self.assertIn("未执行", board)
         self.assertIn("P0/P1/P2", board)
         self.assertIn("Go/No-Go", board)
@@ -352,6 +424,13 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertNotIn("## Record protocol", review)
         self.assertNotIn("逾期未交", review)
         self.assertNotIn("<repo> <ref> <sha> <date>", review)
+        self.assertNotIn("已检索·无先前会审", review)
+        discipline = Path(__file__).resolve().parents[1].joinpath(
+            "docs", "agent-orchestration-discipline.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("dyro-board/SKILL.md", discipline)
+        self.assertNotIn("完整模板见", discipline)
+        self.assertNotIn("1. 单一共享评审文件", discipline)
 
     def test_review_board_install_also_installs_protocol(self) -> None:
         installed = install_integration("review-board", yes=True)

@@ -3,11 +3,14 @@
 ## Unreleased
 
 - Tighten the internal `dyro-board` Record protocol: declare a
-  production-line baseline (not `master`/`main`), close prior P0/P1,
-  re-check seat claims before arbitration, wait ≥ 10 minutes before
-  marking a seat `逾期未交`, and record the full test command plus raw
-  output. The `/dyro-review-board` wrapper still follows that file only
-  and refuses same-turn delivery. Version unchanged.
+  production-line baseline (not `master`/`main`), close prior P0/P1 as
+  `已闭环` / `未闭环` / `须人工核` (or `已检索·无先前会审` when none),
+  re-check seat claims, start the wait window at first dispatch, let a
+  prior-board directory win over a conflicting repo convention, and
+  record the full test command plus whether a pipeline/redirect hid the
+  exit code. Pins lock those polarities. The `/dyro-review-board`
+  wrapper still follows that file only and refuses same-turn delivery.
+  Version unchanged.
 - Hide the internal `dyro-board` protocol from slash / `$` skill pickers.
   `/dyro-review-board` is the only human-facing 会审 command. The protocol
   asset still installs as a non-invocable companion of `review-board` (and
