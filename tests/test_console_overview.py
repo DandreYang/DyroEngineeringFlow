@@ -276,7 +276,11 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         self.assertEqual(payload["data"]["tasks"][0]["id"], "TASK-A")
         self.assertEqual(payload["data"]["tasks"][0]["integration_state"], "not_inspected")
         self.assertEqual(payload["data"]["objectives"][0]["id"], "release")
+        self.assertEqual(payload["data"]["operator_twin"]["plan"][0]["id"], "release")
+        self.assertFalse(payload["data"]["operator_twin"]["plan"][0]["wave_present"])
+        self.assertFalse(payload["data"]["operator_twin"]["latest_ledger"]["present"])
         self.assertNotIn("proofs", payload["data"])
+        self.assertNotIn("operator_twin", page["data"])
         self.assertNotIn("lines", page["data"])
         self.assertNotIn("tasks", page["data"])
         self.assertNotIn("objectives", page["data"])
@@ -312,6 +316,8 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         self.assertEqual(payload["data"]["lines"], [])
         self.assertEqual(payload["data"]["tasks"], [])
         self.assertEqual(payload["data"]["objectives"], [])
+        self.assertEqual(payload["data"]["operator_twin"]["plan"], [])
+        self.assertFalse(payload["data"]["operator_twin"]["latest_ledger"]["present"])
         self.assertNotIn("proofs", payload["data"])
 
     def test_inspect_proofs_does_not_use_summary_loader_and_can_show_decay(self) -> None:

@@ -183,6 +183,20 @@ def _read_locked_records(path: Path) -> list[dict[str, object]]:
     return records
 
 
+def read_events_fail_closed(config: object) -> tuple[dict[str, object], ...]:
+    """Read overlay events without creating a lock or inventing rows.
+
+    A missing file is empty.  Truncation, replacement, or an unreadable
+    path returns no rows.  Callers must not treat emptiness as proof that
+    no work happened.
+    """
+    try:
+        path = events_path(config)  # type: ignore[arg-type]
+        return tuple(_read_locked_records(path))
+    except (EventLogError, OSError, TypeError, AttributeError):
+        return ()
+
+
 def read_events(
     config: Config,
     *,

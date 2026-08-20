@@ -423,6 +423,17 @@ P3 已落地：overlay 清单与同源图像（bearer `fetch` 后赋 `blob:` URL
 - 视频只出卡片。
 - 不扫描 harness home，不把 sidecar 输出目录当成家族产物。
 
+### P4 · 操作者双生
+
+P4 仍在同一 `0.7.x` 列车、同一工作区详情页，不新增一级导航。详情在既有清单之后投影只读操作者双生：
+
+- **计划**：只为快照里已有的 Objective 建泳道；`objective_wave` 只填充这些泳道，不发明目标。
+- **里程碑**：仅 `incomplete | complete | repair_required`；未知派生结果留空。
+- **阶段**：八列沿用既有 Task 状态机；点击只打开已有 Task 摘要。
+- **谁在跑**：只列 `in_progress`；执行者、最近 `dispatch` 事实、是否有匹配该任务的 `board` 事件，外加一行脱敏账本。
+
+缺失或截断的 wave / dispatch / board / ledger 全部 fail-closed。工作区 GET 不创建 overlay 锁。人类 POST 集合不变。
+
 ### 验收
 
 - 操作者打开已登记工作区详情，能在同一页看到一层家族、直播事件和（P2 后）频道，而不需要新的一级导航。

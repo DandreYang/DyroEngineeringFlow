@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Console P4: workspace detail now projects a read-only operator twin after
+  the existing inventory and before the family / events / channel panes.
+  Plan swimlanes come from existing Objectives plus `objective_wave` events;
+  milestone badges stay `incomplete | complete | repair_required`; task
+  phases reuse the existing state machine; 谁在跑 shows executor, latest
+  `dispatch` facts, and whether a `board` event landed. The latest ledger
+  line is a single redacted human-visible row. Missing wave / dispatch /
+  board / ledger fail closed. Swimlanes do not invent Objectives. 谁在跑
+  does not claim a board landed unless a `board` event exists. Hash stays
+  `#w/<alias>` and `#w/<alias>/family|events|channel`. No new mutation API.
+- Console UI: restyle the local page as a one-level family patchbay. The
+  family graph is the signature instrument (parent in camera focus; edges
+  light on merge/sync). Workspace detail is a room: bay first, twin as
+  the now-reading, inventory and proofs recede. Overview stays a strip,
+  not a dump. System fonts only. No third-party script, font, chart, or
+  player.
+
 ## 0.7.8 - 2026-08-20
 
 - Tighten the internal `dyro-board` Record protocol: declare a

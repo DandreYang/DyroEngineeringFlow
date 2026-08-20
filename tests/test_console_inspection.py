@@ -50,7 +50,14 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         self.assertEqual(inspect["data"]["proof_inspection"], "inspected")
         self.assertEqual(overview["data"]["workspaces"][0]["proof_inspection"], "not_inspected")
         self.assertEqual(workspace["data"]["workspace"]["proof_inspection"], "not_inspected")
-        self.assertEqual(set(workspace["data"]), {"workspace", "lines", "tasks", "objectives"})
+        self.assertEqual(
+            set(workspace["data"]),
+            {"workspace", "lines", "tasks", "objectives", "operator_twin"},
+        )
+        twin = workspace["data"]["operator_twin"]
+        self.assertEqual(set(twin), {"plan", "phases", "running", "latest_ledger"})
+        self.assertFalse(twin["latest_ledger"]["present"])
+        self.assertEqual(twin["running"], [])
         self.assertTrue(
             all("parent" in item for item in workspace["data"]["lines"])
         )
