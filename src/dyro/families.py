@@ -222,14 +222,16 @@ def infer_post_family(
     if sender not in ids:
         raise FamilyChannelError("FAMILY_MEMBER_INVALID")
     parent = line_parent_map(items).get(sender, "")
-    if recipient:
-        own_members = set(family_members(items, sender))
-        if recipient in own_members:
-            return sender
-        if parent and recipient in set(family_members(items, parent)):
-            return parent
-        raise FamilyChannelError("FAMILY_TO_INVALID")
-    return parent or sender
+    # operator sits in every F(P). Inferring from membership would pick
+    # F(sender) for `--to operator`, hiding the post from the parent inbox.
+    if recipient == OPERATOR_ID or not recipient:
+        return parent or sender
+    own_lines = {sender, *family_children(items, sender)}
+    if recipient in own_lines:
+        return sender
+    if parent and recipient in set(family_members(items, parent)):
+        return parent
+    raise FamilyChannelError("FAMILY_TO_INVALID")
 
 
 def family_unacked(
@@ -359,11 +361,11 @@ def ack_channel_message(
                 clock=clock,
             )
             _write_acks_locked(config, parent_id, acked)
+            _assert_channel_paired(config, parent_id)
     except EventLogError as exc:
         raise FamilyChannelError(exc.code) from exc
     except OSError as exc:
         raise FamilyChannelError("CHANNEL_WRITE_FAILED") from exc
-    _assert_channel_paired(config, parent_id)
     return {"id": message_id, "seq": row["seq"], "family": parent_id, "acked": True}
 
 
@@ -506,13 +508,13 @@ def _commit_channel_row(
                 facts={"channel_id": row["id"]},
                 clock=clock,
             )
+            _assert_channel_paired(config, parent_id)
     except FamilyChannelError:
         raise
     except EventLogError as exc:
         raise FamilyChannelError(exc.code) from exc
     except OSError as exc:
         raise FamilyChannelError("CHANNEL_WRITE_FAILED") from exc
-    _assert_channel_paired(config, parent_id)
     return row
 
 

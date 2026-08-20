@@ -21,6 +21,8 @@
   Console channel pane shows full family history; the browser POST
   accepts only `decision` / `contract` / `ack` as `operator`. Artifact
   bytes stay closed (P3). `/dyro-line-family` still does not post.
+  CLI `--to operator` uses the same default family as a broadcast
+  (`parent` or sender), not `F(sender)`.
 - User slash Skill `dyro-line-family` (`/dyro-line-family`) preflights
   `line spawn` / `line merge` / `line sync` and prints one `--yes` command
   for the human. It does not execute the mutation, invent `--push`, or

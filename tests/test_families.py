@@ -15,6 +15,8 @@ from dyro.families import (
     family_graph,
     family_members,
     family_unacked,
+    infer_post_family,
+    line_records,
     post_channel_message,
     read_visible_channel,
 )
@@ -120,6 +122,66 @@ class FamilyChannelTests(WorkspaceCase):
             [item["facts"]["channel_id"] for item in signals],
             [broadcast["id"], directed["id"]],
         )
+
+    def test_to_operator_uses_broadcast_default_family(self) -> None:
+        lines = line_records(self.config)
+        broadcast_family = infer_post_family(lines, "core_pay", "")
+        self.assertEqual(infer_post_family(lines, "core_pay", "operator"), broadcast_family)
+        self.assertEqual(broadcast_family, "core")
+        self.assertEqual(infer_post_family(lines, "core_pay_fix", "operator"), "core_pay")
+        self.assertEqual(
+            infer_post_family(lines, "core_pay_fix", "operator"),
+            infer_post_family(lines, "core_pay_fix", ""),
+        )
+
+        broadcast = post_channel_message(
+            self.config,
+            sender="core_pay",
+            kind="blocked",
+            body="默认家族",
+        )
+        to_operator = post_channel_message(
+            self.config,
+            sender="core_pay",
+            kind="blocked",
+            body="发给人类",
+            recipient="operator",
+        )
+        self.assertEqual(to_operator["family"], broadcast["family"])
+        self.assertEqual(to_operator["family"], "core")
+        parent = {item["id"] for item in read_visible_channel(self.config, "core", viewer="core")}
+        cousin = {
+            item["id"] for item in read_visible_channel(self.config, "core", viewer="core_shop")
+        }
+        self.assertIn(to_operator["id"], parent)
+        self.assertNotIn(to_operator["id"], cousin)
+
+        grandchild = post_channel_message(
+            self.config,
+            sender="core_pay_fix",
+            kind="blocked",
+            body="发给人类",
+            recipient="operator",
+        )
+        self.assertEqual(grandchild["family"], "core_pay")
+        pay_parent = {
+            item["id"]
+            for item in read_visible_channel(self.config, "core_pay", viewer="core_pay")
+        }
+        core_ids = {item["id"] for item in read_visible_channel(self.config, "core")}
+        self.assertIn(grandchild["id"], pay_parent)
+        self.assertNotIn(grandchild["id"], core_ids)
+
+    def test_to_outside_family_is_rejected(self) -> None:
+        with self.assertRaises(FamilyChannelError) as raised:
+            post_channel_message(
+                self.config,
+                sender="core",
+                kind="blocked",
+                body="孙线不在本家族",
+                recipient="core_pay_fix",
+            )
+        self.assertEqual(raised.exception.code, "FAMILY_TO_INVALID")
 
     def test_grandchild_channel_stays_off_the_grandparent_family(self) -> None:
         child = post_channel_message(
