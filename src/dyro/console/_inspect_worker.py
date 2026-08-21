@@ -20,7 +20,15 @@ from typing import Any
 
 from ..config import load
 from ..hub import WorkspaceRecord, WorkspaceRegistry
-from .overview import ConsoleOverviewError, ConsoleOverviewService
+from .overview import (
+    ConsoleOverviewError,
+    ConsoleOverviewService,
+    WORKSPACE_MISSING_ROOT,
+    WORKSPACE_TIMEOUT,
+    WORKSPACE_UNAVAILABLE,
+    unavailable_workspace_summary,
+    workspace_root_missing,
+)
 
 
 _CURSOR_SECRET_ENV = "DYRO_CONSOLE_CURSOR_SECRET"
@@ -31,34 +39,7 @@ _WORKER_RESPONSE_LIMIT = 2 * 1024 * 1024
 
 
 def _unavailable_summary(alias: str, code: str) -> dict[str, object]:
-    return {
-        "alias": alias,
-        "display_name": alias,
-        "is_default": False,
-        "availability": "unavailable",
-        "health": "unavailable",
-        "freshness": "partial",
-        "repository_count": 0,
-        "line_count": 0,
-        "objective_count": 0,
-        "active_objective_count": 0,
-        "task_count": 0,
-        "task_status_counts": {},
-        "attention_counts": {
-            "repair_required": 0,
-            "needs_user": 0,
-            "ready": 0,
-            "paused": 0,
-            "waiting": 0,
-        },
-        "recommendation": {
-            "reason": code,
-            "command": f"dyro --workspace {alias} doctor",
-        },
-        "findings": [],
-        "snapshot_sha256": "",
-        "proof_inspection": "not_inspected",
-    }
+    return unavailable_workspace_summary(alias, False, reason=code)
 
 
 def _capture_workspace_summary(
@@ -68,6 +49,14 @@ def _capture_workspace_summary(
 ) -> None:
     """Capture one workspace only, returning a JSON-safe value through IPC."""
     try:
+        if workspace_root_missing(record.root):
+            result_queue.put(
+                {
+                    "summary": _unavailable_summary(record.name, WORKSPACE_MISSING_ROOT),
+                    "warnings": [WORKSPACE_MISSING_ROOT],
+                }
+            )
+            return
         registry = WorkspaceRegistry(
             default=record.name if is_default else "",
             workspaces=(record,),
@@ -80,8 +69,8 @@ def _capture_workspace_summary(
     except Exception:
         result_queue.put(
             {
-                "summary": _unavailable_summary(record.name, "WORKSPACE_UNAVAILABLE"),
-                "warnings": ["WORKSPACE_UNAVAILABLE"],
+                "summary": _unavailable_summary(record.name, WORKSPACE_UNAVAILABLE),
+                "warnings": [WORKSPACE_UNAVAILABLE],
             }
         )
 
@@ -90,8 +79,8 @@ def _parse_child_result(
     value: object, record: WorkspaceRecord, *, is_default: bool
 ) -> tuple[dict[str, object], set[str]]:
     if not isinstance(value, dict):
-        return _unavailable_summary(record.name, "WORKSPACE_UNAVAILABLE"), {
-            "WORKSPACE_UNAVAILABLE"
+        return _unavailable_summary(record.name, WORKSPACE_UNAVAILABLE), {
+            WORKSPACE_UNAVAILABLE
         }
     summary = value.get("summary")
     warnings = value.get("warnings")
@@ -100,8 +89,8 @@ def _parse_child_result(
         or not isinstance(warnings, list)
         or not all(isinstance(item, str) for item in warnings)
     ):
-        return _unavailable_summary(record.name, "WORKSPACE_UNAVAILABLE"), {
-            "WORKSPACE_UNAVAILABLE"
+        return _unavailable_summary(record.name, WORKSPACE_UNAVAILABLE), {
+            WORKSPACE_UNAVAILABLE
         }
     copied = dict(summary)
     copied["alias"] = record.name
@@ -138,8 +127,8 @@ def _isolated_summaries(
                 finish(
                     record,
                     {
-                        "summary": _unavailable_summary(record.name, "WORKSPACE_TIMEOUT"),
-                        "warnings": ["WORKSPACE_TIMEOUT"],
+                        "summary": _unavailable_summary(record.name, WORKSPACE_TIMEOUT),
+                        "warnings": [WORKSPACE_TIMEOUT],
                     },
                     default=record.name == registry.default,
                 )
@@ -148,8 +137,8 @@ def _isolated_summaries(
                 finish(
                     record,
                     {
-                        "summary": _unavailable_summary(record.name, "WORKSPACE_TIMEOUT"),
-                        "warnings": ["WORKSPACE_TIMEOUT"],
+                        "summary": _unavailable_summary(record.name, WORKSPACE_TIMEOUT),
+                        "warnings": [WORKSPACE_TIMEOUT],
                     },
                     default=record.name == registry.default,
                 )
@@ -189,7 +178,7 @@ def _isolated_summaries(
                 if has_value:
                     finish(record, value, default=record.name == registry.default)
                 else:
-                    code = "WORKSPACE_TIMEOUT" if timed_out else "WORKSPACE_UNAVAILABLE"
+                    code = WORKSPACE_TIMEOUT if timed_out else WORKSPACE_UNAVAILABLE
                     finish(
                         record,
                         {

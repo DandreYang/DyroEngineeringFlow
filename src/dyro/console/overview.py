@@ -49,6 +49,13 @@ _ATTENTION_PRIORITY = {
     "paused": 3,
     "waiting": 4,
 }
+WORKSPACE_MISSING_ROOT = "WORKSPACE_MISSING_ROOT"
+WORKSPACE_TIMEOUT = "WORKSPACE_TIMEOUT"
+WORKSPACE_UNAVAILABLE = "WORKSPACE_UNAVAILABLE"
+UNAVAILABLE_REASON_NONE = ""
+UNAVAILABLE_REASON_MISSING_ROOT = "missing_root"
+UNAVAILABLE_REASON_READ_TIMEOUT = "read_timeout"
+UNAVAILABLE_REASON_OTHER = "other"
 _FINDING_LIMIT = 32
 _LINE_FINDING = re.compile(
     r"^FAIL (?:line|hotfix):([A-Za-z0-9][A-Za-z0-9._-]{0,79})/"
@@ -97,6 +104,81 @@ def _safe_list(value: object) -> list[dict[str, object]]:
 
 def _empty_inventory() -> dict[str, list[dict[str, object]]]:
     return {"lines": [], "tasks": [], "objectives": []}
+
+
+def _empty_attention_counts() -> dict[str, int]:
+    return {kind: 0 for kind in _ATTENTION_PRIORITY}
+
+
+def unavailable_reason_for(code: object) -> str:
+    if code == WORKSPACE_MISSING_ROOT:
+        return UNAVAILABLE_REASON_MISSING_ROOT
+    if code == WORKSPACE_TIMEOUT:
+        return UNAVAILABLE_REASON_READ_TIMEOUT
+    return UNAVAILABLE_REASON_OTHER
+
+
+def unavailable_reason_of(summary: object) -> str:
+    if not isinstance(summary, dict):
+        return UNAVAILABLE_REASON_NONE
+    raw = summary.get("unavailable_reason")
+    if raw in {
+        UNAVAILABLE_REASON_MISSING_ROOT,
+        UNAVAILABLE_REASON_READ_TIMEOUT,
+        UNAVAILABLE_REASON_OTHER,
+    }:
+        return raw
+    if summary.get("availability") != "unavailable":
+        return UNAVAILABLE_REASON_NONE
+    recommendation = summary.get("recommendation")
+    reason = recommendation.get("reason") if isinstance(recommendation, dict) else ""
+    return unavailable_reason_for(reason)
+
+
+def workspace_root_missing(root: Path) -> bool:
+    try:
+        return not root.is_dir()
+    except OSError:
+        return False
+
+
+def unavailable_workspace_summary(
+    alias: str,
+    is_default: bool,
+    *,
+    reason: str,
+) -> dict[str, object]:
+    """Path-free unread card. Isolated still requires an allowlisted command."""
+    safe_alias = _safe_code(alias)
+    code = (
+        reason
+        if reason
+        in {WORKSPACE_MISSING_ROOT, WORKSPACE_TIMEOUT, WORKSPACE_UNAVAILABLE}
+        else WORKSPACE_UNAVAILABLE
+    )
+    return {
+        "alias": safe_alias,
+        "display_name": safe_alias,
+        "is_default": is_default,
+        "availability": "unavailable",
+        "health": "unavailable",
+        "freshness": "partial",
+        "repository_count": 0,
+        "line_count": 0,
+        "objective_count": 0,
+        "active_objective_count": 0,
+        "task_count": 0,
+        "task_status_counts": {},
+        "attention_counts": _empty_attention_counts(),
+        "recommendation": {
+            "reason": code,
+            "command": f"dyro --workspace {safe_alias} doctor",
+        },
+        "findings": [],
+        "snapshot_sha256": "",
+        "proof_inspection": "not_inspected",
+        "unavailable_reason": unavailable_reason_for(code),
+    }
 
 
 def _fail_findings(summary: object) -> list[dict[str, str]]:
@@ -661,30 +743,14 @@ class ConsoleOverviewService:
             snapshot = self._snapshot_loader(config)
             envelope = workspace_envelope(snapshot)
         except (DyroError, ValidationError, OSError, UnicodeError):
+            reason = (
+                WORKSPACE_MISSING_ROOT
+                if workspace_root_missing(root)
+                else WORKSPACE_UNAVAILABLE
+            )
             return (
-                {
-                    "alias": safe_alias,
-                    "display_name": safe_alias,
-                    "is_default": is_default,
-                    "availability": "unavailable",
-                    "health": "unavailable",
-                    "freshness": "partial",
-                    "repository_count": 0,
-                    "line_count": 0,
-                    "objective_count": 0,
-                    "active_objective_count": 0,
-                    "task_count": 0,
-                    "task_status_counts": {},
-                    "attention_counts": self._empty_attention_counts(),
-                    "recommendation": {
-                        "reason": "WORKSPACE_UNAVAILABLE",
-                        "command": f"dyro --workspace {safe_alias} doctor",
-                    },
-                    "findings": [],
-                    "snapshot_sha256": "",
-                    "proof_inspection": "not_inspected",
-                },
-                {"WORKSPACE_UNAVAILABLE"},
+                unavailable_workspace_summary(safe_alias, is_default, reason=reason),
+                {reason},
                 _empty_inventory(),
             )
 
@@ -734,12 +800,13 @@ class ConsoleOverviewService:
             "findings": findings,
             "snapshot_sha256": str(envelope.get("snapshot_sha256", "")),
             "proof_inspection": "not_inspected",
+            "unavailable_reason": UNAVAILABLE_REASON_NONE,
         }
         return summary, warning_codes, _inventory_from_envelope(data)
 
     @staticmethod
     def _empty_attention_counts() -> dict[str, int]:
-        return {kind: 0 for kind in _ATTENTION_PRIORITY}
+        return _empty_attention_counts()
 
     def _workspace_attention(
         self, objectives: list[dict[str, object]]
@@ -847,6 +914,8 @@ class ConsoleOverviewService:
     def _highest_priority(self, summaries: list[dict[str, object]]) -> dict[str, str] | None:
         candidates: list[tuple[int, str, dict[str, str]]] = []
         for summary in summaries:
+            if summary.get("availability") != "available":
+                continue
             recommendation = summary.get("recommendation")
             counts = _safe_mapping(summary.get("attention_counts"))
             if not isinstance(recommendation, dict):
@@ -889,11 +958,14 @@ class ConsoleOverviewService:
     @staticmethod
     def _summary_sort_key(summary: dict[str, object]) -> tuple[int, str]:
         counts = _safe_mapping(summary.get("attention_counts"))
-        if (
-            summary.get("availability") == "unavailable"
-            or counts.get("repair_required", 0)
-            or _fail_findings(summary)
-        ):
+        unread = unavailable_reason_of(summary)
+        if unread == UNAVAILABLE_REASON_MISSING_ROOT:
+            priority = 8
+        elif unread == UNAVAILABLE_REASON_READ_TIMEOUT:
+            priority = 7
+        elif unread == UNAVAILABLE_REASON_OTHER:
+            priority = 6
+        elif counts.get("repair_required", 0) or _fail_findings(summary):
             priority = 0
         elif counts.get("needs_user", 0):
             priority = 1

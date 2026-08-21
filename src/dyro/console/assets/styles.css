@@ -260,6 +260,17 @@ code {
 }
 
 .workspace-list { min-height: 1px; }
+.unread-workspaces {
+  border-bottom: 1px solid var(--border);
+  margin: 0;
+  padding: .75rem 1.15rem 1rem;
+}
+.unread-workspaces > summary {
+  color: var(--mute);
+  cursor: pointer;
+  font-size: .88rem;
+}
+.unread-workspaces .workspace-row { padding-left: 0; }
 .workspace-row { align-items: center; border-bottom: 1px solid var(--border); gap: .75rem; padding: 1rem 1.15rem; }
 .workspace-row:last-child { border-bottom: 0; }
 .workspace-row:hover { background: var(--surface-strong); }
@@ -574,7 +585,7 @@ footer { border-top: 1px solid var(--border); color: var(--mute); font-size: .8r
   transform: translateY(-8px) scale(1.03);
   z-index: 2;
 }
-.family-jack[data-role="child"] { opacity: .96; transform: scale(.97); }
+.family-jack[data-role="child"] { cursor: pointer; opacity: .96; transform: scale(.97); }
 .family-jack[data-role="operator"] {
   grid-column: 1;
   grid-row: 2;

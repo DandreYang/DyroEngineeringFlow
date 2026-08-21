@@ -28,6 +28,8 @@ const state = {
   artifactBlobs: new Map(),
   operatorTwin: null,
   twinTasks: [],
+  twinLines: [],
+  twinObjectives: [],
   twinAfterSeq: 0,
   twinOverlayComplete: false,
 };
@@ -106,6 +108,8 @@ const ATTENTION_REASON_LABELS = {
   POLICY_DISALLOWS_OPERATION: "当前策略不允许这一步",
   HOME_GUIDANCE: "可以先打开这个项目看看",
   WORKSPACE_UNAVAILABLE: "这个项目现在读不到",
+  WORKSPACE_MISSING_ROOT: "登记还在，工作区目录已经不在了",
+  WORKSPACE_TIMEOUT: "读取超时，项目还在，只是这次没读完",
   MISSING_ORIGIN: "远端跟踪分支不存在",
   MISSING_WORKTREE: "工作树缺失",
   BRANCH_MISMATCH: "开发线不在约定分支",
@@ -240,6 +244,28 @@ function workspaceCount(summary, key) {
 function unavailableWorkspaceCount(workspaces) {
   if (!Array.isArray(workspaces)) return 0;
   return workspaces.filter((summary) => text(summary.availability) !== "available").length;
+}
+
+function materialUnavailableCount(workspaces) {
+  if (!Array.isArray(workspaces)) return 0;
+  return workspaces.filter((summary) => {
+    const reason = unavailableReason(summary);
+    return reason === "other" || reason === "read_timeout";
+  }).length;
+}
+
+function describeOverviewMix(workspaces, total) {
+  const ghosts = workspaces.filter(isMissingRootWorkspace).length;
+  const timeouts = workspaces.filter(isTimedOutWorkspace).length;
+  const other = workspaces.filter((summary) => unavailableReason(summary) === "other").length;
+  const parts = [`${total} 个本地项目`];
+  if (ghosts) parts.push(`${ghosts} 个登记目录已经不在了`);
+  if (timeouts) parts.push(`${timeouts} 个这次读取超时`);
+  if (other) parts.push(`${other} 个现在读不到`);
+  if (parts.length === 1) {
+    return `${total} 个本地项目。先看需要你的事，再把命令贴到终端。`;
+  }
+  return `${parts.join("。")}。下面先列出需要你处理的事。`;
 }
 
 function displayLabel(value, labels) {
@@ -426,12 +452,36 @@ function workspaceAttention(summary) {
   return 5;
 }
 
+function unavailableReason(summary) {
+  if (text(summary && summary.availability) === "available") return "";
+  const field = text(summary && summary.unavailable_reason);
+  if (field === "missing_root" || field === "read_timeout" || field === "other") return field;
+  const reason = text(summary && summary.recommendation && summary.recommendation.reason);
+  if (reason === "WORKSPACE_MISSING_ROOT") return "missing_root";
+  if (reason === "WORKSPACE_TIMEOUT") return "read_timeout";
+  if (text(summary && summary.availability) !== "available") return "other";
+  return "";
+}
+
+function isMissingRootWorkspace(summary) {
+  return unavailableReason(summary) === "missing_root";
+}
+
+function isTimedOutWorkspace(summary) {
+  return unavailableReason(summary) === "read_timeout";
+}
+
+function commandCenterCandidate(summary) {
+  if (!summary || text(summary.availability) !== "available") return false;
+  return Boolean(recommendedCommand(summary));
+}
+
 function priorityWorkspace(workspaces) {
   const focused = workspaces.find((summary) => text(summary.alias) === state.focus);
-  if (focused && text(focused.recommendation && focused.recommendation.command)) return focused;
+  if (commandCenterCandidate(focused)) return focused;
   return [...workspaces]
     .sort((left, right) => workspaceAttention(left) - workspaceAttention(right))
-    .find((summary) => text(summary.recommendation && summary.recommendation.command));
+    .find(commandCenterCandidate);
 }
 
 function failFindings(summary) {
@@ -450,6 +500,8 @@ function isBareWorkspaceCommand(command, alias) {
 function recommendedCommand(summary) {
   const alias = text(summary && summary.alias);
   if (!SAFE_ID.test(alias)) return "";
+  const unread = unavailableReason(summary);
+  if (unread === "missing_root" || unread === "read_timeout") return "";
   const command = text(summary && summary.recommendation && summary.recommendation.command);
   const doctor = `dyro --workspace ${alias} doctor`;
   const yes = "--" + "yes";
@@ -481,7 +533,7 @@ function overviewState(attention, workspaces) {
   if (Array.isArray(workspaces) && workspaces.some(workspaceHasFail)) return "需要修复";
   if (count(attention && attention.repair_required)) return "需要修复";
   if (count(attention && attention.needs_user)) return "等待你的处理";
-  if (unavailableWorkspaceCount(workspaces)) return "状态不完整";
+  if (materialUnavailableCount(workspaces)) return "状态不完整";
   if (Array.isArray(workspaces) && workspaces.some((summary) => text(summary.health) === "degraded")) {
     return "状态不完整";
   }
@@ -492,7 +544,17 @@ function overviewState(attention, workspaces) {
   return "状态不完整";
 }
 
+function workspaceHealthLabel(summary) {
+  const reason = unavailableReason(summary);
+  if (reason === "read_timeout") return "读取未完成";
+  if (reason === "missing_root") return "目录不在了";
+  return displayLabel(summary && summary.health, HEALTH_LABELS);
+}
+
 function workspaceMatter(summary) {
+  const unread = unavailableReason(summary);
+  if (unread === "missing_root") return "登记还在，工作区目录已经不在了";
+  if (unread === "read_timeout") return "读取超时，项目还在，只是这次没读完";
   if (text(summary && summary.availability) !== "available") {
     return "这个项目现在读不到";
   }
@@ -515,7 +577,7 @@ function needsYouWorkspaces(workspaces) {
   if (!Array.isArray(workspaces)) return [];
   return workspaces
     .filter((summary) => {
-      if (text(summary.availability) !== "available") return true;
+      if (text(summary.availability) !== "available") return false;
       if (workspaceHasFail(summary)) return true;
       const attention = summary.attention_counts || {};
       return Boolean(count(attention.repair_required) || count(attention.needs_user));
@@ -704,7 +766,7 @@ function renderWorkspaceCard(summary) {
   health.className = "workspace-signal";
   health.append(element("span", "状态"));
   health.firstChild.className = "workspace-signal-label";
-  addBadge(health, displayLabel(summary.health, HEALTH_LABELS), attentionLevel(summary));
+  addBadge(health, workspaceHealthLabel(summary), attentionLevel(summary));
   card.append(health);
 
   const matter = element("div");
@@ -739,12 +801,9 @@ function renderOverview(payload) {
   if (!data || !Array.isArray(data.workspaces)) throw new Error("OVERVIEW_UNAVAILABLE");
   const total = count(data.total_workspaces);
   const attention = data.attention_counts || {};
-  const unavailable = unavailableWorkspaceCount(data.workspaces);
   $("overview-heading").textContent = total ? overviewState(attention, data.workspaces) : "尚未登记工作区";
   $("overview-summary").textContent = total
-    ? unavailable
-      ? `${total} 个项目里有 ${unavailable} 个现在读不到。下面先列出需要你处理的事。`
-      : `${total} 个本地项目。先看需要你的事，再把命令贴到终端。`
+    ? describeOverviewMix(data.workspaces, total)
     : "还没有登记项目。可运行 dyro setup、dyro join 或 dyro workspace add。";
   $("captured-at").textContent = text(payload.captured_at) ? `读取于 ${new Date(text(payload.captured_at)).toLocaleString("zh-CN")}` : "";
   renderCounts(data.attention_counts || {});
@@ -759,7 +818,16 @@ function renderOverview(payload) {
     list.append(empty);
     return;
   }
-  for (const summary of data.workspaces) list.append(renderWorkspaceCard(summary));
+  const readable = data.workspaces.filter((summary) => text(summary.availability) === "available");
+  const unread = data.workspaces.filter((summary) => text(summary.availability) !== "available");
+  for (const summary of readable) list.append(renderWorkspaceCard(summary));
+  if (unread.length) {
+    const fold = element("details");
+    fold.className = "unread-workspaces";
+    fold.append(element("summary", `读不到 · ${unread.length} 个`));
+    for (const summary of unread) fold.append(renderWorkspaceCard(summary));
+    list.append(fold);
+  }
 }
 
 function hasSurface(name) {
@@ -795,6 +863,10 @@ function renderInventory(data) {
   const lines = Array.isArray(data && data.lines) ? data.lines : [];
   const tasks = Array.isArray(data && data.tasks) ? data.tasks : [];
   const objectives = Array.isArray(data && data.objectives) ? data.objectives : [];
+  if (lines.length && !tasks.length && !objectives.length) {
+    root.append(element("p", emptyOverlayCopy(lines.length)));
+    return root;
+  }
   root.append(
     renderInventoryList("开发线", lines, (line) => {
       const kind = displayLabel(line.kind, LINE_KIND_LABELS);
@@ -1104,13 +1176,40 @@ function renderTwinRunning() {
   return section;
 }
 
+function emptyOverlayCopy(lineCount) {
+  return `这条 overlay 有 ${lineCount} 条线，还没有 Task / Objective；空的计划 / 谁在跑是预期的。`;
+}
+
+function twinHasWork(twin) {
+  if (!twin) return false;
+  if (Array.isArray(twin.plan) && twin.plan.length) return true;
+  if (Array.isArray(twin.running) && twin.running.length) return true;
+  if (Array.isArray(twin.phases)) {
+    return twin.phases.some((column) => Array.isArray(column.tasks) && column.tasks.length);
+  }
+  return false;
+}
+
+function overlayHasLinesWithoutWork() {
+  return Boolean(
+    state.twinLines.length
+    && !state.twinTasks.length
+    && !state.twinObjectives.length
+    && !twinHasWork(state.operatorTwin)
+  );
+}
+
 function buildOperatorTwin() {
   const section = element("section");
   section.className = "operator-twin";
   section.id = "operator-twin";
   section.append(element("h3", "这一家现在怎样"));
   section.append(element("p", "计划、里程碑、阶段和谁在跑。页面不另造 backlog，也不改任务。"));
-  section.append(renderTwinPlan(), renderTwinPhases(), renderTwinRunning());
+  if (overlayHasLinesWithoutWork()) {
+    section.append(element("p", emptyOverlayCopy(state.twinLines.length)));
+  } else {
+    section.append(renderTwinPlan(), renderTwinPhases(), renderTwinRunning());
+  }
   const summary = element("div");
   summary.id = "twin-task-summary";
   summary.className = "twin-task-summary";
@@ -1122,6 +1221,8 @@ function buildOperatorTwin() {
 function renderOperatorTwin(data) {
   state.operatorTwin = twinFromData(data);
   state.twinTasks = Array.isArray(data && data.tasks) ? data.tasks : [];
+  state.twinLines = Array.isArray(data && data.lines) ? data.lines : [];
+  state.twinObjectives = Array.isArray(data && data.objectives) ? data.objectives : [];
   state.twinAfterSeq = state.operatorTwin.projected_seq;
   state.twinOverlayComplete = state.operatorTwin.overlay_complete === true;
   return buildOperatorTwin();
@@ -1201,7 +1302,14 @@ function renderWorkspaceAttention(data) {
   section.append(element("h3", "需要关注"));
   const available = text(data && data.workspace && data.workspace.availability) === "available";
   if (!available) {
-    section.append(element("p", "工作区不可读取，关注项未知。"));
+    const reason = unavailableReason(data && data.workspace);
+    if (reason === "read_timeout") {
+      section.append(element("p", "这次读取超时，关注项还没读到。项目还在。"));
+    } else if (reason === "missing_root") {
+      section.append(element("p", "登记还在，工作区目录已经不在了。"));
+    } else {
+      section.append(element("p", "工作区不可读取，关注项未知。"));
+    }
     return section;
   }
   const fails = findingLabels(data && data.workspace);
@@ -1360,7 +1468,40 @@ function familyChildren(lines, parentId) {
 }
 
 function familyParents(lines) {
-  return lines.map((line) => text(line.id)).filter((id) => SAFE_ID.test(id));
+  const ids = [];
+  const seen = new Set();
+  for (const line of Array.isArray(lines) ? lines : []) {
+    const id = text(line && line.id);
+    if (!SAFE_ID.test(id) || text(line && line.parent) || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  const focused = text(state.familyParent);
+  if (focused && SAFE_ID.test(focused) && !seen.has(focused)) {
+    const exists = (Array.isArray(lines) ? lines : []).some((line) => text(line && line.id) === focused);
+    if (exists) ids.push(focused);
+  }
+  return ids;
+}
+
+function selectFamilyParent(alias, lines, parent, tasks, findings) {
+  state.familyParent = parent;
+  const pane = $("family-pane");
+  if (pane) {
+    pane.replaceWith(renderFamilyTree(alias, lines, tasks, findings));
+  } else {
+    const tree = $("family-tree");
+    if (tree) tree.replaceWith(renderFamilyGraph(alias, lines, parent, tasks, findings));
+  }
+  resetChannelState();
+  resetArtifactState();
+  loadChannel(alias, parent).catch((error) => {
+    if (error && error.message === "SESSION_EXPIRED") expireSession();
+  });
+  loadArtifacts(alias, parent).catch((error) => {
+    if (error && error.message === "SESSION_EXPIRED") expireSession();
+  });
+  refreshFamilyUnread(alias, parent).catch(() => {});
 }
 
 function lineInProgress(tasks, lineId) {
@@ -1401,18 +1542,7 @@ function renderFamilyTree(alias, lines, tasks, findings) {
       button.className = "secondary";
       if (parent === selected) button.setAttribute("aria-current", "true");
       button.addEventListener("click", () => {
-        state.familyParent = parent;
-        const tree = $("family-tree");
-        if (tree) tree.replaceWith(renderFamilyGraph(alias, lines, parent, tasks, findings));
-        resetChannelState();
-        resetArtifactState();
-        loadChannel(alias, parent).catch((error) => {
-          if (error && error.message === "SESSION_EXPIRED") expireSession();
-        });
-        loadArtifacts(alias, parent).catch((error) => {
-          if (error && error.message === "SESSION_EXPIRED") expireSession();
-        });
-        refreshFamilyUnread(alias, parent).catch(() => {});
+        selectFamilyParent(alias, lines, parent, tasks, findings);
       });
       nav.append(button);
     }
@@ -1508,7 +1638,11 @@ function renderFamilyGraph(alias, lines, parent, tasks, findings) {
     thread.className = live ? "family-edge live" : "family-edge";
     thread.dataset.from = parent;
     thread.dataset.to = id;
-    run.append(thread, renderFamilyJack(id, "child", tasks, findings));
+    const jack = renderFamilyJack(id, "child", tasks, findings);
+    jack.addEventListener("click", () => {
+      selectFamilyParent(alias, lines, id, tasks, findings);
+    });
+    run.append(thread, jack);
     outbound.append(run);
   }
   stage.append(outbound, renderFamilyJack("operator", "operator", tasks, findings));
@@ -2547,9 +2681,13 @@ globalThis.__dyroConsoleTest = {
   renderLivePanes,
   applyLiveTab,
   renderFamilyGraph,
+  renderFamilyTree,
+  familyParents,
   familyBadges,
   familyChildren,
   dryRunCommands,
+  unavailableReason,
+  priorityWorkspace,
   request,
   refresh,
   loadWorkspace,

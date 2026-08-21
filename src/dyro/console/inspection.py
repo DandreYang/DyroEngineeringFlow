@@ -90,7 +90,11 @@ _SUMMARY_KEYS = frozenset(
         "findings",
         "snapshot_sha256",
         "proof_inspection",
+        "unavailable_reason",
     }
+)
+_UNAVAILABLE_REASONS = frozenset(
+    {"", "missing_root", "read_timeout", "other"}
 )
 _FINDING_KEYS = frozenset({"status", "reason", "line"})
 _FINDING_REASONS = frozenset(
@@ -771,6 +775,13 @@ class IsolatedOverviewService:
         if value.get("health") not in {"healthy", "degraded", "unavailable"}:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         if value.get("freshness") not in {"fresh", "partial"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        unavailable_reason = value.get("unavailable_reason")
+        if unavailable_reason not in _UNAVAILABLE_REASONS:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if value.get("availability") == "available" and unavailable_reason != "":
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if value.get("availability") == "unavailable" and unavailable_reason == "":
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         for key in (
             "repository_count",

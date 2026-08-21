@@ -85,6 +85,53 @@ class ConsoleOperatorSurfaceTests(unittest.TestCase):
         self.assertNotIn("正在建立安全本地会话", result["missing"])
         self.assertNotIn("正在建立安全本地会话", result["expired"])
 
+    def test_ghost_test_workspace_does_not_win_command_center(self) -> None:
+        result = _run("ghost_overview")
+
+        self.assertNotIn("test-workspace", result["needsYou"])
+        self.assertNotIn("test-workspace", result["needsYouAliases"])
+        self.assertNotEqual(result["command"], "dyro --workspace test-workspace doctor")
+        self.assertNotIn("dyro --workspace test-workspace", result["primary"])
+        self.assertIn("core", result["list"])
+        self.assertIn("读不到", result["list"])
+        self.assertIn("登记还在，工作区目录已经不在了", result["list"])
+        self.assertNotEqual(result["heading"], "需要修复")
+
+    def test_timeout_copy_is_not_missing_root(self) -> None:
+        result = _run("timeout_overview")
+
+        self.assertEqual(result["timeoutReason"], "read_timeout")
+        self.assertEqual(result["missingReason"], "missing_root")
+        self.assertIn("读取超时", result["timeoutMatter"])
+        self.assertIn("项目还在", result["timeoutMatter"])
+        self.assertIn("目录已经不在了", result["missingMatter"])
+        self.assertNotEqual(result["timeoutMatter"], result["missingMatter"])
+        self.assertNotIn("slow", result["needsYou"])
+        self.assertNotIn("test-workspace", result["needsYou"])
+        self.assertNotEqual(result["command"], "dyro --workspace slow doctor")
+        self.assertNotEqual(result["command"], "dyro --workspace test-workspace doctor")
+        self.assertIn("读取未完成", result["list"])
+        self.assertIn("目录不在了", result["list"])
+
+    def test_family_picker_defaults_to_roots_plus_focused_parent(self) -> None:
+        result = _run("family_picker")
+
+        self.assertEqual(result["roots"], ["core", "release_a"])
+        self.assertNotIn("core_pay", result["roots"])
+        self.assertNotIn("core_pay_fix", result["roots"])
+        self.assertEqual(result["focused"], ["core", "release_a", "core_pay"])
+        self.assertEqual(result["grandchild"], ["core", "release_a", "core_pay_fix"])
+        self.assertNotIn("core_pay_fix", result["focused"])
+
+    def test_empty_twin_explains_lines_without_tasks_or_objectives(self) -> None:
+        result = _run("empty_twin")
+
+        self.assertIn("2 条线", result["text"])
+        self.assertIn("还没有 Task / Objective", result["text"])
+        self.assertIn("谁在跑是预期的", result["text"])
+        self.assertNotEqual(result["text"].strip(), "没有目标。")
+        self.assertNotIn("没有目标。", result["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

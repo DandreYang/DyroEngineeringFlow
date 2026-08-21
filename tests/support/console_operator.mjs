@@ -393,6 +393,156 @@ if (action === "fail_overview") {
 } else if (action === "empty") {
   const graph = api.renderFamilyGraph("core", [], "core", [], []);
   result = { text: collectText(graph) };
+} else if (action === "ghost_overview") {
+  api.renderOverview({
+    captured_at: "2026-08-21T07:00:00Z",
+    freshness: { partial: true, warnings: [] },
+    data: {
+      total_workspaces: 2,
+      attention_counts: emptyAttention(),
+      task_status_counts: {},
+      workspaces: [
+        {
+          alias: "core",
+          display_name: "core",
+          availability: "available",
+          health: "healthy",
+          findings: [],
+          recommendation: { reason: "HOME_GUIDANCE", command: "dyro --workspace core doctor" },
+          attention_counts: emptyAttention(),
+          unavailable_reason: "",
+        },
+        {
+          alias: "test-workspace",
+          display_name: "test-workspace",
+          availability: "unavailable",
+          health: "unavailable",
+          findings: [],
+          recommendation: {
+            reason: "WORKSPACE_MISSING_ROOT",
+            command: "dyro --workspace test-workspace doctor",
+          },
+          attention_counts: emptyAttention(),
+          unavailable_reason: "missing_root",
+        },
+      ],
+    },
+  });
+  result = {
+    heading: nodesById.get("overview-heading").textContent,
+    primary: nodesById.get("primary-command").textContent,
+    command: nodesById.get("primary-copy").dataset.command,
+    why: nodesById.get("primary-why").textContent,
+    needsYou: collectText(nodesById.get("needs-you")),
+    list: collectText(nodesById.get("workspace-list")),
+    needsYouAliases: api.needsYouWorkspaces([
+      {
+        alias: "core",
+        availability: "available",
+        findings: [],
+        attention_counts: emptyAttention(),
+        unavailable_reason: "",
+      },
+      {
+        alias: "test-workspace",
+        availability: "unavailable",
+        findings: [],
+        recommendation: {
+          reason: "WORKSPACE_MISSING_ROOT",
+          command: "dyro --workspace test-workspace doctor",
+        },
+        attention_counts: emptyAttention(),
+        unavailable_reason: "missing_root",
+      },
+    ]).map((item) => item.alias),
+  };
+} else if (action === "timeout_overview") {
+  const timeout = {
+    alias: "slow",
+    display_name: "slow",
+    availability: "unavailable",
+    health: "unavailable",
+    findings: [],
+    recommendation: { reason: "WORKSPACE_TIMEOUT", command: "dyro --workspace slow doctor" },
+    attention_counts: emptyAttention(),
+    unavailable_reason: "read_timeout",
+  };
+  const missing = {
+    alias: "test-workspace",
+    display_name: "test-workspace",
+    availability: "unavailable",
+    health: "unavailable",
+    findings: [],
+    recommendation: {
+      reason: "WORKSPACE_MISSING_ROOT",
+      command: "dyro --workspace test-workspace doctor",
+    },
+    attention_counts: emptyAttention(),
+    unavailable_reason: "missing_root",
+  };
+  const core = {
+    alias: "core",
+    display_name: "core",
+    availability: "available",
+    health: "healthy",
+    findings: [],
+    recommendation: { reason: "HOME_GUIDANCE", command: "dyro --workspace core doctor" },
+    attention_counts: emptyAttention(),
+    unavailable_reason: "",
+  };
+  api.renderOverview({
+    captured_at: "2026-08-21T07:00:00Z",
+    freshness: { partial: true, warnings: [] },
+    data: {
+      total_workspaces: 3,
+      attention_counts: emptyAttention(),
+      task_status_counts: {},
+      workspaces: [timeout, missing, core],
+    },
+  });
+  result = {
+    heading: nodesById.get("overview-heading").textContent,
+    command: nodesById.get("primary-copy").dataset.command,
+    needsYou: collectText(nodesById.get("needs-you")),
+    list: collectText(nodesById.get("workspace-list")),
+    timeoutMatter: api.workspaceMatter(timeout),
+    missingMatter: api.workspaceMatter(missing),
+    timeoutReason: api.unavailableReason(timeout),
+    missingReason: api.unavailableReason(missing),
+  };
+} else if (action === "family_picker") {
+  const lines = [
+    { id: "core", parent: "" },
+    { id: "core_pay", parent: "core" },
+    { id: "core_pay_fix", parent: "core_pay" },
+    { id: "release_a", parent: "" },
+  ];
+  api.getState().familyParent = "";
+  const roots = api.familyParents(lines);
+  api.getState().familyParent = "core_pay";
+  const focused = api.familyParents(lines);
+  api.getState().familyParent = "core_pay_fix";
+  const grandchild = api.familyParents(lines);
+  result = { roots, focused, grandchild };
+} else if (action === "empty_twin") {
+  const twinApi = context.__dyroTwinLive;
+  const twin = twinApi.renderOperatorTwin({
+    lines: [
+      { id: "core", parent: "" },
+      { id: "core_pay", parent: "core" },
+    ],
+    tasks: [],
+    objectives: [],
+    operator_twin: {
+      plan: [],
+      phases: [],
+      running: [],
+      latest_ledger: { present: false, at: "", task_id: "", phase: "", facts: {} },
+      projected_seq: 0,
+      overlay_complete: true,
+    },
+  });
+  result = { text: collectText(twin) };
 } else {
   throw new Error(`unknown action ${action}`);
 }
