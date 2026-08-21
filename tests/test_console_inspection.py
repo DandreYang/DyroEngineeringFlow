@@ -14,7 +14,11 @@ from unittest.mock import Mock, patch
 from dyro.canonical import canonical_json_bytes
 from dyro.console import _inspect_worker
 from dyro.console.inspection import IsolatedOverviewService
-from dyro.console.overview import ConsoleOverviewError
+from dyro.console.overview import (
+    ConsoleOverviewError,
+    WORKSPACE_MISSING_ROOT,
+    WORKSPACE_TIMEOUT,
+)
 from dyro.hub import WorkspaceRecord, WorkspaceRegistry, add_workspace
 
 from .support import WorkspaceCase
@@ -228,6 +232,118 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         self.assertEqual(overview["data"]["total_workspaces"], 1)
         self.assertEqual(overview["data"]["workspaces"][0]["alias"], "test-workspace")
         self.assertNotIn(str(self.root), repr(overview))
+
+    def test_root_scope_hides_global_ghost_registry_rows(self) -> None:
+        ghost = Path("/tmp/dyro-test-xyz")
+        self.assertFalse(ghost.exists())
+        home = self.root / "scoped-state"
+        home.mkdir()
+        home.joinpath("workspaces.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "default": "ghost",
+                    "workspaces": [
+                        {
+                            "name": "ghost",
+                            "root": str(ghost),
+                            "last_kind": "",
+                            "last_target": "",
+                            "last_agent": "",
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        service = IsolatedOverviewService(
+            registry_state_home=home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+            target_root=self.root,
+        )
+
+        overview = service.page(limit=20)
+        aliases = [item["alias"] for item in overview["data"]["workspaces"]]
+
+        self.assertEqual(overview["data"]["total_workspaces"], 1)
+        self.assertEqual(aliases, ["test-workspace"])
+        self.assertEqual(overview["data"]["workspaces"][0]["availability"], "available")
+        self.assertNotIn("ghost", aliases)
+        self.assertNotIn("/tmp", repr(overview))
+
+    def test_vanished_test_workspace_does_not_win_unscoped_overview(self) -> None:
+        ghost = Path("/tmp/dyro-test-xyz")
+        self.assertFalse(ghost.exists())
+        self.home.joinpath("workspaces.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "default": "core",
+                    "workspaces": [
+                        {
+                            "name": "core",
+                            "root": str(self.root),
+                            "last_kind": "",
+                            "last_target": "",
+                            "last_agent": "",
+                        },
+                        {
+                            "name": "test-workspace",
+                            "root": str(ghost),
+                            "last_kind": "",
+                            "last_target": "",
+                            "last_agent": "",
+                        },
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+        )
+
+        overview = service.page(limit=20)
+        cards = overview["data"]["workspaces"]
+        aliases = [item["alias"] for item in cards]
+
+        self.assertEqual(aliases[0], "core")
+        self.assertNotEqual(aliases[0], "test-workspace")
+        ghost_card = next(item for item in cards if item["alias"] == "test-workspace")
+        self.assertEqual(ghost_card["availability"], "unavailable")
+        self.assertEqual(ghost_card["unavailable_reason"], "missing_root")
+        self.assertEqual(ghost_card["recommendation"]["reason"], WORKSPACE_MISSING_ROOT)
+        highest = overview["data"]["highest_priority"]
+        if highest is not None:
+            self.assertNotEqual(highest["alias"], "test-workspace")
+        self.assertNotEqual(
+            cards[0]["recommendation"]["command"],
+            "dyro --workspace test-workspace doctor",
+        )
+        self.assertNotIn("/tmp", repr(overview))
+        self.assertNotIn("dyro-test-xyz", repr(overview))
+
+    def test_timeout_card_is_not_a_missing_root(self) -> None:
+        timeout = _inspect_worker._unavailable_summary("core", WORKSPACE_TIMEOUT)
+        missing = _inspect_worker._unavailable_summary(
+            "test-workspace", WORKSPACE_MISSING_ROOT
+        )
+
+        IsolatedOverviewService._validate_summary(timeout)
+        IsolatedOverviewService._validate_summary(missing)
+        self.assertEqual(timeout["unavailable_reason"], "read_timeout")
+        self.assertEqual(missing["unavailable_reason"], "missing_root")
+        self.assertEqual(timeout["recommendation"]["reason"], WORKSPACE_TIMEOUT)
+        self.assertEqual(missing["recommendation"]["reason"], WORKSPACE_MISSING_ROOT)
+        self.assertNotEqual(
+            timeout["recommendation"]["reason"],
+            missing["recommendation"]["reason"],
+        )
 
     def test_worker_timeout_kills_its_process_group_and_returns_a_stable_code(self) -> None:
         process = Mock(spec=subprocess.Popen)
@@ -642,6 +758,42 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
                 "dyro --workspace demo task next", "demo"
             )
         )
+        self.assertFalse(
+            IsolatedOverviewService._safe_command("dyro --workspace demo", "demo")
+        )
+
+    def test_missing_origin_fail_is_not_ready_or_a_bare_workspace_command(self) -> None:
+        from dyro.config import load
+        from dyro.workspace import create_line, spawn_line
+
+        config = load(self.root)
+        create_line(config, line_id="core", branch="feat/core", base="main")
+        spawn_line(config, "core", "pay")
+        create_line(
+            config,
+            line_id="release_a",
+            branch="hotfix/release_a",
+            base="main",
+            kind="hotfix",
+        )
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+        )
+
+        overview = service.page(limit=1)
+        card = overview["data"]["workspaces"][0]
+        reasons = {(item["reason"], item["line"]) for item in card["findings"]}
+
+        self.assertIn(("MISSING_ORIGIN", "core"), reasons)
+        self.assertIn(("MISSING_ORIGIN", "core_pay"), reasons)
+        self.assertIn(("MISSING_ORIGIN", "release_a"), reasons)
+        self.assertEqual(card["recommendation"]["command"], "dyro --workspace demo doctor")
+        self.assertNotEqual(card["recommendation"]["command"], "dyro --workspace demo")
+        self.assertEqual(card["health"], "degraded")
+        self.assertNotEqual(card["recommendation"]["reason"], "HOME_GUIDANCE")
+        self.assertNotIn(str(self.root), repr(overview))
 
     def test_worker_cannot_serve_or_write_artifacts_via_a_mutation_op(self) -> None:
         from dyro.config import load

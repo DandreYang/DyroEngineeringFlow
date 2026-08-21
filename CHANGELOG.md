@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Console operator surface: treat doctor FAIL findings as something the
+  page must show even when `next` reports ready with empty commands.
+  Overview heading and 现在需要你 surface those FAILs; the primary copy
+  command is `doctor` (or another allowlisted next command), never a
+  bare `dyro --workspace <alias>`.
+- Console tabs `#w/<alias>/family|events|channel` show only that pane.
+  Refresh re-fetches the overview and any open workspace so captured-at
+  moves. Spawn/merge/sync copy no longer invents `<parent>_new`.
+- `dyro console --no-open` flushes the one-time URL. A missing or
+  expired bootstrap paints the door on the command-center heading
+  and primary (not only session-status) and tells the operator to
+  run `dyro console` again. Empty twin/inventory copy is one honest
+  sentence; line badges do not paint 未检查 when a FAIL finding
+  exists for that line.
+- Unscoped `dyro console` no longer lets vanished registry rows
+  (missing roots, including dead `/tmp/dyro-test-*` aliases) win
+  现在需要你 or the primary CTA. Those cards fold under 读不到.
+  Inspection timeout is not painted as “project gone”: missing-root
+  and read-timeout get different copy and sort below a healthy
+  default workspace. Family picker defaults to root parents plus the
+  focused parent. An overlay with lines but no Task/Objective says
+  so in one sentence instead of only “没有目标”.
+
 ## 0.7.9 - 2026-08-21
 
 - Console P4: workspace detail now projects a read-only operator twin after

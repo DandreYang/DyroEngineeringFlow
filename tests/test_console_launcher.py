@@ -75,6 +75,30 @@ class ConsoleLauncherTests(unittest.TestCase):
         self.assertFalse(factory.call_args is None)
         browser.assert_not_called()
 
+    def test_no_open_flushes_the_one_time_url_so_a_pipe_still_sees_it(self) -> None:
+        printed: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def capture(*args: object, **kwargs: object) -> None:
+            printed.append((args, kwargs))
+
+        server = _Server()
+        with patch("builtins.print", side_effect=capture):
+            launch_console(
+                port=0,
+                no_open=True,
+                browser_open=Mock(return_value=True),
+                server_factory=Mock(return_value=server),
+                serve=lambda _: None,
+            )
+
+        url_calls = [
+            kwargs
+            for args, kwargs in printed
+            if args and isinstance(args[0], str) and "#bootstrap=" in args[0]
+        ]
+        self.assertTrue(url_calls)
+        self.assertTrue(all(item.get("flush") is True for item in url_calls))
+
     def test_failed_browser_open_prints_manual_recovery_url(self) -> None:
         _, output, _, _ = self._launch(browser_result=False)
 
