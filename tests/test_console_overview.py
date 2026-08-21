@@ -212,6 +212,40 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         )
         self.assertNotEqual(recommendation["command"], "dyro --workspace core")
 
+    def test_fail_findings_prefer_allowlisted_next_command_over_doctor(self) -> None:
+        self.registry = WorkspaceRegistry(
+            default="core",
+            workspaces=(WorkspaceRecord("core", self.alpha_root),),
+        )
+        self.snapshots["Alpha Project"] = _snapshot(
+            name="Alpha Project",
+            attention=(),
+        )
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            config_loader=self.service._config_loader,
+            snapshot_loader=lambda config: self.snapshots[config.name],
+            clock=self.service._clock,
+            cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [
+                "FAIL line:core/api: missing origin/feat/core",
+            ],
+            commands_loader=lambda config: [
+                "dyro --workspace core objective tick release",
+            ],
+        )
+
+        page = service.page()
+        card = page["data"]["workspaces"][0]
+
+        self.assertEqual(
+            card["recommendation"]["command"],
+            "dyro --workspace core objective tick release",
+        )
+        self.assertNotEqual(card["recommendation"]["command"], "dyro --workspace core doctor")
+        self.assertEqual(card["recommendation"]["reason"], "MISSING_ORIGIN")
+        self.assertNotIn("/private", repr(page))
+
     def test_fail_findings_and_empty_commands_recommend_doctor_not_bare_home(self) -> None:
         recommendation = self.service._recommendation(
             "core",

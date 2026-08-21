@@ -73,23 +73,40 @@ class ConsoleOperatorSurfaceTests(unittest.TestCase):
 
         self.assertTrue(result["cachedHasMatch"])
         self.assertFalse(result["forcedHasMatch"])
-        self.assertNotEqual(result["before"], result["after"])
+        self.assertFalse(result["refreshHasMatch"])
+        self.assertFalse(result["clickHasMatch"])
+        self.assertNotEqual(result["before"], result["afterRefresh"])
+        self.assertNotEqual(result["before"], result["afterClick"])
+        self.assertIn("读取于", result["afterRefresh"])
+        self.assertIn("读取于", result["afterClick"])
         self.assertIn("读取于", result["after"])
 
     def test_missing_bootstrap_explains_how_to_open_again(self) -> None:
         result = _run("session")
 
-        self.assertIn("尚未建立", result["missing"])
-        self.assertIn("dyro console", result["missing"])
-        self.assertIn("dyro console", result["expired"])
-        self.assertNotIn("正在建立安全本地会话", result["missing"])
-        self.assertNotIn("正在建立安全本地会话", result["expired"])
+        for door in (result["missing"], result["expired"]):
+            self.assertNotEqual(door["heading"], "正在读取工程状态")
+            self.assertNotEqual(door["primary"], "正在准备推荐命令…")
+            self.assertEqual(door["heading"], door["helper"])
+            self.assertEqual(door["primary"], "")
+            self.assertTrue(door["primaryHidden"])
+            self.assertNotIn("正在读取", door["center"])
+            self.assertNotIn("正在准备推荐命令", door["center"])
+            self.assertIn("dyro console", door["heading"])
+        self.assertIn("尚未建立", result["missing"]["heading"])
+        self.assertIn("尚未建立", result["missing"]["helper"])
+        self.assertIn("dyro console", result["missing"]["helper"])
+        self.assertIn("dyro console", result["expired"]["helper"])
+        self.assertNotIn("正在建立安全本地会话", result["missing"]["status"])
+        self.assertNotIn("正在建立安全本地会话", result["expired"]["status"])
 
     def test_ghost_test_workspace_does_not_win_command_center(self) -> None:
         result = _run("ghost_overview")
 
         self.assertNotIn("test-workspace", result["needsYou"])
         self.assertNotIn("test-workspace", result["needsYouAliases"])
+        self.assertEqual(result["ghostCommand"], "")
+        self.assertNotEqual(result["priorityAlias"], "test-workspace")
         self.assertNotEqual(result["command"], "dyro --workspace test-workspace doctor")
         self.assertNotIn("dyro --workspace test-workspace", result["primary"])
         self.assertIn("core", result["list"])
@@ -122,6 +139,28 @@ class ConsoleOperatorSurfaceTests(unittest.TestCase):
         self.assertEqual(result["focused"], ["core", "release_a", "core_pay"])
         self.assertEqual(result["grandchild"], ["core", "release_a", "core_pay_fix"])
         self.assertNotIn("core_pay_fix", result["focused"])
+        self.assertEqual(result["rootButtons"], ["core", "release_a"])
+        self.assertEqual(result["focusedButtons"], ["core", "release_a", "core_pay"])
+        self.assertEqual(result["grandchildButtons"], ["core", "release_a", "core_pay_fix"])
+        self.assertNotIn("core_pay", result["rootButtons"])
+        self.assertNotIn("core_pay_fix", result["rootButtons"])
+        self.assertNotIn("core_pay_fix", result["focusedButtons"])
+
+    def test_fail_outRanks_ready_in_overview_heading(self) -> None:
+        result = _run("fail_over_ready")
+
+        self.assertEqual(result["heading"], "需要修复")
+        self.assertEqual(result["state"], "需要修复")
+        self.assertNotEqual(result["heading"], "有工作可推进")
+        self.assertNotEqual(result["state"], "有工作可推进")
+
+    def test_hash_tab_shows_only_that_pane_without_a_click(self) -> None:
+        result = _run("hash_tab")
+
+        self.assertEqual(result["visible"], ["event-pane"])
+        self.assertEqual(result["detailTab"], "events")
+        self.assertNotIn("family-pane", result["visible"])
+        self.assertNotIn("channel-pane", result["visible"])
 
     def test_empty_twin_explains_lines_without_tasks_or_objectives(self) -> None:
         result = _run("empty_twin")

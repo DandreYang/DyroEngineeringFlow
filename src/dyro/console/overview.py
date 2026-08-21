@@ -327,6 +327,7 @@ class ConsoleOverviewService:
         update_loader: Callable[[], UpdateState] = load_update_state,
         version_loader: Callable[[], str] = lambda: __version__,
         doctor_loader: Callable[[Config], list[str]] = load_doctor_findings,
+        commands_loader: Callable[[Config], object] | None = None,
     ) -> None:
         if cursor_secret is not None and (
             not isinstance(cursor_secret, bytes) or len(cursor_secret) < 32
@@ -342,6 +343,7 @@ class ConsoleOverviewService:
         self._update_loader = update_loader
         self._version_loader = version_loader
         self._doctor_loader = doctor_loader
+        self._commands_loader = commands_loader if commands_loader is not None else (lambda config: [])
 
     def page(
         self,
@@ -775,6 +777,13 @@ class ConsoleOverviewService:
             findings = _project_doctor_findings(self._doctor_loader(config))
         except (DyroError, ValidationError, OSError, UnicodeError, TypeError, AttributeError):
             warning_codes.add("DOCTOR_UNAVAILABLE")
+        commands: list[object] = []
+        try:
+            loaded = self._commands_loader(config)
+            if isinstance(loaded, list):
+                commands = loaded
+        except (DyroError, ValidationError, OSError, UnicodeError, TypeError, AttributeError):
+            commands = []
         partial = freshness.get("state") != "fresh" or bool(warning_codes)
         fails = [item for item in findings if item.get("status") == "FAIL"]
         health = "degraded" if partial or fails else "healthy"
@@ -795,7 +804,7 @@ class ConsoleOverviewService:
             "task_status_counts": dict(sorted(task_status_counts.items())),
             "attention_counts": attention["counts"],
             "recommendation": self._recommendation(
-                safe_alias, attention["items"], findings=findings
+                safe_alias, attention["items"], findings=findings, commands=commands
             ),
             "findings": findings,
             "snapshot_sha256": str(envelope.get("snapshot_sha256", "")),

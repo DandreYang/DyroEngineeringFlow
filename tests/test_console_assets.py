@@ -165,6 +165,7 @@ class ConsoleAssetTests(unittest.TestCase):
         self.assertIn("pane.hidden".encode(), script.body)
         self.assertIn("force: true".encode(), script.body)
         self.assertIn("本地会话尚未建立".encode(), script.body)
+        self.assertIn("function paintClosedCommandCenter".encode(), script.body)
         self.assertNotIn("${parent}_new".encode(), script.body)
         self.assertNotIn("干净".encode(), script.body)
         self.assertNotIn("远端已绑定".encode(), script.body)

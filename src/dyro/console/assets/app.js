@@ -223,8 +223,39 @@ const $ = (id) => (typeof document !== "undefined" && document.getElementById
 
 function setStatus(message, error = false) {
   const node = $("session-status");
+  if (!node) return;
   node.textContent = message;
   node.classList.toggle("error", error);
+}
+
+function paintClosedCommandCenter(message) {
+  setStatus(message, true);
+  const heading = $("overview-heading");
+  if (heading) heading.textContent = message;
+  const summary = $("overview-summary");
+  if (summary) summary.textContent = "";
+  const guidance = $("primary-guidance");
+  if (guidance) guidance.textContent = "";
+  const why = $("primary-why");
+  if (why) why.textContent = "";
+  const command = $("primary-command");
+  if (command) {
+    command.textContent = "";
+    command.hidden = true;
+  }
+  const copy = $("primary-copy");
+  if (copy) {
+    copy.dataset.command = "";
+    copy.disabled = true;
+    copy.hidden = true;
+    copy.textContent = "复制命令";
+  }
+  const needs = $("needs-you");
+  if (needs) needs.replaceChildren();
+  const counts = $("attention-counts");
+  if (counts) counts.replaceChildren();
+  const tasks = $("task-status-counts");
+  if (tasks) tasks.replaceChildren();
 }
 
 function text(value) {
@@ -431,7 +462,7 @@ function expireSession() {
   state.timer = null;
   stopEventLive();
   sessionStorage.removeItem(TOKEN_KEY);
-  setStatus("本地会话已过期；请重新运行 dyro console。", true);
+  paintClosedCommandCenter(sessionExpiredMessage());
 }
 
 function addBadge(parent, label, level = "") {
@@ -530,7 +561,10 @@ function findingLabels(summary) {
 }
 
 function overviewState(attention, workspaces) {
-  if (Array.isArray(workspaces) && workspaces.some(workspaceHasFail)) return "需要修复";
+  const live = Array.isArray(workspaces)
+    ? workspaces.filter((summary) => !isMissingRootWorkspace(summary))
+    : [];
+  if (live.some(workspaceHasFail)) return "需要修复";
   if (count(attention && attention.repair_required)) return "需要修复";
   if (count(attention && attention.needs_user)) return "等待你的处理";
   if (materialUnavailableCount(workspaces)) return "状态不完整";
@@ -2623,14 +2657,14 @@ async function start() {
       try {
         await exchange(bootstrap);
       } catch (_) {
-        setStatus(sessionExpiredMessage(), true);
+        paintClosedCommandCenter(sessionExpiredMessage());
         return;
       }
     } else {
       state.bearer = sessionStorage.getItem(TOKEN_KEY) || "";
     }
     if (!state.bearer) {
-      setStatus(sessionMissingMessage(), true);
+      paintClosedCommandCenter(sessionMissingMessage());
       return;
     }
     const meta = await request("/api/v1/meta", "meta");
@@ -2650,7 +2684,7 @@ async function start() {
       return;
     } else {
       sessionStorage.removeItem(TOKEN_KEY);
-      setStatus("无法建立本地会话；请重新运行 dyro console。", true);
+      paintClosedCommandCenter("无法建立本地会话；请重新运行 dyro console。");
     }
     showError(error);
   }
@@ -2691,6 +2725,7 @@ globalThis.__dyroConsoleTest = {
   request,
   refresh,
   loadWorkspace,
+  start,
   sessionMissingMessage,
   sessionExpiredMessage,
   getState: () => state,

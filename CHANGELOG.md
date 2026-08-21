@@ -11,10 +11,11 @@
   Refresh re-fetches the overview and any open workspace so captured-at
   moves. Spawn/merge/sync copy no longer invents `<parent>_new`.
 - `dyro console --no-open` flushes the one-time URL. A missing or
-  expired bootstrap tells the operator to run `dyro console` again
-  instead of spinning on session setup. Empty twin/inventory copy is
-  one honest sentence; line badges do not paint 未检查 when a FAIL
-  finding exists for that line.
+  expired bootstrap paints the door on the command-center heading
+  and primary (not only session-status) and tells the operator to
+  run `dyro console` again. Empty twin/inventory copy is one honest
+  sentence; line badges do not paint 未检查 when a FAIL finding
+  exists for that line.
 - Unscoped `dyro console` no longer lets vanished registry rows
   (missing roots, including dead `/tmp/dyro-test-*` aliases) win
   现在需要你 or the primary CTA. Those cards fold under 读不到.

@@ -103,7 +103,7 @@ function fakeNode(tag) {
       node.listeners[type].push(fn);
     },
     click() {
-      for (const fn of node.listeners.click || []) fn({ target: node });
+      return Promise.all((node.listeners.click || []).map((fn) => fn({ target: node })));
     },
     replaceWith() {},
     replaceChildren(...items) {
@@ -142,6 +142,8 @@ function seed(id) {
   return node;
 }
 
+const commandCenter = seed("command-center");
+commandCenter.className = "command-center";
 for (const id of [
   "overview-heading",
   "overview-summary",
@@ -158,8 +160,48 @@ for (const id of [
   "system-panel",
   "system-note",
   "system-update",
+  "refresh",
+  "detail-close",
+  "workspace-detail",
 ]) {
-  seed(id);
+  const node = seed(id);
+  if (
+    [
+      "overview-heading",
+      "overview-summary",
+      "needs-you",
+      "primary-guidance",
+      "primary-why",
+      "primary-command",
+      "primary-copy",
+    ].includes(id)
+  ) {
+    commandCenter.append(node);
+  }
+}
+nodesById.get("overview-heading").textContent = "正在读取工程状态";
+nodesById.get("overview-summary").textContent = "正在读取本地工作区状态。";
+nodesById.get("primary-command").textContent = "正在准备推荐命令…";
+nodesById.get("session-status").textContent = "正在建立安全本地会话…";
+
+function resetCommandCenterPlaceholders() {
+  const heading = nodesById.get("overview-heading");
+  const summary = nodesById.get("overview-summary");
+  const command = nodesById.get("primary-command");
+  const copy = nodesById.get("primary-copy");
+  heading.textContent = "正在读取工程状态";
+  summary.textContent = "正在读取本地工作区状态。";
+  command.textContent = "正在准备推荐命令…";
+  command.hidden = false;
+  copy.hidden = false;
+  copy.disabled = true;
+  copy.dataset.command = "";
+}
+
+function pickerLabels(pane) {
+  const nav = pane && pane.querySelector ? pane.querySelector(".family-picker") : null;
+  if (!nav) return [];
+  return (nav.querySelectorAll("button") || []).map((button) => button.textContent);
 }
 
 const fetchCalls = [];
@@ -327,6 +369,26 @@ if (action === "fail_overview") {
     unknown: collectText(unknown),
   };
 } else if (action === "refresh") {
+  const coreCard = {
+    alias: "core",
+    display_name: "core",
+    availability: "available",
+    health: "healthy",
+    findings: [],
+    recommendation: { reason: "HOME_GUIDANCE", command: "dyro --workspace core doctor" },
+    attention_counts: emptyAttention(),
+    unavailable_reason: "",
+  };
+  const freshOverview = {
+    captured_at: "2026-08-21T08:01:00Z",
+    freshness: { partial: false, warnings: [] },
+    data: {
+      total_workspaces: 1,
+      attention_counts: emptyAttention(),
+      task_status_counts: {},
+      workspaces: [coreCard],
+    },
+  };
   api.getState().bearer = "token";
   api.getState().etags.set("overview", '"old-etag"');
   fetchImpl = async () => ({
@@ -342,58 +404,123 @@ if (action === "fail_overview") {
   const forced = { ...fetchCalls[0] };
   api.renderOverview({
     captured_at: "2026-08-21T07:00:00Z",
+    freshness: { partial: false, warnings: [] },
     data: {
       total_workspaces: 1,
       attention_counts: emptyAttention(),
       task_status_counts: {},
-      workspaces: [
-        {
-          alias: "core",
-          display_name: "core",
-          availability: "available",
-          health: "healthy",
-          findings: [],
-          recommendation: { reason: "HOME_GUIDANCE", command: "dyro --workspace core doctor" },
-          attention_counts: emptyAttention(),
-        },
-      ],
+      workspaces: [coreCard],
     },
   });
   const before = nodesById.get("captured-at").textContent;
+  fetchImpl = async (_path, init = {}) => {
+    if (init.headers && init.headers["If-None-Match"]) {
+      return {
+        ok: true,
+        status: 304,
+        headers: { get: () => null },
+        json: async () => null,
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: (name) => (name === "ETag" ? '"refreshed-etag"' : null) },
+      json: async () => freshOverview,
+    };
+  };
+  fetchCalls.length = 0;
+  await api.refresh({ force: true });
+  const refreshed = { ...fetchCalls[0] };
+  const afterRefresh = nodesById.get("captured-at").textContent;
   api.renderOverview({
-    captured_at: "2026-08-21T08:01:00Z",
+    captured_at: "2026-08-21T07:00:00Z",
+    freshness: { partial: false, warnings: [] },
     data: {
       total_workspaces: 1,
       attention_counts: emptyAttention(),
       task_status_counts: {},
-      workspaces: [
-        {
-          alias: "core",
-          display_name: "core",
-          availability: "available",
-          health: "healthy",
-          findings: [],
-          recommendation: { reason: "HOME_GUIDANCE", command: "dyro --workspace core doctor" },
-          attention_counts: emptyAttention(),
-        },
-      ],
+      workspaces: [coreCard],
     },
   });
+  fetchCalls.length = 0;
+  await nodesById.get("refresh").click();
+  const clicked = { ...fetchCalls[0] };
   result = {
     cachedHasMatch: Boolean(cached.headers["If-None-Match"]),
     forcedHasMatch: Boolean(forced.headers["If-None-Match"]),
+    refreshHasMatch: Boolean(refreshed.headers["If-None-Match"]),
+    clickHasMatch: Boolean(clicked.headers["If-None-Match"]),
     before,
-    after: nodesById.get("captured-at").textContent,
+    afterRefresh,
+    afterClick: nodesById.get("captured-at").textContent,
+    after: afterRefresh,
   };
 } else if (action === "session") {
-  result = {
-    missing: api.sessionMissingMessage(),
-    expired: api.sessionExpiredMessage(),
+  resetCommandCenterPlaceholders();
+  context.window.location.hash = "";
+  await api.start();
+  const missingCenter = collectText(commandCenter);
+  const missing = {
+    status: nodesById.get("session-status").textContent,
+    heading: nodesById.get("overview-heading").textContent,
+    primary: nodesById.get("primary-command").textContent,
+    primaryHidden: Boolean(nodesById.get("primary-command").hidden),
+    center: missingCenter,
+    helper: api.sessionMissingMessage(),
   };
+  resetCommandCenterPlaceholders();
+  context.window.location.hash = "#bootstrap=dead-token";
+  fetchImpl = async () => ({
+    ok: false,
+    status: 401,
+    headers: { get: () => null },
+    json: async () => ({}),
+  });
+  await api.start();
+  const expiredCenter = collectText(commandCenter);
+  const expired = {
+    status: nodesById.get("session-status").textContent,
+    heading: nodesById.get("overview-heading").textContent,
+    primary: nodesById.get("primary-command").textContent,
+    primaryHidden: Boolean(nodesById.get("primary-command").hidden),
+    center: expiredCenter,
+    helper: api.sessionExpiredMessage(),
+  };
+  result = { missing, expired, missingText: missing.helper, expiredText: expired.helper };
 } else if (action === "empty") {
   const graph = api.renderFamilyGraph("core", [], "core", [], []);
   result = { text: collectText(graph) };
 } else if (action === "ghost_overview") {
+  const ghostRepair = {
+    alias: "test-workspace",
+    display_name: "test-workspace",
+    availability: "unavailable",
+    health: "unavailable",
+    findings: [{ status: "FAIL", reason: "MISSING_ORIGIN", line: "core" }],
+    recommendation: {
+      reason: "MISSING_ORIGIN",
+      command: "dyro --workspace test-workspace doctor",
+    },
+    attention_counts: {
+      repair_required: 1,
+      needs_user: 0,
+      ready: 0,
+      paused: 0,
+      waiting: 0,
+    },
+    unavailable_reason: "missing_root",
+  };
+  const core = {
+    alias: "core",
+    display_name: "core",
+    availability: "available",
+    health: "healthy",
+    findings: [],
+    recommendation: { reason: "HOME_GUIDANCE", command: "dyro --workspace core doctor" },
+    attention_counts: emptyAttention(),
+    unavailable_reason: "",
+  };
   api.renderOverview({
     captured_at: "2026-08-21T07:00:00Z",
     freshness: { partial: true, warnings: [] },
@@ -401,31 +528,7 @@ if (action === "fail_overview") {
       total_workspaces: 2,
       attention_counts: emptyAttention(),
       task_status_counts: {},
-      workspaces: [
-        {
-          alias: "core",
-          display_name: "core",
-          availability: "available",
-          health: "healthy",
-          findings: [],
-          recommendation: { reason: "HOME_GUIDANCE", command: "dyro --workspace core doctor" },
-          attention_counts: emptyAttention(),
-          unavailable_reason: "",
-        },
-        {
-          alias: "test-workspace",
-          display_name: "test-workspace",
-          availability: "unavailable",
-          health: "unavailable",
-          findings: [],
-          recommendation: {
-            reason: "WORKSPACE_MISSING_ROOT",
-            command: "dyro --workspace test-workspace doctor",
-          },
-          attention_counts: emptyAttention(),
-          unavailable_reason: "missing_root",
-        },
-      ],
+      workspaces: [core, ghostRepair],
     },
   });
   result = {
@@ -435,26 +538,9 @@ if (action === "fail_overview") {
     why: nodesById.get("primary-why").textContent,
     needsYou: collectText(nodesById.get("needs-you")),
     list: collectText(nodesById.get("workspace-list")),
-    needsYouAliases: api.needsYouWorkspaces([
-      {
-        alias: "core",
-        availability: "available",
-        findings: [],
-        attention_counts: emptyAttention(),
-        unavailable_reason: "",
-      },
-      {
-        alias: "test-workspace",
-        availability: "unavailable",
-        findings: [],
-        recommendation: {
-          reason: "WORKSPACE_MISSING_ROOT",
-          command: "dyro --workspace test-workspace doctor",
-        },
-        attention_counts: emptyAttention(),
-        unavailable_reason: "missing_root",
-      },
-    ]).map((item) => item.alias),
+    needsYouAliases: api.needsYouWorkspaces([core, ghostRepair]).map((item) => item.alias),
+    ghostCommand: api.recommendedCommand(ghostRepair),
+    priorityAlias: (api.priorityWorkspace([core, ghostRepair]) || {}).alias || "",
   };
 } else if (action === "timeout_overview") {
   const timeout = {
@@ -517,13 +603,73 @@ if (action === "fail_overview") {
     { id: "core_pay_fix", parent: "core_pay" },
     { id: "release_a", parent: "" },
   ];
+  api.getState().surfaces = ["events"];
   api.getState().familyParent = "";
   const roots = api.familyParents(lines);
+  const rootButtons = pickerLabels(api.renderFamilyTree("core", lines, [], []));
   api.getState().familyParent = "core_pay";
   const focused = api.familyParents(lines);
+  const focusedButtons = pickerLabels(api.renderFamilyTree("core", lines, [], []));
   api.getState().familyParent = "core_pay_fix";
   const grandchild = api.familyParents(lines);
-  result = { roots, focused, grandchild };
+  const grandchildButtons = pickerLabels(api.renderFamilyTree("core", lines, [], []));
+  result = {
+    roots,
+    focused,
+    grandchild,
+    rootButtons,
+    focusedButtons,
+    grandchildButtons,
+  };
+} else if (action === "fail_over_ready") {
+  const attention = {
+    repair_required: 0,
+    needs_user: 0,
+    ready: 1,
+    paused: 0,
+    waiting: 0,
+  };
+  const workspaces = [
+    {
+      alias: "core",
+      display_name: "core",
+      availability: "available",
+      health: "degraded",
+      findings: [{ status: "FAIL", reason: "MISSING_ORIGIN", line: "core" }],
+      recommendation: { reason: "MISSING_ORIGIN", command: "dyro --workspace core doctor" },
+      attention_counts: attention,
+      unavailable_reason: "",
+    },
+  ];
+  api.renderOverview({
+    captured_at: "2026-08-21T07:00:00Z",
+    freshness: { partial: false, warnings: [] },
+    data: {
+      total_workspaces: 1,
+      attention_counts: attention,
+      task_status_counts: {},
+      workspaces,
+    },
+  });
+  result = {
+    heading: nodesById.get("overview-heading").textContent,
+    state: api.overviewState(attention, workspaces),
+  };
+} else if (action === "hash_tab") {
+  context.window.location.hash = "#w/core/events";
+  api.getState().detailTab = "events";
+  const live = api.renderLivePanes("core", {
+    workspace: { findings: [] },
+    lines: [
+      { id: "core", parent: "" },
+      { id: "core_pay", parent: "core" },
+    ],
+    tasks: [],
+  });
+  result = {
+    visible: visiblePaneIds(live),
+    detailTab: api.getState().detailTab,
+  };
 } else if (action === "empty_twin") {
   const twinApi = context.__dyroTwinLive;
   const twin = twinApi.renderOperatorTwin({
