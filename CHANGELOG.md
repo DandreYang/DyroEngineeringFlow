@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `dyro next` no longer reports `ready` when doctor has FAIL findings,
+  including missing-origin-only. JSON `state` is `needs_repair`,
+  `commands` includes scoped `doctor` (a read; `mutation_available`
+  stays false), and the human path prints the FAILs instead of
+  「工作区已就绪」。`dyro start` still treats missing-origin as
+  non-blocking. Isolated Console uses the same `next.commands` source
+  instead of an empty loader, so a FAIL workspace is not stuck with
+  empty commands while production is not.
 - Console operator surface: treat doctor FAIL findings as something the
   page must show even when `next` reports ready with empty commands.
   Overview heading and 现在需要你 surface those FAILs; the primary copy

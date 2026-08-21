@@ -779,7 +779,7 @@ class ConsoleOverviewService:
             warning_codes.add("DOCTOR_UNAVAILABLE")
         commands: list[object] = []
         try:
-            loaded = self._commands_loader(config)
+            loaded = self._invoke_commands_loader(config, alias)
             if isinstance(loaded, list):
                 commands = loaded
         except (DyroError, ValidationError, OSError, UnicodeError, TypeError, AttributeError):
@@ -847,6 +847,14 @@ class ConsoleOverviewService:
             )
         )
         return {"counts": counts, "items": items}
+
+    def _invoke_commands_loader(self, config: Config, alias: str) -> object:
+        """Prefer ``(config, alias)`` so Isolated next.commands match the card."""
+        loader = self._commands_loader
+        try:
+            return loader(config, alias)
+        except TypeError:
+            return loader(config)
 
     def _recommendation(
         self,
