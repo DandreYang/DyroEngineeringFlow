@@ -106,6 +106,21 @@ const ATTENTION_REASON_LABELS = {
   POLICY_DISALLOWS_OPERATION: "当前策略不允许这一步",
   HOME_GUIDANCE: "可以先打开这个项目看看",
   WORKSPACE_UNAVAILABLE: "这个项目现在读不到",
+  MISSING_ORIGIN: "远端跟踪分支不存在",
+  MISSING_WORKTREE: "工作树缺失",
+  BRANCH_MISMATCH: "开发线不在约定分支",
+  REPOSITORY_UNAVAILABLE: "仓库不可用",
+  UPSTREAM_MISMATCH: "上游跟踪不匹配",
+  COMMON_DIR: "Git 公共目录不匹配",
+  SYMLINK: "工作树链接方式不对",
+  EXTERNAL_POLICY: "外部策略未满足",
+  DOCTOR_FAIL: "doctor 检查未通过",
+};
+const LIVE_TABS = ["family", "events", "channel"];
+const LIVE_PANE_IDS = {
+  family: "family-pane",
+  events: "event-pane",
+  channel: "channel-pane",
 };
 const PROOF_INSPECTION_LABELS = { not_inspected: "尚未核验证据", inspected: "已单独检查证据" };
 const PROOF_KIND_LABELS = {
@@ -301,7 +316,7 @@ function consumeFragment() {
     const alias = parts[1] || "";
     const tab = parts[2] || "family";
     state.focus = alias && SAFE_ID.test(alias) ? alias : "";
-    state.detailTab = ["family", "events", "channel"].includes(tab) ? tab : "family";
+    state.detailTab = LIVE_TABS.includes(tab) ? tab : "family";
     return "";
   }
   const values = new URLSearchParams(raw);
@@ -315,7 +330,7 @@ function consumeFragment() {
 }
 
 function setWorkspaceRoute(alias, tab) {
-  const safeTab = ["family", "events", "channel"].includes(tab) ? tab : "family";
+  const safeTab = LIVE_TABS.includes(tab) ? tab : "family";
   state.detailTab = safeTab;
   const hash = alias && SAFE_ID.test(alias) ? `#w/${alias}/${safeTab}` : "";
   window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
@@ -337,9 +352,10 @@ async function exchange(bootstrap) {
   sessionStorage.setItem(TOKEN_KEY, state.bearer);
 }
 
-async function request(path, key) {
+async function request(path, key, options = {}) {
   const headers = { Authorization: `Bearer ${state.bearer}` };
-  const etag = state.etags.get(key);
+  const force = Boolean(options && options.force);
+  const etag = force ? "" : state.etags.get(key);
   if (etag) headers["If-None-Match"] = etag;
   const response = await fetch(path, { headers, cache: "no-store", credentials: "omit" });
   if (response.status === 304) return null;
@@ -374,6 +390,14 @@ async function requestWrite(path, payload) {
   return body;
 }
 
+function sessionMissingMessage() {
+  return "本地会话尚未建立。请重新运行 dyro console，并用终端给出的一次性地址打开。";
+}
+
+function sessionExpiredMessage() {
+  return "一次性本地会话已失效。请重新运行 dyro console，再用新的地址打开。";
+}
+
 function expireSession() {
   state.bearer = "";
   state.etags.clear();
@@ -392,6 +416,7 @@ function addBadge(parent, label, level = "") {
 }
 
 function workspaceAttention(summary) {
+  if (workspaceHasFail(summary)) return 0;
   const attention = summary.attention_counts || {};
   if (count(attention.repair_required)) return 0;
   if (count(attention.needs_user)) return 1;
@@ -409,10 +434,57 @@ function priorityWorkspace(workspaces) {
     .find((summary) => text(summary.recommendation && summary.recommendation.command));
 }
 
+function failFindings(summary) {
+  const findings = Array.isArray(summary && summary.findings) ? summary.findings : [];
+  return findings.filter((item) => text(item && item.status) === "FAIL");
+}
+
+function workspaceHasFail(summary) {
+  return failFindings(summary).length > 0;
+}
+
+function isBareWorkspaceCommand(command, alias) {
+  return Boolean(alias) && command === `dyro --workspace ${alias}`;
+}
+
+function recommendedCommand(summary) {
+  const alias = text(summary && summary.alias);
+  if (!SAFE_ID.test(alias)) return "";
+  const command = text(summary && summary.recommendation && summary.recommendation.command);
+  const doctor = `dyro --workspace ${alias} doctor`;
+  const yes = "--" + "yes";
+  const push = "--" + "push";
+  if (workspaceHasFail(summary)) {
+    if (
+      command
+      && !isBareWorkspaceCommand(command, alias)
+      && !command.includes(yes)
+      && !command.includes(push)
+    ) {
+      return command;
+    }
+    return doctor;
+  }
+  if (!command || isBareWorkspaceCommand(command, alias)) return "";
+  return command;
+}
+
+function findingLabels(summary) {
+  return failFindings(summary).map((item) => {
+    const label = displayLabel(item.reason, ATTENTION_REASON_LABELS);
+    const line = text(item.line);
+    return line ? `${line}：${label}` : label;
+  });
+}
+
 function overviewState(attention, workspaces) {
+  if (Array.isArray(workspaces) && workspaces.some(workspaceHasFail)) return "需要修复";
   if (count(attention && attention.repair_required)) return "需要修复";
   if (count(attention && attention.needs_user)) return "等待你的处理";
   if (unavailableWorkspaceCount(workspaces)) return "状态不完整";
+  if (Array.isArray(workspaces) && workspaces.some((summary) => text(summary.health) === "degraded")) {
+    return "状态不完整";
+  }
   if (count(attention && attention.ready)) return "有工作可推进";
   if (count(attention && attention.waiting)) return "等待外部条件";
   if (count(attention && attention.paused)) return "存在已暂停工作";
@@ -424,6 +496,8 @@ function workspaceMatter(summary) {
   if (text(summary && summary.availability) !== "available") {
     return "这个项目现在读不到";
   }
+  const fails = findingLabels(summary);
+  if (fails.length) return fails.join("；");
   const reason = text(summary && summary.recommendation && summary.recommendation.reason);
   if (reason && reason !== "HOME_GUIDANCE") {
     return displayLabel(reason, ATTENTION_REASON_LABELS);
@@ -442,6 +516,7 @@ function needsYouWorkspaces(workspaces) {
   return workspaces
     .filter((summary) => {
       if (text(summary.availability) !== "available") return true;
+      if (workspaceHasFail(summary)) return true;
       const attention = summary.attention_counts || {};
       return Boolean(count(attention.repair_required) || count(attention.needs_user));
     })
@@ -487,7 +562,7 @@ function renderNeedsYou(workspaces, total) {
     const why = element("p", workspaceMatter(summary));
     const actions = element("div");
     actions.className = "needs-you-actions";
-    const command = text(summary.recommendation && summary.recommendation.command);
+    const command = recommendedCommand(summary);
     if (command) {
       const copy = element("button", "复制命令");
       copy.type = "button";
@@ -510,8 +585,7 @@ function renderPrimaryAction(workspaces) {
   const why = $("primary-why");
   const command = $("primary-command");
   const button = $("primary-copy");
-  const recommendation = summary && summary.recommendation;
-  const nextCommand = text(recommendation && recommendation.command);
+  const nextCommand = recommendedCommand(summary);
   if (!summary || !nextCommand) {
     guidance.textContent = "下一步 · 还没有可执行的建议";
     if (why) why.textContent = "等项目状态可读之后，这里会给出一条可以贴到终端的命令。";
@@ -698,10 +772,10 @@ function renderInventoryList(title, items, describe) {
   section.append(element("h3", title));
   if (!items.length) {
     section.append(element("p", title === "开发线"
-      ? "没有开发线。回终端跑 dyro setup 或 line spawn。"
+      ? "没有开发线。"
       : title === "任务"
-        ? "没有任务。回终端建 Task 后再打开这一页。"
-        : "没有目标。回终端建 Objective 后再看计划。"));
+        ? "没有任务。"
+        : "没有目标。"));
     return section;
   }
   const list = element("ul");
@@ -889,7 +963,7 @@ function renderTwinPlan() {
   section.append(element("h4", "计划"));
   const plan = state.operatorTwin && Array.isArray(state.operatorTwin.plan) ? state.operatorTwin.plan : [];
   if (!plan.length) {
-    section.append(element("p", "没有目标。先在终端建 Objective，再回到这页看计划。"));
+    section.append(element("p", "没有目标。"));
     return section;
   }
   const lanes = element("div");
@@ -985,7 +1059,7 @@ function renderTwinRunning() {
   section.append(element("h4", "谁在跑"));
   const running = state.operatorTwin && Array.isArray(state.operatorTwin.running) ? state.operatorTwin.running : [];
   if (!running.length) {
-    section.append(element("p", "没有进行中的任务。要派人，回终端跑 dispatch。"));
+    section.append(element("p", "没有进行中的任务。"));
   } else {
     const list = element("ul");
     list.className = "twin-running-list";
@@ -1130,6 +1204,7 @@ function renderWorkspaceAttention(data) {
     section.append(element("p", "工作区不可读取，关注项未知。"));
     return section;
   }
+  const fails = findingLabels(data && data.workspace);
   const items = [];
   for (const objective of Array.isArray(data && data.objectives) ? data.objectives : []) {
     for (const item of Array.isArray(objective.attention) ? objective.attention : []) {
@@ -1137,9 +1212,15 @@ function renderWorkspaceAttention(data) {
     }
   }
   items.sort((left, right) => attentionKindRank(left.item) - attentionKindRank(right.item));
-  if (!items.length) {
+  if (!items.length && !fails.length) {
     section.append(element("p", "摘要未列出关注项。"));
     return section;
+  }
+  if (fails.length) {
+    const failList = element("ul");
+    for (const label of fails) failList.append(element("li", label));
+    section.append(failList);
+    if (!items.length) return section;
   }
   const list = element("ul");
   for (const entry of items) list.append(element("li", describeAttentionItem(entry.item, entry.objective)));
@@ -1294,7 +1375,7 @@ function dryRunCommands(alias, parent, child) {
   ];
 }
 
-function renderFamilyTree(alias, lines, tasks) {
+function renderFamilyTree(alias, lines, tasks, findings) {
   const section = element("section");
   section.className = "live-pane family-pane";
   section.id = "family-pane";
@@ -1322,7 +1403,7 @@ function renderFamilyTree(alias, lines, tasks) {
       button.addEventListener("click", () => {
         state.familyParent = parent;
         const tree = $("family-tree");
-        if (tree) tree.replaceWith(renderFamilyGraph(alias, lines, parent, tasks));
+        if (tree) tree.replaceWith(renderFamilyGraph(alias, lines, parent, tasks, findings));
         resetChannelState();
         resetArtifactState();
         loadChannel(alias, parent).catch((error) => {
@@ -1337,11 +1418,20 @@ function renderFamilyTree(alias, lines, tasks) {
     }
     section.append(nav);
   }
-  section.append(renderFamilyGraph(alias, lines, selected, tasks));
+  section.append(renderFamilyGraph(alias, lines, selected, tasks, findings));
   return section;
 }
 
-function familyBadges(id, tasks, unread = 0) {
+function lineFailFindings(findings, lineId) {
+  if (!Array.isArray(findings)) return [];
+  return findings.filter((item) => {
+    if (text(item && item.status) !== "FAIL") return false;
+    const line = text(item.line);
+    return !line || line === lineId;
+  });
+}
+
+function familyBadges(id, tasks, unread = 0, findings = []) {
   const marks = element("p");
   marks.className = "family-badges";
   const unreadBadge = element("span", `未读 ${count(unread)}`);
@@ -1351,11 +1441,28 @@ function familyBadges(id, tasks, unread = 0) {
     return marks;
   }
   const busy = lineInProgress(tasks, id);
-  // Git cleanliness and origin binding are not inspected. Unread is overlay-only.
-  for (const label of ["未检查", "未检查", busy ? "进行中" : "空闲"]) {
-    const badge = element("span", label);
-    badge.className = "family-badge";
-    marks.append(badge);
+  const fails = lineFailFindings(findings, id);
+  if (fails.length) {
+    const seen = new Set();
+    for (const item of fails) {
+      const label = displayLabel(item.reason, ATTENTION_REASON_LABELS);
+      if (seen.has(label)) continue;
+      seen.add(label);
+      const badge = element("span", label);
+      badge.className = "family-badge";
+      badge.dataset.level = "danger";
+      marks.append(badge);
+    }
+    const status = element("span", busy ? "进行中" : "空闲");
+    status.className = "family-badge";
+    marks.append(status);
+  } else {
+    // Git cleanliness and origin binding are not inspected. Unread is overlay-only.
+    for (const label of ["未检查", "未检查", busy ? "进行中" : "空闲"]) {
+      const badge = element("span", label);
+      badge.className = "family-badge";
+      marks.append(badge);
+    }
   }
   marks.append(unreadBadge);
   return marks;
@@ -1365,7 +1472,7 @@ function edgeLabel(parent, child, live) {
   return live ? `${parent} → ${child} · 刚有合入或同步` : `${parent} → ${child}`;
 }
 
-function renderFamilyJack(id, role, tasks) {
+function renderFamilyJack(id, role, tasks, findings) {
   const jack = element("div");
   jack.className = role === "parent" ? "family-jack is-focus" : "family-jack";
   jack.dataset.member = id;
@@ -1376,22 +1483,22 @@ function renderFamilyJack(id, role, tasks) {
     role === "parent" ? "父线" : role === "operator" ? "操作者" : "子线",
   );
   label.className = "family-role";
-  jack.append(title, label, familyBadges(id, tasks));
+  jack.append(title, label, familyBadges(id, tasks, 0, findings));
   return jack;
 }
 
-function renderFamilyGraph(alias, lines, parent, tasks) {
+function renderFamilyGraph(alias, lines, parent, tasks, findings) {
   const wrap = element("div");
   wrap.id = "family-tree";
   wrap.className = "family-tree family-bay";
   const children = familyChildren(lines, parent);
   const stage = element("div");
   stage.className = "family-stage";
-  stage.append(renderFamilyJack(parent, "parent", tasks));
+  stage.append(renderFamilyJack(parent, "parent", tasks, findings));
   const outbound = element("div");
   outbound.className = "family-outbound";
   if (!children.length) {
-    outbound.append(element("p", "还没有子线。开子线：把下面的 dry-run 贴到终端。"));
+    outbound.append(element("p", "还没有子线。"));
   }
   for (const id of children) {
     const run = element("div");
@@ -1401,16 +1508,23 @@ function renderFamilyGraph(alias, lines, parent, tasks) {
     thread.className = live ? "family-edge live" : "family-edge";
     thread.dataset.from = parent;
     thread.dataset.to = id;
-    run.append(thread, renderFamilyJack(id, "child", tasks));
+    run.append(thread, renderFamilyJack(id, "child", tasks, findings));
     outbound.append(run);
   }
-  stage.append(outbound, renderFamilyJack("operator", "operator", tasks));
+  stage.append(outbound, renderFamilyJack("operator", "operator", tasks, findings));
   wrap.append(stage);
   const actions = element("div");
   actions.className = "family-actions";
-  const child = children[0] || `${parent}_new`;
-  for (const command of dryRunCommands(alias, parent, child)) {
-    actions.append(commandRow(command));
+  const child = children[0] || "";
+  if (!SAFE_ID.test(child)) {
+    const note = element("p", "先在终端想好子线名");
+    note.className = "family-spawn-disabled";
+    note.setAttribute("aria-disabled", "true");
+    actions.append(note);
+  } else {
+    for (const command of dryRunCommands(alias, parent, child)) {
+      actions.append(commandRow(command));
+    }
   }
   wrap.append(element("p", "复制区只有 dry-run。页面不会执行 spawn、合入或同步。"));
   wrap.append(actions);
@@ -2145,6 +2259,29 @@ async function refreshFamilyUnread(alias, parent) {
   }
 }
 
+function applyLiveTab(root, tab) {
+  const id = LIVE_TABS.includes(tab) ? tab : "family";
+  state.detailTab = id;
+  if (!root) return id;
+  root.dataset.tab = id;
+  for (const pane of root.querySelectorAll ? root.querySelectorAll(".live-pane") : []) {
+    const paneId = text(pane.id);
+    const match = paneId === LIVE_PANE_IDS[id];
+    pane.hidden = !match;
+    if (match) pane.removeAttribute("hidden");
+    else pane.setAttribute("hidden", "");
+  }
+  const tabs = root.querySelector ? root.querySelector(".live-tabs") : null;
+  const buttons = tabs && tabs.querySelectorAll ? tabs.querySelectorAll("button[data-tab]") : [];
+  for (const item of buttons) {
+    const selected = text(item.dataset.tab) === id;
+    item.setAttribute("aria-selected", selected ? "true" : "false");
+    if (selected) item.setAttribute("aria-current", "true");
+    else item.removeAttribute("aria-current");
+  }
+  return id;
+}
+
 function renderLivePanes(alias, data) {
   const root = element("div");
   root.className = "live-panes";
@@ -2152,27 +2289,33 @@ function renderLivePanes(alias, data) {
   const tabs = element("div");
   tabs.className = "live-tabs";
   tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-label", "工作区面板");
   for (const [id, label] of [["family", "家族"], ["events", "事件"], ["channel", "频道"]]) {
     const button = element("button", label);
     button.type = "button";
     button.dataset.tab = id;
-    if (state.detailTab === id) button.setAttribute("aria-current", "true");
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-controls", LIVE_PANE_IDS[id]);
     button.addEventListener("click", () => {
-      state.detailTab = id;
+      applyLiveTab(root, id);
       setWorkspaceRoute(alias, id);
-      root.dataset.tab = id;
-      for (const item of tabs.querySelectorAll("button")) {
-        if (text(item.dataset.tab) === id) item.setAttribute("aria-current", "true");
-        else item.removeAttribute("aria-current");
-      }
     });
     tabs.append(button);
   }
-  root.dataset.tab = state.detailTab;
   root.append(tabs);
   const lines = Array.isArray(data && data.lines) ? data.lines : [];
   const tasks = Array.isArray(data && data.tasks) ? data.tasks : [];
-  root.append(renderFamilyTree(alias, lines, tasks), renderEventPane(), renderChannelPane(alias));
+  const findings = Array.isArray(data && data.workspace && data.workspace.findings)
+    ? data.workspace.findings
+    : [];
+  const family = renderFamilyTree(alias, lines, tasks, findings);
+  const events = renderEventPane();
+  const channel = renderChannelPane(alias);
+  family.setAttribute("role", "tabpanel");
+  events.setAttribute("role", "tabpanel");
+  channel.setAttribute("role", "tabpanel");
+  root.append(family, events, channel);
+  applyLiveTab(root, state.detailTab || "family");
   return root;
 }
 
@@ -2186,7 +2329,7 @@ function resetEventState() {
   resetArtifactState();
 }
 
-async function loadWorkspace(alias, silent = false) {
+async function loadWorkspace(alias, silent = false, force = false) {
   if (!SAFE_ID.test(alias)) return;
   if (state.detailAlias && state.detailAlias !== alias) {
     resetEventState();
@@ -2194,7 +2337,11 @@ async function loadWorkspace(alias, silent = false) {
     resetChannelState();
   }
   try {
-    const payload = await request(`/api/v1/workspaces/${encodeURIComponent(alias)}`, `workspace:${alias}`);
+    const payload = await request(
+      `/api/v1/workspaces/${encodeURIComponent(alias)}`,
+      `workspace:${alias}`,
+      { force },
+    );
     if (!payload) return;
     const summary = payload.data && payload.data.workspace;
     if (!summary) throw new Error("WORKSPACE_UNAVAILABLE");
@@ -2232,7 +2379,7 @@ async function loadWorkspace(alias, silent = false) {
     const quiet = element("div");
     quiet.className = "workspace-quiet";
     quiet.append(grid, renderInventory(payload.data));
-    const command = text(summary.recommendation && summary.recommendation.command);
+    const command = recommendedCommand(summary);
     if (command) quiet.append(commandRow(command));
     quiet.append(await loadProofInspect(alias));
     room.append(meta, hero, renderOperatorTwin(payload.data), quiet);
@@ -2267,9 +2414,9 @@ function showError(error) {
   list.append(notice);
 }
 
-async function refresh({ includeSystem = false } = {}) {
+async function refresh({ includeSystem = false, force = false } = {}) {
   try {
-    const payload = await request("/api/v1/overview?limit=100", "overview");
+    const payload = await request("/api/v1/overview?limit=100", "overview", { force });
     if (payload) {
       renderOverview(payload);
       state.partial = Boolean(payload.freshness && payload.freshness.partial);
@@ -2278,6 +2425,9 @@ async function refresh({ includeSystem = false } = {}) {
       await loadSystem();
     } else {
       renderSystem(state.system);
+    }
+    if (force && state.detailAlias) {
+      await loadWorkspace(state.detailAlias, true, true);
     }
     setStatus(
       state.partial ? "已连上本地页面；有些项目还读不到，这页不会改你的文件。" : "已连上本地页面；这页只看状态，不会改你的文件。",
@@ -2301,7 +2451,7 @@ function scheduleRefresh() {
 }
 
 async function start() {
-  $("refresh").addEventListener("click", async () => { await refresh({ includeSystem: true }); scheduleRefresh(); });
+  $("refresh").addEventListener("click", async () => { await refresh({ includeSystem: true, force: true }); scheduleRefresh(); });
   $("primary-copy").addEventListener("click", () => {
     const button = $("primary-copy");
     const command = text(button.dataset.command);
@@ -2324,11 +2474,31 @@ async function start() {
       startEventLive(state.detailAlias).catch(() => {});
     }
   });
+  window.addEventListener("hashchange", () => {
+    const raw = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+    if (!raw.startsWith("w/")) return;
+    const parts = raw.split("/").filter(Boolean);
+    const alias = parts[1] || "";
+    const tab = parts[2] || "family";
+    if (alias !== state.detailAlias) return;
+    applyLiveTab($("live-panes"), tab);
+  });
   const bootstrap = consumeFragment();
   try {
-    if (bootstrap) await exchange(bootstrap);
-    else state.bearer = sessionStorage.getItem(TOKEN_KEY) || "";
-    if (!state.bearer) throw new Error("SESSION_EXPIRED");
+    if (bootstrap) {
+      try {
+        await exchange(bootstrap);
+      } catch (_) {
+        setStatus(sessionExpiredMessage(), true);
+        return;
+      }
+    } else {
+      state.bearer = sessionStorage.getItem(TOKEN_KEY) || "";
+    }
+    if (!state.bearer) {
+      setStatus(sessionMissingMessage(), true);
+      return;
+    }
     const meta = await request("/api/v1/meta", "meta");
     if (meta) {
       const surfaces = meta.data && (meta.data.surfaces || meta.data.capabilities);
@@ -2363,4 +2533,29 @@ globalThis.__dyroTwinLive = {
   renderedTwinText,
   emptyTwin,
   getState: () => state,
+};
+globalThis.__dyroConsoleTest = {
+  overviewState,
+  workspaceMatter,
+  needsYouWorkspaces,
+  recommendedCommand,
+  isBareWorkspaceCommand,
+  failFindings,
+  renderOverview,
+  renderNeedsYou,
+  renderPrimaryAction,
+  renderLivePanes,
+  applyLiveTab,
+  renderFamilyGraph,
+  familyBadges,
+  familyChildren,
+  dryRunCommands,
+  request,
+  refresh,
+  loadWorkspace,
+  sessionMissingMessage,
+  sessionExpiredMessage,
+  getState: () => state,
+  LIVE_TABS,
+  LIVE_PANE_IDS,
 };

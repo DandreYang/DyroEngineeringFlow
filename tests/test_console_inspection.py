@@ -642,6 +642,42 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
                 "dyro --workspace demo task next", "demo"
             )
         )
+        self.assertFalse(
+            IsolatedOverviewService._safe_command("dyro --workspace demo", "demo")
+        )
+
+    def test_missing_origin_fail_is_not_ready_or_a_bare_workspace_command(self) -> None:
+        from dyro.config import load
+        from dyro.workspace import create_line, spawn_line
+
+        config = load(self.root)
+        create_line(config, line_id="core", branch="feat/core", base="main")
+        spawn_line(config, "core", "pay")
+        create_line(
+            config,
+            line_id="release_a",
+            branch="hotfix/release_a",
+            base="main",
+            kind="hotfix",
+        )
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+        )
+
+        overview = service.page(limit=1)
+        card = overview["data"]["workspaces"][0]
+        reasons = {(item["reason"], item["line"]) for item in card["findings"]}
+
+        self.assertIn(("MISSING_ORIGIN", "core"), reasons)
+        self.assertIn(("MISSING_ORIGIN", "core_pay"), reasons)
+        self.assertIn(("MISSING_ORIGIN", "release_a"), reasons)
+        self.assertEqual(card["recommendation"]["command"], "dyro --workspace demo doctor")
+        self.assertNotEqual(card["recommendation"]["command"], "dyro --workspace demo")
+        self.assertEqual(card["health"], "degraded")
+        self.assertNotEqual(card["recommendation"]["reason"], "HOME_GUIDANCE")
+        self.assertNotIn(str(self.root), repr(overview))
 
     def test_worker_cannot_serve_or_write_artifacts_via_a_mutation_op(self) -> None:
         from dyro.config import load

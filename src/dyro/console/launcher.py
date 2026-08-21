@@ -103,22 +103,22 @@ def launch_console(
     try:
         url = _bootstrap_url(server, initial_workspace)
         if no_open:
-            print("Console 已就绪。以下 URL 单次可用，并在 60 秒后失效：")
-            print(url)
+            print("Console 已就绪。以下 URL 单次可用，并在 60 秒后失效：", flush=True)
+            print(url, flush=True)
         else:
             try:
                 opened = browser_open(url)
             except Exception:
                 opened = False
             if opened is False:
-                print("无法自动打开浏览器。以下 URL 单次可用，并在 60 秒后失效：")
-                print(url)
+                print("无法自动打开浏览器。以下 URL 单次可用，并在 60 秒后失效：", flush=True)
+                print(url, flush=True)
             else:
-                print(f"Console 已在 {server.origin} 打开；按 Ctrl-C 停止。")
+                print(f"Console 已在 {server.origin} 打开；按 Ctrl-C 停止。", flush=True)
         try:
             serve(server)
         except KeyboardInterrupt:
-            print("Console 已停止。")
+            print("Console 已停止。", flush=True)
     finally:
         try:
             server.shutdown()

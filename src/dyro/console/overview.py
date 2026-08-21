@@ -31,6 +31,7 @@ from ..observations import (
     capture_workspace_read_snapshot,
     inspect_workspace_read_snapshot,
 )
+from ..workspace import doctor as load_doctor_findings, is_missing_origin_finding
 from .models import ConsoleEnvelope
 from .read_model import proof_inspect_data, workspace_envelope
 from .redaction import REDACTED, safe_id, safe_title
@@ -48,6 +49,15 @@ _ATTENTION_PRIORITY = {
     "paused": 3,
     "waiting": 4,
 }
+_FINDING_LIMIT = 32
+_LINE_FINDING = re.compile(
+    r"^FAIL (?:line|hotfix):([A-Za-z0-9][A-Za-z0-9._-]{0,79})/"
+)
+_CONSOLE_COMMAND = re.compile(
+    r"^dyro --workspace ([A-Za-z0-9][A-Za-z0-9._-]{0,79}) "
+    r"(?:doctor|objective (?:explain|tick|attention) "
+    r"[A-Za-z0-9][A-Za-z0-9._-]{0,79})$"
+)
 
 
 class ConsoleOverviewError(Exception):
@@ -87,6 +97,76 @@ def _safe_list(value: object) -> list[dict[str, object]]:
 
 def _empty_inventory() -> dict[str, list[dict[str, object]]]:
     return {"lines": [], "tasks": [], "objectives": []}
+
+
+def _fail_findings(summary: object) -> list[dict[str, str]]:
+    if not isinstance(summary, dict):
+        return []
+    raw = summary.get("findings")
+    if not isinstance(raw, list):
+        return []
+    return [
+        {
+            "status": _safe_code(item.get("status")),
+            "reason": _safe_code(item.get("reason")),
+            "line": _safe_code(item.get("line")) if item.get("line") else "",
+        }
+        for item in raw
+        if isinstance(item, dict) and _safe_code(item.get("status")) == "FAIL"
+    ]
+
+
+def _console_command(command: object, alias: str) -> str:
+    """Allowlisted read command. Never a bare workspace invocation or --yes."""
+    if not isinstance(command, str) or not isinstance(alias, str):
+        return ""
+    if "--yes" in command or "--push" in command:
+        return ""
+    if not _CONSOLE_COMMAND.fullmatch(command):
+        return ""
+    expected = f"dyro --workspace {alias} "
+    return command if command.startswith(expected) else ""
+
+
+def _project_doctor_findings(raw: object) -> list[dict[str, str]]:
+    """Path-free FAIL rows. PASS/WARN stay out; messages never carry paths."""
+    if not isinstance(raw, list):
+        return []
+    projected: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in raw:
+        if not isinstance(item, str) or not item.startswith("FAIL"):
+            continue
+        if is_missing_origin_finding(item):
+            reason = "MISSING_ORIGIN"
+        elif ": missing worktree" in item:
+            reason = "MISSING_WORKTREE"
+        elif ": missing or not Git:" in item:
+            reason = "REPOSITORY_UNAVAILABLE"
+        elif "expected upstream" in item:
+            reason = "UPSTREAM_MISMATCH"
+        elif ": expected " in item and ", found " in item:
+            reason = "BRANCH_MISMATCH"
+        elif "common-dir" in item:
+            reason = "COMMON_DIR"
+        elif "symlink" in item or "anchor-reference" in item:
+            reason = "SYMLINK"
+        elif "external Profile" in item:
+            reason = "EXTERNAL_POLICY"
+        else:
+            reason = "DOCTOR_FAIL"
+        match = _LINE_FINDING.search(item)
+        line = _safe_code(match.group(1)) if match else ""
+        if line == "REDACTED":
+            line = ""
+        key = ("FAIL", reason, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        projected.append({"status": "FAIL", "reason": reason, "line": line})
+        if len(projected) >= _FINDING_LIMIT:
+            break
+    return projected
 
 
 def _without_proof_decay(items: object) -> list[dict[str, object]]:
@@ -164,6 +244,7 @@ class ConsoleOverviewService:
         | None = None,
         update_loader: Callable[[], UpdateState] = load_update_state,
         version_loader: Callable[[], str] = lambda: __version__,
+        doctor_loader: Callable[[Config], list[str]] = load_doctor_findings,
     ) -> None:
         if cursor_secret is not None and (
             not isinstance(cursor_secret, bytes) or len(cursor_secret) < 32
@@ -178,6 +259,7 @@ class ConsoleOverviewService:
         self._summary_loader = summary_loader
         self._update_loader = update_loader
         self._version_loader = version_loader
+        self._doctor_loader = doctor_loader
 
     def page(
         self,
@@ -598,6 +680,7 @@ class ConsoleOverviewService:
                         "reason": "WORKSPACE_UNAVAILABLE",
                         "command": f"dyro --workspace {safe_alias} doctor",
                     },
+                    "findings": [],
                     "snapshot_sha256": "",
                     "proof_inspection": "not_inspected",
                 },
@@ -621,8 +704,14 @@ class ConsoleOverviewService:
             status = _safe_code(task.get("status"))
             task_status_counts[status] = task_status_counts.get(status, 0) + 1
         attention = self._workspace_attention(objectives)
-        partial = freshness.get("state") != "fresh"
-        health = "degraded" if partial else "healthy"
+        findings: list[dict[str, str]] = []
+        try:
+            findings = _project_doctor_findings(self._doctor_loader(config))
+        except (DyroError, ValidationError, OSError, UnicodeError, TypeError, AttributeError):
+            warning_codes.add("DOCTOR_UNAVAILABLE")
+        partial = freshness.get("state") != "fresh" or bool(warning_codes)
+        fails = [item for item in findings if item.get("status") == "FAIL"]
+        health = "degraded" if partial or fails else "healthy"
         summary = {
             "alias": safe_alias,
             "display_name": safe_title(getattr(config, "name", workspace.get("name"))),
@@ -639,7 +728,10 @@ class ConsoleOverviewService:
             "task_count": len(tasks),
             "task_status_counts": dict(sorted(task_status_counts.items())),
             "attention_counts": attention["counts"],
-            "recommendation": self._recommendation(safe_alias, attention["items"]),
+            "recommendation": self._recommendation(
+                safe_alias, attention["items"], findings=findings
+            ),
+            "findings": findings,
             "snapshot_sha256": str(envelope.get("snapshot_sha256", "")),
             "proof_inspection": "not_inspected",
         }
@@ -681,27 +773,50 @@ class ConsoleOverviewService:
         return {"counts": counts, "items": items}
 
     def _recommendation(
-        self, alias: str, attention: object
+        self,
+        alias: str,
+        attention: object,
+        findings: object = None,
+        commands: object = None,
     ) -> dict[str, str] | None:
+        doctor = f"dyro --workspace {alias} doctor"
+        next_command = ""
+        if isinstance(commands, list):
+            for raw in commands:
+                next_command = _console_command(raw, alias)
+                if next_command:
+                    break
+        fails = [
+            item
+            for item in findings
+            if isinstance(item, dict) and _safe_code(item.get("status")) == "FAIL"
+        ] if isinstance(findings, list) else []
+        if fails:
+            reason = _safe_code(fails[0].get("reason"))
+            if reason in {"", "REDACTED"}:
+                reason = "DOCTOR_FAIL"
+            return {"reason": reason, "command": next_command or doctor}
         if not isinstance(attention, list) or not attention:
             return {
                 "reason": "HOME_GUIDANCE",
-                "command": f"dyro --workspace {alias}",
+                "command": next_command or doctor,
             }
         item = attention[0]
         if not isinstance(item, dict):
-            return None
+            return {"reason": "HOME_GUIDANCE", "command": next_command or doctor}
         objective_id = _safe_code(item.get("objective_id"))
+        follow_up = " ".join(
+            (
+                "dyro",
+                "--workspace",
+                alias,
+                *follow_up_from_kind(_safe_code(item.get("kind")), objective_id),
+            )
+        )
+        command = _console_command(follow_up, alias) or next_command or doctor
         return {
             "reason": _safe_code(item.get("reason")),
-            "command": " ".join(
-                (
-                    "dyro",
-                    "--workspace",
-                    alias,
-                    *follow_up_from_kind(_safe_code(item.get("kind")), objective_id),
-                )
-            ),
+            "command": command,
         }
 
     def _attention_counts(self, summaries: list[dict[str, object]]) -> dict[str, int]:
@@ -736,6 +851,23 @@ class ConsoleOverviewService:
             counts = _safe_mapping(summary.get("attention_counts"))
             if not isinstance(recommendation, dict):
                 continue
+            fails = _fail_findings(summary)
+            if fails:
+                reason = _safe_code(fails[0].get("reason"))
+                if reason in {"", "REDACTED"}:
+                    reason = "DOCTOR_FAIL"
+                candidates.append(
+                    (
+                        0,
+                        str(summary.get("alias", "")),
+                        {
+                            "alias": _safe_code(summary.get("alias")),
+                            "kind": "repair_required",
+                            "reason": reason,
+                        },
+                    )
+                )
+                continue
             for kind, priority in _ATTENTION_PRIORITY.items():
                 if counts.get(kind, 0):
                     candidates.append(
@@ -757,7 +889,11 @@ class ConsoleOverviewService:
     @staticmethod
     def _summary_sort_key(summary: dict[str, object]) -> tuple[int, str]:
         counts = _safe_mapping(summary.get("attention_counts"))
-        if summary.get("availability") == "unavailable" or counts.get("repair_required", 0):
+        if (
+            summary.get("availability") == "unavailable"
+            or counts.get("repair_required", 0)
+            or _fail_findings(summary)
+        ):
             priority = 0
         elif counts.get("needs_user", 0):
             priority = 1

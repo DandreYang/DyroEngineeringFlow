@@ -55,6 +55,7 @@ def _unavailable_summary(alias: str, code: str) -> dict[str, object]:
             "reason": code,
             "command": f"dyro --workspace {alias} doctor",
         },
+        "findings": [],
         "snapshot_sha256": "",
         "proof_inspection": "not_inspected",
     }

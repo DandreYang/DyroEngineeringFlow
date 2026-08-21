@@ -29,6 +29,7 @@ def _snapshot(
     failure_code: str = "OBJECTIVES_UNAVAILABLE",
     proof_inspection: str = "not_inspected",
     proofs: tuple[WorkspaceProofObservation, ...] = (),
+    attention: tuple[ObjectiveAttentionObservation, ...] | None = None,
 ) -> WorkspaceReadSnapshot:
     observed_at = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
     failures = ()
@@ -86,11 +87,15 @@ def _snapshot(
                 selected_actions=(),
                 blocked_actions=(),
                 attention=(
-                    ObjectiveAttentionObservation(
-                        kind=attention_kind,
-                        subject_id="TASK-A",
-                        reason=reason,
-                    ),
+                    (
+                        ObjectiveAttentionObservation(
+                            kind=attention_kind,
+                            subject_id="TASK-A",
+                            reason=reason,
+                        ),
+                    )
+                    if attention is None
+                    else attention
                 ),
                 contract_sha256="c" * 64,
                 scope_sha256="d" * 64,
@@ -143,6 +148,7 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
             snapshot_loader=lambda config: self.snapshots[config.name],
             clock=lambda: datetime(2026, 8, 4, 12, 5, tzinfo=timezone.utc),
             cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [],
         )
 
     def test_paginates_stably_prioritizes_attention_and_never_exposes_roots(self) -> None:
@@ -186,13 +192,74 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_CURSOR_INVALID"):
             self.service.page(cursor=cursor, limit=1)
 
-    def test_empty_attention_recommends_the_guided_home_not_task_next(self) -> None:
-        recommendation = self.service._recommendation("alpha", [])
+    def test_empty_attention_recommends_doctor_not_a_bare_workspace_invocation(self) -> None:
+        recommendation = self.service._recommendation("core", [])
 
         self.assertEqual(
             recommendation,
-            {"reason": "HOME_GUIDANCE", "command": "dyro --workspace alpha"},
+            {"reason": "HOME_GUIDANCE", "command": "dyro --workspace core doctor"},
         )
+        self.assertNotEqual(recommendation["command"], "dyro --workspace core")
+
+    def test_fail_findings_and_empty_commands_recommend_doctor_not_bare_home(self) -> None:
+        recommendation = self.service._recommendation(
+            "core",
+            [],
+            findings=[
+                {"status": "FAIL", "reason": "MISSING_ORIGIN", "line": "core"},
+                {"status": "FAIL", "reason": "MISSING_ORIGIN", "line": "release_a"},
+            ],
+            commands=[],
+        )
+
+        self.assertEqual(recommendation["command"], "dyro --workspace core doctor")
+        self.assertNotEqual(recommendation["command"], "dyro --workspace core")
+        self.assertEqual(recommendation["reason"], "MISSING_ORIGIN")
+        self.assertNotEqual(recommendation["reason"], "HOME_GUIDANCE")
+
+    def test_fail_findings_project_path_free_and_degrade_health(self) -> None:
+        self.registry = WorkspaceRegistry(
+            default="core",
+            workspaces=(WorkspaceRecord("core", self.alpha_root),),
+        )
+        self.snapshots["Alpha Project"] = _snapshot(
+            name="Alpha Project",
+            attention=(),
+        )
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            config_loader=self.service._config_loader,
+            snapshot_loader=lambda config: self.snapshots[config.name],
+            clock=self.service._clock,
+            cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [
+                "FAIL line:core/api: missing origin/feat/core",
+                "FAIL line:core_pay/api: missing origin/feat/core_pay",
+                "FAIL hotfix:release_a/api: missing origin/hotfix/release_a",
+                "FAIL repository api: missing or not Git: /private/secret",
+            ],
+        )
+
+        page = service.page()
+        card = page["data"]["workspaces"][0]
+
+        self.assertEqual(card["alias"], "core")
+        self.assertEqual(card["health"], "degraded")
+        self.assertEqual(
+            {(item["reason"], item["line"]) for item in card["findings"]},
+            {
+                ("MISSING_ORIGIN", "core"),
+                ("MISSING_ORIGIN", "core_pay"),
+                ("MISSING_ORIGIN", "release_a"),
+                ("REPOSITORY_UNAVAILABLE", ""),
+            },
+        )
+        self.assertEqual(card["recommendation"]["command"], "dyro --workspace core doctor")
+        self.assertNotEqual(card["recommendation"]["command"], "dyro --workspace core")
+        self.assertEqual(page["data"]["highest_priority"]["kind"], "repair_required")
+        self.assertEqual(page["data"]["highest_priority"]["reason"], "MISSING_ORIGIN")
+        self.assertNotIn("/private", repr(page))
+        self.assertNotIn("secret", repr(card["findings"]))
 
     def test_attention_recommends_the_same_follow_up_as_next(self) -> None:
         self.assertEqual(
@@ -270,6 +337,7 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         page = self.service.page(limit=3)
 
         self.assertEqual(payload["data"]["workspace"]["alias"], "alpha")
+        self.assertEqual(payload["data"]["workspace"]["findings"], [])
         self.assertEqual(payload["data"]["workspace"]["proof_inspection"], "not_inspected")
         self.assertEqual(payload["data"]["lines"][0]["id"], "alpha")
         self.assertEqual(payload["data"]["lines"][0]["parent"], "")
@@ -301,6 +369,7 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
             snapshot_loader=self.service._snapshot_loader,
             clock=self.service._clock,
             cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [],
         )
 
         payload = service.page()
@@ -312,6 +381,7 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         payload = self.service.workspace("broken")
 
         self.assertEqual(payload["data"]["workspace"]["availability"], "unavailable")
+        self.assertEqual(payload["data"]["workspace"]["findings"], [])
         self.assertEqual(payload["data"]["workspace"]["proof_inspection"], "not_inspected")
         self.assertEqual(payload["data"]["lines"], [])
         self.assertEqual(payload["data"]["tasks"], [])
@@ -347,6 +417,7 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
             inspect_loader=lambda config: inspected,
             clock=lambda: datetime(2026, 8, 4, 12, 5, tzinfo=timezone.utc),
             cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [],
         )
         leaked = ConsoleOverviewService(
             registry_loader=lambda: self.registry,
@@ -355,6 +426,7 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
             inspect_loader=lambda config: inspected,
             clock=lambda: datetime(2026, 8, 4, 12, 5, tzinfo=timezone.utc),
             cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [],
         )
         summary = leaked.workspace("alpha")
         self.assertEqual(summary["data"]["workspace"]["proof_inspection"], "not_inspected")

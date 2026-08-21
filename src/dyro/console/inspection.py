@@ -87,8 +87,23 @@ _SUMMARY_KEYS = frozenset(
         "task_status_counts",
         "attention_counts",
         "recommendation",
+        "findings",
         "snapshot_sha256",
         "proof_inspection",
+    }
+)
+_FINDING_KEYS = frozenset({"status", "reason", "line"})
+_FINDING_REASONS = frozenset(
+    {
+        "MISSING_ORIGIN",
+        "MISSING_WORKTREE",
+        "BRANCH_MISMATCH",
+        "REPOSITORY_UNAVAILABLE",
+        "UPSTREAM_MISMATCH",
+        "COMMON_DIR",
+        "SYMLINK",
+        "EXTERNAL_POLICY",
+        "DOCTOR_FAIL",
     }
 )
 
@@ -780,6 +795,7 @@ class IsolatedOverviewService:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         if value.get("proof_inspection") != "not_inspected":
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        cls._validate_findings(value.get("findings"))
 
     @classmethod
     def _validate_inventory(cls, data: dict[str, object]) -> None:
@@ -1103,10 +1119,25 @@ class IsolatedOverviewService:
         escaped_alias = re.escape(alias)
         return bool(
             re.fullmatch(
-                rf"dyro --workspace {escaped_alias}(?: (?:doctor|objective (?:explain|tick|attention) [A-Za-z0-9][A-Za-z0-9._-]{{0,79}}))?",
+                rf"dyro --workspace {escaped_alias} (?:doctor|objective (?:explain|tick|attention) [A-Za-z0-9][A-Za-z0-9._-]{{0,79}})",
                 command,
             )
         )
+
+    @classmethod
+    def _validate_findings(cls, value: object) -> None:
+        if not isinstance(value, list) or len(value) > 32:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in value:
+            if not isinstance(item, dict) or set(item) != _FINDING_KEYS:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if item.get("status") != "FAIL":
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if item.get("reason") not in _FINDING_REASONS:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            line = item.get("line")
+            if line != "" and not cls._safe_alias(line):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
 
     @staticmethod
     def _validate_attention_counts(value: object) -> None:
