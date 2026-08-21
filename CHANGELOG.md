@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.10 - 2026-08-21
+
 - `dyro next` no longer reports `ready` when doctor has FAIL findings,
   including missing-origin-only. JSON `state` is `needs_repair`,
   `commands` includes scoped `doctor` (a read; `mutation_available`
