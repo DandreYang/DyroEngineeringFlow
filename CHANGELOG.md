@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.9 - 2026-08-21
+
 - Console P4: workspace detail now projects a read-only operator twin after
   the existing inventory and before the family / events / channel panes.
   Plan swimlanes come from existing Objectives plus `objective_wave` events;
