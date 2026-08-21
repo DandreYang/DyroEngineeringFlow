@@ -44,6 +44,7 @@ from .continuation.briefing import (
     render_human_attention,
     render_human_wave,
 )
+from .continuation.next_step import bootstrap_repair_applicable, repair_commands
 from .continuation.ready_briefing import briefing_command, build_ready_briefing
 from .continuation.engine import (
     build_scheduler_tick,
@@ -164,7 +165,6 @@ from .onboarding import (
     render_setup_plan,
     repository_input_from_path,
     sibling_workspace_for,
-    validate_bootstrap_destination,
 )
 from .read_limits import ObservationLimits, ReadBudget, ReadLimitCode, ReadLimitError
 from .profile import (
@@ -2525,14 +2525,6 @@ def cmd_start(args: argparse.Namespace) -> None:
     )
 
 
-def _bootstrap_destination_safe(config: Config, relative: str) -> bool:
-    try:
-        validate_bootstrap_destination(config, relative)
-    except (DyroError, OSError):
-        return False
-    return True
-
-
 def _next_push_fields(config: Config) -> dict[str, object]:
     return push_policy_fields(config.policy)
 
@@ -2581,34 +2573,10 @@ def cmd_next(args: argparse.Namespace) -> None:
     budget = _control_plane_budget(args) if args.format == "json" else None
     findings = doctor(config, read_budget=budget)
     failures = [finding for finding in findings if finding.startswith("FAIL")]
-    missing_origin_failures = [
-        finding for finding in failures if is_missing_origin_finding(finding)
-    ]
-    blocking_failures = [
-        finding for finding in failures if not is_missing_origin_finding(finding)
-    ]
-    if blocking_failures:
-        absent_bootstrap_ids = {
-            repo_id
-            for repo_id, repository in config.repositories.items()
-            if repository.remote
-            and not (config.root / repository.path).exists()
-            and not (config.root / repository.path).is_symlink()
-            and _bootstrap_destination_safe(config, repository.path)
-        }
-        expected_bootstrap_failures = {
-            f"FAIL repository {repo_id}: missing or not Git: "
-            f"{config.root / config.repositories[repo_id].path}"
-            for repo_id in absent_bootstrap_ids
-        }
-        bootstrap_applicable = (
-            bool(absent_bootstrap_ids) and set(failures) == expected_bootstrap_failures
-        )
-        repair_commands = (
-            [_briefing_command(args, config, "bootstrap", "--yes")]
-            if bootstrap_applicable
-            else []
-        )
+    if failures:
+        alias = getattr(args, "workspace_alias", None) or config.name
+        commands = repair_commands(config, str(alias), failures)
+        bootstrap_applicable = bootstrap_repair_applicable(config, failures)
         findings = [
             _doctor_finding_payload(item, include_paths=False) for item in failures
         ]
@@ -2617,7 +2585,7 @@ def cmd_next(args: argparse.Namespace) -> None:
                 "next_step",
                 state="needs_repair",
                 summary="工作区还不能开始任务。",
-                commands=repair_commands,
+                commands=commands,
                 diagnostic_commands=[_briefing_command(args, config, "doctor")],
                 mutation_available=bootstrap_applicable,
                 findings=findings,
@@ -2689,17 +2657,10 @@ def cmd_next(args: argparse.Namespace) -> None:
         if briefing is not None:
             payload["briefing"] = briefing
             payload["diagnostic_commands"] = diagnostic_commands
-        if missing_origin_failures:
-            payload["findings"] = [
-                _doctor_finding_payload(item, include_paths=False)
-                for item in missing_origin_failures
-            ]
         payload.update(_family_unacked_fields(config))
         payload.update(_next_push_fields(config))
         _print_control_plane_json("next_step", **payload)
         return
-    for finding in missing_origin_failures:
-        _print_doctor_finding(finding)
     if briefing is None:
         print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。")
         _print_family_unacked_attention(config)

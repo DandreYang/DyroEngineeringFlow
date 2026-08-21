@@ -1126,9 +1126,20 @@ class ObjectiveCliTests(WorkspaceCase):
                     )
 
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["state"], "ready")
-        self.assertEqual(payload["commands"], [])
+        self.assertEqual(payload["state"], "needs_repair")
+        self.assertNotEqual(payload["state"], "ready")
+        self.assertEqual(
+            payload["commands"],
+            ["dyro --workspace selected doctor"],
+        )
         self.assertFalse(payload["mutation_available"])
+        self.assertTrue(
+            any(
+                "missing origin/" in item.get("message", "")
+                for item in payload.get("findings", [])
+            ),
+            payload,
+        )
 
     def test_control_plane_json_runtime_errors_use_one_stable_envelope(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-registry-") as registry_home:
@@ -1259,7 +1270,10 @@ class ObjectiveCliTests(WorkspaceCase):
         self.anchor.rename(self.root / "api-missing")
         unavailable = self._read_json("next")
         self.assertFalse(unavailable["mutation_available"])
-        self.assertEqual(unavailable["commands"], [])
+        self.assertEqual(
+            unavailable["commands"],
+            ["dyro --workspace test-workspace doctor"],
+        )
         self.assertEqual(
             unavailable["diagnostic_commands"],
             ["dyro --workspace test-workspace doctor"],
@@ -1305,7 +1319,10 @@ class ObjectiveCliTests(WorkspaceCase):
         payload = self._read_json("next")
 
         self.assertFalse(payload["mutation_available"])
-        self.assertEqual(payload["commands"], [])
+        self.assertEqual(
+            payload["commands"],
+            ["dyro --workspace test-workspace doctor"],
+        )
         self.assertFalse((outside / "api").exists())
 
     def test_control_plane_rejects_symlinked_line_and_changeset_manifests(self) -> None:
@@ -1699,6 +1716,7 @@ class ObjectiveCliTests(WorkspaceCase):
         self.assertIn("下一步：", "\n".join(briefing["lines"]))
 
     def test_next_with_one_live_objective_points_to_follow_up(self) -> None:
+        publish_origin_branch(self.anchor, "feat/alpha")
         self._start_release_objective()
         explain = self._read_json("objective", "explain", "release")
         payload = self._read_json("next")
@@ -1744,6 +1762,7 @@ class ObjectiveCliTests(WorkspaceCase):
         self.assertNotIn("objective attention", text)
 
     def test_next_with_two_live_objectives_does_not_pick_one(self) -> None:
+        publish_origin_branch(self.anchor, "feat/alpha")
         self._start_release_objective()
         directory = self.config.task_specs_dir / "TASK-B"
         directory.mkdir(parents=True)

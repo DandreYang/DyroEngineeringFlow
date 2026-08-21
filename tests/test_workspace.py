@@ -117,16 +117,21 @@ class WorkspaceTests(WorkspaceCase):
         with redirect_stdout(output):
             main(["--root", str(self.root), "next"])
         rendered = output.getvalue()
-        # doctor still FAILs missing origin; next stays ready when that is
-        # the only FAIL and discloses it.
+        # doctor FAILs missing origin; next must not sell that as ready.
         self.assertIn("missing origin/feat/local-only", rendered)
-        self.assertNotIn("还不能开始任务", rendered)
-        self.assertIn("工作区已就绪", rendered)
+        self.assertIn("还不能开始任务", rendered)
+        self.assertNotIn("工作区已就绪", rendered)
+        self.assertIn("dyro --workspace test-workspace doctor", rendered)
         json_out = StringIO()
         with redirect_stdout(json_out):
             main(["--root", str(self.root), "next", "--format", "json"])
         payload = json.loads(json_out.getvalue())
-        self.assertEqual(payload["state"], "ready")
+        self.assertEqual(payload["state"], "needs_repair")
+        self.assertNotEqual(payload["state"], "ready")
+        self.assertIn(
+            "dyro --workspace test-workspace doctor", payload["commands"]
+        )
+        self.assertFalse(payload["mutation_available"])
         self.assertTrue(
             any(
                 "missing origin/feat/local-only" in item.get("message", "")

@@ -19,6 +19,7 @@ import time
 from typing import Any
 
 from ..config import load
+from ..continuation.next_step import next_commands
 from ..hub import WorkspaceRecord, WorkspaceRegistry
 from .overview import (
     ConsoleOverviewError,
@@ -61,7 +62,10 @@ def _capture_workspace_summary(
             default=record.name if is_default else "",
             workspaces=(record,),
         )
-        service = ConsoleOverviewService(registry_loader=lambda: registry)
+        service = ConsoleOverviewService(
+            registry_loader=lambda: registry,
+            commands_loader=next_commands,
+        )
         payload = service.workspace(record.name)
         summary = payload["data"]["workspace"]
         warnings = [item["code"] for item in payload["freshness"]["warnings"]]
@@ -282,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         service_arguments: dict[str, object] = {
             "cursor_secret": _secret_from_environment(),
             "summary_loader": _isolated_summaries,
+            "commands_loader": next_commands,
         }
         if target_registry is not None:
             service_arguments["registry_loader"] = lambda: target_registry

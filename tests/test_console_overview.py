@@ -262,6 +262,39 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         self.assertEqual(recommendation["reason"], "MISSING_ORIGIN")
         self.assertNotEqual(recommendation["reason"], "HOME_GUIDANCE")
 
+    def test_commands_loader_receives_registry_alias_not_empty_default(self) -> None:
+        seen: list[str | None] = []
+
+        def loader(config: object, alias: str | None = None) -> list[str]:
+            seen.append(alias)
+            return [f"dyro --workspace {alias} doctor"]
+
+        self.registry = WorkspaceRegistry(
+            default="core",
+            workspaces=(WorkspaceRecord("core", self.alpha_root),),
+        )
+        self.snapshots["Alpha Project"] = _snapshot(
+            name="Alpha Project",
+            attention=(),
+        )
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            config_loader=self.service._config_loader,
+            snapshot_loader=lambda config: self.snapshots[config.name],
+            clock=self.service._clock,
+            cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [
+                "FAIL line:core/api: missing origin/feat/core",
+            ],
+            commands_loader=loader,
+        )
+
+        card = service.page()["data"]["workspaces"][0]
+
+        self.assertEqual(seen, ["core"])
+        self.assertEqual(card["recommendation"]["command"], "dyro --workspace core doctor")
+        self.assertNotEqual(card["recommendation"]["command"], "dyro --workspace core")
+
     def test_fail_findings_project_path_free_and_degrade_health(self) -> None:
         self.registry = WorkspaceRegistry(
             default="core",

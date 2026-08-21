@@ -794,6 +794,42 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         self.assertEqual(card["health"], "degraded")
         self.assertNotEqual(card["recommendation"]["reason"], "HOME_GUIDANCE")
         self.assertNotIn(str(self.root), repr(overview))
+        workspace = service.workspace("demo")
+        self.assertEqual(
+            workspace["data"]["workspace"]["recommendation"]["command"],
+            "dyro --workspace demo doctor",
+        )
+        self.assertNotEqual(
+            workspace["data"]["workspace"]["recommendation"]["command"],
+            "dyro --workspace demo",
+        )
+
+    def test_isolated_summary_worker_passes_next_commands_loader(self) -> None:
+        from dyro.config import load
+        from dyro.continuation.next_step import next_commands
+        from dyro.workspace import create_line
+
+        create_line(load(self.root), line_id="core", branch="feat/core", base="main")
+        seen: dict[str, object] = {}
+        real = _inspect_worker.ConsoleOverviewService
+
+        def spy(*args: object, **kwargs: object):
+            seen.update(kwargs)
+            return real(*args, **kwargs)
+
+        class _Queue:
+            def put(self, value: object) -> None:
+                self.value = value
+
+        with patch.object(_inspect_worker, "ConsoleOverviewService", side_effect=spy):
+            _inspect_worker._capture_workspace_summary(
+                _Queue(), WorkspaceRecord("demo", self.root), True
+            )
+
+        self.assertIs(seen.get("commands_loader"), next_commands)
+        commands = next_commands(load(self.root), alias="demo")
+        self.assertIn("dyro --workspace demo doctor", commands)
+        self.assertNotIn("dyro --workspace demo", commands)
 
     def test_worker_cannot_serve_or_write_artifacts_via_a_mutation_op(self) -> None:
         from dyro.config import load
