@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- JSON `doctor` / `status` / `next` no longer share a flat 5s observation
+  deadline with Bridge. Those commands start at the documented 45s ceiling
+  (not 5s) so a ~50+ worktree workspace that the text path finishes in ~7s
+  cannot bare-`DEADLINE_EXCEEDED` at ~5.3s. Locked Mac baseline: five
+  consecutive JSON `status` walls at 5.35–5.41s are 0/5 on the 5s
+  protocol budget and must be 5/5 success (or structured partial that
+  still returns completed FAILs), never a bare `DEADLINE_EXCEEDED`. A
+  default 5s `ReadBudget` passed into `doctor()` / `status_rows()` still
+  grows by 0.4s per extra git scope, capped at 45s. Isolated Console
+  overview still calls unbounded `doctor()`; inspect workers still use
+  3s/6s process kills and do not attach this budget. If the ceiling is
+  hit, the JSON `kind` stays `doctor` / `workspace_status` / `next_step`
+  with `partial: true`, `code: DEADLINE_EXCEEDED`, and completed FAIL
+  findings or rows; leftover timeout reuses that stash and keeps a
+  non-empty `doctor` repair command. JSON `status` deadline partial
+  exits 2, same as `doctor`. It is not a bare `kind=error` with
+  `command`. `next` stays `needs_repair` (never ready on FAIL).
 - Attach first-party Skill avatars to OpenCode and Hermes when those host
   homes already exist (`~/.config/opencode/skills/<skill>`,
   `~/.hermes/skills/<skill>`). Detection stays fail-closed: absent default

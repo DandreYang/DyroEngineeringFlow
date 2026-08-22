@@ -5,8 +5,8 @@ from __future__ import annotations
 from ..config import Config
 from ..errors import DyroError, ValidationError
 from ..onboarding import validate_bootstrap_destination
-from ..read_limits import ReadBudget
-from ..workspace import doctor, list_lines
+from ..read_limits import ReadBudget, ReadLimitCode, ReadLimitError
+from ..workspace import OBSERVATION_DEADLINE_FINDING, doctor, list_lines
 from .ready_briefing import briefing_command
 
 
@@ -26,6 +26,10 @@ def next_commands(
         return []
     try:
         findings = doctor(config, read_budget=read_budget)
+    except ReadLimitError as exc:
+        if exc.code != ReadLimitCode.DEADLINE_EXCEEDED:
+            return []
+        return deadline_repair_commands(config, token)
     except (DyroError, ValidationError, OSError, TypeError, AttributeError):
         return []
     failures = [
@@ -37,11 +41,31 @@ def next_commands(
         return repair_commands(config, token, failures)
     try:
         lines = list_lines(config, read_budget=read_budget)
+    except ReadLimitError as exc:
+        if exc.code != ReadLimitCode.DEADLINE_EXCEEDED:
+            return []
+        return deadline_repair_commands(config, token, findings)
     except (DyroError, ValidationError, OSError, TypeError, AttributeError):
         return []
     if not lines:
         return [briefing_command(token, "line", "create", "dev", "--yes")]
     return []
+
+
+def deadline_repair_commands(
+    config: Config, alias: str, findings: list[str] | None = None
+) -> list[str]:
+    """Non-empty doctor repair when a read budget deadline escapes."""
+
+    failures = [
+        item
+        for item in (findings or [])
+        if isinstance(item, str) and item.startswith("FAIL")
+    ]
+    if OBSERVATION_DEADLINE_FINDING not in failures:
+        failures.append(OBSERVATION_DEADLINE_FINDING)
+    commands = repair_commands(config, alias, failures)
+    return commands or [briefing_command(alias, "doctor")]
 
 
 def repair_commands(config: Config, alias: str, failures: list[str]) -> list[str]:

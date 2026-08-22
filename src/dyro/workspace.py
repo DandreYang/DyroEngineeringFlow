@@ -16,6 +16,7 @@ from .read_limits import (
     ReadBudget,
     ReadLimitCode,
     ReadLimitError,
+    apply_control_plane_fanout,
     bounded_directory_names,
 )
 from .state import atomic_write_text, exclusive_lock
@@ -24,6 +25,14 @@ from .state import atomic_write_text, exclusive_lock
 STORAGE_MODES = frozenset({"linked-worktree", "anchor-reference"})
 LINE_MANIFEST_SCHEMAS = frozenset({1, 2, 3})
 MERGE_LOCK_TIMEOUT_SECONDS = 1800.0
+OBSERVATION_DEADLINE_FINDING = (
+    "FAIL observation: deadline exceeded before every worktree was inspected"
+)
+OBSERVATION_TIMEOUT_SCOPE = "observation"
+OBSERVATION_TIMEOUT_BRANCH = "TIMEOUT"
+_STASHED_FINDINGS = "_control_plane_findings"
+_STASHED_ROWS = "_control_plane_rows"
+ObservationStatusRow = tuple[str, str, str, str, str, int]
 
 
 @dataclass(frozen=True)
@@ -1191,122 +1200,248 @@ def _short_status(
     return branch, head, upstream, dirty
 
 
+def git_observation_scope_count(
+    config: Config, *, read_budget: ReadBudget | None = None
+) -> int:
+    """Count anchors plus each line/hotfix worktree from manifests (no git)."""
+
+    count = len(config.repositories)
+    for line in list_lines(config, read_budget=read_budget):
+        count += len(line.repositories)
+    return max(count, 1)
+
+
+def is_observation_deadline_finding(finding: str) -> bool:
+    return finding == OBSERVATION_DEADLINE_FINDING
+
+
+def observation_timeout_row() -> ObservationStatusRow:
+    return (
+        OBSERVATION_TIMEOUT_SCOPE,
+        "-",
+        OBSERVATION_TIMEOUT_BRANCH,
+        "-",
+        "-",
+        -1,
+    )
+
+
+def is_observation_timeout_row(row: ObservationStatusRow) -> bool:
+    return (
+        row[0] == OBSERVATION_TIMEOUT_SCOPE
+        and row[2] == OBSERVATION_TIMEOUT_BRANCH
+    )
+
+
+def stash_observation_findings(
+    read_budget: ReadBudget | None, findings: list[str]
+) -> None:
+    if read_budget is None:
+        return
+    setattr(read_budget, _STASHED_FINDINGS, list(findings))
+
+
+def stashed_observation_findings(read_budget: ReadBudget | None) -> list[str]:
+    if read_budget is None:
+        return []
+    raw = getattr(read_budget, _STASHED_FINDINGS, None)
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, str)]
+
+
+def stash_observation_rows(
+    read_budget: ReadBudget | None, rows: list[ObservationStatusRow]
+) -> None:
+    if read_budget is None:
+        return
+    setattr(read_budget, _STASHED_ROWS, list(rows))
+
+
+def stashed_observation_rows(
+    read_budget: ReadBudget | None,
+) -> list[ObservationStatusRow]:
+    if read_budget is None:
+        return []
+    raw = getattr(read_budget, _STASHED_ROWS, None)
+    if not isinstance(raw, list):
+        return []
+    kept: list[ObservationStatusRow] = []
+    for item in raw:
+        if (
+            isinstance(item, tuple)
+            and len(item) == 6
+            and all(isinstance(part, str) for part in item[:5])
+            and isinstance(item[5], int)
+            and not isinstance(item[5], bool)
+        ):
+            kept.append(item)
+    return kept
+
+
+def _scale_control_plane_budget(
+    config: Config, read_budget: ReadBudget | None
+) -> None:
+    if read_budget is None:
+        return
+    apply_control_plane_fanout(
+        read_budget,
+        git_observation_scope_count(config, read_budget=read_budget),
+    )
+
+
 def status_rows(
     config: Config, *, read_budget: ReadBudget | None = None
 ) -> list[tuple[str, str, str, str, str, int]]:
     rows: list[tuple[str, str, str, str, str, int]] = []
-    for repo_id in sorted(config.repositories):
-        path = repository_path(config, repo_id)
-        if _is_git_repo(path, read_budget=read_budget):
-            branch, head, upstream, dirty = _short_status(
-                path, read_budget=read_budget
-            )
-            rows.append(("anchor", repo_id, branch, head, upstream, dirty))
-        else:
-            rows.append(("anchor", repo_id, "MISSING", "-", "-", -1))
-    for line in list_lines(config, read_budget=read_budget):
-        for repo_id in line.repositories:
-            path = line_repository_path(config, line, repo_id)
+    try:
+        _scale_control_plane_budget(config, read_budget)
+        for repo_id in sorted(config.repositories):
+            path = repository_path(config, repo_id)
             if _is_git_repo(path, read_budget=read_budget):
                 branch, head, upstream, dirty = _short_status(
                     path, read_budget=read_budget
                 )
-                rows.append((_line_status_scope(line), repo_id, branch, head, upstream, dirty))
+                rows.append(("anchor", repo_id, branch, head, upstream, dirty))
             else:
-                rows.append((_line_status_scope(line), repo_id, "MISSING", "-", "-", -1))
+                rows.append(("anchor", repo_id, "MISSING", "-", "-", -1))
+        for line in list_lines(config, read_budget=read_budget):
+            for repo_id in line.repositories:
+                path = line_repository_path(config, line, repo_id)
+                if _is_git_repo(path, read_budget=read_budget):
+                    branch, head, upstream, dirty = _short_status(
+                        path, read_budget=read_budget
+                    )
+                    rows.append(
+                        (
+                            _line_status_scope(line),
+                            repo_id,
+                            branch,
+                            head,
+                            upstream,
+                            dirty,
+                        )
+                    )
+                else:
+                    rows.append(
+                        (
+                            _line_status_scope(line),
+                            repo_id,
+                            "MISSING",
+                            "-",
+                            "-",
+                            -1,
+                        )
+                    )
+    except ReadLimitError as exc:
+        if read_budget is None or exc.code is not ReadLimitCode.DEADLINE_EXCEEDED:
+            stash_observation_rows(read_budget, rows)
+            raise
+        if not any(is_observation_timeout_row(row) for row in rows):
+            rows.append(observation_timeout_row())
+    stash_observation_rows(read_budget, rows)
     return rows
 
 
 def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str]:
     """Return diagnostics.  Callers decide whether any FAIL means non-zero."""
     findings: list[str] = []
-    for requirement in external_security_errors(config.policy):
-        findings.append(f"FAIL external Profile requires {requirement}")
-    root_git = _is_git_repo(config.root, read_budget=read_budget)
-    findings.append(("WARN" if root_git else "PASS") + " workspace root " + ("is a Git repository" if root_git else "is not a Git repository"))
-    from .instructions import overlay_instruction_warning
+    try:
+        _scale_control_plane_budget(config, read_budget)
+        for requirement in external_security_errors(config.policy):
+            findings.append(f"FAIL external Profile requires {requirement}")
+        root_git = _is_git_repo(config.root, read_budget=read_budget)
+        findings.append(("WARN" if root_git else "PASS") + " workspace root " + ("is a Git repository" if root_git else "is not a Git repository"))
+        from .instructions import overlay_instruction_warning
 
-    overlay_warning = overlay_instruction_warning(config.root)
-    if overlay_warning:
-        findings.append(overlay_warning)
-    for repo_id in sorted(config.repositories):
-        anchor = repository_path(config, repo_id)
-        if _is_git_repo(anchor, read_budget=read_budget):
-            findings.append(f"PASS repository {repo_id}: {anchor}")
-        else:
-            findings.append(f"FAIL repository {repo_id}: missing or not Git: {anchor}")
-    for line in list_lines(config, read_budget=read_budget):
-        for repo_id in line.repositories:
+        overlay_warning = overlay_instruction_warning(config.root)
+        if overlay_warning:
+            findings.append(overlay_warning)
+        for repo_id in sorted(config.repositories):
             anchor = repository_path(config, repo_id)
-            worktree = line_repository_path(config, line, repo_id)
-            storage_mode = line.storage_for(repo_id)
-            if not _is_git_repo(worktree, read_budget=read_budget):
-                findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: missing worktree")
-                continue
-            actual_branch = git_read(
-                worktree,
-                "branch",
-                "--show-current",
-                read_budget=read_budget,
-            )
-            if actual_branch.code != 0 or actual_branch.stdout.strip() != line.branch:
-                actual = actual_branch.stdout.strip() if actual_branch.code == 0 else "UNREADABLE"
-                findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: expected {line.branch}, found {actual or 'DETACHED'}")
-                continue
-            if storage_mode == "anchor-reference":
-                if not worktree.is_symlink():
-                    findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: expected anchor-reference symlink")
-                elif worktree.resolve() != anchor.resolve():
-                    findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: symlink does not target configured anchor")
-                else:
-                    findings.append(f"PASS {line.kind}:{line.id}/{repo_id}: references configured anchor")
-                continue
-            if worktree.is_symlink():
-                findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: linked-worktree cannot be a symlink")
-                continue
-            anchor_common = git_read(
-                anchor,
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-common-dir",
-                read_budget=read_budget,
-            )
-            worktree_common = git_read(
-                worktree,
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-common-dir",
-                read_budget=read_budget,
-            )
-            if not (
-                anchor_common.code == 0
-                and worktree_common.code == 0
-                and anchor_common.stdout.strip() == worktree_common.stdout.strip()
-            ):
-                findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: unexpected Git common-dir")
-                continue
-            expected_remote = _expected_remote_branch(line.branch)
-            if not _ref_exists(
-                worktree, f"refs/remotes/{expected_remote}", read_budget=read_budget
-            ):
-                findings.append(
-                    f"FAIL {line.kind}:{line.id}/{repo_id}: missing {expected_remote}"
-                )
-                continue
-            upstream = _branch_upstream(worktree, read_budget=read_budget)
-            head = _rev_parse(worktree, "HEAD", read_budget=read_budget)
-            remote_head = _rev_parse(worktree, expected_remote, read_budget=read_budget)
-            if upstream == expected_remote or (
-                not upstream and head and head == remote_head
-            ):
-                findings.append(
-                    f"PASS {line.kind}:{line.id}/{repo_id}: linked to configured anchor"
-                )
+            if _is_git_repo(anchor, read_budget=read_budget):
+                findings.append(f"PASS repository {repo_id}: {anchor}")
             else:
-                findings.append(
-                    f"FAIL {line.kind}:{line.id}/{repo_id}: "
-                    f"expected upstream {expected_remote}, found {upstream or '-'}"
+                findings.append(f"FAIL repository {repo_id}: missing or not Git: {anchor}")
+        for line in list_lines(config, read_budget=read_budget):
+            for repo_id in line.repositories:
+                anchor = repository_path(config, repo_id)
+                worktree = line_repository_path(config, line, repo_id)
+                storage_mode = line.storage_for(repo_id)
+                if not _is_git_repo(worktree, read_budget=read_budget):
+                    findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: missing worktree")
+                    continue
+                actual_branch = git_read(
+                    worktree,
+                    "branch",
+                    "--show-current",
+                    read_budget=read_budget,
                 )
+                if actual_branch.code != 0 or actual_branch.stdout.strip() != line.branch:
+                    actual = actual_branch.stdout.strip() if actual_branch.code == 0 else "UNREADABLE"
+                    findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: expected {line.branch}, found {actual or 'DETACHED'}")
+                    continue
+                if storage_mode == "anchor-reference":
+                    if not worktree.is_symlink():
+                        findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: expected anchor-reference symlink")
+                    elif worktree.resolve() != anchor.resolve():
+                        findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: symlink does not target configured anchor")
+                    else:
+                        findings.append(f"PASS {line.kind}:{line.id}/{repo_id}: references configured anchor")
+                    continue
+                if worktree.is_symlink():
+                    findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: linked-worktree cannot be a symlink")
+                    continue
+                anchor_common = git_read(
+                    anchor,
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-common-dir",
+                    read_budget=read_budget,
+                )
+                worktree_common = git_read(
+                    worktree,
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-common-dir",
+                    read_budget=read_budget,
+                )
+                if not (
+                    anchor_common.code == 0
+                    and worktree_common.code == 0
+                    and anchor_common.stdout.strip() == worktree_common.stdout.strip()
+                ):
+                    findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: unexpected Git common-dir")
+                    continue
+                expected_remote = _expected_remote_branch(line.branch)
+                if not _ref_exists(
+                    worktree, f"refs/remotes/{expected_remote}", read_budget=read_budget
+                ):
+                    findings.append(
+                        f"FAIL {line.kind}:{line.id}/{repo_id}: missing {expected_remote}"
+                    )
+                    continue
+                upstream = _branch_upstream(worktree, read_budget=read_budget)
+                head = _rev_parse(worktree, "HEAD", read_budget=read_budget)
+                remote_head = _rev_parse(worktree, expected_remote, read_budget=read_budget)
+                if upstream == expected_remote or (
+                    not upstream and head and head == remote_head
+                ):
+                    findings.append(
+                        f"PASS {line.kind}:{line.id}/{repo_id}: linked to configured anchor"
+                    )
+                else:
+                    findings.append(
+                        f"FAIL {line.kind}:{line.id}/{repo_id}: "
+                        f"expected upstream {expected_remote}, found {upstream or '-'}"
+                    )
+    except ReadLimitError as exc:
+        if read_budget is None or exc.code is not ReadLimitCode.DEADLINE_EXCEEDED:
+            stash_observation_findings(read_budget, findings)
+            raise
+        if not any(is_observation_deadline_finding(item) for item in findings):
+            findings.append(OBSERVATION_DEADLINE_FINDING)
+    stash_observation_findings(read_budget, findings)
     return findings
 
 
