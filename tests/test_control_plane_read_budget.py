@@ -81,6 +81,30 @@ class ControlPlaneDeadlineScaleTests(unittest.TestCase):
         apply_control_plane_fanout(tight, 58)
         self.assertEqual(tight.limits.deadline_seconds, 0.05)
 
+    def test_seven_second_fanout_fits_scaled_budget_not_flat_five(self) -> None:
+        """Text path ~7s must not be a JSON DEADLINE on a ~58-scope workspace."""
+
+        class Clock:
+            def __init__(self) -> None:
+                self.t = 1000.0
+
+            def __call__(self) -> float:
+                return self.t
+
+        scaled_clock = Clock()
+        scaled = ReadBudget(ObservationLimits(), monotonic=scaled_clock)
+        apply_control_plane_fanout(scaled, 58)
+        scaled_clock.t += 7.0
+        scaled.check_deadline()
+        self.assertGreater(scaled.remaining_seconds(), 10.0)
+
+        flat_clock = Clock()
+        flat = ReadBudget(ObservationLimits(), monotonic=flat_clock)
+        flat_clock.t += 5.34
+        with self.assertRaises(ReadLimitError) as raised:
+            flat.check_deadline()
+        self.assertIs(raised.exception.code, ReadLimitCode.DEADLINE_EXCEEDED)
+
 
 class ControlPlaneTimeoutFindingTests(WorkspaceCase):
     def _workspace_with_completed_fail_and_worktree(self):
