@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Resolve `--workspace` aliases case-insensitively when exactly one
+  registered name folds to the same key, and keep that canonical spelling
+  in outputs. Two registered aliases that differ only by case fail closed
+  with the colliding names listed; a total miss still suggests nearby
+  names.
 - JSON `doctor` / `status` / `next` no longer share a flat 5s observation
   deadline with Bridge. Those commands start at the documented 45s ceiling
   (not 5s) so a ~50+ worktree workspace that the text path finishes in ~7s

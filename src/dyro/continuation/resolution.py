@@ -12,12 +12,13 @@ from typing import Callable
 from ..config import CONFIG_NAME, Config, LoadedProfile, load, load_profile_exact, validate_id
 from ..errors import DyroError, ValidationError
 from ..hub import (
+    WorkspaceAliasCollisionError,
     WorkspaceRecord,
     get_workspace,
     load_registry,
     load_registry_bounded,
     looks_like_workspace_path,
-    unregistered_workspace_error,
+    select_workspace_record,
     workspace_path_as_alias_error,
 )
 from ..read_limits import ReadBudget, ReadLimitCode, ReadLimitError
@@ -231,18 +232,18 @@ def resolve_workspace_readonly(
             raise workspace_path_as_alias_error(workspace)
         validate_id(workspace, "工作区别名")
         registry = _bounded_registry(budget)
-        matches = tuple(item for item in registry.workspaces if item.name == workspace)
-        if len(matches) != 1:
+        try:
+            record = select_workspace_record(registry.workspaces, workspace)
+        except WorkspaceAliasCollisionError as exc:
+            raise WorkspaceResolutionError(
+                WorkspaceResolutionFailure.AMBIGUOUS_WORKSPACE,
+                message=str(exc),
+            ) from exc
+        except DyroError as exc:
             raise WorkspaceResolutionError(
                 WorkspaceResolutionFailure.WORKSPACE_NOT_REGISTERED,
-                message=str(
-                    unregistered_workspace_error(
-                        workspace,
-                        tuple(item.name for item in registry.workspaces),
-                    )
-                ),
-            )
-        record = matches[0]
+                message=str(exc),
+            ) from exc
         return ResolvedWorkspace(
             _registered_profile(record, budget),
             WorkspaceResolutionSource.EXPLICIT,

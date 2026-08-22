@@ -57,8 +57,54 @@ def workspace_path_as_alias_error(value: str) -> ValidationError:
     )
 
 
+def _alias_fold(name: str) -> str:
+    return name.casefold()
+
+
+def workspace_alias_matches(
+    workspaces: tuple[WorkspaceRecord, ...], name: str
+) -> tuple[WorkspaceRecord, ...]:
+    """Return registered records whose aliases fold equal to ``name``."""
+    key = _alias_fold(name)
+    return tuple(record for record in workspaces if _alias_fold(record.name) == key)
+
+
+class WorkspaceAliasCollisionError(DyroError):
+    """More than one registered alias folds to the same lookup key."""
+
+
+def colliding_workspace_aliases_error(
+    name: str, colliding: tuple[str, ...]
+) -> WorkspaceAliasCollisionError:
+    listed = "、".join(colliding)
+    return WorkspaceAliasCollisionError(
+        f"工作区别名大小写冲突：{name} 同时匹配 {listed}"
+    )
+
+
+def select_workspace_record(
+    workspaces: tuple[WorkspaceRecord, ...], name: str
+) -> WorkspaceRecord:
+    """Resolve one registered alias.
+
+    A unique case-insensitive match returns the canonical registered record.
+    Two or more aliases that fold equal fail closed. A total miss keeps the
+    existing unregistered suggestion.
+    """
+    matches = workspace_alias_matches(workspaces, name)
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise colliding_workspace_aliases_error(
+            name, tuple(record.name for record in matches)
+        )
+    raise unregistered_workspace_error(name, tuple(record.name for record in workspaces))
+
+
 def _close_workspace_names(name: str, names: tuple[str, ...]) -> tuple[str, ...]:
-    exact_ci = tuple(item for item in names if item.lower() == name.lower() and item != name)
+    exact_ci = tuple(
+        item for item in names if _alias_fold(item) == _alias_fold(name) and item != name
+    )
     if exact_ci:
         return exact_ci
     return tuple(difflib.get_close_matches(name, names, n=5, cutoff=0.4))
@@ -340,12 +386,7 @@ def get_workspace(name: str) -> WorkspaceRecord:
         raise workspace_path_as_alias_error(name)
     validate_id(name, "工作区别名")
     registry = load_registry()
-    try:
-        return next(record for record in registry.workspaces if record.name == name)
-    except StopIteration as exc:
-        raise unregistered_workspace_error(
-            name, tuple(record.name for record in registry.workspaces)
-        ) from exc
+    return select_workspace_record(registry.workspaces, name)
 
 
 def set_default_workspace(name: str) -> None:

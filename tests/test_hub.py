@@ -137,6 +137,51 @@ mount = "api"
         with self.assertRaisesRegex(Exception, "工作区记录"):
             load_registry()
 
+    def _second_workspace(self, name: str) -> Path:
+        other = self.base / name
+        other.mkdir()
+        other.joinpath("dyro.toml").write_text(
+            self.workspace.joinpath("dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "demo"', f'name = "{name}"'),
+            encoding="utf-8",
+        )
+        return other
+
+    def test_get_workspace_exact_alias_match(self) -> None:
+        add_workspace(self.workspace, name="Acme")
+        record = get_workspace("Acme")
+        self.assertEqual(record.name, "Acme")
+        self.assertEqual(record.root, self.workspace.resolve())
+        self.assertEqual(load_registry().workspaces[0].name, "Acme")
+
+    def test_get_workspace_matches_alias_case_insensitively(self) -> None:
+        add_workspace(self.workspace, name="Acme")
+        record = get_workspace("acme")
+        self.assertEqual(record.name, "Acme")
+        self.assertEqual(record.root, self.workspace.resolve())
+        self.assertEqual(load_registry().workspaces[0].name, "Acme")
+
+    def test_get_workspace_fails_closed_on_case_fold_collision(self) -> None:
+        from dyro.errors import DyroError
+
+        other = self._second_workspace("other")
+        add_workspace(self.workspace, name="Acme")
+        add_workspace(other, name="acme")
+        with self.assertRaises(DyroError) as ctx:
+            get_workspace("Acme")
+        message = str(ctx.exception)
+        self.assertIn("Acme", message)
+        self.assertIn("acme", message)
+        self.assertNotIn("你是不是指", message)
+
+    def test_get_workspace_unrelated_miss_stays_unregistered(self) -> None:
+        from dyro.errors import DyroError
+
+        add_workspace(self.workspace, name="Acme")
+        with self.assertRaisesRegex(DyroError, "未登记工作区：missing"):
+            get_workspace("missing")
+
     def test_malformed_registry_rejects_non_string_alias(self) -> None:
         self.state.mkdir(parents=True)
         registry_home().joinpath("workspaces.json").write_text(
@@ -1484,14 +1529,14 @@ write = ["codex"]
         from dyro.errors import DyroError
         from dyro.hub import get_workspace
 
-        add_workspace(self.root, name="DyroEngineeringFlow", make_default=True)
-        with self.assertRaisesRegex(DyroError, "你是不是指 DyroEngineeringFlow"):
-            get_workspace("dyroengineeringflow")
+        add_workspace(self.root, name="AcmeLab", make_default=True)
+        with self.assertRaisesRegex(DyroError, "你是不是指 AcmeLab"):
+            get_workspace("acme-labs")
         stderr = StringIO()
         with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
-            main(["--workspace", "dyroengineeringflow", "next"])
+            main(["--workspace", "acme-labs", "next"])
         self.assertEqual(raised.exception.code, 2)
-        self.assertIn("你是不是指 DyroEngineeringFlow", stderr.getvalue())
+        self.assertIn("你是不是指 AcmeLab", stderr.getvalue())
 
     def test_status_and_next_disclose_disabled_push(self) -> None:
         self._create_line()

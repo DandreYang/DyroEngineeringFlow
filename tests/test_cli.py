@@ -1222,6 +1222,35 @@ class ObjectiveCliTests(WorkspaceCase):
             payload,
         )
 
+    def test_control_plane_next_uses_canonical_alias_spelling(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-registry-") as registry_home:
+            with patch.dict(os.environ, {"DYRO_HOME": registry_home}, clear=False):
+                main(
+                    [
+                        "workspace",
+                        "add",
+                        str(self.root),
+                        "--name",
+                        "Acme",
+                        "--default",
+                    ]
+                )
+                output = StringIO()
+                with redirect_stdout(output):
+                    main(
+                        [
+                            "--workspace",
+                            "acme",
+                            "next",
+                            "--format",
+                            "json",
+                        ]
+                    )
+                self.assertEqual(load_registry().workspaces[0].name, "Acme")
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["commands"], ["dyro --workspace Acme doctor"])
+
     def test_control_plane_json_runtime_errors_use_one_stable_envelope(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-registry-") as registry_home:
             stdout = StringIO()

@@ -343,12 +343,16 @@ def _config(args: argparse.Namespace) -> Config:
                 cwd=Path.cwd().absolute(),
                 budget=budget,
             )
+            if resolved.registry_alias is not None:
+                setattr(args, "workspace_alias", resolved.registry_alias)
         setattr(args, "_control_plane_resolution", resolved)
         return resolved.profile.config
     if root_arg:
         root = Path(root_arg).expanduser()
     elif workspace_arg:
-        root = get_workspace(workspace_arg).root
+        record = get_workspace(workspace_arg)
+        setattr(args, "workspace_alias", record.name)
+        root = record.root
     else:
         interactive = sys.stdin.isatty() and sys.stdout.isatty()
         return resolve_workspace(
@@ -1940,7 +1944,7 @@ def cmd_console(args: argparse.Namespace) -> None:
         target_root = config.root
         initial_workspace = config.name
     elif initial_workspace:
-        get_workspace(initial_workspace)
+        initial_workspace = get_workspace(initial_workspace).name
     launch_console(
         port=args.port,
         no_open=args.no_open,
