@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
@@ -10,7 +11,13 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from dyro.cli import _route_experiment_surface, build_parser, main
+from dyro.cli import (
+    _print_json_observation_timeout,
+    _route_experiment_surface,
+    _timeout_repair_commands,
+    build_parser,
+    main,
+)
 from dyro.config import load
 from dyro.home import (
     HomeTarget,
@@ -189,6 +196,13 @@ mount = "api"
             workspace_alias_retargets_root("current", self.workspace.resolve())
         )
         self.assertFalse(workspace_alias_retargets_root("missing", self.workspace))
+
+    def test_registry_read_failure_cannot_prove_workspace_stays_on_root(self) -> None:
+        add_workspace(self.workspace, name="current", make_default=True)
+        with patch("dyro.hub.load_registry", side_effect=OSError("registry unread")):
+            self.assertTrue(
+                workspace_alias_retargets_root("Demo", self.workspace.resolve())
+            )
 
     def test_get_workspace_fails_closed_on_case_fold_collision(self) -> None:
         from dyro.errors import DyroError
@@ -1799,6 +1813,110 @@ write = ["codex"]
                 if "bootstrap" in command or "doctor" in command:
                     self.assertIn("--root", command)
                     self.assertIn(current_root, command)
+
+    def _timeout_args(self, **overrides: object) -> argparse.Namespace:
+        values = {
+            "workspace_alias": "Demo",
+            "root": None,
+            "format": "json",
+            "command": "next",
+            "all": False,
+            "_control_plane_read_budget": None,
+            "_stashed_findings": None,
+        }
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def _assert_no_other_root_fold_ad(
+        self, advertised: list[str], other: Path
+    ) -> None:
+        joined = "\n".join(advertised)
+        self.assertNotIn("--workspace demo", joined)
+        self.assertNotIn("--workspace Demo", joined)
+        self.assertNotIn(str(other.resolve()), joined)
+        self.assertNotIn("dyro --workspace demo bootstrap --yes", advertised)
+        self.assertNotIn("dyro --workspace Demo bootstrap --yes", advertised)
+        self.assertNotIn("dyro --workspace demo doctor", advertised)
+        self.assertNotIn("dyro --workspace Demo doctor", advertised)
+
+    def test_timeout_fallback_after_config_fail_does_not_advertise_other_root_fold(
+        self,
+    ) -> None:
+        other = self._fold_retarget_registry()
+        args = self._timeout_args()
+        with patch("dyro.cli._config", side_effect=OSError("profile unread")):
+            commands = _timeout_repair_commands(args, ["FAIL observation deadline"])
+            output = StringIO()
+            with redirect_stdout(output):
+                _print_json_observation_timeout(args)
+        payload = json.loads(output.getvalue())
+        advertised = [
+            item
+            for item in (
+                *commands,
+                *(payload.get("commands") or []),
+                *(payload.get("diagnostic_commands") or []),
+            )
+            if isinstance(item, str)
+        ]
+        self._assert_no_other_root_fold_ad(advertised, other)
+        rooted = self._timeout_args(root=str(self.root))
+        with patch("dyro.cli._config", side_effect=OSError("profile unread")):
+            rooted_commands = _timeout_repair_commands(
+                rooted, ["FAIL observation deadline"]
+            )
+        self._assert_no_other_root_fold_ad(rooted_commands, other)
+        if rooted_commands:
+            self.assertTrue(
+                any(
+                    "--root" in item and str(self.root) in item
+                    for item in rooted_commands
+                ),
+                rooted_commands,
+            )
+
+    def test_registry_read_failure_uses_root_not_other_workspace_fold(self) -> None:
+        other = self._fold_retarget_registry()
+        from dyro.continuation.ready_briefing import scoped_briefing_command
+
+        config = load(self.root)
+        with (
+            patch(
+                "dyro.continuation.ready_briefing.load_registry",
+                side_effect=OSError("registry unread"),
+            ),
+            patch("dyro.hub.load_registry", side_effect=OSError("registry unread")),
+        ):
+            command = scoped_briefing_command(config, "Demo", "bootstrap", "--yes")
+            rooted, advertised = self._advertised_next(
+                ["--root", str(self.root), "next", "--format", "json"]
+            )
+        self.assertIn("--root", command)
+        self.assertIn(str(config.root), command)
+        self.assertNotIn("--workspace Demo", command)
+        self.assertNotIn("--workspace demo", command)
+        self.assertNotIn(str(other.resolve()), command)
+        self.assertEqual(rooted["kind"], "next_step")
+        self._assert_no_other_root_fold_ad(advertised, other)
+        self.assertTrue(
+            any("--root" in item and str(self.root) in item for item in advertised),
+            advertised,
+        )
+
+    def test_unavailable_summary_with_root_omits_other_root_fold_workspace(
+        self,
+    ) -> None:
+        other = self._fold_retarget_registry()
+        from dyro.console._inspect_worker import _unavailable_summary
+        from dyro.console.overview import WORKSPACE_TIMEOUT
+
+        summary = _unavailable_summary(
+            "Demo", WORKSPACE_TIMEOUT, ("Demo",), root=self.root
+        )
+        command = summary["recommendation"]["command"]
+        self.assertIsInstance(command, str)
+        self._assert_no_other_root_fold_ad([command], other)
+        self.assertNotIn(str(self.root), command)
 
     def test_console_unique_fold_plan_and_apply_share_canonical_alias(self) -> None:
         add_workspace(self.root, name="Demo")

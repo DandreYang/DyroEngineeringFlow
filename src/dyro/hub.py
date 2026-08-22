@@ -102,7 +102,7 @@ def workspace_alias_retargets_root(
     """True when ``--workspace alias`` uniquely fold-resolves to another root.
 
     A miss or fold collision is not a working selector for a different root.
-    Registry read failures stay conservative: do not claim a retarget.
+    Registry read failures cannot prove the selector stays on this root.
     """
     if not isinstance(alias, str) or not alias:
         return False
@@ -111,7 +111,7 @@ def workspace_alias_retargets_root(
             workspaces if workspaces is not None else load_registry().workspaces
         )
     except (DyroError, ValidationError, OSError, TypeError, AttributeError):
-        return False
+        return True
     matches = workspace_alias_matches(records, alias)
     if len(matches) != 1:
         return False

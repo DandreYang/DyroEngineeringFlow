@@ -50,7 +50,6 @@ from .continuation.next_step import (
     repair_commands,
 )
 from .continuation.ready_briefing import (
-    briefing_command,
     build_ready_briefing,
     scoped_briefing_command,
 )
@@ -665,6 +664,31 @@ def _timeout_status_rows(args: argparse.Namespace) -> list[object]:
     return rows
 
 
+def _timeout_verified_root(args: argparse.Namespace) -> Path | None:
+    """Return this invocation's root when it is already known, never a fold alias."""
+    resolved = getattr(args, "_control_plane_resolution", None)
+    profile = getattr(resolved, "profile", None)
+    config = getattr(profile, "config", None)
+    root = getattr(config, "root", None)
+    if root is not None:
+        return Path(root)
+    raw = getattr(args, "root", None)
+    if isinstance(raw, str) and raw.strip():
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return path
+    return None
+
+
+def _timeout_unscoped_repair_commands(args: argparse.Namespace) -> list[str]:
+    """Repair ads after config reload fails. Never emit a fold-matching --workspace."""
+    root = _timeout_verified_root(args)
+    if root is None:
+        return []
+    return [shlex.join(("dyro", "--root", str(root), "doctor"))]
+
+
 def _timeout_repair_commands(
     args: argparse.Namespace, findings: list[str]
 ) -> list[str]:
@@ -675,7 +699,7 @@ def _timeout_repair_commands(
         commands = deadline_repair_commands(config, alias, failures)
         return commands or [_briefing_command(args, config, "doctor")]
     except (DyroError, OSError, ValidationError, TypeError, AttributeError):
-        return [briefing_command(alias, "doctor")]
+        return _timeout_unscoped_repair_commands(args)
 
 
 def _print_json_observation_timeout(args: argparse.Namespace) -> None:
@@ -729,7 +753,7 @@ def _print_json_observation_timeout(args: argparse.Namespace) -> None:
     try:
         diagnostic_commands = [_briefing_command(args, _config(args), "doctor")]
     except (DyroError, OSError, ValidationError, TypeError, AttributeError):
-        diagnostic_commands = [briefing_command(workspace, "doctor")]
+        diagnostic_commands = _timeout_unscoped_repair_commands(args)
     _print_control_plane_json(
         "next_step",
         state="needs_repair",

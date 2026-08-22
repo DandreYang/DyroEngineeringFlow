@@ -43,12 +43,15 @@ def scoped_briefing_command(
 
     A unique fold uses the canonical registered spelling when that record is
     the current workspace. An unregistered profile name keeps ``--workspace``
-    so path-free next ads stay path-free. A fold collision, or a unique fold
-    that would resolve to a different root, switches the ad to ``--root``.
+    so path-free next ads stay path-free. A fold collision, a unique fold
+    that would resolve to a different root, or a registry read that cannot
+    prove the selector stays here, switches the ad to ``--root``.
     """
     try:
         records = tuple(load_registry().workspaces)
     except (DyroError, ValidationError, OSError, TypeError, AttributeError):
+        if getattr(config, "root", None) is not None:
+            return _root_scoped_command(config, *command)
         records = ()
     registered = names if names is not None else tuple(item.name for item in records)
     if alias_fold_collides(alias, registered):
