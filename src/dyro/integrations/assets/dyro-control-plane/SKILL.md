@@ -30,7 +30,7 @@ When the request already supplies a workspace alias, skip global discovery and u
 - Objective next-wave preview: `dyro --workspace <alias> objective tick <id> --format json`. Treat `peer_wave.executor_bindings` as the intended peer executors for that wave, and `peer_wave.warnings` as missing `conflict_group` or harness-capacity notes. A wave member is an executor, not a live supervisor.
 - Objective plan: `dyro --workspace <alias> objective plan <id> --format json`
 
-Use only an existing Objective or Change Set ID returned by Dyro or supplied by the user. A non-zero exit, unavailable workspace, pending transaction, failed finding, missing field, or partial observation is unknown or blocked—not ready.
+Use only an existing Objective or Change Set ID returned by Dyro or supplied by the user. A non-zero exit, unavailable workspace, pending transaction, failed finding, missing field, or partial observation is unknown or blocked—not ready. JSON `doctor` / `status` / `next` scale the read deadline with git-scope count (anchors + worktrees), capped at 45s. If that ceiling is hit, `kind` stays `doctor` / `workspace_status` / `next_step` with `partial: true` and a FAIL observation-deadline finding; completed FAILs remain. That is blocked evidence, not a bare `error` / `DEADLINE_EXCEEDED`, and not ready.
 
 Treat local paths and workspace inventory as sensitive metadata. Never add `--include-paths` to any command, request paths only to enrich a summary, or repeat a local path in the response unless the user supplied that exact path and it is necessary to identify the requested workspace. Keep Task IDs, branch names, and commit identifiers to the minimum needed for the requested observation.
 

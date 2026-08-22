@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
+import json
+import unittest
+from unittest.mock import patch
+
+from dyro.cli import main
+from dyro.config import load
+from dyro.continuation.next_step import next_commands
+from dyro.errors import ValidationError
+from dyro.process import git_read as real_git_read
+from dyro.read_limits import (
+    CONTROL_PLANE_DEADLINE_CEILING_SECONDS,
+    PROTOCOL_DEADLINE_SECONDS,
+    ObservationLimits,
+    ReadBudget,
+    ReadLimitCode,
+    ReadLimitError,
+    apply_control_plane_fanout,
+    control_plane_deadline_seconds,
+)
+from dyro.workspace import (
+    OBSERVATION_DEADLINE_FINDING,
+    create_line,
+    doctor,
+    git_observation_scope_count,
+    is_observation_deadline_finding,
+    status_rows,
+)
+
+from .support import WorkspaceCase
+
+
+def _raise_deadline_on_worktree(repo, *args, read_budget=None, **kwargs):
+    if read_budget is not None and "versions/" in str(repo):
+        raise ReadLimitError(
+            ReadLimitCode.DEADLINE_EXCEEDED,
+            "Core observation deadline exceeded",
+        )
+    return real_git_read(repo, *args, read_budget=read_budget, **kwargs)
+
+
+class ControlPlaneDeadlineScaleTests(unittest.TestCase):
+    def test_default_observation_deadline_stays_five_seconds(self) -> None:
+        limits = ObservationLimits()
+        self.assertEqual(limits.deadline_seconds, PROTOCOL_DEADLINE_SECONDS)
+        self.assertEqual(PROTOCOL_DEADLINE_SECONDS, 5.0)
+
+    def test_observation_limits_allow_documented_control_plane_ceiling(self) -> None:
+        limits = ObservationLimits(
+            deadline_seconds=CONTROL_PLANE_DEADLINE_CEILING_SECONDS
+        )
+        self.assertEqual(
+            limits.deadline_seconds, CONTROL_PLANE_DEADLINE_CEILING_SECONDS
+        )
+        with self.assertRaises(ValidationError):
+            ObservationLimits(
+                deadline_seconds=CONTROL_PLANE_DEADLINE_CEILING_SECONDS + 0.01
+            )
+
+    def test_deadline_scales_with_git_scope_count_and_caps(self) -> None:
+        self.assertEqual(control_plane_deadline_seconds(1), 5.0)
+        large = control_plane_deadline_seconds(58)
+        self.assertGreaterEqual(large, 20.0)
+        self.assertLessEqual(large, CONTROL_PLANE_DEADLINE_CEILING_SECONDS)
+        self.assertEqual(
+            control_plane_deadline_seconds(10_000),
+            CONTROL_PLANE_DEADLINE_CEILING_SECONDS,
+        )
+        self.assertGreater(control_plane_deadline_seconds(58), 5.0)
+
+    def test_default_budget_widens_for_fanout_but_explicit_deadline_does_not(
+        self,
+    ) -> None:
+        budget = ReadBudget(ObservationLimits())
+        apply_control_plane_fanout(budget, 58)
+        self.assertGreaterEqual(budget.limits.deadline_seconds, 20.0)
+        tight = ReadBudget(ObservationLimits(deadline_seconds=0.05))
+        apply_control_plane_fanout(tight, 58)
+        self.assertEqual(tight.limits.deadline_seconds, 0.05)
+
+
+class ControlPlaneTimeoutFindingTests(WorkspaceCase):
+    def _workspace_with_completed_fail_and_worktree(self):
+        config = load(self.root)
+        create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8")
+            + "\n[repositories.web]\n"
+            + 'path = "repositories/web"\n'
+            + 'mount = "clients/web"\n',
+            encoding="utf-8",
+        )
+        return load(self.root)
+
+    def test_scope_count_is_anchors_plus_line_worktrees(self) -> None:
+        config = self._workspace_with_completed_fail_and_worktree()
+        self.assertEqual(git_observation_scope_count(config), 3)
+
+    def test_doctor_keeps_completed_fails_and_adds_timeout_finding(self) -> None:
+        config = self._workspace_with_completed_fail_and_worktree()
+        with patch("dyro.workspace.git_read", side_effect=_raise_deadline_on_worktree):
+            findings = doctor(config, read_budget=ReadBudget(ObservationLimits()))
+
+        self.assertTrue(
+            any(
+                item.startswith("FAIL repository web:")
+                and "missing or not Git" in item
+                for item in findings
+            ),
+            findings,
+        )
+        self.assertTrue(
+            any(is_observation_deadline_finding(item) for item in findings),
+            findings,
+        )
+        self.assertIn(OBSERVATION_DEADLINE_FINDING, findings)
+        self.assertFalse(
+            any(item.startswith("PASS line:alpha/web") for item in findings),
+            findings,
+        )
+
+    def test_status_rows_keep_completed_rows_and_mark_timeout(self) -> None:
+        config = self._workspace_with_completed_fail_and_worktree()
+        with patch("dyro.workspace.git_read", side_effect=_raise_deadline_on_worktree):
+            rows = status_rows(config, read_budget=ReadBudget(ObservationLimits()))
+
+        self.assertTrue(
+            any(scope == "anchor" and repository == "api" for scope, repository, *_ in rows),
+            rows,
+        )
+        self.assertTrue(
+            any(
+                scope == "observation" and branch == "TIMEOUT"
+                for scope, _repository, branch, *_ in rows
+            ),
+            rows,
+        )
+
+    def test_next_commands_repair_on_timeout_instead_of_empty_ready(self) -> None:
+        config = self._workspace_with_completed_fail_and_worktree()
+        with patch("dyro.workspace.git_read", side_effect=_raise_deadline_on_worktree):
+            commands = next_commands(
+                config,
+                "selected",
+                read_budget=ReadBudget(ObservationLimits()),
+            )
+        self.assertEqual(commands, ["dyro --workspace selected doctor"])
+
+    def test_json_doctor_and_next_are_not_bare_deadline_errors(self) -> None:
+        self._workspace_with_completed_fail_and_worktree()
+        with patch("dyro.workspace.git_read", side_effect=_raise_deadline_on_worktree):
+            doctor_out = StringIO()
+            doctor_err = StringIO()
+            with (
+                redirect_stdout(doctor_out),
+                redirect_stderr(doctor_err),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main(
+                    [
+                        "--root",
+                        str(self.root),
+                        "doctor",
+                        "--format",
+                        "json",
+                    ]
+                )
+            next_out = StringIO()
+            next_err = StringIO()
+            with redirect_stdout(next_out), redirect_stderr(next_err):
+                main(
+                    [
+                        "--root",
+                        str(self.root),
+                        "next",
+                        "--format",
+                        "json",
+                    ]
+                )
+            status_out = StringIO()
+            status_err = StringIO()
+            with redirect_stdout(status_out), redirect_stderr(status_err):
+                main(
+                    [
+                        "--root",
+                        str(self.root),
+                        "status",
+                        "--format",
+                        "json",
+                    ]
+                )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(doctor_err.getvalue(), "")
+        doctor_payload = json.loads(doctor_out.getvalue())
+        self.assertEqual(doctor_payload["kind"], "doctor")
+        self.assertNotEqual(doctor_payload.get("kind"), "error")
+        self.assertFalse(doctor_payload["passed"])
+        self.assertTrue(doctor_payload["partial"])
+        self.assertTrue(
+            any(
+                item["status"] == "FAIL" and "missing or not Git" in item["message"]
+                for item in doctor_payload["findings"]
+            ),
+            doctor_payload,
+        )
+        self.assertTrue(
+            any(
+                item["status"] == "FAIL" and "deadline" in item["message"]
+                for item in doctor_payload["findings"]
+            ),
+            doctor_payload,
+        )
+
+        self.assertEqual(next_err.getvalue(), "")
+        next_payload = json.loads(next_out.getvalue())
+        self.assertEqual(next_payload["kind"], "next_step")
+        self.assertEqual(next_payload["state"], "needs_repair")
+        self.assertNotEqual(next_payload["state"], "ready")
+        self.assertTrue(next_payload["partial"])
+        self.assertFalse(next_payload["mutation_available"])
+
+        self.assertEqual(status_err.getvalue(), "")
+        status_payload = json.loads(status_out.getvalue())
+        self.assertEqual(status_payload["kind"], "workspace_status")
+        self.assertTrue(status_payload["partial"])
+        self.assertTrue(
+            any(row["branch"] == "TIMEOUT" for row in status_payload["rows"]),
+            status_payload,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -235,10 +235,13 @@ from .updates import (
     set_update_enabled,
 )
 from .workspace import (
+    OBSERVATION_TIMEOUT_BRANCH,
+    OBSERVATION_TIMEOUT_SCOPE,
     create_line,
     doctor,
     get_line,
     is_missing_origin_finding,
+    is_observation_deadline_finding,
     list_lines,
     merge_line,
     spawn_line,
@@ -525,9 +528,15 @@ def _doctor_finding_payload(
 def _status_payload(
     config: Config, *, read_budget: ReadBudget | None = None
 ) -> dict[str, object]:
+    rows = status_rows(config, read_budget=read_budget)
     return {
         "workspace": config.name,
         **push_policy_fields(config.policy),
+        "partial": any(
+            scope == OBSERVATION_TIMEOUT_SCOPE
+            and branch == OBSERVATION_TIMEOUT_BRANCH
+            for scope, _repository, branch, _head, _upstream, _dirty in rows
+        ),
         "rows": [
             {
                 "scope": scope,
@@ -537,9 +546,7 @@ def _status_payload(
                 "upstream": upstream,
                 "dirty_count": dirty,
             }
-            for scope, repository, branch, head, upstream, dirty in status_rows(
-                config, read_budget=read_budget
-            )
+            for scope, repository, branch, head, upstream, dirty in rows
         ],
     }
 
@@ -1628,6 +1635,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             "doctor",
             workspace=config.name,
             passed=not failures,
+            partial=any(is_observation_deadline_finding(item) for item in findings),
             findings=[
                 _doctor_finding_payload(item, include_paths=args.include_paths)
                 for item in findings
@@ -2588,6 +2596,9 @@ def cmd_next(args: argparse.Namespace) -> None:
                 commands=commands,
                 diagnostic_commands=[_briefing_command(args, config, "doctor")],
                 mutation_available=bootstrap_applicable,
+                partial=any(
+                    is_observation_deadline_finding(item) for item in failures
+                ),
                 findings=findings,
                 **_family_unacked_fields(config),
                 **_next_push_fields(config),

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- JSON `doctor` / `status` / `next` no longer share a flat 5s observation
+  deadline with Bridge. The read budget starts at 5s and grows by 0.4s per
+  additional git scope (anchor or worktree), capped at 45s, so a large
+  multi-worktree workspace that the text path can finish in ~7s is not
+  cut off by `--format json`. If the ceiling is still hit, those commands
+  return completed FAIL findings plus a FAIL observation-deadline finding
+  and `partial: true`; they do not emit a bare `DEADLINE_EXCEEDED` error,
+  and `next` stays `needs_repair` (never ready on FAIL).
 - Attach first-party Skill avatars to OpenCode and Hermes when those host
   homes already exist (`~/.config/opencode/skills/<skill>`,
   `~/.hermes/skills/<skill>`). Detection stays fail-closed: absent homes
