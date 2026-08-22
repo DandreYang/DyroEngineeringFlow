@@ -250,21 +250,33 @@ def _state_paths(
     )
 
 
+def _usable_existing_host_home(candidate: Path) -> Path | None:
+    """Accept only a real directory that already exists. Never create one."""
+    if candidate.exists() and candidate.is_dir() and not candidate.is_symlink():
+        if _symlink_component(candidate) is None:
+            return candidate
+    return None
+
+
 def _host_home(
     spec: HostSpec, overrides: Mapping[str, Path] | None
 ) -> Path | None:
     if overrides is not None and spec.host_id in overrides:
-        return _absolute_path(overrides[spec.host_id], f"{spec.host_id} home")
+        candidate = _absolute_path(overrides[spec.host_id], f"{spec.host_id} home")
+        # Fail-closed: surface symlink / non-dir path components so install
+        # refuses instead of mkdir-through or silent-skip.
+        if _symlink_component(candidate) is not None:
+            return candidate
+        return _usable_existing_host_home(candidate)
     if spec.env_var:
         raw = os.environ.get(spec.env_var, "").strip()
         if raw:
-            return _absolute_path(Path(raw), spec.env_var)
+            candidate = _absolute_path(Path(raw), spec.env_var)
+            if _symlink_component(candidate) is not None:
+                return candidate
+            return _usable_existing_host_home(candidate)
     candidate = _user_home() / spec.default_dirname
-    if candidate.exists() and candidate.is_dir() and not candidate.is_symlink():
-        unsafe = _symlink_component(candidate)
-        if unsafe is None:
-            return candidate
-    return None
+    return _usable_existing_host_home(candidate)
 
 
 def _avatar_path(host_home: Path, spec: SkillIntegrationSpec) -> Path:
@@ -1234,6 +1246,10 @@ def _install_avatars(
                     raise DyroError(
                         f"{host_spec.host_id} skills 目录不安全：{unsafe}"
                     )
+                continue
+            if not home.exists() or not home.is_dir() or home.is_symlink():
+                # Never mkdir host homes. Missing env / host_homes overrides
+                # stay silent, matching absent default homes.
                 continue
             if _is_link(avatar) and _resolves_to(avatar, mirror):
                 avatars[host_spec.host_id] = {
