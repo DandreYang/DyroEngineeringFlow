@@ -33,10 +33,29 @@ class ConsoleOperatorSurfaceTests(unittest.TestCase):
         self.assertNotEqual(result["heading"], "关注项未知")
         self.assertEqual(result["heading"], "需要修复")
         self.assertNotEqual(result["command"], "dyro --workspace core")
-        self.assertEqual(result["command"], "dyro --workspace core doctor")
+        self.assertNotEqual(result["command"], "dyro --workspace core doctor")
+        self.assertEqual(result["command"], "")
+        self.assertNotIn("dyro --workspace core doctor", result["primary"])
         self.assertNotIn("摘要未列出关注项", result["needsYou"])
         self.assertIn("core", result["needsYou"])
         self.assertIn("release_a", result["needsYou"])
+        self.assertEqual(result["uniqueCommand"], "dyro --workspace core doctor")
+        self.assertEqual(result["uniqueRecommended"], "dyro --workspace core doctor")
+        self.assertIn("dyro --workspace core doctor", result["uniquePrimary"])
+
+    def test_fold_twin_fail_empty_command_does_not_invent_workspace_doctor(self) -> None:
+        result = _run("fold_twin_fail_overview")
+
+        self.assertEqual(result["heading"], "需要修复")
+        self.assertEqual(result["command"], "")
+        self.assertEqual(result["recommendedDemo"], "")
+        self.assertEqual(result["recommendedTwin"], "")
+        self.assertNotIn("dyro --workspace Demo", result["primary"])
+        self.assertNotIn("dyro --workspace demo", result["primary"])
+        self.assertNotIn("dyro --workspace Demo doctor", result["needsYou"])
+        self.assertNotIn("dyro --workspace demo doctor", result["needsYou"])
+        self.assertIn("Demo", result["needsYou"])
+        self.assertIn("demo", result["needsYou"])
 
     def test_tablist_switch_changes_visible_section_ids(self) -> None:
         result = _run("tabs")

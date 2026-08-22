@@ -305,10 +305,74 @@ if (action === "fail_overview") {
             { status: "FAIL", reason: "MISSING_ORIGIN", line: "core_pay" },
             { status: "FAIL", reason: "MISSING_ORIGIN", line: "release_a" },
           ],
-          recommendation: { reason: "HOME_GUIDANCE", command: "dyro --workspace core" },
+          recommendation: { reason: "HOME_GUIDANCE", command: "" },
           attention_counts: emptyAttention(),
         },
       ],
+    },
+  });
+  const emptyFail = {
+    heading: nodesById.get("overview-heading").textContent,
+    primary: nodesById.get("primary-command").textContent,
+    command: nodesById.get("primary-copy").dataset.command,
+    needsYou: collectText(nodesById.get("needs-you")),
+  };
+  const uniqueCard = {
+    alias: "core",
+    display_name: "core",
+    availability: "available",
+    health: "degraded",
+    findings: [
+      { status: "FAIL", reason: "MISSING_ORIGIN", line: "core" },
+    ],
+    recommendation: {
+      reason: "MISSING_ORIGIN",
+      command: "dyro --workspace core doctor",
+    },
+    attention_counts: emptyAttention(),
+    unavailable_reason: "",
+  };
+  api.renderOverview({
+    captured_at: "2026-08-21T07:00:00Z",
+    freshness: { partial: false, warnings: [] },
+    data: {
+      total_workspaces: 1,
+      attention_counts: emptyAttention(),
+      task_status_counts: {},
+      workspaces: [uniqueCard],
+    },
+  });
+  result = {
+    ...emptyFail,
+    uniqueCommand: nodesById.get("primary-copy").dataset.command,
+    uniquePrimary: nodesById.get("primary-command").textContent,
+    uniqueRecommended: api.recommendedCommand(uniqueCard),
+  };
+} else if (action === "fold_twin_fail_overview") {
+  const findings = [{ status: "FAIL", reason: "MISSING_ORIGIN", line: "core" }];
+  const demo = {
+    alias: "Demo",
+    display_name: "Demo",
+    availability: "available",
+    health: "degraded",
+    findings,
+    recommendation: { reason: "MISSING_ORIGIN", command: "" },
+    attention_counts: emptyAttention(),
+    unavailable_reason: "",
+  };
+  const twin = {
+    ...demo,
+    alias: "demo",
+    display_name: "demo",
+  };
+  api.renderOverview({
+    captured_at: "2026-08-21T07:00:00Z",
+    freshness: { partial: false, warnings: [] },
+    data: {
+      total_workspaces: 2,
+      attention_counts: emptyAttention(),
+      task_status_counts: {},
+      workspaces: [demo, twin],
     },
   });
   result = {
@@ -316,6 +380,8 @@ if (action === "fail_overview") {
     primary: nodesById.get("primary-command").textContent,
     command: nodesById.get("primary-copy").dataset.command,
     needsYou: collectText(nodesById.get("needs-you")),
+    recommendedDemo: api.recommendedCommand(demo),
+    recommendedTwin: api.recommendedCommand(twin),
   };
 } else if (action === "tabs") {
   const live = api.renderLivePanes("core", {

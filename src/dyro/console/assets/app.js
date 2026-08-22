@@ -534,21 +534,16 @@ function recommendedCommand(summary) {
   const unread = unavailableReason(summary);
   if (unread === "missing_root" || unread === "read_timeout") return "";
   const command = text(summary && summary.recommendation && summary.recommendation.command);
-  const doctor = `dyro --workspace ${alias} doctor`;
   const yes = "--" + "yes";
   const push = "--" + "push";
-  if (workspaceHasFail(summary)) {
-    if (
-      command
-      && !isBareWorkspaceCommand(command, alias)
-      && !command.includes(yes)
-      && !command.includes(push)
-    ) {
-      return command;
-    }
-    return doctor;
+  if (
+    !command
+    || isBareWorkspaceCommand(command, alias)
+    || command.includes(yes)
+    || command.includes(push)
+  ) {
+    return "";
   }
-  if (!command || isBareWorkspaceCommand(command, alias)) return "";
   return command;
 }
 

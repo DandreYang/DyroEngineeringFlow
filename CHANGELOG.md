@@ -15,6 +15,8 @@
   fail-close; they use `--root` instead. `console` plan and apply share
   that resolve (canonical on a unique fold; fail-closed on twins).
   Console overview recommendations omit a colliding `--workspace` ad.
+  The operator copy path does not invent `--workspace … doctor` when
+  that field is blank.
 - JSON `doctor` / `status` / `next` no longer share a flat 5s observation
   deadline with Bridge. Those commands start at the documented 45s ceiling
   (not 5s) so a ~50+ worktree workspace that the text path finishes in ~7s
