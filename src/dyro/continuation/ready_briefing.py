@@ -12,7 +12,7 @@ from ..hub import (
     unique_registered_alias,
     workspace_alias_retargets_root,
 )
-from ..read_limits import ReadBudget, ReadLimitError
+from ..read_limits import ReadBudget, ReadLimitCode, ReadLimitError
 from .briefing import (
     briefing_payload,
     follow_up_argv,
@@ -102,7 +102,12 @@ def build_ready_briefing(
             )
             if record.operator_state != "stopped"
         ]
-    except (DyroError, ValidationError, OSError, ReadLimitError):
+    except ReadLimitError as exc:
+        if exc.code == ReadLimitCode.DEADLINE_EXCEEDED:
+            raise
+        command = scoped_briefing_command(config, alias, "objective", "list")
+        return unread_briefing(command), [command]
+    except (DyroError, ValidationError, OSError):
         command = scoped_briefing_command(config, alias, "objective", "list")
         return unread_briefing(command), [command]
     if not records:
@@ -116,7 +121,11 @@ def build_ready_briefing(
     )
     try:
         stored, plan = _read_plan(config, record.objective.id, read_budget)
-    except (DyroError, ValidationError, OSError, ReadLimitError):
+    except ReadLimitError as exc:
+        if exc.code == ReadLimitCode.DEADLINE_EXCEEDED:
+            raise
+        return unread_briefing(explain), [explain]
+    except (DyroError, ValidationError, OSError):
         return unread_briefing(explain), [explain]
     command = scoped_briefing_command(config, alias, *follow_up_argv(plan))
     return (
