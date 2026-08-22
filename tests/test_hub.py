@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -181,6 +182,40 @@ mount = "api"
         add_workspace(self.workspace, name="Acme")
         with self.assertRaisesRegex(DyroError, "未登记工作区：missing"):
             get_workspace("missing")
+
+    def test_set_default_unique_fold_writes_canonical_name(self) -> None:
+        other = self._second_workspace("other")
+        add_workspace(other, name="other", make_default=True)
+        add_workspace(self.workspace, name="Acme")
+        set_default_workspace("acme")
+        self.assertEqual(load_registry().default, "Acme")
+
+    def test_set_default_collision_fails_closed(self) -> None:
+        from dyro.errors import DyroError
+
+        other = self._second_workspace("other")
+        add_workspace(self.workspace, name="Acme", make_default=True)
+        add_workspace(other, name="acme")
+        with self.assertRaises(DyroError) as ctx:
+            set_default_workspace("acme")
+        self.assertIn("Acme", str(ctx.exception))
+        self.assertIn("acme", str(ctx.exception))
+        self.assertEqual(load_registry().default, "Acme")
+
+    def test_remove_unique_fold_deletes_canonical_row(self) -> None:
+        add_workspace(self.workspace, name="Acme")
+        remove_workspace("acme")
+        self.assertEqual(load_registry().workspaces, ())
+
+    def test_remove_exact_registered_name_works_under_collision(self) -> None:
+        other = self._second_workspace("other")
+        add_workspace(self.workspace, name="Acme")
+        add_workspace(other, name="acme")
+        remove_workspace("Acme")
+        remaining = tuple(item.name for item in load_registry().workspaces)
+        self.assertEqual(remaining, ("acme",))
+        remove_workspace("acme")
+        self.assertEqual(load_registry().workspaces, ())
 
     def test_malformed_registry_rejects_non_string_alias(self) -> None:
         self.state.mkdir(parents=True)
@@ -1537,6 +1572,89 @@ write = ["codex"]
             main(["--workspace", "acme-labs", "next"])
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("你是不是指 AcmeLab", stderr.getvalue())
+
+    def _second_registered_workspace(self, alias: str) -> Path:
+        other = self.root.parent / f"{self.root.name}-{alias}"
+        other.mkdir()
+        other.joinpath("dyro.toml").write_text(
+            (self.root / "dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "test-workspace"', f'name = "{alias}"'),
+            encoding="utf-8",
+        )
+        return other
+
+    def test_workspace_default_unique_fold_plan_and_apply(self) -> None:
+        other = self._second_registered_workspace("other")
+        add_workspace(other, name="other", make_default=True)
+        add_workspace(self.root, name="Acme")
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--dry-run", "workspace", "default", "acme"])
+        self.assertIn("Acme", output.getvalue())
+        self.assertEqual(load_registry().default, "other")
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["workspace", "default", "acme"])
+        self.assertEqual(load_registry().default, "Acme")
+        self.assertIn("Acme", output.getvalue())
+
+    def test_workspace_remove_unique_fold_plan_and_apply(self) -> None:
+        add_workspace(self.root, name="Acme")
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--dry-run", "workspace", "remove", "acme"])
+        self.assertEqual(load_registry().workspaces[0].name, "Acme")
+        self.assertIn("Acme", output.getvalue())
+        main(["workspace", "remove", "acme", "--yes"])
+        self.assertEqual(load_registry().workspaces, ())
+
+    def test_workspace_default_collision_refuses_plan_and_apply(self) -> None:
+        other = self._second_registered_workspace("other")
+        add_workspace(self.root, name="Acme", make_default=True)
+        add_workspace(other, name="acme")
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as planned:
+            main(["--dry-run", "workspace", "default", "acme"])
+        self.assertEqual(planned.exception.code, 2)
+        self.assertIn("acme", stderr.getvalue())
+        self.assertEqual(load_registry().default, "Acme")
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as applied:
+            main(["workspace", "default", "acme"])
+        self.assertEqual(applied.exception.code, 2)
+        self.assertEqual(load_registry().default, "Acme")
+
+    def test_workspace_remove_exact_names_work_under_collision(self) -> None:
+        other = self._second_registered_workspace("other")
+        add_workspace(self.root, name="Acme")
+        add_workspace(other, name="acme")
+        main(["workspace", "remove", "Acme", "--yes"])
+        self.assertEqual(
+            tuple(item.name for item in load_registry().workspaces), ("acme",)
+        )
+        main(["workspace", "remove", "acme", "--yes"])
+        self.assertEqual(load_registry().workspaces, ())
+
+    def test_implicit_json_next_does_not_advertise_colliding_alias(self) -> None:
+        other = self._second_registered_workspace("other")
+        add_workspace(self.root, name="Acme", make_default=True)
+        add_workspace(other, name="acme")
+        unrelated = self.root.parent / f"{self.root.name}-unrelated"
+        unrelated.mkdir()
+        output = StringIO()
+        previous = Path.cwd()
+        try:
+            os.chdir(unrelated)
+            with redirect_stdout(output):
+                main(["next", "--format", "json"])
+        finally:
+            os.chdir(previous)
+        rendered = output.getvalue()
+        self.assertNotIn("--workspace Acme", rendered)
+        self.assertNotIn("--workspace acme", rendered)
+        payload = json.loads(rendered)
+        self.assertEqual(payload["kind"], "next_step")
 
     def test_status_and_next_disclose_disabled_push(self) -> None:
         self._create_line()

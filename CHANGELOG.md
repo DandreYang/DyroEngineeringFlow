@@ -6,7 +6,11 @@
   registered name folds to the same key, and keep that canonical spelling
   in outputs. Two registered aliases that differ only by case fail closed
   with the colliding names listed; a total miss still suggests nearby
-  names.
+  names. Implicit JSON resolve does not stamp a `--workspace` selector.
+  `workspace default` / `workspace remove` plan and apply share that
+  policy; remove can still target each exact registered name when twins
+  collide. Bridge workspace list loads each row by stored root so a
+  fold-twin does not mark the other stale.
 - JSON `doctor` / `status` / `next` no longer share a flat 5s observation
   deadline with Bridge. Those commands start at the documented 45s ceiling
   (not 5s) so a ~50+ worktree workspace that the text path finishes in ~7s

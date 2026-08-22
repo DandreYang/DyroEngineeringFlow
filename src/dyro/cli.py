@@ -343,7 +343,11 @@ def _config(args: argparse.Namespace) -> Config:
                 cwd=Path.cwd().absolute(),
                 budget=budget,
             )
-            if resolved.registry_alias is not None:
+            if (
+                workspace_arg
+                and resolved.source is WorkspaceResolutionSource.EXPLICIT
+                and resolved.registry_alias is not None
+            ):
                 setattr(args, "workspace_alias", resolved.registry_alias)
         setattr(args, "_control_plane_resolution", resolved)
         return resolved.profile.config
@@ -2026,23 +2030,23 @@ def cmd_workspace_list(args: argparse.Namespace) -> None:
 
 
 def cmd_workspace_default(args: argparse.Namespace) -> None:
+    record = get_workspace(args.name)
     if args.dry_run:
-        get_workspace(args.name)
-        print(f"DRY RUN: 将默认工作区设为 {args.name}")
+        print(f"DRY RUN: 将默认工作区设为 {record.name}")
         return
-    set_default_workspace(args.name)
-    print(f"默认工作区：{args.name}")
+    set_default_workspace(record.name)
+    print(f"默认工作区：{record.name}")
 
 
 def cmd_workspace_remove(args: argparse.Namespace) -> None:
-    get_workspace(args.name)
+    record = get_workspace(args.name, exact_on_collision=True)
     if not args.yes and not args.dry_run:
         raise DyroError("移除只会删除全局首页入口，不会删除项目文件；确认后请加 --yes")
     if args.dry_run:
-        print(f"DRY RUN: 将移除工作区入口 {args.name}；不会删除项目文件")
+        print(f"DRY RUN: 将移除工作区入口 {record.name}；不会删除项目文件")
         return
-    remove_workspace(args.name)
-    print(f"已移除工作区入口：{args.name}；项目文件未改动")
+    remove_workspace(record.name)
+    print(f"已移除工作区入口：{record.name}；项目文件未改动")
 
 
 def _blueprint_document(args: argparse.Namespace):

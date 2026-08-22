@@ -9,6 +9,7 @@ from typing import Callable
 from ..config import Config
 from ..continuation.resolution import (
     WorkspaceResolutionError,
+    load_registered_profile,
     resolve_workspace_readonly,
 )
 from ..continuation.store import get_objective, list_objectives
@@ -78,12 +79,7 @@ def list_workspaces_observation(*, budget: ReadBudget | None = None) -> dict[str
     failures: list[dict[str, str]] = []
     for record in registry.workspaces:
         try:
-            profile = resolve_workspace_readonly(
-                start=None,
-                workspace=record.name,
-                cwd=Path("/"),
-                budget=limits,
-            ).profile
+            profile = load_registered_profile(record, limits)
             items.append(
                 {
                     "alias": record.name,

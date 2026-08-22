@@ -200,6 +200,11 @@ def _bounded_registry(budget: ReadBudget):
         ) from exc
 
 
+def load_registered_profile(record: WorkspaceRecord, budget: ReadBudget) -> LoadedProfile:
+    """Load one registry row by its stored root; do not re-resolve the alias."""
+    return _registered_profile(record, budget)
+
+
 def _registered_profile(record: WorkspaceRecord, budget: ReadBudget) -> LoadedProfile:
     try:
         return load_profile_exact(record.root, budget)

@@ -72,3 +72,21 @@ class BridgeResolutionTests(WorkspaceCase):
         self.assertTrue(payload["partial"])
         self.assertNotIn(str(self.root.resolve()), str(payload))
         self.assertNotIn(str(stale.resolve()), str(payload))
+
+    def test_list_does_not_mark_fold_twins_ambiguous(self) -> None:
+        add_workspace(self.root, name="Acme", make_default=True)
+        twin = self.root / "acme-twin"
+        twin.mkdir()
+        (twin / "dyro.toml").write_text(
+            CONFIG.replace('name = "test-workspace"', 'name = "acme-twin"'),
+            encoding="utf-8",
+        )
+        add_workspace(twin, name="acme")
+        payload = list_workspaces_observation()
+        by_alias = {item["alias"]: item for item in payload["workspaces"]}
+        self.assertEqual(by_alias["Acme"]["status"], "ok")
+        self.assertEqual(by_alias["acme"]["status"], "ok")
+        self.assertFalse(
+            any(item["code"] == "AMBIGUOUS_WORKSPACE" for item in payload["failures"])
+        )
+        self.assertFalse(payload["partial"])
