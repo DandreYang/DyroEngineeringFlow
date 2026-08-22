@@ -808,3 +808,15 @@ class MissingOriginFindingTests(unittest.TestCase):
                 "PASS line:alpha/api: missing origin/feat/alpha"
             )
         )
+        self.assertFalse(
+            is_missing_origin_finding(
+                "FAIL repository api: missing or not Git: "
+                "/tmp/repo: missing origin/evil"
+            )
+        )
+        self.assertFalse(
+            is_missing_origin_finding(
+                "FAIL line:alpha/api: missing worktree at "
+                "/tmp/checkout: missing origin/evil"
+            )
+        )
