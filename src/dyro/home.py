@@ -747,13 +747,15 @@ def existing_line_workspace(
     config: Config, line_id: str, kind: str | None
 ) -> tuple[Line, Path]:
     line = get_line(config, line_id, kind)
-    relevant = {f"FAIL repository {repo_id}:" for repo_id in line.repositories}
-    relevant.add(f"FAIL {line.kind}:{line.id}/")
+    # Same FAIL set as `dyro next` → needs_repair, minus the constructed
+    # missing-origin shape. Workspace-level FAILs (external Profile, …)
+    # and other-line FAILs block open; only missing-origin-only may skip
+    # so a just-created local-only line can be opened. start/next refuse
+    # even that skip.
     failures = [
         finding
         for finding in doctor(config)
-        if any(finding.startswith(prefix) for prefix in relevant)
-        and not is_missing_origin_finding(finding)
+        if finding.startswith("FAIL") and not is_missing_origin_finding(finding)
     ]
     if failures:
         raise DyroError(
@@ -2178,7 +2180,8 @@ def _run_config_home(
     failures = [finding for finding in doctor(config) if finding.startswith("FAIL")]
     if failures:
         print(
-            f"\n检测到 {len(failures)} 个结构问题；只会阻止进入受影响的目标。"
+            f"\n检测到 {len(failures)} 个结构问题；除尚未发布的 "
+            "origin/<branch> 外，doctor FAIL 会阻止打开开发线。"
             "运行 dyro doctor 查看详情。"
         )
     briefing = _print_ready_briefing(config, record)

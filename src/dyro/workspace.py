@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 from typing import Iterable, Mapping
@@ -1309,16 +1310,25 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
     return findings
 
 
-_MISSING_ORIGIN_TOKEN = ": missing origin/"
+_SAFE_FINDING_ID = r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}"
+_MISSING_ORIGIN_FINDING = re.compile(
+    rf"^FAIL (?:line|hotfix):{_SAFE_FINDING_ID}/{_SAFE_FINDING_ID}: missing origin/\S+$"
+)
 
 
 def is_missing_origin_finding(finding: str) -> bool:
     """True only for doctor FAILs that mean origin/<line.branch> is absent.
 
-    Join completion, setup post-doctor, start, and home-open skip these so
-    SHA-pinned / local-only lines can exist before the remote-tracking ref
-    is published. ``dyro next`` and Isolated Console do not: a FAIL is not
-    ready. Wrong upstream, wrong branch, missing worktree, common-dir, and
-    symlink FAILs still fail.
+    Matches the constructed shape
+    ``FAIL <kind>:<id>/<repo>: missing origin/<branch>`` and nothing else.
+    A path or message that merely embeds ``: missing origin/`` does not match.
+
+    Join completion, setup post-doctor, home create-and-open, and
+    ``existing_line_workspace`` / ``dyro open`` skip only this constructed
+    shape so SHA-pinned / local-only lines can exist (and be opened)
+    before the remote-tracking ref is published. Every other doctor FAIL
+    — including workspace-level ``FAIL external Profile requires …`` —
+    still blocks open. ``dyro next``, ``dyro start``, and Isolated Console
+    do not skip: a FAIL is not ready.
     """
-    return finding.startswith("FAIL ") and _MISSING_ORIGIN_TOKEN in finding
+    return _MISSING_ORIGIN_FINDING.fullmatch(finding) is not None

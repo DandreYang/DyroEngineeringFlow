@@ -30,3 +30,13 @@ class ReadmeIdentityTests(unittest.TestCase):
             self.assertIn("inconclusive", text, msg=name)
             self.assertNotIn("Symphony", text)
             self.assertNotIn("Gas Town", text)
+
+    def test_docs_do_not_use_known_banned_identity_tokens(self) -> None:
+        banned = ("Symphony", "Gas Town")
+        docs = ROOT / "docs"
+        for path in docs.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in {".md", ".txt", ".toml"}:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for token in banned:
+                self.assertNotIn(token, text, msg=str(path.relative_to(ROOT)))

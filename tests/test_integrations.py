@@ -65,6 +65,7 @@ class IntegrationManagerTests(unittest.TestCase):
         self.dyro_home = self.root / "dyro"
         self.fake_home = self.root / "home"
         self.fake_home.mkdir()
+        self.codex_home.mkdir()
         isolated_hosts = {
             spec.env_var: "" for spec in manager.HOSTS if spec.env_var
         }
@@ -1255,6 +1256,7 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertEqual(spec.default_dirname, ".pi/agent")
 
         pi_home = self.root / "pi-agent"
+        pi_home.mkdir()
         install_integration("skill", yes=True, host_homes={"pi": pi_home})
         avatar = pi_home / "skills" / "dyro-control-plane"
         self.assertTrue(avatar.is_symlink() or avatar.is_dir())
@@ -1268,6 +1270,7 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertEqual(spec.default_dirname, ".dsh")
 
         dsh_home = self.root / "dsh-home"
+        dsh_home.mkdir()
         install_integration("skill", yes=True, host_homes={"dsh": dsh_home})
         avatar = dsh_home / "skills" / "dyro-control-plane"
         self.assertTrue(avatar.is_symlink() or avatar.is_dir())
@@ -1283,6 +1286,8 @@ class IntegrationManagerTests(unittest.TestCase):
 
         opencode_home = self.root / "opencode-home"
         hermes_home = self.root / "hermes-home"
+        opencode_home.mkdir()
+        hermes_home.mkdir()
         homes = {"opencode": opencode_home, "hermes": hermes_home}
         preview = integration_status("skill", host_homes=homes)
         self.assertEqual(
@@ -1324,6 +1329,34 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertEqual(removed.status.state, IntegrationState.ABSENT)
         self.assertFalse(opencode_avatar.exists() or opencode_avatar.is_symlink())
         self.assertFalse(hermes_avatar.exists() or hermes_avatar.is_symlink())
+
+    def test_explicit_missing_host_homes_are_not_created(self) -> None:
+        missing_env = self.root / "missing-opencode-env"
+        missing_override = self.root / "missing-hermes-override"
+        opencode = next(host for host in manager.HOSTS if host.host_id == "opencode")
+        hermes = next(host for host in manager.HOSTS if host.host_id == "hermes")
+
+        with patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": str(missing_env)}):
+            self.assertIsNone(manager._host_home(opencode, None))
+            status = integration_status("skill")
+            self.assertNotIn("opencode", {row.host for row in status.avatars})
+            install_integration("skill", yes=True)
+            self.assertFalse(missing_env.exists())
+
+        self.assertIsNone(manager._host_home(hermes, {"hermes": missing_override}))
+        status = integration_status("skill", host_homes={"hermes": missing_override})
+        self.assertNotIn("hermes", {row.host for row in status.avatars})
+        install_integration("skill", yes=True, host_homes={"hermes": missing_override})
+        self.assertFalse(missing_override.exists())
+
+    def test_missing_override_only_refuses_isolated_mirror(self) -> None:
+        missing_only = self.root / "missing-only-host"
+        isolated = {spec.env_var: "" for spec in manager.HOSTS if spec.env_var}
+        with patch.dict(os.environ, isolated, clear=False):
+            with self.assertRaisesRegex(DyroError, "孤立镜像|未检测到宿主|没有可挂接"):
+                install_integration("skill", yes=True, host_homes={"pi": missing_only})
+            self.assertFalse(missing_only.exists())
+            self.assertEqual(integration_status("skill").state, IntegrationState.ABSENT)
 
     def test_absent_opencode_and_hermes_homes_stay_silent(self) -> None:
         config_root = self.fake_home / ".config"
