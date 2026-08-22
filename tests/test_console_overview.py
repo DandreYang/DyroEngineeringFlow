@@ -203,6 +203,49 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_CURSOR_INVALID"):
             self.service.page(cursor=cursor, limit=1)
 
+    def test_fold_twin_cards_do_not_recommend_fail_closed_workspace_selector(self) -> None:
+        demo_root = Path("/private/demo-workspace")
+        twin_root = Path("/private/demo-twin-workspace")
+        registry = WorkspaceRegistry(
+            default="Demo",
+            workspaces=(
+                WorkspaceRecord("Demo", demo_root),
+                WorkspaceRecord("demo", twin_root),
+            ),
+        )
+        configurations = {
+            demo_root: SimpleNamespace(name="Demo", repositories={"api": object()}),
+            twin_root: SimpleNamespace(name="demo", repositories={"web": object()}),
+        }
+        snapshots = {
+            "Demo": _snapshot(name="Demo", attention=()),
+            "demo": _snapshot(name="demo", attention=()),
+        }
+        service = ConsoleOverviewService(
+            registry_loader=lambda: registry,
+            config_loader=lambda root: configurations[root],
+            snapshot_loader=lambda config: snapshots[config.name],
+            clock=lambda: datetime(2026, 8, 4, 12, 5, tzinfo=timezone.utc),
+            cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [
+                "FAIL line:core/api: missing origin/feat/core",
+            ],
+            commands_loader=lambda config, alias=None: [
+                f"dyro --workspace {alias} doctor"
+            ],
+        )
+
+        page = service.page()
+        cards = page["data"]["workspaces"]
+        self.assertEqual({card["alias"] for card in cards}, {"Demo", "demo"})
+        for card in cards:
+            command = card["recommendation"]["command"]
+            self.assertNotIn("--workspace Demo", command)
+            self.assertNotIn("--workspace demo", command)
+            self.assertNotIn("/private", command)
+        unique = self.service._recommendation("core", [])
+        self.assertEqual(unique["command"], "dyro --workspace core doctor")
+
     def test_empty_attention_recommends_doctor_not_a_bare_workspace_invocation(self) -> None:
         recommendation = self.service._recommendation("core", [])
 

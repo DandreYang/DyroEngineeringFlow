@@ -10,7 +10,11 @@
   `workspace default` / `workspace remove` plan and apply share that
   policy; remove can still target each exact registered name when twins
   collide. Bridge workspace list loads each row by stored root so a
-  fold-twin does not mark the other stale.
+  fold-twin does not mark the other stale. Implicit `next` and ready
+  briefing never advertise a `--workspace` selector that would
+  fail-close; they use `--root` instead. `console` plan and apply share
+  that resolve (canonical on a unique fold; fail-closed on twins).
+  Console overview recommendations omit a colliding `--workspace` ad.
 - JSON `doctor` / `status` / `next` no longer share a flat 5s observation
   deadline with Bridge. Those commands start at the documented 45s ceiling
   (not 5s) so a ~50+ worktree workspace that the text path finishes in ~7s

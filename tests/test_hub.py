@@ -25,12 +25,14 @@ from dyro.home import (
 )
 from dyro.hub import (
     add_workspace,
+    alias_fold_collides,
     get_workspace,
     load_registry,
     mark_workspace_used,
     registry_home,
     remove_workspace,
     set_default_workspace,
+    unique_registered_alias,
 )
 from dyro.tooling import (
     ToolPreferences,
@@ -162,6 +164,15 @@ mount = "api"
         self.assertEqual(record.name, "Acme")
         self.assertEqual(record.root, self.workspace.resolve())
         self.assertEqual(load_registry().workspaces[0].name, "Acme")
+
+    def test_alias_fold_helpers_distinguish_unique_and_collision(self) -> None:
+        names = ("Demo", "other")
+        self.assertFalse(alias_fold_collides("demo", names))
+        self.assertEqual(unique_registered_alias("demo", names), "Demo")
+        colliding = ("Demo", "demo")
+        self.assertTrue(alias_fold_collides("Demo", colliding))
+        self.assertIsNone(unique_registered_alias("demo", colliding))
+        self.assertIsNone(unique_registered_alias("missing", names))
 
     def test_get_workspace_fails_closed_on_case_fold_collision(self) -> None:
         from dyro.errors import DyroError
@@ -1637,9 +1648,23 @@ write = ["codex"]
         self.assertEqual(load_registry().workspaces, ())
 
     def test_implicit_json_next_does_not_advertise_colliding_alias(self) -> None:
-        other = self._second_registered_workspace("other")
-        add_workspace(self.root, name="Acme", make_default=True)
-        add_workspace(other, name="acme")
+        self._create_line()
+        (self.root / "dyro.toml").write_text(
+            (self.root / "dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "test-workspace"', 'name = "Demo"'),
+            encoding="utf-8",
+        )
+        other = self.root.parent / f"{self.root.name}-twin"
+        other.mkdir()
+        other.joinpath("dyro.toml").write_text(
+            (self.root / "dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "Demo"', 'name = "demo"'),
+            encoding="utf-8",
+        )
+        add_workspace(self.root, name="Demo", make_default=True)
+        add_workspace(other, name="demo")
         unrelated = self.root.parent / f"{self.root.name}-unrelated"
         unrelated.mkdir()
         output = StringIO()
@@ -1651,10 +1676,51 @@ write = ["codex"]
         finally:
             os.chdir(previous)
         rendered = output.getvalue()
-        self.assertNotIn("--workspace Acme", rendered)
-        self.assertNotIn("--workspace acme", rendered)
         payload = json.loads(rendered)
         self.assertEqual(payload["kind"], "next_step")
+        self.assertEqual(payload["state"], "needs_repair")
+        commands = payload.get("commands") or []
+        diagnostic = payload.get("diagnostic_commands") or []
+        briefing = payload.get("briefing") or {}
+        briefing_command = (
+            briefing.get("command") if isinstance(briefing, dict) else None
+        )
+        advertised = [
+            item
+            for item in (*commands, *diagnostic, briefing_command)
+            if isinstance(item, str)
+        ]
+        self.assertTrue(advertised)
+        for command in advertised:
+            self.assertNotIn("--workspace Demo", command)
+            self.assertNotIn("--workspace demo", command)
+        self.assertTrue(any("--root" in item for item in advertised))
+
+    def test_console_unique_fold_plan_and_apply_share_canonical_alias(self) -> None:
+        add_workspace(self.root, name="Demo")
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--dry-run", "--workspace", "demo", "console"])
+        self.assertIn("初始焦点：Demo", output.getvalue())
+        self.assertNotIn("初始焦点：demo", output.getvalue())
+        with patch("dyro.cli.launch_console") as launch:
+            main(["--workspace", "demo", "console"])
+        launch.assert_called_once()
+        self.assertEqual(launch.call_args.kwargs["initial_workspace"], "Demo")
+
+    def test_console_collision_refuses_plan_and_apply(self) -> None:
+        other = self._second_registered_workspace("other")
+        add_workspace(self.root, name="Demo")
+        add_workspace(other, name="demo")
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as planned:
+            main(["--dry-run", "--workspace", "Demo", "console"])
+        self.assertEqual(planned.exception.code, 2)
+        self.assertIn("Demo", stderr.getvalue())
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as applied:
+            main(["--workspace", "Demo", "console"])
+        self.assertEqual(applied.exception.code, 2)
 
     def test_status_and_next_disclose_disabled_push(self) -> None:
         self._create_line()

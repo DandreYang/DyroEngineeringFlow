@@ -6,6 +6,7 @@ import shlex
 
 from ..config import Config
 from ..errors import DyroError, ValidationError
+from ..hub import alias_fold_collides, load_registry, unique_registered_alias
 from ..read_limits import ReadBudget, ReadLimitError
 from .briefing import (
     briefing_payload,
@@ -21,6 +22,29 @@ from .store import get_objective, list_objectives
 def briefing_command(alias: str, *command: str) -> str:
     """Scope a read-only command without embedding --root paths."""
     return shlex.join(("dyro", "--workspace", alias, *command))
+
+
+def scoped_briefing_command(
+    config: Config,
+    alias: str,
+    *command: str,
+    names: tuple[str, ...] | None = None,
+) -> str:
+    """Advertise ``--workspace`` only when that selector would resolve.
+
+    A unique fold uses the canonical registered spelling. An unregistered
+    profile name keeps ``--workspace`` so path-free next ads stay path-free.
+    A fold collision fail-closes at resolve, so the ad switches to ``--root``.
+    """
+    registered = (
+        names
+        if names is not None
+        else tuple(item.name for item in load_registry().workspaces)
+    )
+    if alias_fold_collides(alias, registered):
+        return shlex.join(("dyro", "--root", str(config.root), *command))
+    canonical = unique_registered_alias(alias, registered) or alias
+    return briefing_command(canonical, *command)
 
 
 def _read_plan(
@@ -61,20 +85,22 @@ def build_ready_briefing(
             if record.operator_state != "stopped"
         ]
     except (DyroError, ValidationError, OSError, ReadLimitError):
-        command = briefing_command(alias, "objective", "list")
+        command = scoped_briefing_command(config, alias, "objective", "list")
         return unread_briefing(command), [command]
     if not records:
         return None, []
     if len(records) > 1:
-        command = briefing_command(alias, "objective", "list")
+        command = scoped_briefing_command(config, alias, "objective", "list")
         return inventory_briefing(command, len(records)), [command]
     record = records[0]
-    explain = briefing_command(alias, "objective", "explain", record.objective.id)
+    explain = scoped_briefing_command(
+        config, alias, "objective", "explain", record.objective.id
+    )
     try:
         stored, plan = _read_plan(config, record.objective.id, read_budget)
     except (DyroError, ValidationError, OSError, ReadLimitError):
         return unread_briefing(explain), [explain]
-    command = briefing_command(alias, *follow_up_argv(plan))
+    command = scoped_briefing_command(config, alias, *follow_up_argv(plan))
     return (
         briefing_payload(plan, command=command, title=stored.objective.title),
         [command],

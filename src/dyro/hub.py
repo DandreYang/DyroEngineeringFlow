@@ -69,6 +69,21 @@ def workspace_alias_matches(
     return tuple(record for record in workspaces if _alias_fold(record.name) == key)
 
 
+def alias_fold_collides(name: str, names: tuple[str, ...]) -> bool:
+    """True when two or more registered aliases fold equal to ``name``."""
+    key = _alias_fold(name)
+    return sum(1 for item in names if _alias_fold(item) == key) > 1
+
+
+def unique_registered_alias(name: str, names: tuple[str, ...]) -> str | None:
+    """Return the sole registered spelling that folds equal to ``name``."""
+    key = _alias_fold(name)
+    matches = tuple(item for item in names if _alias_fold(item) == key)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
 class WorkspaceAliasCollisionError(DyroError):
     """More than one registered alias folds to the same lookup key."""
 

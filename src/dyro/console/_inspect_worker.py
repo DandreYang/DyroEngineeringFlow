@@ -27,6 +27,7 @@ from .overview import (
     WORKSPACE_MISSING_ROOT,
     WORKSPACE_TIMEOUT,
     WORKSPACE_UNAVAILABLE,
+    omit_colliding_workspace_command,
     unavailable_workspace_summary,
     workspace_root_missing,
 )
@@ -39,31 +40,41 @@ _OVERVIEW_TIMEOUT_SECONDS = 6.0
 _WORKER_RESPONSE_LIMIT = 2 * 1024 * 1024
 
 
-def _unavailable_summary(alias: str, code: str) -> dict[str, object]:
-    return unavailable_workspace_summary(alias, False, reason=code)
+def _unavailable_summary(
+    alias: str, code: str, names: tuple[str, ...] = ()
+) -> dict[str, object]:
+    return unavailable_workspace_summary(alias, False, reason=code, names=names)
 
 
 def _capture_workspace_summary(
     result_queue: Any,
     record: WorkspaceRecord,
     is_default: bool,
+    registry: WorkspaceRegistry | None = None,
 ) -> None:
     """Capture one workspace only, returning a JSON-safe value through IPC."""
+    names = (
+        tuple(item.name for item in registry.workspaces)
+        if registry is not None
+        else (record.name,)
+    )
     try:
         if workspace_root_missing(record.root):
             result_queue.put(
                 {
-                    "summary": _unavailable_summary(record.name, WORKSPACE_MISSING_ROOT),
+                    "summary": _unavailable_summary(
+                        record.name, WORKSPACE_MISSING_ROOT, names
+                    ),
                     "warnings": [WORKSPACE_MISSING_ROOT],
                 }
             )
             return
-        registry = WorkspaceRegistry(
+        capture_registry = registry or WorkspaceRegistry(
             default=record.name if is_default else "",
             workspaces=(record,),
         )
         service = ConsoleOverviewService(
-            registry_loader=lambda: registry,
+            registry_loader=lambda: capture_registry,
             commands_loader=next_commands,
         )
         payload = service.workspace(record.name)
@@ -73,17 +84,23 @@ def _capture_workspace_summary(
     except Exception:
         result_queue.put(
             {
-                "summary": _unavailable_summary(record.name, WORKSPACE_UNAVAILABLE),
+                "summary": _unavailable_summary(
+                    record.name, WORKSPACE_UNAVAILABLE, names
+                ),
                 "warnings": [WORKSPACE_UNAVAILABLE],
             }
         )
 
 
 def _parse_child_result(
-    value: object, record: WorkspaceRecord, *, is_default: bool
+    value: object,
+    record: WorkspaceRecord,
+    *,
+    is_default: bool,
+    names: tuple[str, ...] = (),
 ) -> tuple[dict[str, object], set[str]]:
     if not isinstance(value, dict):
-        return _unavailable_summary(record.name, WORKSPACE_UNAVAILABLE), {
+        return _unavailable_summary(record.name, WORKSPACE_UNAVAILABLE, names), {
             WORKSPACE_UNAVAILABLE
         }
     summary = value.get("summary")
@@ -93,13 +110,13 @@ def _parse_child_result(
         or not isinstance(warnings, list)
         or not all(isinstance(item, str) for item in warnings)
     ):
-        return _unavailable_summary(record.name, WORKSPACE_UNAVAILABLE), {
+        return _unavailable_summary(record.name, WORKSPACE_UNAVAILABLE, names), {
             WORKSPACE_UNAVAILABLE
         }
     copied = dict(summary)
     copied["alias"] = record.name
     copied["is_default"] = is_default
-    return copied, set(warnings)
+    return omit_colliding_workspace_command(copied, names), set(warnings)
 
 
 def _isolated_summaries(
@@ -115,9 +132,12 @@ def _isolated_summaries(
     summaries: list[dict[str, object]] = []
     warnings: set[str] = set()
     deadline = time.monotonic() + total_timeout
+    names = tuple(item.name for item in registry.workspaces)
 
     def finish(record: WorkspaceRecord, value: object, *, default: bool) -> None:
-        summary, codes = _parse_child_result(value, record, is_default=default)
+        summary, codes = _parse_child_result(
+            value, record, is_default=default, names=names
+        )
         summaries.append(summary)
         warnings.update(codes)
 
@@ -131,7 +151,9 @@ def _isolated_summaries(
                 finish(
                     record,
                     {
-                        "summary": _unavailable_summary(record.name, WORKSPACE_TIMEOUT),
+                        "summary": _unavailable_summary(
+                            record.name, WORKSPACE_TIMEOUT, names
+                        ),
                         "warnings": [WORKSPACE_TIMEOUT],
                     },
                     default=record.name == registry.default,
@@ -141,7 +163,9 @@ def _isolated_summaries(
                 finish(
                     record,
                     {
-                        "summary": _unavailable_summary(record.name, WORKSPACE_TIMEOUT),
+                        "summary": _unavailable_summary(
+                            record.name, WORKSPACE_TIMEOUT, names
+                        ),
                         "warnings": [WORKSPACE_TIMEOUT],
                     },
                     default=record.name == registry.default,
@@ -153,7 +177,12 @@ def _isolated_summaries(
             result_queue = context.Queue(maxsize=1)
             process = context.Process(
                 target=_capture_workspace_summary,
-                args=(result_queue, record, record.name == registry.default),
+                args=(
+                    result_queue,
+                    record,
+                    record.name == registry.default,
+                    registry,
+                ),
                 daemon=True,
             )
             process.start()
@@ -186,7 +215,9 @@ def _isolated_summaries(
                     finish(
                         record,
                         {
-                            "summary": _unavailable_summary(record.name, code),
+                            "summary": _unavailable_summary(
+                                record.name, code, names
+                            ),
                             "warnings": [code],
                         },
                         default=record.name == registry.default,

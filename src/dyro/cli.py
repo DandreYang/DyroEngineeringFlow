@@ -49,7 +49,11 @@ from .continuation.next_step import (
     deadline_repair_commands,
     repair_commands,
 )
-from .continuation.ready_briefing import briefing_command, build_ready_briefing
+from .continuation.ready_briefing import (
+    briefing_command,
+    build_ready_briefing,
+    scoped_briefing_command,
+)
 from .continuation.engine import (
     build_scheduler_tick,
     render_scheduler_tick_text,
@@ -669,9 +673,9 @@ def _timeout_repair_commands(
     try:
         config = _config(args)
         commands = deadline_repair_commands(config, alias, failures)
+        return commands or [_briefing_command(args, config, "doctor")]
     except (DyroError, OSError, ValidationError, TypeError, AttributeError):
-        commands = [briefing_command(alias, "doctor")]
-    return commands or [briefing_command(alias, "doctor")]
+        return [briefing_command(alias, "doctor")]
 
 
 def _print_json_observation_timeout(args: argparse.Namespace) -> None:
@@ -722,12 +726,16 @@ def _print_json_observation_timeout(args: argparse.Namespace) -> None:
         return
     commands = _timeout_repair_commands(args, findings)
     failures = [item for item in findings if item.startswith("FAIL")]
+    try:
+        diagnostic_commands = [_briefing_command(args, _config(args), "doctor")]
+    except (DyroError, OSError, ValidationError, TypeError, AttributeError):
+        diagnostic_commands = [briefing_command(workspace, "doctor")]
     _print_control_plane_json(
         "next_step",
         state="needs_repair",
         summary="工作区还不能开始任务。",
         commands=commands,
-        diagnostic_commands=[briefing_command(workspace, "doctor")],
+        diagnostic_commands=diagnostic_commands,
         mutation_available=False,
         partial=True,
         findings=[
@@ -819,9 +827,9 @@ def _scoped_command(
 def _briefing_command(
     args: argparse.Namespace, config: Config, *command: str
 ) -> str:
-    """Scope a read-only briefing command without embedding --root paths."""
+    """Scope a read-only briefing command without a fail-closed selector."""
     alias = getattr(args, "workspace_alias", None) or config.name
-    return briefing_command(str(alias), *command)
+    return scoped_briefing_command(config, str(alias), *command)
 
 
 def _workspace_ready_briefing(
@@ -1934,8 +1942,16 @@ def cmd_console(args: argparse.Namespace) -> None:
     initial_workspace = getattr(args, "workspace_alias", None)
     root_arg = getattr(args, "root", None)
     target_root: Path | None = None
+    if root_arg:
+        if args.dry_run:
+            target_root = Path(root_arg).expanduser().absolute()
+        else:
+            config = load(Path(root_arg).expanduser())
+            target_root = config.root
+            initial_workspace = config.name
+    elif initial_workspace:
+        initial_workspace = get_workspace(initial_workspace).name
     if args.dry_run:
-        target_root = Path(root_arg).expanduser().absolute() if root_arg else None
         render_console_plan(
             port=args.port,
             no_open=args.no_open,
@@ -1943,12 +1959,6 @@ def cmd_console(args: argparse.Namespace) -> None:
             target_root=target_root,
         )
         return
-    if root_arg:
-        config = load(Path(root_arg).expanduser())
-        target_root = config.root
-        initial_workspace = config.name
-    elif initial_workspace:
-        initial_workspace = get_workspace(initial_workspace).name
     launch_console(
         port=args.port,
         no_open=args.no_open,
