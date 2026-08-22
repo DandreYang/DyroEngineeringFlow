@@ -140,8 +140,11 @@ class WorkspaceTests(WorkspaceCase):
             ),
             payload,
         )
-        with self.assertRaisesRegex(DyroError, "尚未就绪"):
-            existing_line_workspace(config, "local-only", "line")
+        # Narrow exception: open / home create-and-open may still enter a
+        # just-created local-only line. start and next refuse.
+        line, workspace = existing_line_workspace(config, "local-only", "line")
+        self.assertEqual(line.id, "local-only")
+        self.assertTrue(workspace.is_dir())
 
     def test_doctor_fails_when_one_repo_missing_origin_feat(self) -> None:
         web = self.root / "repositories/web"

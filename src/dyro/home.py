@@ -46,6 +46,7 @@ from .workspace import (
     create_line,
     doctor,
     get_line,
+    is_missing_origin_finding,
     line_root,
     list_lines,
     preflight_line,
@@ -748,10 +749,14 @@ def existing_line_workspace(
     line = get_line(config, line_id, kind)
     relevant = {f"FAIL repository {repo_id}:" for repo_id in line.repositories}
     relevant.add(f"FAIL {line.kind}:{line.id}/")
+    # Home create-and-open and `dyro open` skip missing-origin-only so a
+    # just-created local-only line can be opened before origin/<branch>
+    # exists. `dyro start` and `dyro next` do not skip: any FAIL refuses.
     failures = [
         finding
         for finding in doctor(config)
         if any(finding.startswith(prefix) for prefix in relevant)
+        and not is_missing_origin_finding(finding)
     ]
     if failures:
         raise DyroError(

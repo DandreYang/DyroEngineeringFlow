@@ -1323,10 +1323,11 @@ def is_missing_origin_finding(finding: str) -> bool:
     ``FAIL <kind>:<id>/<repo>: missing origin/<branch>`` and nothing else.
     A path or message that merely embeds ``: missing origin/`` does not match.
 
-    Join completion and setup post-doctor skip these so SHA-pinned /
-    local-only lines can exist before the remote-tracking ref is published.
-    ``dyro next``, ``dyro start``, Isolated Console, and
-    ``existing_line_workspace`` do not: a FAIL is not ready. Wrong upstream,
-    wrong branch, missing worktree, common-dir, and symlink FAILs still fail.
+    Join completion, setup post-doctor, home create-and-open, and
+    ``existing_line_workspace`` / ``dyro open`` skip these so SHA-pinned /
+    local-only lines can exist (and be opened) before the remote-tracking
+    ref is published. ``dyro next``, ``dyro start``, and Isolated Console
+    do not: a FAIL is not ready. Wrong upstream, wrong branch, missing
+    worktree, common-dir, and symlink FAILs still fail.
     """
     return _MISSING_ORIGIN_FINDING.fullmatch(finding) is not None
