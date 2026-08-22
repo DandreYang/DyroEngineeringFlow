@@ -1648,7 +1648,7 @@ write = ["codex"]
         self.assertEqual(load_registry().workspaces, ())
 
     def test_implicit_json_next_does_not_advertise_colliding_alias(self) -> None:
-        self._create_line()
+        create_line(load(self.root), line_id="alpha", branch="feat/alpha", base="main")
         (self.root / "dyro.toml").write_text(
             (self.root / "dyro.toml")
             .read_text(encoding="utf-8")
