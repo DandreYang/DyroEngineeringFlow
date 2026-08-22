@@ -41,6 +41,19 @@ from dyro.workspace import (
 
 from .support import WorkspaceCase
 
+# Locked pre-merge Mac baseline: five consecutive JSON status walls, all
+# DEADLINE_EXCEEDED on the 5s protocol budget, zero successes. The faster
+# box (4.60–4.73s) stayed under 5s and did not catch the cliff.
+LOCKED_MAC_JSON_STATUS_WALLS = (5.35, 5.36, 5.38, 5.40, 5.41)
+
+
+class _FrozenClock:
+    def __init__(self, t: float = 1000.0) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
 
 def _raise_deadline_on_worktree(repo, *args, read_budget=None, **kwargs):
     if read_budget is not None and "versions/" in str(repo):
@@ -137,14 +150,7 @@ class ControlPlaneDeadlineScaleTests(unittest.TestCase):
         )
 
     def test_json_fanout_budget_survives_stable_mac_5_35s_wall(self) -> None:
-        class Clock:
-            def __init__(self) -> None:
-                self.t = 1000.0
-
-            def __call__(self) -> float:
-                return self.t
-
-        clock = Clock()
+        clock = _FrozenClock()
         budget = ReadBudget(
             ObservationLimits(
                 deadline_seconds=CONTROL_PLANE_DEADLINE_CEILING_SECONDS
@@ -154,6 +160,30 @@ class ControlPlaneDeadlineScaleTests(unittest.TestCase):
         clock.t += 5.35
         budget.check_deadline()
         self.assertGreater(budget.remaining_seconds(), 20.0)
+
+    def test_locked_mac_five_run_fails_on_five_seconds_succeeds_on_json_budget(
+        self,
+    ) -> None:
+        """Five consecutive Mac JSON status walls: 0/5 on 5s, 5/5 on 45s."""
+
+        self.assertEqual(len(LOCKED_MAC_JSON_STATUS_WALLS), 5)
+        for wall in LOCKED_MAC_JSON_STATUS_WALLS:
+            pre = _FrozenClock()
+            protocol = ReadBudget(ObservationLimits(), monotonic=pre)
+            pre.t += wall
+            with self.assertRaises(ReadLimitError) as raised:
+                protocol.check_deadline()
+            self.assertEqual(
+                raised.exception.code, ReadLimitCode.DEADLINE_EXCEEDED, wall
+            )
+
+            post = _FrozenClock()
+            json_budget = _control_plane_budget(Namespace(command="status"))
+            json_budget.monotonic = post
+            json_budget._started_at = post.t
+            post.t += wall
+            json_budget.check_deadline()
+            self.assertGreater(json_budget.remaining_seconds(), 30.0, wall)
 
 
 class ControlPlaneTimeoutFindingTests(WorkspaceCase):
@@ -340,6 +370,104 @@ class ControlPlaneTimeoutFindingTests(WorkspaceCase):
             if kind == "next_step":
                 self.assertEqual(payload["state"], "needs_repair")
                 self.assertNotEqual(payload["state"], "ready")
+
+    def test_locked_mac_five_run_json_status_succeeds_every_sample(self) -> None:
+        """Post-fix: the same five JSON status walls all succeed, not bare DEADLINE."""
+
+        self._workspace_with_completed_fail_and_worktree()
+        for wall in LOCKED_MAC_JSON_STATUS_WALLS:
+            clock = _FrozenClock()
+            budget = ReadBudget(
+                ObservationLimits(
+                    deadline_seconds=CONTROL_PLANE_DEADLINE_CEILING_SECONDS
+                ),
+                monotonic=clock,
+            )
+            clock.t += wall
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("dyro.cli._control_plane_budget", return_value=budget),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                main(["--root", str(self.root), "status", "--format", "json"])
+            self.assertEqual(stderr.getvalue(), "", wall)
+            payload = json.loads(stdout.getvalue())
+            self.assertNotEqual(payload.get("kind"), "error", payload)
+            self.assertNotEqual(payload.get("command"), "status", payload)
+            self.assertEqual(payload["kind"], "workspace_status", payload)
+            self.assertFalse(payload.get("partial"), payload)
+            self.assertNotEqual(payload.get("code"), "DEADLINE_EXCEEDED", payload)
+            self.assertGreaterEqual(len(payload.get("rows") or []), 1, payload)
+
+    def test_locked_mac_five_run_timeout_keeps_fails_not_bare_deadline(
+        self,
+    ) -> None:
+        """If a sample still times out, return structured partial + FAILs."""
+
+        self._workspace_with_completed_fail_and_worktree()
+        for wall in LOCKED_MAC_JSON_STATUS_WALLS:
+            status_out = StringIO()
+            status_err = StringIO()
+            with (
+                patch(
+                    "dyro.workspace.git_read",
+                    side_effect=_raise_deadline_on_worktree,
+                ),
+                redirect_stdout(status_out),
+                redirect_stderr(status_err),
+            ):
+                main(["--root", str(self.root), "status", "--format", "json"])
+            self.assertEqual(status_err.getvalue(), "", wall)
+            status_payload = json.loads(status_out.getvalue())
+            self.assertNotEqual(status_payload.get("kind"), "error", status_payload)
+            self.assertNotEqual(status_payload.get("command"), "status", status_payload)
+            self.assertEqual(status_payload["kind"], "workspace_status", status_payload)
+            self.assertEqual(status_payload["code"], "DEADLINE_EXCEEDED", status_payload)
+            self.assertTrue(status_payload["partial"], status_payload)
+            self.assertTrue(
+                any(row["branch"] == "TIMEOUT" for row in status_payload["rows"]),
+                status_payload,
+            )
+            self.assertTrue(
+                any(row["scope"] == "anchor" for row in status_payload["rows"]),
+                status_payload,
+            )
+
+            doctor_out = StringIO()
+            doctor_err = StringIO()
+            with (
+                patch(
+                    "dyro.workspace.git_read",
+                    side_effect=_raise_deadline_on_worktree,
+                ),
+                redirect_stdout(doctor_out),
+                redirect_stderr(doctor_err),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main(["--root", str(self.root), "doctor", "--format", "json"])
+            self.assertEqual(raised.exception.code, 2, wall)
+            self.assertEqual(doctor_err.getvalue(), "", wall)
+            doctor_payload = json.loads(doctor_out.getvalue())
+            self.assertNotEqual(doctor_payload.get("kind"), "error", doctor_payload)
+            self.assertEqual(doctor_payload["kind"], "doctor", doctor_payload)
+            self.assertEqual(doctor_payload["code"], "DEADLINE_EXCEEDED", doctor_payload)
+            self.assertTrue(doctor_payload["partial"], doctor_payload)
+            self.assertTrue(
+                any(
+                    item["status"] == "FAIL" and "missing or not Git" in item["message"]
+                    for item in doctor_payload["findings"]
+                ),
+                doctor_payload,
+            )
+            self.assertTrue(
+                any(
+                    item["status"] == "FAIL" and "deadline" in item["message"]
+                    for item in doctor_payload["findings"]
+                ),
+                doctor_payload,
+            )
 
     def test_print_error_does_not_emit_mac_bare_status_envelope(self) -> None:
         """Verifier payload {code, command:status} is a total-failure agents abandon."""
