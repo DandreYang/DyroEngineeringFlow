@@ -1773,6 +1773,77 @@ write = ["codex"]
         ]
         return payload, advertised
 
+    def _default_a_bootstrap_fail_b(self) -> Path:
+        """A is registry default; B (self.root) is Demo with a bootstrap-able FAIL.
+
+        Unique fold of Demo is registered at A, so next/briefing must advertise
+        ``--root <B> bootstrap --yes``. Unscoped ``dyro bootstrap --yes`` from a
+        non-workspace cwd resolves to A, not B.
+        """
+        self._profile_named(self.root, "Demo", remote=True)
+        default_a = self.root.parent / f"{self.root.name}-default-a"
+        default_a.mkdir()
+        default_a.joinpath("dyro.toml").write_text(
+            (self.root / "dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "Demo"', 'name = "alpha"'),
+            encoding="utf-8",
+        )
+        (default_a / "repositories/api").mkdir(parents=True)
+        add_workspace(default_a, name="demo", make_default=True)
+        self.anchor.rename(self.root / "api-missing")
+        return default_a
+
+    def test_root_start_does_not_advertise_unscoped_bootstrap_that_resolves_to_a(
+        self,
+    ) -> None:
+        default_a = self._default_a_bootstrap_fail_b()
+        current_root = str(self.root.resolve())
+        default_root = str(default_a.resolve())
+        unrelated = self.root.parent / f"{self.root.name}-unrelated"
+        unrelated.mkdir()
+        previous = Path.cwd()
+        try:
+            os.chdir(unrelated)
+            next_payload, next_ads = self._advertised_next(
+                ["--root", str(self.root), "next", "--format", "json"]
+            )
+            start_out = StringIO()
+            start_err = StringIO()
+            with (
+                redirect_stdout(start_out),
+                redirect_stderr(start_err),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main(["--root", str(self.root), "--dry-run", "start"])
+        finally:
+            os.chdir(previous)
+        self.assertEqual(next_payload["kind"], "next_step")
+        self.assertEqual(next_payload["state"], "needs_repair")
+        self.assertTrue(
+            any(
+                "bootstrap --yes" in item and "--root" in item and current_root in item
+                for item in next_ads
+            ),
+            next_ads,
+        )
+        self.assertEqual(raised.exception.code, 2)
+        advertised = start_out.getvalue() + start_err.getvalue()
+        self.assertIn("尚未就绪", advertised)
+        self.assertNotIn("dyro bootstrap --yes", advertised)
+        self.assertNotIn(default_root, advertised)
+        bootstrap_lines = [
+            line
+            for line in advertised.splitlines()
+            if "bootstrap" in line
+        ]
+        self.assertTrue(bootstrap_lines, advertised)
+        for line in bootstrap_lines:
+            self.assertIn("--root", line)
+            self.assertIn(current_root, line)
+            self.assertNotIn("--workspace demo", line)
+            self.assertNotIn("--workspace Demo", line)
+
     def test_implicit_and_root_next_do_not_advertise_other_root_fold_match(
         self,
     ) -> None:

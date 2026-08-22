@@ -2747,9 +2747,12 @@ def cmd_start(args: argparse.Namespace) -> None:
     failures = [finding for finding in findings if finding.startswith("FAIL")]
     if failures:
         print("\n".join(failures))
-        raise DyroError(
-            "工作区尚未就绪；先修复 doctor 失败项，或运行 dyro bootstrap --yes"
-        )
+        extra = ""
+        if bootstrap_repair_applicable(config, failures):
+            extra = "，或运行 " + _briefing_command(
+                args, config, "bootstrap", "--yes"
+            )
+        raise DyroError("工作区尚未就绪；先修复 doctor 失败项" + extra)
     alias = getattr(args, "workspace_alias", None) or config.name
     briefing, _ = build_ready_briefing(config, alias=str(alias))
     text = render_briefing_text(briefing) if briefing else ""

@@ -37,6 +37,12 @@
   non-empty `doctor` repair command. JSON `status` deadline partial
   exits 2, same as `doctor`. It is not a bare `kind=error` with
   `command`. `next` stays `needs_repair` (never ready on FAIL).
+- `dyro start` no longer prints unscoped `dyro bootstrap --yes` when
+  doctor has FAIL. If bootstrap can clone the missing remotes, the ad
+  uses the same root-safe selector as `next` / briefing (`--workspace`
+  only when it stays on this root; otherwise `--root <current>`). Bare
+  `dyro bootstrap --yes` is never advertised when that command would
+  resolve to a different registry default.
 - Attach first-party Skill avatars to OpenCode and Hermes when those host
   homes already exist (`~/.config/opencode/skills/<skill>`,
   `~/.hermes/skills/<skill>`). Detection stays fail-closed: absent default
