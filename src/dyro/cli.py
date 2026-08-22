@@ -166,7 +166,13 @@ from .onboarding import (
     repository_input_from_path,
     sibling_workspace_for,
 )
-from .read_limits import ObservationLimits, ReadBudget, ReadLimitCode, ReadLimitError
+from .read_limits import (
+    CONTROL_PLANE_DEADLINE_CEILING_SECONDS,
+    ObservationLimits,
+    ReadBudget,
+    ReadLimitCode,
+    ReadLimitError,
+)
 from .profile import (
     append_adapter,
     command_adapter,
@@ -235,6 +241,7 @@ from .updates import (
     set_update_enabled,
 )
 from .workspace import (
+    OBSERVATION_DEADLINE_FINDING,
     OBSERVATION_TIMEOUT_BRANCH,
     OBSERVATION_TIMEOUT_SCOPE,
     create_line,
@@ -347,11 +354,23 @@ def _config(args: argparse.Namespace) -> Config:
     return load(root)
 
 
+_CONTROL_PLANE_FANOUT_COMMANDS = frozenset({"doctor", "status", "next"})
+
+
 def _control_plane_budget(args: argparse.Namespace) -> ReadBudget:
     existing = getattr(args, "_control_plane_read_budget", None)
     if isinstance(existing, ReadBudget):
         return existing
-    budget = ReadBudget(ObservationLimits())
+    # JSON doctor/status/next must not share Bridge's flat 5s cliff. Mac
+    # multi-worktree workspaces finish the text path in ~7s and cross 5s
+    # every time; start these commands at the documented 45s ceiling.
+    if getattr(args, "command", None) in _CONTROL_PLANE_FANOUT_COMMANDS:
+        limits = ObservationLimits(
+            deadline_seconds=CONTROL_PLANE_DEADLINE_CEILING_SECONDS
+        )
+    else:
+        limits = ObservationLimits()
+    budget = ReadBudget(limits)
     setattr(args, "_control_plane_read_budget", budget)
     return budget
 
@@ -525,18 +544,25 @@ def _doctor_finding_payload(
     return payload
 
 
+def _observation_timeout_fields(*, partial: bool) -> dict[str, object]:
+    if not partial:
+        return {}
+    return {"code": ReadLimitCode.DEADLINE_EXCEEDED.value}
+
+
 def _status_payload(
     config: Config, *, read_budget: ReadBudget | None = None
 ) -> dict[str, object]:
     rows = status_rows(config, read_budget=read_budget)
-    return {
+    partial = any(
+        scope == OBSERVATION_TIMEOUT_SCOPE
+        and branch == OBSERVATION_TIMEOUT_BRANCH
+        for scope, _repository, branch, _head, _upstream, _dirty in rows
+    )
+    payload: dict[str, object] = {
         "workspace": config.name,
         **push_policy_fields(config.policy),
-        "partial": any(
-            scope == OBSERVATION_TIMEOUT_SCOPE
-            and branch == OBSERVATION_TIMEOUT_BRANCH
-            for scope, _repository, branch, _head, _upstream, _dirty in rows
-        ),
+        "partial": partial,
         "rows": [
             {
                 "scope": scope,
@@ -549,6 +575,59 @@ def _status_payload(
             for scope, repository, branch, head, upstream, dirty in rows
         ],
     }
+    payload.update(_observation_timeout_fields(partial=partial))
+    return payload
+
+
+def _print_json_observation_timeout(args: argparse.Namespace) -> None:
+    """Emit doctor/status/next JSON after a deadline; never kind=error."""
+
+    alias = getattr(args, "workspace_alias", None)
+    workspace = alias if isinstance(alias, str) and alias else "unknown"
+    finding = _doctor_finding_payload(
+        OBSERVATION_DEADLINE_FINDING, include_paths=False
+    )
+    command = getattr(args, "command", "")
+    extra = _observation_timeout_fields(partial=True)
+    if command == "doctor":
+        _print_control_plane_json(
+            "doctor",
+            workspace=workspace,
+            passed=False,
+            partial=True,
+            findings=[finding],
+            sidecars={"local_image_gen": {"state": "unknown"}},
+            **extra,
+        )
+        return
+    if command == "status":
+        _print_control_plane_json(
+            "workspace_status",
+            workspace=workspace,
+            partial=True,
+            rows=[
+                {
+                    "scope": OBSERVATION_TIMEOUT_SCOPE,
+                    "repository": "-",
+                    "branch": OBSERVATION_TIMEOUT_BRANCH,
+                    "head": "-",
+                    "upstream": "-",
+                    "dirty_count": -1,
+                }
+            ],
+            **extra,
+        )
+        return
+    _print_control_plane_json(
+        "next_step",
+        state="needs_repair",
+        summary="工作区还不能开始任务。",
+        commands=[],
+        mutation_available=False,
+        partial=True,
+        findings=[finding],
+        **extra,
+    )
 
 
 def _control_plane_command(args: argparse.Namespace) -> str:
@@ -1631,16 +1710,18 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     failures = [item for item in findings if item.startswith("FAIL")]
     sidecar = discover_sidecar()
     if args.format == "json":
+        partial = any(is_observation_deadline_finding(item) for item in findings)
         _print_control_plane_json(
             "doctor",
             workspace=config.name,
             passed=not failures,
-            partial=any(is_observation_deadline_finding(item) for item in findings),
+            partial=partial,
             findings=[
                 _doctor_finding_payload(item, include_paths=args.include_paths)
                 for item in findings
             ],
             sidecars={"local_image_gen": sidecar.as_dict()},
+            **_observation_timeout_fields(partial=partial),
         )
         if failures:
             raise SystemExit(2)
@@ -2589,6 +2670,9 @@ def cmd_next(args: argparse.Namespace) -> None:
             _doctor_finding_payload(item, include_paths=False) for item in failures
         ]
         if args.format == "json":
+            partial = any(
+                is_observation_deadline_finding(item) for item in failures
+            )
             _print_control_plane_json(
                 "next_step",
                 state="needs_repair",
@@ -2596,10 +2680,9 @@ def cmd_next(args: argparse.Namespace) -> None:
                 commands=commands,
                 diagnostic_commands=[_briefing_command(args, config, "doctor")],
                 mutation_available=bootstrap_applicable,
-                partial=any(
-                    is_observation_deadline_finding(item) for item in failures
-                ),
+                partial=partial,
                 findings=findings,
+                **_observation_timeout_fields(partial=partial),
                 **_family_unacked_fields(config),
                 **_next_push_fields(config),
             )
@@ -5671,6 +5754,13 @@ def main(argv: list[str] | None = None) -> None:
             cmd_home(args)
     except DyroError as exc:
         if args is not None and getattr(args, "format", None) == "json":
+            if (
+                isinstance(exc, ReadLimitError)
+                and exc.code is ReadLimitCode.DEADLINE_EXCEEDED
+                and getattr(args, "command", None) in _CONTROL_PLANE_FANOUT_COMMANDS
+            ):
+                _print_json_observation_timeout(args)
+                raise SystemExit(2) from None
             _print_control_plane_error(args, exc)
             raise SystemExit(2) from None
         parser.exit(2, danger(f"错误：{exc}\n", stream=sys.stderr))

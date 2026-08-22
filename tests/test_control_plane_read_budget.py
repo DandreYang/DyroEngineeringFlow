@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from argparse import Namespace
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
 import unittest
 from unittest.mock import patch
 
-from dyro.cli import main
+from dyro.cli import _control_plane_budget, main
 from dyro.config import load
 from dyro.continuation.next_step import next_commands
 from dyro.errors import ValidationError
@@ -104,6 +105,38 @@ class ControlPlaneDeadlineScaleTests(unittest.TestCase):
         with self.assertRaises(ReadLimitError) as raised:
             flat.check_deadline()
         self.assertIs(raised.exception.code, ReadLimitCode.DEADLINE_EXCEEDED)
+
+    def test_json_fanout_commands_do_not_start_on_the_five_second_cliff(self) -> None:
+        for command in ("doctor", "status", "next"):
+            budget = _control_plane_budget(Namespace(command=command))
+            self.assertEqual(
+                budget.limits.deadline_seconds,
+                CONTROL_PLANE_DEADLINE_CEILING_SECONDS,
+                command,
+            )
+            self.assertGreater(budget.remaining_seconds(), 5.35)
+
+        other = _control_plane_budget(Namespace(command="line"))
+        self.assertEqual(other.limits.deadline_seconds, PROTOCOL_DEADLINE_SECONDS)
+
+    def test_json_fanout_budget_survives_stable_mac_5_35s_wall(self) -> None:
+        class Clock:
+            def __init__(self) -> None:
+                self.t = 1000.0
+
+            def __call__(self) -> float:
+                return self.t
+
+        clock = Clock()
+        budget = ReadBudget(
+            ObservationLimits(
+                deadline_seconds=CONTROL_PLANE_DEADLINE_CEILING_SECONDS
+            ),
+            monotonic=clock,
+        )
+        clock.t += 5.35
+        budget.check_deadline()
+        self.assertGreater(budget.remaining_seconds(), 20.0)
 
 
 class ControlPlaneTimeoutFindingTests(WorkspaceCase):
@@ -223,6 +256,7 @@ class ControlPlaneTimeoutFindingTests(WorkspaceCase):
         doctor_payload = json.loads(doctor_out.getvalue())
         self.assertEqual(doctor_payload["kind"], "doctor")
         self.assertNotEqual(doctor_payload.get("kind"), "error")
+        self.assertEqual(doctor_payload["code"], "DEADLINE_EXCEEDED")
         self.assertFalse(doctor_payload["passed"])
         self.assertTrue(doctor_payload["partial"])
         self.assertTrue(
@@ -245,17 +279,50 @@ class ControlPlaneTimeoutFindingTests(WorkspaceCase):
         self.assertEqual(next_payload["kind"], "next_step")
         self.assertEqual(next_payload["state"], "needs_repair")
         self.assertNotEqual(next_payload["state"], "ready")
+        self.assertEqual(next_payload["code"], "DEADLINE_EXCEEDED")
         self.assertTrue(next_payload["partial"])
         self.assertFalse(next_payload["mutation_available"])
 
         self.assertEqual(status_err.getvalue(), "")
         status_payload = json.loads(status_out.getvalue())
         self.assertEqual(status_payload["kind"], "workspace_status")
+        self.assertEqual(status_payload["code"], "DEADLINE_EXCEEDED")
         self.assertTrue(status_payload["partial"])
         self.assertTrue(
             any(row["branch"] == "TIMEOUT" for row in status_payload["rows"]),
             status_payload,
         )
+
+    def test_json_commands_do_not_bare_deadline_when_observation_raises(self) -> None:
+        self._workspace_with_completed_fail_and_worktree()
+        deadline = ReadLimitError(
+            ReadLimitCode.DEADLINE_EXCEEDED,
+            "Core observation deadline exceeded",
+        )
+        cases = (
+            (["doctor"], "doctor", "dyro.cli.doctor"),
+            (["status"], "workspace_status", "dyro.cli.status_rows"),
+            (["next"], "next_step", "dyro.cli.doctor"),
+        )
+        for argv, kind, target in cases:
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch(target, side_effect=deadline),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main(["--root", str(self.root), *argv, "--format", "json"])
+            self.assertEqual(raised.exception.code, 2, argv)
+            self.assertEqual(stderr.getvalue(), "", argv)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["kind"], kind, payload)
+            self.assertEqual(payload["code"], "DEADLINE_EXCEEDED", payload)
+            self.assertTrue(payload["partial"], payload)
+            if kind == "next_step":
+                self.assertEqual(payload["state"], "needs_repair")
+                self.assertNotEqual(payload["state"], "ready")
 
 
 if __name__ == "__main__":
