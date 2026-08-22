@@ -7,7 +7,14 @@ import json
 import unittest
 from unittest.mock import patch
 
-from dyro.cli import _control_plane_budget, main
+from dyro.cli import (
+    _control_plane_budget,
+    _print_control_plane_error,
+    cmd_doctor,
+    cmd_next,
+    cmd_status,
+    main,
+)
 from dyro.config import load
 from dyro.continuation.next_step import next_commands
 from dyro.errors import ValidationError
@@ -15,6 +22,7 @@ from dyro.process import git_read as real_git_read
 from dyro.read_limits import (
     CONTROL_PLANE_DEADLINE_CEILING_SECONDS,
     PROTOCOL_DEADLINE_SECONDS,
+    _PROTOCOL_DEADLINE_SECONDS,
     ObservationLimits,
     ReadBudget,
     ReadLimitCode,
@@ -48,6 +56,10 @@ class ControlPlaneDeadlineScaleTests(unittest.TestCase):
         limits = ObservationLimits()
         self.assertEqual(limits.deadline_seconds, PROTOCOL_DEADLINE_SECONDS)
         self.assertEqual(PROTOCOL_DEADLINE_SECONDS, 5.0)
+        self.assertEqual(_PROTOCOL_DEADLINE_SECONDS, PROTOCOL_DEADLINE_SECONDS)
+        self.assertLess(
+            _PROTOCOL_DEADLINE_SECONDS, CONTROL_PLANE_DEADLINE_CEILING_SECONDS
+        )
 
     def test_observation_limits_allow_documented_control_plane_ceiling(self) -> None:
         limits = ObservationLimits(
@@ -118,6 +130,11 @@ class ControlPlaneDeadlineScaleTests(unittest.TestCase):
 
         other = _control_plane_budget(Namespace(command="line"))
         self.assertEqual(other.limits.deadline_seconds, PROTOCOL_DEADLINE_SECONDS)
+        via_func = _control_plane_budget(Namespace(command=None, func=cmd_status))
+        self.assertEqual(
+            via_func.limits.deadline_seconds,
+            CONTROL_PLANE_DEADLINE_CEILING_SECONDS,
+        )
 
     def test_json_fanout_budget_survives_stable_mac_5_35s_wall(self) -> None:
         class Clock:
@@ -323,6 +340,69 @@ class ControlPlaneTimeoutFindingTests(WorkspaceCase):
             if kind == "next_step":
                 self.assertEqual(payload["state"], "needs_repair")
                 self.assertNotEqual(payload["state"], "ready")
+
+    def test_print_error_does_not_emit_mac_bare_status_envelope(self) -> None:
+        """Verifier payload {code, command:status} is a total-failure agents abandon."""
+
+        args = Namespace(
+            command="status",
+            format="json",
+            workspace_alias="selected",
+            func=cmd_status,
+        )
+        stdout = StringIO()
+        stderr = StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            _print_control_plane_error(
+                args,
+                ReadLimitError(
+                    ReadLimitCode.DEADLINE_EXCEEDED,
+                    "Core observation deadline exceeded",
+                ),
+            )
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        self.assertNotEqual(payload.get("kind"), "error")
+        self.assertNotEqual(payload.get("command"), "status")
+        self.assertEqual(payload["kind"], "workspace_status")
+        self.assertEqual(payload["code"], "DEADLINE_EXCEEDED")
+        self.assertTrue(payload["partial"])
+
+        via_func = Namespace(command=None, format="json", func=cmd_status)
+        stdout = StringIO()
+        stderr = StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            _print_control_plane_error(
+                via_func,
+                ReadLimitError(
+                    ReadLimitCode.DEADLINE_EXCEEDED,
+                    "Core observation deadline exceeded",
+                ),
+            )
+        self.assertEqual(stderr.getvalue(), "")
+        via_payload = json.loads(stdout.getvalue())
+        self.assertEqual(via_payload["kind"], "workspace_status")
+        self.assertNotEqual(via_payload.get("kind"), "error")
+        self.assertNotIn("command", via_payload)
+
+        for func, kind in (
+            (cmd_doctor, "doctor"),
+            (cmd_next, "next_step"),
+        ):
+            stdout = StringIO()
+            with redirect_stdout(stdout), redirect_stderr(StringIO()):
+                _print_control_plane_error(
+                    Namespace(command=None, format="json", func=func),
+                    ReadLimitError(
+                        ReadLimitCode.DEADLINE_EXCEEDED,
+                        "Core observation deadline exceeded",
+                    ),
+                )
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["kind"], kind)
+            self.assertTrue(payload["partial"])
+            if kind == "next_step":
+                self.assertEqual(payload["state"], "needs_repair")
 
 
 if __name__ == "__main__":

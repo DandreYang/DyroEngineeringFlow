@@ -357,6 +357,34 @@ def _config(args: argparse.Namespace) -> Config:
 _CONTROL_PLANE_FANOUT_COMMANDS = frozenset({"doctor", "status", "next"})
 
 
+def _is_json_observation_deadline(
+    args: argparse.Namespace, exc: BaseException
+) -> bool:
+    if not isinstance(exc, ReadLimitError):
+        return False
+    if exc.code != ReadLimitCode.DEADLINE_EXCEEDED:
+        return False
+    return _fanout_command_name(args) in _CONTROL_PLANE_FANOUT_COMMANDS
+
+
+def _uses_fanout_observation_budget(args: argparse.Namespace) -> bool:
+    return _fanout_command_name(args) in _CONTROL_PLANE_FANOUT_COMMANDS
+
+
+def _fanout_command_name(args: argparse.Namespace) -> str:
+    command = getattr(args, "command", None)
+    if command in _CONTROL_PLANE_FANOUT_COMMANDS:
+        return command
+    func = getattr(args, "func", None)
+    if func is cmd_doctor:
+        return "doctor"
+    if func is cmd_status:
+        return "status"
+    if func is cmd_next:
+        return "next"
+    return command if isinstance(command, str) else ""
+
+
 def _control_plane_budget(args: argparse.Namespace) -> ReadBudget:
     existing = getattr(args, "_control_plane_read_budget", None)
     if isinstance(existing, ReadBudget):
@@ -364,7 +392,9 @@ def _control_plane_budget(args: argparse.Namespace) -> ReadBudget:
     # JSON doctor/status/next must not share Bridge's flat 5s cliff. Mac
     # multi-worktree workspaces finish the text path in ~7s and cross 5s
     # every time; start these commands at the documented 45s ceiling.
-    if getattr(args, "command", None) in _CONTROL_PLANE_FANOUT_COMMANDS:
+    # Match by command or func so a missing dest="command" cannot fall
+    # back to the 5s protocol default.
+    if _uses_fanout_observation_budget(args):
         limits = ObservationLimits(
             deadline_seconds=CONTROL_PLANE_DEADLINE_CEILING_SECONDS
         )
@@ -587,7 +617,7 @@ def _print_json_observation_timeout(args: argparse.Namespace) -> None:
     finding = _doctor_finding_payload(
         OBSERVATION_DEADLINE_FINDING, include_paths=False
     )
-    command = getattr(args, "command", "")
+    command = _fanout_command_name(args)
     extra = _observation_timeout_fields(partial=True)
     if command == "doctor":
         _print_control_plane_json(
@@ -679,6 +709,12 @@ def _control_plane_error_code(
 def _print_control_plane_error(
     args: argparse.Namespace, exc: BaseException
 ) -> None:
+    if (
+        getattr(args, "format", None) == "json"
+        and _is_json_observation_deadline(args, exc)
+    ):
+        _print_json_observation_timeout(args)
+        return
     _print_control_plane_json(
         "error",
         stream=sys.stderr,
@@ -5754,13 +5790,6 @@ def main(argv: list[str] | None = None) -> None:
             cmd_home(args)
     except DyroError as exc:
         if args is not None and getattr(args, "format", None) == "json":
-            if (
-                isinstance(exc, ReadLimitError)
-                and exc.code is ReadLimitCode.DEADLINE_EXCEEDED
-                and getattr(args, "command", None) in _CONTROL_PLANE_FANOUT_COMMANDS
-            ):
-                _print_json_observation_timeout(args)
-                raise SystemExit(2) from None
             _print_control_plane_error(args, exc)
             raise SystemExit(2) from None
         parser.exit(2, danger(f"错误：{exc}\n", stream=sys.stderr))

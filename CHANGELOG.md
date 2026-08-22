@@ -10,7 +10,9 @@
   extra git scope, capped at 45s. If the ceiling is hit, the JSON `kind`
   stays `doctor` / `workspace_status` / `next_step` with `partial: true`,
   `code: DEADLINE_EXCEEDED`, and completed FAIL findings; it is not a bare
-  `kind=error`. `next` stays `needs_repair` (never ready on FAIL).
+  `kind=error` with `command`. The JSON error printer converts leftover
+  `DEADLINE_EXCEEDED` on these commands the same way, matching by
+  `command` or `func`. `next` stays `needs_repair` (never ready on FAIL).
 - Attach first-party Skill avatars to OpenCode and Hermes when those host
   homes already exist (`~/.config/opencode/skills/<skill>`,
   `~/.hermes/skills/<skill>`). Detection stays fail-closed: absent homes
