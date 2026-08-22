@@ -33,6 +33,7 @@ from dyro.hub import (
     remove_workspace,
     set_default_workspace,
     unique_registered_alias,
+    workspace_alias_retargets_root,
 )
 from dyro.tooling import (
     ToolPreferences,
@@ -173,6 +174,21 @@ mount = "api"
         self.assertTrue(alias_fold_collides("Demo", colliding))
         self.assertIsNone(unique_registered_alias("demo", colliding))
         self.assertIsNone(unique_registered_alias("missing", names))
+
+    def test_unique_fold_of_profile_name_retargets_when_root_differs(self) -> None:
+        other = self._second_workspace("other")
+        add_workspace(self.workspace, name="current", make_default=True)
+        add_workspace(other, name="demo")
+        self.assertTrue(
+            workspace_alias_retargets_root("Demo", self.workspace.resolve())
+        )
+        self.assertFalse(
+            workspace_alias_retargets_root("demo", other.resolve())
+        )
+        self.assertFalse(
+            workspace_alias_retargets_root("current", self.workspace.resolve())
+        )
+        self.assertFalse(workspace_alias_retargets_root("missing", self.workspace))
 
     def test_get_workspace_fails_closed_on_case_fold_collision(self) -> None:
         from dyro.errors import DyroError
@@ -1695,6 +1711,94 @@ write = ["codex"]
             self.assertNotIn("--workspace Demo", command)
             self.assertNotIn("--workspace demo", command)
         self.assertTrue(any("--root" in item for item in advertised))
+
+    def _profile_named(self, root: Path, name: str, *, remote: bool = False) -> None:
+        text = root.joinpath("dyro.toml").read_text(encoding="utf-8")
+        text = text.replace('name = "test-workspace"', f'name = "{name}"')
+        if remote and 'remote = "' not in text:
+            text = text.replace(
+                'mount = "services/api"',
+                'mount = "services/api"\nremote = "https://example.invalid/api.git"',
+            )
+        root.joinpath("dyro.toml").write_text(text, encoding="utf-8")
+
+    def _fold_retarget_registry(self) -> Path:
+        """Default A named Demo; unique fold of Demo is registered at another root."""
+        self._profile_named(self.root, "Demo", remote=True)
+        other = self.root.parent / f"{self.root.name}-fold-other"
+        other.mkdir()
+        other.joinpath("dyro.toml").write_text(
+            (self.root / "dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "Demo"', 'name = "other"'),
+            encoding="utf-8",
+        )
+        (other / "repositories/api").mkdir(parents=True)
+        add_workspace(self.root, name="current", make_default=True)
+        add_workspace(other, name="demo")
+        self.anchor.rename(self.root / "api-missing")
+        return other
+
+    def _advertised_next(self, argv: list[str]) -> tuple[dict[str, object], list[str]]:
+        output = StringIO()
+        with redirect_stdout(output):
+            main(argv)
+        payload = json.loads(output.getvalue())
+        briefing = payload.get("briefing") or {}
+        briefing_command = (
+            briefing.get("command") if isinstance(briefing, dict) else None
+        )
+        advertised = [
+            item
+            for item in (
+                *(payload.get("commands") or []),
+                *(payload.get("diagnostic_commands") or []),
+                briefing_command,
+            )
+            if isinstance(item, str)
+        ]
+        return payload, advertised
+
+    def test_implicit_and_root_next_do_not_advertise_other_root_fold_match(
+        self,
+    ) -> None:
+        other = self._fold_retarget_registry()
+        unrelated = self.root.parent / f"{self.root.name}-unrelated"
+        unrelated.mkdir()
+        previous = Path.cwd()
+        try:
+            os.chdir(unrelated)
+            implicit, implicit_ads = self._advertised_next(["next", "--format", "json"])
+        finally:
+            os.chdir(previous)
+        rooted, root_ads = self._advertised_next(
+            ["--root", str(self.root), "next", "--format", "json"]
+        )
+        current_root = str(self.root.resolve())
+        other_root = str(other.resolve())
+        for payload, advertised in (
+            (implicit, implicit_ads),
+            (rooted, root_ads),
+        ):
+            self.assertEqual(payload["kind"], "next_step")
+            self.assertEqual(payload["state"], "needs_repair")
+            self.assertTrue(advertised, payload)
+            joined = "\n".join(advertised)
+            self.assertNotIn("--workspace demo", joined)
+            self.assertNotIn("--workspace Demo", joined)
+            self.assertNotIn(other_root, joined)
+            self.assertNotIn("dyro --workspace demo bootstrap --yes", advertised)
+            self.assertNotIn("dyro --workspace Demo bootstrap --yes", advertised)
+            self.assertNotIn("dyro --workspace demo doctor", advertised)
+            self.assertNotIn("dyro --workspace Demo doctor", advertised)
+            self.assertTrue(
+                any("--root" in item and current_root in item for item in advertised),
+                advertised,
+            )
+            for command in advertised:
+                if "bootstrap" in command or "doctor" in command:
+                    self.assertIn("--root", command)
+                    self.assertIn(current_root, command)
 
     def test_console_unique_fold_plan_and_apply_share_canonical_alias(self) -> None:
         add_workspace(self.root, name="Demo")

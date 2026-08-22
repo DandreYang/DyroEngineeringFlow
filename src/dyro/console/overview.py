@@ -27,6 +27,7 @@ from ..hub import (
     WorkspaceRegistry,
     alias_fold_collides,
     load_registry,
+    workspace_alias_retargets_root,
 )
 from ..continuation.briefing import follow_up_from_kind
 from ..updates import UpdateState, classify_update, load_update_state
@@ -146,22 +147,32 @@ def workspace_root_missing(root: Path) -> bool:
         return False
 
 
-def _workspace_ad(alias: str, *parts: str, names: tuple[str, ...]) -> str:
-    """Return a ``--workspace`` command only when that selector would resolve."""
+def _workspace_ad(
+    alias: str,
+    *parts: str,
+    names: tuple[str, ...],
+    root: Path | None = None,
+) -> str:
+    """Return a ``--workspace`` command only when that selector stays here."""
     if not isinstance(alias, str) or alias_fold_collides(alias, names):
+        return ""
+    if root is not None and workspace_alias_retargets_root(alias, root):
         return ""
     return " ".join(("dyro", "--workspace", alias, *parts))
 
 
 def omit_colliding_workspace_command(
-    summary: dict[str, object], names: tuple[str, ...]
+    summary: dict[str, object],
+    names: tuple[str, ...],
+    root: Path | None = None,
 ) -> dict[str, object]:
-    """Blank a fail-closed ``--workspace`` ad after list-by-root capture."""
+    """Blank a fail-closed or cross-root ``--workspace`` ad after capture."""
     alias = summary.get("alias")
     recommendation = summary.get("recommendation")
     if not isinstance(alias, str) or not isinstance(recommendation, dict):
         return summary
-    if not alias_fold_collides(alias, names):
+    retargets = root is not None and workspace_alias_retargets_root(alias, root)
+    if not alias_fold_collides(alias, names) and not retargets:
         return summary
     command = recommendation.get("command")
     if not isinstance(command, str) or "--workspace" not in command:
@@ -177,6 +188,7 @@ def unavailable_workspace_summary(
     *,
     reason: str,
     names: tuple[str, ...] = (),
+    root: Path | None = None,
 ) -> dict[str, object]:
     """Path-free unread card. Isolated still requires an allowlisted command."""
     safe_alias = _safe_code(alias)
@@ -202,7 +214,7 @@ def unavailable_workspace_summary(
         "attention_counts": _empty_attention_counts(),
         "recommendation": {
             "reason": code,
-            "command": _workspace_ad(safe_alias, "doctor", names=names),
+            "command": _workspace_ad(safe_alias, "doctor", names=names, root=root),
         },
         "findings": [],
         "snapshot_sha256": "",
@@ -786,6 +798,7 @@ class ConsoleOverviewService:
                     is_default,
                     reason=reason,
                     names=self._registry_names(),
+                    root=root,
                 ),
                 {reason},
                 _empty_inventory(),
@@ -839,7 +852,11 @@ class ConsoleOverviewService:
             "task_status_counts": dict(sorted(task_status_counts.items())),
             "attention_counts": attention["counts"],
             "recommendation": self._recommendation(
-                safe_alias, attention["items"], findings=findings, commands=commands
+                safe_alias,
+                attention["items"],
+                findings=findings,
+                commands=commands,
+                root=getattr(config, "root", None) or root,
             ),
             "findings": findings,
             "snapshot_sha256": str(envelope.get("snapshot_sha256", "")),
@@ -903,10 +920,11 @@ class ConsoleOverviewService:
         attention: object,
         findings: object = None,
         commands: object = None,
+        root: Path | None = None,
     ) -> dict[str, str] | None:
         names = self._registry_names()
         collide = alias_fold_collides(alias, names)
-        doctor = _workspace_ad(alias, "doctor", names=names)
+        doctor = _workspace_ad(alias, "doctor", names=names, root=root)
         next_command = ""
         if isinstance(commands, list) and not collide:
             for raw in commands:
@@ -936,6 +954,7 @@ class ConsoleOverviewService:
             alias,
             *follow_up_from_kind(_safe_code(item.get("kind")), objective_id),
             names=names,
+            root=root,
         )
         command = _console_command(follow_up, alias) or next_command or doctor
         return {

@@ -827,7 +827,7 @@ def _scoped_command(
 def _briefing_command(
     args: argparse.Namespace, config: Config, *command: str
 ) -> str:
-    """Scope a read-only briefing command without a fail-closed selector."""
+    """Scope a briefing command without a fail-closed or cross-root selector."""
     alias = getattr(args, "workspace_alias", None) or config.name
     return scoped_briefing_command(config, str(alias), *command)
 

@@ -116,7 +116,9 @@ def _parse_child_result(
     copied = dict(summary)
     copied["alias"] = record.name
     copied["is_default"] = is_default
-    return omit_colliding_workspace_command(copied, names), set(warnings)
+    return omit_colliding_workspace_command(
+        copied, names, root=record.root
+    ), set(warnings)
 
 
 def _isolated_summaries(

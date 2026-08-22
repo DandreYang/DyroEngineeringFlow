@@ -6,7 +6,12 @@ import shlex
 
 from ..config import Config
 from ..errors import DyroError, ValidationError
-from ..hub import alias_fold_collides, load_registry, unique_registered_alias
+from ..hub import (
+    alias_fold_collides,
+    load_registry,
+    unique_registered_alias,
+    workspace_alias_retargets_root,
+)
 from ..read_limits import ReadBudget, ReadLimitError
 from .briefing import (
     briefing_payload,
@@ -24,25 +29,35 @@ def briefing_command(alias: str, *command: str) -> str:
     return shlex.join(("dyro", "--workspace", alias, *command))
 
 
+def _root_scoped_command(config: Config, *command: str) -> str:
+    return shlex.join(("dyro", "--root", str(config.root), *command))
+
+
 def scoped_briefing_command(
     config: Config,
     alias: str,
     *command: str,
     names: tuple[str, ...] | None = None,
 ) -> str:
-    """Advertise ``--workspace`` only when that selector would resolve.
+    """Advertise ``--workspace`` only when that selector stays on this root.
 
-    A unique fold uses the canonical registered spelling. An unregistered
-    profile name keeps ``--workspace`` so path-free next ads stay path-free.
-    A fold collision fail-closes at resolve, so the ad switches to ``--root``.
+    A unique fold uses the canonical registered spelling when that record is
+    the current workspace. An unregistered profile name keeps ``--workspace``
+    so path-free next ads stay path-free. A fold collision, or a unique fold
+    that would resolve to a different root, switches the ad to ``--root``.
     """
-    registered = (
-        names
-        if names is not None
-        else tuple(item.name for item in load_registry().workspaces)
-    )
+    try:
+        records = tuple(load_registry().workspaces)
+    except (DyroError, ValidationError, OSError, TypeError, AttributeError):
+        records = ()
+    registered = names if names is not None else tuple(item.name for item in records)
     if alias_fold_collides(alias, registered):
-        return shlex.join(("dyro", "--root", str(config.root), *command))
+        return _root_scoped_command(config, *command)
+    root = getattr(config, "root", None)
+    if root is not None and workspace_alias_retargets_root(
+        alias, root, workspaces=records or None
+    ):
+        return _root_scoped_command(config, *command)
     canonical = unique_registered_alias(alias, registered) or alias
     return briefing_command(canonical, *command)
 
