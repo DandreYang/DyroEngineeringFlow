@@ -41,9 +41,15 @@ _WORKER_RESPONSE_LIMIT = 2 * 1024 * 1024
 
 
 def _unavailable_summary(
-    alias: str, code: str, names: tuple[str, ...] = ()
+    alias: str,
+    code: str,
+    names: tuple[str, ...] = (),
+    *,
+    root: Path | None = None,
 ) -> dict[str, object]:
-    return unavailable_workspace_summary(alias, False, reason=code, names=names)
+    return unavailable_workspace_summary(
+        alias, False, reason=code, names=names, root=root
+    )
 
 
 def _capture_workspace_summary(
@@ -63,7 +69,10 @@ def _capture_workspace_summary(
             result_queue.put(
                 {
                     "summary": _unavailable_summary(
-                        record.name, WORKSPACE_MISSING_ROOT, names
+                        record.name,
+                        WORKSPACE_MISSING_ROOT,
+                        names,
+                        root=record.root,
                     ),
                     "warnings": [WORKSPACE_MISSING_ROOT],
                 }
@@ -85,7 +94,10 @@ def _capture_workspace_summary(
         result_queue.put(
             {
                 "summary": _unavailable_summary(
-                    record.name, WORKSPACE_UNAVAILABLE, names
+                    record.name,
+                    WORKSPACE_UNAVAILABLE,
+                    names,
+                    root=record.root,
                 ),
                 "warnings": [WORKSPACE_UNAVAILABLE],
             }
@@ -100,9 +112,9 @@ def _parse_child_result(
     names: tuple[str, ...] = (),
 ) -> tuple[dict[str, object], set[str]]:
     if not isinstance(value, dict):
-        return _unavailable_summary(record.name, WORKSPACE_UNAVAILABLE, names), {
-            WORKSPACE_UNAVAILABLE
-        }
+        return _unavailable_summary(
+            record.name, WORKSPACE_UNAVAILABLE, names, root=record.root
+        ), {WORKSPACE_UNAVAILABLE}
     summary = value.get("summary")
     warnings = value.get("warnings")
     if (
@@ -110,13 +122,15 @@ def _parse_child_result(
         or not isinstance(warnings, list)
         or not all(isinstance(item, str) for item in warnings)
     ):
-        return _unavailable_summary(record.name, WORKSPACE_UNAVAILABLE, names), {
-            WORKSPACE_UNAVAILABLE
-        }
+        return _unavailable_summary(
+            record.name, WORKSPACE_UNAVAILABLE, names, root=record.root
+        ), {WORKSPACE_UNAVAILABLE}
     copied = dict(summary)
     copied["alias"] = record.name
     copied["is_default"] = is_default
-    return omit_colliding_workspace_command(copied, names), set(warnings)
+    return omit_colliding_workspace_command(
+        copied, names, root=record.root
+    ), set(warnings)
 
 
 def _isolated_summaries(
@@ -152,7 +166,10 @@ def _isolated_summaries(
                     record,
                     {
                         "summary": _unavailable_summary(
-                            record.name, WORKSPACE_TIMEOUT, names
+                            record.name,
+                            WORKSPACE_TIMEOUT,
+                            names,
+                            root=record.root,
                         ),
                         "warnings": [WORKSPACE_TIMEOUT],
                     },
@@ -164,7 +181,10 @@ def _isolated_summaries(
                     record,
                     {
                         "summary": _unavailable_summary(
-                            record.name, WORKSPACE_TIMEOUT, names
+                            record.name,
+                            WORKSPACE_TIMEOUT,
+                            names,
+                            root=record.root,
                         ),
                         "warnings": [WORKSPACE_TIMEOUT],
                     },
@@ -216,7 +236,7 @@ def _isolated_summaries(
                         record,
                         {
                             "summary": _unavailable_summary(
-                                record.name, code, names
+                                record.name, code, names, root=record.root
                             ),
                             "warnings": [code],
                         },

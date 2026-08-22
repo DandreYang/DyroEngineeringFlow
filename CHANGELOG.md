@@ -12,11 +12,14 @@
   collide. Bridge workspace list loads each row by stored root so a
   fold-twin does not mark the other stale. Implicit `next` and ready
   briefing never advertise a `--workspace` selector that would
-  fail-close; they use `--root` instead. `console` plan and apply share
-  that resolve (canonical on a unique fold; fail-closed on twins).
-  Console overview recommendations omit a colliding `--workspace` ad.
-  The operator copy path does not invent `--workspace … doctor` when
-  that field is blank.
+  fail-close; they use `--root` instead. Implicit and `--root` next /
+  briefing / repair also refuse a unique fold of the current profile
+  name when that selector would resolve to a different registered root;
+  those ads use `--root` for the current workspace. `console` plan and
+  apply share that resolve (canonical on a unique fold; fail-closed on
+  twins). Console overview recommendations omit a colliding or
+  cross-root `--workspace` ad. The operator copy path does not invent
+  `--workspace … doctor` when that field is blank.
 - JSON `doctor` / `status` / `next` no longer share a flat 5s observation
   deadline with Bridge. Those commands start at the documented 45s ceiling
   (not 5s) so a ~50+ worktree workspace that the text path finishes in ~7s

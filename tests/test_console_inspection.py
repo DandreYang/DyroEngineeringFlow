@@ -844,6 +844,50 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
             self.assertNotIn(str(self.root), command)
             self.assertNotIn(str(other), command)
 
+    def test_isolated_root_console_does_not_advertise_other_root_fold_match(
+        self,
+    ) -> None:
+        from dyro.hub import remove_workspace
+
+        remove_workspace("demo")
+        (self.root / "dyro.toml").write_text(
+            (self.root / "dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "test-workspace"', 'name = "Demo"')
+            .replace(
+                'mount = "services/api"',
+                'mount = "services/api"\nremote = "https://example.invalid/api.git"',
+            ),
+            encoding="utf-8",
+        )
+        other = self.root.parent / f"{self.root.name}-fold-other"
+        other.mkdir()
+        other.joinpath("dyro.toml").write_text(
+            (self.root / "dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "Demo"', 'name = "other"'),
+            encoding="utf-8",
+        )
+        (other / "repositories/api").mkdir(parents=True)
+        add_workspace(self.root, name="current", make_default=True)
+        add_workspace(other, name="demo")
+        self.anchor.rename(self.root / "api-missing")
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+            target_root=self.root,
+        )
+
+        page = service.page()
+        cards = page["data"]["workspaces"]
+        self.assertEqual(len(cards), 1)
+        command = cards[0]["recommendation"]["command"]
+        self.assertNotIn("--workspace demo", command)
+        self.assertNotIn("--workspace Demo", command)
+        self.assertNotIn("bootstrap --yes", command)
+        self.assertNotIn(str(other), command)
+
     def test_isolated_summary_worker_passes_next_commands_loader(self) -> None:
         from dyro.config import load
         from dyro.continuation.next_step import next_commands

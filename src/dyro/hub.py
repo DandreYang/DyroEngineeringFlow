@@ -84,6 +84,40 @@ def unique_registered_alias(name: str, names: tuple[str, ...]) -> str | None:
     return None
 
 
+def same_workspace_root(left: Path | None, right: Path | None) -> bool:
+    """True when both paths resolve to the same workspace root."""
+    if left is None or right is None:
+        return False
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except OSError:
+        return False
+
+
+def workspace_alias_retargets_root(
+    alias: str,
+    root: Path,
+    workspaces: tuple[WorkspaceRecord, ...] | None = None,
+) -> bool:
+    """True when ``--workspace alias`` uniquely fold-resolves to another root.
+
+    A miss or fold collision is not a working selector for a different root.
+    Registry read failures cannot prove the selector stays on this root.
+    """
+    if not isinstance(alias, str) or not alias:
+        return False
+    try:
+        records = (
+            workspaces if workspaces is not None else load_registry().workspaces
+        )
+    except (DyroError, ValidationError, OSError, TypeError, AttributeError):
+        return True
+    matches = workspace_alias_matches(records, alias)
+    if len(matches) != 1:
+        return False
+    return not same_workspace_root(matches[0].root, root)
+
+
 class WorkspaceAliasCollisionError(DyroError):
     """More than one registered alias folds to the same lookup key."""
 
