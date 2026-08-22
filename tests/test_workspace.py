@@ -6,6 +6,7 @@ import subprocess
 
 from dyro.config import load
 from dyro.errors import DyroError
+from dyro.home import existing_line_workspace
 from dyro.process import Result
 from dyro.workspace import (
     create_line,
@@ -139,6 +140,8 @@ class WorkspaceTests(WorkspaceCase):
             ),
             payload,
         )
+        with self.assertRaisesRegex(DyroError, "尚未就绪"):
+            existing_line_workspace(config, "local-only", "line")
 
     def test_doctor_fails_when_one_repo_missing_origin_feat(self) -> None:
         web = self.root / "repositories/web"
