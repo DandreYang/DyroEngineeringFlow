@@ -2703,14 +2703,8 @@ def cmd_start(args: argparse.Namespace) -> None:
     config = _config(args)
     findings = doctor(config)
     failures = [finding for finding in findings if finding.startswith("FAIL")]
-    blocking = [
-        finding
-        for finding in failures
-        if not is_missing_origin_finding(finding)
-    ]
     if failures:
         print("\n".join(failures))
-    if blocking:
         raise DyroError(
             "工作区尚未就绪；先修复 doctor 失败项，或运行 dyro bootstrap --yes"
         )

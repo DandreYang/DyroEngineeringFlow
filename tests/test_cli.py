@@ -26,7 +26,14 @@ from dyro.hub import load_registry
 from dyro.tasks import load_task, status, task_template
 from dyro.tooling import ToolState, load_tool_preferences
 from dyro.updates import load_update_state
-from dyro.workspace import create_line, get_line, line_repository_path, spawn_line
+from dyro.workspace import (
+    create_line,
+    doctor,
+    get_line,
+    is_missing_origin_finding,
+    line_repository_path,
+    spawn_line,
+)
 
 from .support import WorkspaceCase, publish_origin_branch
 
@@ -801,6 +808,7 @@ class CliTests(unittest.TestCase):
 
 class StartTests(WorkspaceCase):
     def test_start_dry_run_uses_selected_line_and_adapter(self) -> None:
+        publish_origin_branch(self.anchor, "feat/alpha")
         config = load(self.root)
         create_line(config, line_id="alpha", branch="feat/alpha", base="main")
         output = StringIO()
@@ -820,6 +828,78 @@ class StartTests(WorkspaceCase):
         rendered = output.getvalue()
         self.assertIn("座位  控制面 · dyro-control-plane", rendered)
         self.assertIn("先观察 next / attention", rendered)
+
+    def test_start_refuses_when_doctor_has_missing_origin_only(self) -> None:
+        config = load(self.root)
+        create_line(config, line_id="local-only", branch="feat/local-only", base="main")
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "--dry-run",
+                    "start",
+                    "--line",
+                    "local-only",
+                    "--agent",
+                    "noop",
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
+        combined = stdout.getvalue() + stderr.getvalue()
+        self.assertIn("missing origin/feat/local-only", combined)
+        self.assertIn("尚未就绪", combined)
+        self.assertNotIn("座位", stdout.getvalue())
+
+    def test_start_refuses_fail_whose_path_embeds_missing_origin_token(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8")
+            + "\n[repositories.evil]\n"
+            + 'path = "repositories/api: missing origin/evil"\n'
+            + 'mount = "evil"\n',
+            encoding="utf-8",
+        )
+        findings = doctor(load(self.root))
+        embedded = [
+            item
+            for item in findings
+            if item.startswith("FAIL") and ": missing origin/evil" in item
+        ]
+        self.assertTrue(embedded, findings)
+        for item in embedded:
+            self.assertFalse(is_missing_origin_finding(item), item)
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "--dry-run",
+                    "start",
+                    "--agent",
+                    "noop",
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
+        combined = stdout.getvalue() + stderr.getvalue()
+        self.assertIn("尚未就绪", combined)
+        self.assertTrue(
+            any(": missing origin/evil" in item for item in embedded),
+            embedded,
+        )
+        self.assertNotIn("座位", stdout.getvalue())
 
     def test_next_without_a_profile_explains_how_to_begin(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
@@ -927,6 +1007,7 @@ class ProfileCommandsTests(WorkspaceCase):
         )
 
     def test_start_can_launch_an_installed_tool_without_a_profile_adapter(self) -> None:
+        publish_origin_branch(self.anchor, "feat/alpha")
         create_line(load(self.root), line_id="alpha", branch="feat/alpha", base="main")
         launched: list[object] = []
 

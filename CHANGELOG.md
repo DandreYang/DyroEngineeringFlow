@@ -21,10 +21,28 @@
   `command`. `next` stays `needs_repair` (never ready on FAIL).
 - Attach first-party Skill avatars to OpenCode and Hermes when those host
   homes already exist (`~/.config/opencode/skills/<skill>`,
-  `~/.hermes/skills/<skill>`). Detection stays fail-closed: absent homes
-  stay silent, and Dyro does not create OpenCode or Hermes directories.
-  `OPENCODE_CONFIG_DIR` and `HERMES_HOME` remain the existing overrides.
-  Pi (`PI_CODING_AGENT_DIR`, `~/.pi/agent`) is unchanged.
+  `~/.hermes/skills/<skill>`). Detection stays fail-closed: absent default
+  homes stay silent, and Dyro does not create host homes — including when
+  `host_homes` or host env vars (`OPENCODE_CONFIG_DIR`, `HERMES_HOME`,
+  `PI_CODING_AGENT_DIR`, and the other host overrides) point at a path that
+  is not already a real directory. Missing override homes are skipped
+  (isolated-mirror-only if no host remains). Symlink path components stay
+  fail-closed. Pi (`PI_CODING_AGENT_DIR`, `~/.pi/agent`) still uses the
+  same existing-home rule.
+- `dyro start` now refuses the same way `dyro next` does when doctor has
+  any FAIL, including missing-origin-only. The 0.7.10 note that start
+  treated missing-origin as non-blocking is no longer the live contract.
+  Setup, join, and `dyro open` / home create-and-open
+  (`existing_line_workspace`) skip only the constructed missing-origin
+  shape so a just-created SHA-pinned local-only line can be created and
+  opened. Every other doctor FAIL — including workspace-level
+  `FAIL external Profile requires …` — blocks open.
+- `is_missing_origin_finding` parses the doctor FAIL shape
+  (`FAIL <kind>:<id>/<repo>: missing origin/<branch>`) instead of a
+  substring, so a path that embeds `: missing origin/...` is not classified
+  as missing-origin and still blocks start.
+- Redact a non-fictional product-line token from the public 2026-08-19
+  slash-review record. Public docs keep fictional placeholders.
 
 ## 0.7.10 - 2026-08-21
 

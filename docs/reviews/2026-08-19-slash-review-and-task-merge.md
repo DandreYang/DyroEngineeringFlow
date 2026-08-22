@@ -2,7 +2,7 @@
 
 Date: 2026-08-19
 
-Scope: 本会话新增的用户斜杠 `/dyro-task-merge` 与 `/dyro-review-board`（skills-library），不是 Huiyichu 产品线，也不是 `dyro` 包装源码。
+Scope: 本会话新增的用户斜杠 `/dyro-task-merge` 与 `/dyro-review-board`（skills-library），不是 example-line 产品线，也不是 `dyro` 包装源码。
 
 SSOT: 当前 skill 文件 + 已安装 `dyro-board` + `dyroengineeringflow` 中 `merge_task` / `explain_task` / `cmd_next`。本记录不是 Proof，不是 `task review` PASS。
 
@@ -78,7 +78,7 @@ Final verdict: **No-Go for 提交 / 推送 / 发布。** 用户斜杠可继续�
 | 对象 | 结论 |
 | --- | --- |
 | 当作用户斜杠继续用 | Conditional Go（先收下 P1 文本） |
-| 提交 / 推送 / 发布这些 skill 或任何 Dyro/Huiyichu 仓 | **No-Go** |
+| 提交 / 推送 / 发布这些 skill 或任何 Dyro/example-line 仓 | **No-Go** |
 | 用本会审代替 `task review` / 发版 | **No-Go** |
 
 ## 须人工核
