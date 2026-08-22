@@ -44,7 +44,11 @@ from .continuation.briefing import (
     render_human_attention,
     render_human_wave,
 )
-from .continuation.next_step import bootstrap_repair_applicable, repair_commands
+from .continuation.next_step import (
+    bootstrap_repair_applicable,
+    deadline_repair_commands,
+    repair_commands,
+)
 from .continuation.ready_briefing import briefing_command, build_ready_briefing
 from .continuation.engine import (
     build_scheduler_tick,
@@ -242,16 +246,19 @@ from .updates import (
 )
 from .workspace import (
     OBSERVATION_DEADLINE_FINDING,
-    OBSERVATION_TIMEOUT_BRANCH,
-    OBSERVATION_TIMEOUT_SCOPE,
     create_line,
     doctor,
     get_line,
     is_missing_origin_finding,
     is_observation_deadline_finding,
+    is_observation_timeout_row,
     list_lines,
     merge_line,
+    observation_timeout_row,
     spawn_line,
+    stash_observation_findings,
+    stashed_observation_findings,
+    stashed_observation_rows,
     status_rows,
     sync_line,
 )
@@ -580,82 +587,144 @@ def _observation_timeout_fields(*, partial: bool) -> dict[str, object]:
     return {"code": ReadLimitCode.DEADLINE_EXCEEDED.value}
 
 
+def _status_row_payload(row: object) -> dict[str, object]:
+    if isinstance(row, dict):
+        return row
+    if isinstance(row, tuple) and len(row) == 6:
+        scope, repository, branch, head, upstream, dirty = row
+        return {
+            "scope": scope,
+            "repository": repository,
+            "branch": branch,
+            "head": head,
+            "upstream": upstream,
+            "dirty_count": dirty,
+        }
+    return _status_row_payload(observation_timeout_row())
+
+
 def _status_payload(
     config: Config, *, read_budget: ReadBudget | None = None
 ) -> dict[str, object]:
     rows = status_rows(config, read_budget=read_budget)
-    partial = any(
-        scope == OBSERVATION_TIMEOUT_SCOPE
-        and branch == OBSERVATION_TIMEOUT_BRANCH
-        for scope, _repository, branch, _head, _upstream, _dirty in rows
-    )
+    partial = any(is_observation_timeout_row(row) for row in rows)
     payload: dict[str, object] = {
         "workspace": config.name,
         **push_policy_fields(config.policy),
         "partial": partial,
-        "rows": [
-            {
-                "scope": scope,
-                "repository": repository,
-                "branch": branch,
-                "head": head,
-                "upstream": upstream,
-                "dirty_count": dirty,
-            }
-            for scope, repository, branch, head, upstream, dirty in rows
-        ],
+        "rows": [_status_row_payload(row) for row in rows],
     }
     payload.update(_observation_timeout_fields(partial=partial))
     return payload
 
 
+def _timeout_workspace_name(args: argparse.Namespace) -> str:
+    alias = getattr(args, "workspace_alias", None)
+    if isinstance(alias, str) and alias:
+        return alias
+    try:
+        return _config(args).name
+    except (DyroError, OSError, ValidationError, TypeError, AttributeError):
+        return "unknown"
+
+
+def _timeout_findings(args: argparse.Namespace) -> list[str]:
+    budget = getattr(args, "_control_plane_read_budget", None)
+    findings = stashed_observation_findings(
+        budget if isinstance(budget, ReadBudget) else None
+    )
+    extra = getattr(args, "_stashed_findings", None)
+    if isinstance(extra, list):
+        findings.extend(item for item in extra if isinstance(item, str))
+    if not any(is_observation_deadline_finding(item) for item in findings):
+        findings.append(OBSERVATION_DEADLINE_FINDING)
+    return findings
+
+
+def _timeout_status_rows(args: argparse.Namespace) -> list[object]:
+    budget = getattr(args, "_control_plane_read_budget", None)
+    rows: list[object] = list(
+        stashed_observation_rows(budget if isinstance(budget, ReadBudget) else None)
+    )
+    if not any(
+        isinstance(row, tuple) and is_observation_timeout_row(row) for row in rows
+    ):
+        rows.append(observation_timeout_row())
+    return rows
+
+
+def _timeout_repair_commands(
+    args: argparse.Namespace, findings: list[str]
+) -> list[str]:
+    alias = _timeout_workspace_name(args)
+    failures = [item for item in findings if item.startswith("FAIL")]
+    try:
+        config = _config(args)
+        commands = deadline_repair_commands(config, alias, failures)
+    except (DyroError, OSError, ValidationError, TypeError, AttributeError):
+        commands = [briefing_command(alias, "doctor")]
+    return commands or [briefing_command(alias, "doctor")]
+
+
 def _print_json_observation_timeout(args: argparse.Namespace) -> None:
     """Emit doctor/status/next JSON after a deadline; never kind=error."""
 
-    alias = getattr(args, "workspace_alias", None)
-    workspace = alias if isinstance(alias, str) and alias else "unknown"
-    finding = _doctor_finding_payload(
-        OBSERVATION_DEADLINE_FINDING, include_paths=False
-    )
-    command = _fanout_command_name(args)
+    workspace = _timeout_workspace_name(args)
+    findings = _timeout_findings(args)
     extra = _observation_timeout_fields(partial=True)
+    command = _fanout_command_name(args)
     if command == "doctor":
         _print_control_plane_json(
             "doctor",
             workspace=workspace,
             passed=False,
             partial=True,
-            findings=[finding],
+            findings=[
+                _doctor_finding_payload(item, include_paths=False) for item in findings
+            ],
             sidecars={"local_image_gen": {"state": "unknown"}},
             **extra,
         )
         return
     if command == "status":
+        rows = [_status_row_payload(row) for row in _timeout_status_rows(args)]
+        if getattr(args, "all", False):
+            _print_control_plane_json(
+                "workspace_status_all",
+                partial=True,
+                workspaces=[
+                    {
+                        "workspace": workspace,
+                        "available": True,
+                        "partial": True,
+                        "code": ReadLimitCode.DEADLINE_EXCEEDED.value,
+                        "rows": rows,
+                    }
+                ],
+                **extra,
+            )
+            return
         _print_control_plane_json(
             "workspace_status",
             workspace=workspace,
             partial=True,
-            rows=[
-                {
-                    "scope": OBSERVATION_TIMEOUT_SCOPE,
-                    "repository": "-",
-                    "branch": OBSERVATION_TIMEOUT_BRANCH,
-                    "head": "-",
-                    "upstream": "-",
-                    "dirty_count": -1,
-                }
-            ],
+            rows=rows,
             **extra,
         )
         return
+    commands = _timeout_repair_commands(args, findings)
+    failures = [item for item in findings if item.startswith("FAIL")]
     _print_control_plane_json(
         "next_step",
         state="needs_repair",
         summary="工作区还不能开始任务。",
-        commands=[],
+        commands=commands,
+        diagnostic_commands=[briefing_command(workspace, "doctor")],
         mutation_available=False,
         partial=True,
-        findings=[finding],
+        findings=[
+            _doctor_finding_payload(item, include_paths=False) for item in failures
+        ],
         **extra,
     )
 
@@ -2064,16 +2133,38 @@ def cmd_status(args: argparse.Namespace) -> None:
     if args.format == "json":
         budget = _control_plane_budget(args)
         if not args.all:
-            _print_control_plane_json(
-                "workspace_status",
-                **_status_payload(_config(args), read_budget=budget),
-            )
+            payload = _status_payload(_config(args), read_budget=budget)
+            _print_control_plane_json("workspace_status", **payload)
+            if payload.get("partial"):
+                raise SystemExit(2)
             return
         registry = load_registry_bounded(budget)
         workspaces: list[dict[str, object]] = []
+        any_partial = False
         for record in registry.workspaces:
             try:
                 config = load_profile_exact(record.root, budget).config
+            except ReadLimitError as exc:
+                if exc.code != ReadLimitCode.DEADLINE_EXCEEDED:
+                    workspaces.append(
+                        {
+                            "workspace": record.name,
+                            "available": False,
+                            "error_code": _control_plane_error_code(args, exc),
+                            "rows": [],
+                        }
+                    )
+                    continue
+                any_partial = True
+                workspaces.append(
+                    {
+                        "workspace": record.name,
+                        "available": True,
+                        "partial": True,
+                        "code": ReadLimitCode.DEADLINE_EXCEEDED.value,
+                        "rows": [_status_row_payload(observation_timeout_row())],
+                    }
+                )
             except (DyroError, OSError, ValidationError) as exc:
                 workspaces.append(
                     {
@@ -2084,13 +2175,17 @@ def cmd_status(args: argparse.Namespace) -> None:
                     }
                 )
             else:
-                workspaces.append(
-                    {
-                        "available": True,
-                        **_status_payload(config, read_budget=budget),
-                    }
-                )
-        _print_control_plane_json("workspace_status_all", workspaces=workspaces)
+                payload = _status_payload(config, read_budget=budget)
+                workspaces.append({"available": True, **payload})
+                any_partial = any_partial or bool(payload.get("partial"))
+        _print_control_plane_json(
+            "workspace_status_all",
+            workspaces=workspaces,
+            partial=any_partial,
+            **_observation_timeout_fields(partial=any_partial),
+        )
+        if any_partial:
+            raise SystemExit(2)
         return
     if args.all:
         print_all_status()
@@ -2697,6 +2792,7 @@ def cmd_next(args: argparse.Namespace) -> None:
         return
     budget = _control_plane_budget(args) if args.format == "json" else None
     findings = doctor(config, read_budget=budget)
+    stash_observation_findings(budget, findings)
     failures = [finding for finding in findings if finding.startswith("FAIL")]
     if failures:
         alias = getattr(args, "workspace_alias", None) or config.name

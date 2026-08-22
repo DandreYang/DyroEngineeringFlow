@@ -8,14 +8,17 @@
   cannot bare-`DEADLINE_EXCEEDED` at ~5.3s. Locked Mac baseline: five
   consecutive JSON `status` walls at 5.35–5.41s are 0/5 on the 5s
   protocol budget and must be 5/5 success (or structured partial that
-  still returns completed FAILs), never a bare `DEADLINE_EXCEEDED`. A default 5s budget that still
-  reaches `doctor` / `status` (Isolated Console) also grows by 0.4s per
-  extra git scope, capped at 45s. If the ceiling is hit, the JSON `kind`
-  stays `doctor` / `workspace_status` / `next_step` with `partial: true`,
-  `code: DEADLINE_EXCEEDED`, and completed FAIL findings; it is not a bare
-  `kind=error` with `command`. The JSON error printer converts leftover
-  `DEADLINE_EXCEEDED` on these commands the same way, matching by
-  `command` or `func`. `next` stays `needs_repair` (never ready on FAIL).
+  still returns completed FAILs), never a bare `DEADLINE_EXCEEDED`. A
+  default 5s `ReadBudget` passed into `doctor()` / `status_rows()` still
+  grows by 0.4s per extra git scope, capped at 45s. Isolated Console
+  overview still calls unbounded `doctor()`; inspect workers still use
+  3s/6s process kills and do not attach this budget. If the ceiling is
+  hit, the JSON `kind` stays `doctor` / `workspace_status` / `next_step`
+  with `partial: true`, `code: DEADLINE_EXCEEDED`, and completed FAIL
+  findings or rows; leftover timeout reuses that stash and keeps a
+  non-empty `doctor` repair command. JSON `status` deadline partial
+  exits 2, same as `doctor`. It is not a bare `kind=error` with
+  `command`. `next` stays `needs_repair` (never ready on FAIL).
 - Attach first-party Skill avatars to OpenCode and Hermes when those host
   homes already exist (`~/.config/opencode/skills/<skill>`,
   `~/.hermes/skills/<skill>`). Detection stays fail-closed: absent homes

@@ -4,6 +4,9 @@ from argparse import Namespace
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
+import os
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -287,7 +290,11 @@ class ControlPlaneTimeoutFindingTests(WorkspaceCase):
                 )
             status_out = StringIO()
             status_err = StringIO()
-            with redirect_stdout(status_out), redirect_stderr(status_err):
+            with (
+                redirect_stdout(status_out),
+                redirect_stderr(status_err),
+                self.assertRaises(SystemExit) as status_raised,
+            ):
                 main(
                     [
                         "--root",
@@ -329,7 +336,10 @@ class ControlPlaneTimeoutFindingTests(WorkspaceCase):
         self.assertEqual(next_payload["code"], "DEADLINE_EXCEEDED")
         self.assertTrue(next_payload["partial"])
         self.assertFalse(next_payload["mutation_available"])
+        self.assertTrue(next_payload["commands"], next_payload)
+        self.assertIn("doctor", next_payload["commands"][0])
 
+        self.assertEqual(status_raised.exception.code, 2)
         self.assertEqual(status_err.getvalue(), "")
         status_payload = json.loads(status_out.getvalue())
         self.assertEqual(status_payload["kind"], "workspace_status")
@@ -370,6 +380,8 @@ class ControlPlaneTimeoutFindingTests(WorkspaceCase):
             if kind == "next_step":
                 self.assertEqual(payload["state"], "needs_repair")
                 self.assertNotEqual(payload["state"], "ready")
+                self.assertTrue(payload["commands"], payload)
+                self.assertIn("doctor", payload["commands"][0])
 
     def test_locked_mac_five_run_json_status_succeeds_every_sample(self) -> None:
         """Post-fix: the same five JSON status walls all succeed, not bare DEADLINE."""
@@ -417,8 +429,10 @@ class ControlPlaneTimeoutFindingTests(WorkspaceCase):
                 ),
                 redirect_stdout(status_out),
                 redirect_stderr(status_err),
+                self.assertRaises(SystemExit) as status_raised,
             ):
                 main(["--root", str(self.root), "status", "--format", "json"])
+            self.assertEqual(status_raised.exception.code, 2, wall)
             self.assertEqual(status_err.getvalue(), "", wall)
             status_payload = json.loads(status_out.getvalue())
             self.assertNotEqual(status_payload.get("kind"), "error", status_payload)
@@ -468,6 +482,156 @@ class ControlPlaneTimeoutFindingTests(WorkspaceCase):
                 ),
                 doctor_payload,
             )
+
+    def test_leftover_timeout_keeps_prior_fails_and_next_repair(self) -> None:
+        """Leftover DEADLINE must reuse stashed FAILs/rows and a doctor command."""
+
+        self._workspace_with_completed_fail_and_worktree()
+        deadline = ReadLimitError(
+            ReadLimitCode.DEADLINE_EXCEEDED,
+            "Core observation deadline exceeded",
+        )
+
+        def doctor_then_raise(config, *, read_budget=None):
+            doctor(config, read_budget=read_budget)
+            raise deadline
+
+        def rows_then_raise(config, *, read_budget=None):
+            status_rows(config, read_budget=read_budget)
+            raise deadline
+
+        cases = (
+            (["doctor"], "doctor", "dyro.cli.doctor", doctor_then_raise),
+            (["status"], "workspace_status", "dyro.cli.status_rows", rows_then_raise),
+            (["next"], "next_step", "dyro.cli.doctor", doctor_then_raise),
+        )
+        for argv, kind, target, side_effect in cases:
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch(target, side_effect=side_effect),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main(["--root", str(self.root), *argv, "--format", "json"])
+            self.assertEqual(raised.exception.code, 2, argv)
+            self.assertEqual(stderr.getvalue(), "", argv)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["kind"], kind, payload)
+            self.assertEqual(payload["code"], "DEADLINE_EXCEEDED", payload)
+            self.assertTrue(payload["partial"], payload)
+            if kind == "doctor":
+                self.assertTrue(
+                    any(
+                        item["status"] == "FAIL"
+                        and "missing or not Git" in item["message"]
+                        for item in payload["findings"]
+                    ),
+                    payload,
+                )
+                self.assertTrue(
+                    any(
+                        item["status"] == "FAIL" and "deadline" in item["message"]
+                        for item in payload["findings"]
+                    ),
+                    payload,
+                )
+            if kind == "workspace_status":
+                self.assertTrue(
+                    any(row["scope"] == "anchor" for row in payload["rows"]),
+                    payload,
+                )
+                self.assertTrue(
+                    any(row["branch"] == "TIMEOUT" for row in payload["rows"]),
+                    payload,
+                )
+            if kind == "next_step":
+                self.assertEqual(payload["state"], "needs_repair")
+                self.assertTrue(payload["commands"], payload)
+                self.assertIn("doctor", payload["commands"][0])
+                self.assertTrue(
+                    any(
+                        item["status"] == "FAIL"
+                        and (
+                            "missing or not Git" in item["message"]
+                            or "deadline" in item["message"]
+                        )
+                        for item in payload["findings"]
+                    ),
+                    payload,
+                )
+
+    def test_next_commands_deadline_raise_is_doctor_repair_not_empty(self) -> None:
+        config = self._workspace_with_completed_fail_and_worktree()
+        with patch(
+            "dyro.continuation.next_step.doctor",
+            side_effect=ReadLimitError(
+                ReadLimitCode.DEADLINE_EXCEEDED,
+                "Core observation deadline exceeded",
+            ),
+        ):
+            commands = next_commands(
+                config,
+                "selected",
+                read_budget=ReadBudget(ObservationLimits()),
+            )
+        self.assertEqual(commands, ["dyro --workspace selected doctor"])
+        self.assertNotEqual(commands, [])
+
+    def test_json_status_all_deadline_is_partial_not_missing_workspace(self) -> None:
+        self._workspace_with_completed_fail_and_worktree()
+        with tempfile.TemporaryDirectory(prefix="dyro-registry-") as registry_home:
+            with patch.dict(os.environ, {"DYRO_HOME": registry_home}, clear=False):
+                main(
+                    [
+                        "workspace",
+                        "add",
+                        str(self.root),
+                        "--name",
+                        "selected",
+                        "--default",
+                    ]
+                )
+                stdout = StringIO()
+                stderr = StringIO()
+                with (
+                    patch(
+                        "dyro.cli.load_profile_exact",
+                        side_effect=ReadLimitError(
+                            ReadLimitCode.DEADLINE_EXCEEDED,
+                            "Core observation deadline exceeded",
+                        ),
+                    ),
+                    redirect_stdout(stdout),
+                    redirect_stderr(stderr),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    main(["status", "--all", "--format", "json"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["kind"], "workspace_status_all")
+        self.assertTrue(payload["partial"])
+        self.assertEqual(payload["code"], "DEADLINE_EXCEEDED")
+        workspace = payload["workspaces"][0]
+        self.assertTrue(workspace["available"])
+        self.assertTrue(workspace["partial"])
+        self.assertEqual(workspace["code"], "DEADLINE_EXCEEDED")
+        self.assertTrue(workspace["rows"])
+        self.assertNotEqual(workspace["rows"], [])
+
+    def test_unreleased_docs_do_not_claim_isolated_console_fanout(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        unreleased = changelog.split("## 0.7.10", 1)[0]
+        self.assertNotIn("Isolated Console) also grows", unreleased)
+        self.assertIn("do not attach this budget", unreleased)
+        skill = (
+            root
+            / "src/dyro/integrations/assets/dyro-control-plane/SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Isolated Console overview does not attach", skill)
 
     def test_print_error_does_not_emit_mac_bare_status_envelope(self) -> None:
         """Verifier payload {code, command:status} is a total-failure agents abandon."""
@@ -531,6 +695,8 @@ class ControlPlaneTimeoutFindingTests(WorkspaceCase):
             self.assertTrue(payload["partial"])
             if kind == "next_step":
                 self.assertEqual(payload["state"], "needs_repair")
+                self.assertTrue(payload["commands"], payload)
+                self.assertIn("doctor", payload["commands"][0])
 
 
 if __name__ == "__main__":

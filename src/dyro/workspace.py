@@ -29,6 +29,9 @@ OBSERVATION_DEADLINE_FINDING = (
 )
 OBSERVATION_TIMEOUT_SCOPE = "observation"
 OBSERVATION_TIMEOUT_BRANCH = "TIMEOUT"
+_STASHED_FINDINGS = "_control_plane_findings"
+_STASHED_ROWS = "_control_plane_rows"
+ObservationStatusRow = tuple[str, str, str, str, str, int]
 
 
 @dataclass(frozen=True)
@@ -1211,6 +1214,70 @@ def is_observation_deadline_finding(finding: str) -> bool:
     return finding == OBSERVATION_DEADLINE_FINDING
 
 
+def observation_timeout_row() -> ObservationStatusRow:
+    return (
+        OBSERVATION_TIMEOUT_SCOPE,
+        "-",
+        OBSERVATION_TIMEOUT_BRANCH,
+        "-",
+        "-",
+        -1,
+    )
+
+
+def is_observation_timeout_row(row: ObservationStatusRow) -> bool:
+    return (
+        row[0] == OBSERVATION_TIMEOUT_SCOPE
+        and row[2] == OBSERVATION_TIMEOUT_BRANCH
+    )
+
+
+def stash_observation_findings(
+    read_budget: ReadBudget | None, findings: list[str]
+) -> None:
+    if read_budget is None:
+        return
+    setattr(read_budget, _STASHED_FINDINGS, list(findings))
+
+
+def stashed_observation_findings(read_budget: ReadBudget | None) -> list[str]:
+    if read_budget is None:
+        return []
+    raw = getattr(read_budget, _STASHED_FINDINGS, None)
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, str)]
+
+
+def stash_observation_rows(
+    read_budget: ReadBudget | None, rows: list[ObservationStatusRow]
+) -> None:
+    if read_budget is None:
+        return
+    setattr(read_budget, _STASHED_ROWS, list(rows))
+
+
+def stashed_observation_rows(
+    read_budget: ReadBudget | None,
+) -> list[ObservationStatusRow]:
+    if read_budget is None:
+        return []
+    raw = getattr(read_budget, _STASHED_ROWS, None)
+    if not isinstance(raw, list):
+        return []
+    kept: list[ObservationStatusRow] = []
+    for item in raw:
+        if (
+            isinstance(item, tuple)
+            and len(item) == 6
+            and all(isinstance(part, str) for part in item[:5])
+            and isinstance(item[5], int)
+            and not isinstance(item[5], bool)
+        ):
+            kept.append(item)
+    return kept
+
+
 def _scale_control_plane_budget(
     config: Config, read_budget: ReadBudget | None
 ) -> None:
@@ -1267,17 +1334,11 @@ def status_rows(
                     )
     except ReadLimitError as exc:
         if read_budget is None or exc.code is not ReadLimitCode.DEADLINE_EXCEEDED:
+            stash_observation_rows(read_budget, rows)
             raise
-        rows.append(
-            (
-                OBSERVATION_TIMEOUT_SCOPE,
-                "-",
-                OBSERVATION_TIMEOUT_BRANCH,
-                "-",
-                "-",
-                -1,
-            )
-        )
+        if not any(is_observation_timeout_row(row) for row in rows):
+            rows.append(observation_timeout_row())
+    stash_observation_rows(read_budget, rows)
     return rows
 
 
@@ -1375,9 +1436,11 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
                     )
     except ReadLimitError as exc:
         if read_budget is None or exc.code is not ReadLimitCode.DEADLINE_EXCEEDED:
+            stash_observation_findings(read_budget, findings)
             raise
         if not any(is_observation_deadline_finding(item) for item in findings):
             findings.append(OBSERVATION_DEADLINE_FINDING)
+    stash_observation_findings(read_budget, findings)
     return findings
 
 

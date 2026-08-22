@@ -151,8 +151,10 @@ def apply_control_plane_fanout(
     """Widen a default 5s budget for multi-worktree JSON observations.
 
     Callers that set a non-default deadline (including tests that force a
-    timeout) keep that deadline. The start timestamp is unchanged, so
-    remaining time is ``scaled_deadline - elapsed``.
+    timeout, and CLI JSON doctor/status/next which start at 45s) keep that
+    deadline. Isolated Console overview does not attach this budget.
+    The start timestamp is unchanged, so remaining time is
+    ``scaled_deadline - elapsed``.
     """
 
     if budget.limits.deadline_seconds != PROTOCOL_DEADLINE_SECONDS:
