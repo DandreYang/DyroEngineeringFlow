@@ -146,6 +146,99 @@ class WorkspaceTests(WorkspaceCase):
         self.assertEqual(line.id, "local-only")
         self.assertTrue(workspace.is_dir())
 
+    def test_external_profile_fail_blocks_open_missing_origin_only_does_not(
+        self,
+    ) -> None:
+        from contextlib import redirect_stderr, redirect_stdout
+        from io import StringIO
+        import json
+
+        from dyro.cli import main
+
+        config = load(self.root)
+        create_line(
+            config, line_id="local-only", branch="feat/local-only", base="main"
+        )
+        line, workspace = existing_line_workspace(config, "local-only", "line")
+        self.assertEqual(line.id, "local-only")
+        self.assertTrue(workspace.is_dir())
+
+        publish_origin_branch(self.anchor, "feat/alpha")
+        create_line(load(self.root), line_id="alpha", branch="feat/alpha", base="main")
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                "require_clean_merge = true",
+                'require_clean_merge = true\nexecution_mode = "external"',
+            ),
+            encoding="utf-8",
+        )
+        config = load(self.root)
+        findings = doctor(config)
+        self.assertTrue(
+            any(
+                item.startswith("FAIL")
+                and "external Profile requires" in item
+                and "require_signed_execution" in item
+                for item in findings
+            ),
+            findings,
+        )
+        self.assertFalse(
+            any(is_missing_origin_finding(item) and "alpha" in item for item in findings),
+            findings,
+        )
+        with self.assertRaisesRegex(DyroError, "尚未就绪|external Profile"):
+            existing_line_workspace(config, "alpha", "line")
+
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "--dry-run",
+                    "open",
+                    "alpha",
+                    "--agent",
+                    "noop",
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("尚未就绪", stdout.getvalue() + stderr.getvalue())
+
+        start_out = StringIO()
+        start_err = StringIO()
+        with (
+            redirect_stdout(start_out),
+            redirect_stderr(start_err),
+            self.assertRaises(SystemExit) as start_raised,
+        ):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "--dry-run",
+                    "start",
+                    "--line",
+                    "alpha",
+                    "--agent",
+                    "noop",
+                ]
+            )
+        self.assertEqual(start_raised.exception.code, 2)
+
+        next_out = StringIO()
+        with redirect_stdout(next_out):
+            main(["--root", str(self.root), "next", "--format", "json"])
+        payload = json.loads(next_out.getvalue())
+        self.assertEqual(payload["state"], "needs_repair")
+
     def test_doctor_fails_when_one_repo_missing_origin_feat(self) -> None:
         web = self.root / "repositories/web"
         web.mkdir(parents=True)

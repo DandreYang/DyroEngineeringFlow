@@ -1324,10 +1324,11 @@ def is_missing_origin_finding(finding: str) -> bool:
     A path or message that merely embeds ``: missing origin/`` does not match.
 
     Join completion, setup post-doctor, home create-and-open, and
-    ``existing_line_workspace`` / ``dyro open`` skip these so SHA-pinned /
-    local-only lines can exist (and be opened) before the remote-tracking
-    ref is published. ``dyro next``, ``dyro start``, and Isolated Console
-    do not: a FAIL is not ready. Wrong upstream, wrong branch, missing
-    worktree, common-dir, and symlink FAILs still fail.
+    ``existing_line_workspace`` / ``dyro open`` skip only this constructed
+    shape so SHA-pinned / local-only lines can exist (and be opened)
+    before the remote-tracking ref is published. Every other doctor FAIL
+    — including workspace-level ``FAIL external Profile requires …`` —
+    still blocks open. ``dyro next``, ``dyro start``, and Isolated Console
+    do not skip: a FAIL is not ready.
     """
     return _MISSING_ORIGIN_FINDING.fullmatch(finding) is not None

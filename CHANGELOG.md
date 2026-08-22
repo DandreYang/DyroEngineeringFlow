@@ -15,10 +15,11 @@
 - `dyro start` now refuses the same way `dyro next` does when doctor has
   any FAIL, including missing-origin-only. The 0.7.10 note that start
   treated missing-origin as non-blocking is no longer the live contract.
-  Setup, join, and the narrow home create-and-open / `dyro open` path
-  (`existing_line_workspace`) still skip missing-origin-only so a
-  just-created SHA-pinned local-only line can be created and opened.
-  Other FAILs still block open.
+  Setup, join, and `dyro open` / home create-and-open
+  (`existing_line_workspace`) skip only the constructed missing-origin
+  shape so a just-created SHA-pinned local-only line can be created and
+  opened. Every other doctor FAIL — including workspace-level
+  `FAIL external Profile requires …` — blocks open.
 - `is_missing_origin_finding` parses the doctor FAIL shape
   (`FAIL <kind>:<id>/<repo>: missing origin/<branch>`) instead of a
   substring, so a path that embeds `: missing origin/...` is not classified
