@@ -1125,6 +1125,8 @@ class IsolatedOverviewService:
 
     @staticmethod
     def _safe_command(command: object, alias: object) -> bool:
+        if command == "":
+            return True
         if not isinstance(command, str) or not isinstance(alias, str):
             return False
         escaped_alias = re.escape(alias)

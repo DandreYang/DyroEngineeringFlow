@@ -49,7 +49,11 @@ from .continuation.next_step import (
     deadline_repair_commands,
     repair_commands,
 )
-from .continuation.ready_briefing import briefing_command, build_ready_briefing
+from .continuation.ready_briefing import (
+    briefing_command,
+    build_ready_briefing,
+    scoped_briefing_command,
+)
 from .continuation.engine import (
     build_scheduler_tick,
     render_scheduler_tick_text,
@@ -343,12 +347,20 @@ def _config(args: argparse.Namespace) -> Config:
                 cwd=Path.cwd().absolute(),
                 budget=budget,
             )
+            if (
+                workspace_arg
+                and resolved.source is WorkspaceResolutionSource.EXPLICIT
+                and resolved.registry_alias is not None
+            ):
+                setattr(args, "workspace_alias", resolved.registry_alias)
         setattr(args, "_control_plane_resolution", resolved)
         return resolved.profile.config
     if root_arg:
         root = Path(root_arg).expanduser()
     elif workspace_arg:
-        root = get_workspace(workspace_arg).root
+        record = get_workspace(workspace_arg)
+        setattr(args, "workspace_alias", record.name)
+        root = record.root
     else:
         interactive = sys.stdin.isatty() and sys.stdout.isatty()
         return resolve_workspace(
@@ -661,9 +673,9 @@ def _timeout_repair_commands(
     try:
         config = _config(args)
         commands = deadline_repair_commands(config, alias, failures)
+        return commands or [_briefing_command(args, config, "doctor")]
     except (DyroError, OSError, ValidationError, TypeError, AttributeError):
-        commands = [briefing_command(alias, "doctor")]
-    return commands or [briefing_command(alias, "doctor")]
+        return [briefing_command(alias, "doctor")]
 
 
 def _print_json_observation_timeout(args: argparse.Namespace) -> None:
@@ -714,12 +726,16 @@ def _print_json_observation_timeout(args: argparse.Namespace) -> None:
         return
     commands = _timeout_repair_commands(args, findings)
     failures = [item for item in findings if item.startswith("FAIL")]
+    try:
+        diagnostic_commands = [_briefing_command(args, _config(args), "doctor")]
+    except (DyroError, OSError, ValidationError, TypeError, AttributeError):
+        diagnostic_commands = [briefing_command(workspace, "doctor")]
     _print_control_plane_json(
         "next_step",
         state="needs_repair",
         summary="工作区还不能开始任务。",
         commands=commands,
-        diagnostic_commands=[briefing_command(workspace, "doctor")],
+        diagnostic_commands=diagnostic_commands,
         mutation_available=False,
         partial=True,
         findings=[
@@ -811,9 +827,9 @@ def _scoped_command(
 def _briefing_command(
     args: argparse.Namespace, config: Config, *command: str
 ) -> str:
-    """Scope a read-only briefing command without embedding --root paths."""
+    """Scope a read-only briefing command without a fail-closed selector."""
     alias = getattr(args, "workspace_alias", None) or config.name
-    return briefing_command(str(alias), *command)
+    return scoped_briefing_command(config, str(alias), *command)
 
 
 def _workspace_ready_briefing(
@@ -1926,8 +1942,16 @@ def cmd_console(args: argparse.Namespace) -> None:
     initial_workspace = getattr(args, "workspace_alias", None)
     root_arg = getattr(args, "root", None)
     target_root: Path | None = None
+    if root_arg:
+        if args.dry_run:
+            target_root = Path(root_arg).expanduser().absolute()
+        else:
+            config = load(Path(root_arg).expanduser())
+            target_root = config.root
+            initial_workspace = config.name
+    elif initial_workspace:
+        initial_workspace = get_workspace(initial_workspace).name
     if args.dry_run:
-        target_root = Path(root_arg).expanduser().absolute() if root_arg else None
         render_console_plan(
             port=args.port,
             no_open=args.no_open,
@@ -1935,12 +1959,6 @@ def cmd_console(args: argparse.Namespace) -> None:
             target_root=target_root,
         )
         return
-    if root_arg:
-        config = load(Path(root_arg).expanduser())
-        target_root = config.root
-        initial_workspace = config.name
-    elif initial_workspace:
-        get_workspace(initial_workspace)
     launch_console(
         port=args.port,
         no_open=args.no_open,
@@ -2022,23 +2040,23 @@ def cmd_workspace_list(args: argparse.Namespace) -> None:
 
 
 def cmd_workspace_default(args: argparse.Namespace) -> None:
+    record = get_workspace(args.name)
     if args.dry_run:
-        get_workspace(args.name)
-        print(f"DRY RUN: 将默认工作区设为 {args.name}")
+        print(f"DRY RUN: 将默认工作区设为 {record.name}")
         return
-    set_default_workspace(args.name)
-    print(f"默认工作区：{args.name}")
+    set_default_workspace(record.name)
+    print(f"默认工作区：{record.name}")
 
 
 def cmd_workspace_remove(args: argparse.Namespace) -> None:
-    get_workspace(args.name)
+    record = get_workspace(args.name, exact_on_collision=True)
     if not args.yes and not args.dry_run:
         raise DyroError("移除只会删除全局首页入口，不会删除项目文件；确认后请加 --yes")
     if args.dry_run:
-        print(f"DRY RUN: 将移除工作区入口 {args.name}；不会删除项目文件")
+        print(f"DRY RUN: 将移除工作区入口 {record.name}；不会删除项目文件")
         return
-    remove_workspace(args.name)
-    print(f"已移除工作区入口：{args.name}；项目文件未改动")
+    remove_workspace(record.name)
+    print(f"已移除工作区入口：{record.name}；项目文件未改动")
 
 
 def _blueprint_document(args: argparse.Namespace):

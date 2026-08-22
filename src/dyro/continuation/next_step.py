@@ -7,7 +7,7 @@ from ..errors import DyroError, ValidationError
 from ..onboarding import validate_bootstrap_destination
 from ..read_limits import ReadBudget, ReadLimitCode, ReadLimitError
 from ..workspace import OBSERVATION_DEADLINE_FINDING, doctor, list_lines
-from .ready_briefing import briefing_command
+from .ready_briefing import scoped_briefing_command
 
 
 def next_commands(
@@ -48,7 +48,7 @@ def next_commands(
     except (DyroError, ValidationError, OSError, TypeError, AttributeError):
         return []
     if not lines:
-        return [briefing_command(token, "line", "create", "dev", "--yes")]
+        return [scoped_briefing_command(config, token, "line", "create", "dev", "--yes")]
     return []
 
 
@@ -65,7 +65,7 @@ def deadline_repair_commands(
     if OBSERVATION_DEADLINE_FINDING not in failures:
         failures.append(OBSERVATION_DEADLINE_FINDING)
     commands = repair_commands(config, alias, failures)
-    return commands or [briefing_command(alias, "doctor")]
+    return commands or [scoped_briefing_command(config, alias, "doctor")]
 
 
 def repair_commands(config: Config, alias: str, failures: list[str]) -> list[str]:
@@ -73,8 +73,8 @@ def repair_commands(config: Config, alias: str, failures: list[str]) -> list[str
     if not failures:
         return []
     if bootstrap_repair_applicable(config, failures):
-        return [briefing_command(alias, "bootstrap", "--yes")]
-    return [briefing_command(alias, "doctor")]
+        return [scoped_briefing_command(config, alias, "bootstrap", "--yes")]
+    return [scoped_briefing_command(config, alias, "doctor")]
 
 
 def bootstrap_repair_applicable(config: Config, failures: list[str]) -> bool:

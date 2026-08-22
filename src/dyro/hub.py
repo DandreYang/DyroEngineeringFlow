@@ -57,8 +57,77 @@ def workspace_path_as_alias_error(value: str) -> ValidationError:
     )
 
 
+def _alias_fold(name: str) -> str:
+    return name.casefold()
+
+
+def workspace_alias_matches(
+    workspaces: tuple[WorkspaceRecord, ...], name: str
+) -> tuple[WorkspaceRecord, ...]:
+    """Return registered records whose aliases fold equal to ``name``."""
+    key = _alias_fold(name)
+    return tuple(record for record in workspaces if _alias_fold(record.name) == key)
+
+
+def alias_fold_collides(name: str, names: tuple[str, ...]) -> bool:
+    """True when two or more registered aliases fold equal to ``name``."""
+    key = _alias_fold(name)
+    return sum(1 for item in names if _alias_fold(item) == key) > 1
+
+
+def unique_registered_alias(name: str, names: tuple[str, ...]) -> str | None:
+    """Return the sole registered spelling that folds equal to ``name``."""
+    key = _alias_fold(name)
+    matches = tuple(item for item in names if _alias_fold(item) == key)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+class WorkspaceAliasCollisionError(DyroError):
+    """More than one registered alias folds to the same lookup key."""
+
+
+def colliding_workspace_aliases_error(
+    name: str, colliding: tuple[str, ...]
+) -> WorkspaceAliasCollisionError:
+    listed = "、".join(colliding)
+    return WorkspaceAliasCollisionError(
+        f"工作区别名大小写冲突：{name} 同时匹配 {listed}"
+    )
+
+
+def select_workspace_record(
+    workspaces: tuple[WorkspaceRecord, ...],
+    name: str,
+    *,
+    exact_on_collision: bool = False,
+) -> WorkspaceRecord:
+    """Resolve one registered alias.
+
+    A unique case-insensitive match returns the canonical registered record.
+    Two or more aliases that fold equal fail closed unless
+    ``exact_on_collision`` is set and ``name`` equals one registered spelling.
+    A total miss keeps the existing unregistered suggestion.
+    """
+    matches = workspace_alias_matches(workspaces, name)
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        if exact_on_collision:
+            exact = next((record for record in matches if record.name == name), None)
+            if exact is not None:
+                return exact
+        raise colliding_workspace_aliases_error(
+            name, tuple(record.name for record in matches)
+        )
+    raise unregistered_workspace_error(name, tuple(record.name for record in workspaces))
+
+
 def _close_workspace_names(name: str, names: tuple[str, ...]) -> tuple[str, ...]:
-    exact_ci = tuple(item for item in names if item.lower() == name.lower() and item != name)
+    exact_ci = tuple(
+        item for item in names if _alias_fold(item) == _alias_fold(name) and item != name
+    )
     if exact_ci:
         return exact_ci
     return tuple(difflib.get_close_matches(name, names, n=5, cutoff=0.4))
@@ -335,26 +404,22 @@ def ensure_workspace(path: str | Path) -> WorkspaceRecord:
     return add_workspace(root, name=alias, make_default=not registry.default)
 
 
-def get_workspace(name: str) -> WorkspaceRecord:
+def get_workspace(name: str, *, exact_on_collision: bool = False) -> WorkspaceRecord:
     if looks_like_workspace_path(name):
         raise workspace_path_as_alias_error(name)
     validate_id(name, "工作区别名")
     registry = load_registry()
-    try:
-        return next(record for record in registry.workspaces if record.name == name)
-    except StopIteration as exc:
-        raise unregistered_workspace_error(
-            name, tuple(record.name for record in registry.workspaces)
-        ) from exc
+    return select_workspace_record(
+        registry.workspaces, name, exact_on_collision=exact_on_collision
+    )
 
 
 def set_default_workspace(name: str) -> None:
     validate_id(name, "工作区别名")
 
     def update(current: WorkspaceRegistry) -> WorkspaceRegistry:
-        if name not in {record.name for record in current.workspaces}:
-            raise DyroError(f"未登记工作区：{name}")
-        return replace(current, default=name)
+        selected = select_workspace_record(current.workspaces, name)
+        return replace(current, default=selected.name)
 
     _update_registry(update)
 
@@ -363,14 +428,15 @@ def remove_workspace(name: str) -> None:
     validate_id(name, "工作区别名")
 
     def update(current: WorkspaceRegistry) -> WorkspaceRegistry:
-        if name not in {record.name for record in current.workspaces}:
-            raise DyroError(f"未登记工作区：{name}")
+        selected = select_workspace_record(
+            current.workspaces, name, exact_on_collision=True
+        )
         remaining = tuple(
-            record for record in current.workspaces if record.name != name
+            record for record in current.workspaces if record.name != selected.name
         )
         default = (
             current.default
-            if current.default != name
+            if current.default != selected.name
             else (remaining[0].name if remaining else "")
         )
         return WorkspaceRegistry(default, remaining)

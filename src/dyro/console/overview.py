@@ -23,7 +23,11 @@ from .. import __version__
 from ..canonical import canonical_json_bytes
 from ..config import Config, load, validate_id
 from ..errors import DyroError, ValidationError
-from ..hub import WorkspaceRegistry, load_registry
+from ..hub import (
+    WorkspaceRegistry,
+    alias_fold_collides,
+    load_registry,
+)
 from ..continuation.briefing import follow_up_from_kind
 from ..updates import UpdateState, classify_update, load_update_state
 from ..observations import (
@@ -142,11 +146,37 @@ def workspace_root_missing(root: Path) -> bool:
         return False
 
 
+def _workspace_ad(alias: str, *parts: str, names: tuple[str, ...]) -> str:
+    """Return a ``--workspace`` command only when that selector would resolve."""
+    if not isinstance(alias, str) or alias_fold_collides(alias, names):
+        return ""
+    return " ".join(("dyro", "--workspace", alias, *parts))
+
+
+def omit_colliding_workspace_command(
+    summary: dict[str, object], names: tuple[str, ...]
+) -> dict[str, object]:
+    """Blank a fail-closed ``--workspace`` ad after list-by-root capture."""
+    alias = summary.get("alias")
+    recommendation = summary.get("recommendation")
+    if not isinstance(alias, str) or not isinstance(recommendation, dict):
+        return summary
+    if not alias_fold_collides(alias, names):
+        return summary
+    command = recommendation.get("command")
+    if not isinstance(command, str) or "--workspace" not in command:
+        return summary
+    copied = dict(summary)
+    copied["recommendation"] = {**recommendation, "command": ""}
+    return copied
+
+
 def unavailable_workspace_summary(
     alias: str,
     is_default: bool,
     *,
     reason: str,
+    names: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """Path-free unread card. Isolated still requires an allowlisted command."""
     safe_alias = _safe_code(alias)
@@ -172,7 +202,7 @@ def unavailable_workspace_summary(
         "attention_counts": _empty_attention_counts(),
         "recommendation": {
             "reason": code,
-            "command": f"dyro --workspace {safe_alias} doctor",
+            "command": _workspace_ad(safe_alias, "doctor", names=names),
         },
         "findings": [],
         "snapshot_sha256": "",
@@ -751,7 +781,12 @@ class ConsoleOverviewService:
                 else WORKSPACE_UNAVAILABLE
             )
             return (
-                unavailable_workspace_summary(safe_alias, is_default, reason=reason),
+                unavailable_workspace_summary(
+                    safe_alias,
+                    is_default,
+                    reason=reason,
+                    names=self._registry_names(),
+                ),
                 {reason},
                 _empty_inventory(),
             )
@@ -856,6 +891,12 @@ class ConsoleOverviewService:
         except TypeError:
             return loader(config)
 
+    def _registry_names(self) -> tuple[str, ...]:
+        try:
+            return tuple(item.name for item in self._load_registry().workspaces)
+        except ConsoleOverviewError:
+            return ()
+
     def _recommendation(
         self,
         alias: str,
@@ -863,9 +904,11 @@ class ConsoleOverviewService:
         findings: object = None,
         commands: object = None,
     ) -> dict[str, str] | None:
-        doctor = f"dyro --workspace {alias} doctor"
+        names = self._registry_names()
+        collide = alias_fold_collides(alias, names)
+        doctor = _workspace_ad(alias, "doctor", names=names)
         next_command = ""
-        if isinstance(commands, list):
+        if isinstance(commands, list) and not collide:
             for raw in commands:
                 next_command = _console_command(raw, alias)
                 if next_command:
@@ -889,13 +932,10 @@ class ConsoleOverviewService:
         if not isinstance(item, dict):
             return {"reason": "HOME_GUIDANCE", "command": next_command or doctor}
         objective_id = _safe_code(item.get("objective_id"))
-        follow_up = " ".join(
-            (
-                "dyro",
-                "--workspace",
-                alias,
-                *follow_up_from_kind(_safe_code(item.get("kind")), objective_id),
-            )
+        follow_up = _workspace_ad(
+            alias,
+            *follow_up_from_kind(_safe_code(item.get("kind")), objective_id),
+            names=names,
         )
         command = _console_command(follow_up, alias) or next_command or doctor
         return {

@@ -761,6 +761,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         self.assertFalse(
             IsolatedOverviewService._safe_command("dyro --workspace demo", "demo")
         )
+        self.assertTrue(IsolatedOverviewService._safe_command("", "demo"))
 
     def test_missing_origin_fail_is_not_ready_or_a_bare_workspace_command(self) -> None:
         from dyro.config import load
@@ -803,6 +804,45 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
             workspace["data"]["workspace"]["recommendation"]["command"],
             "dyro --workspace demo",
         )
+
+    def test_fold_twin_cards_do_not_advertise_fail_closed_workspace_selector(self) -> None:
+        from dyro.config import load
+        from dyro.hub import remove_workspace
+        from dyro.workspace import create_line
+
+        remove_workspace("demo")
+        (self.root / "dyro.toml").write_text(
+            (self.root / "dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "test-workspace"', 'name = "Demo"'),
+            encoding="utf-8",
+        )
+        other = self.root.parent / f"{self.root.name}-twin"
+        other.mkdir()
+        other.joinpath("dyro.toml").write_text(
+            (self.root / "dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "Demo"', 'name = "demo"'),
+            encoding="utf-8",
+        )
+        add_workspace(self.root, name="Demo", make_default=True)
+        add_workspace(other, name="demo")
+        create_line(load(self.root), line_id="core", branch="feat/core", base="main")
+        service = IsolatedOverviewService(
+            registry_state_home=self.home,
+            timeout_seconds=5,
+            cursor_secret=b"q" * 32,
+        )
+
+        page = service.page()
+        cards = page["data"]["workspaces"]
+        self.assertEqual({card["alias"] for card in cards}, {"Demo", "demo"})
+        for card in cards:
+            command = card["recommendation"]["command"]
+            self.assertNotIn("--workspace Demo", command)
+            self.assertNotIn("--workspace demo", command)
+            self.assertNotIn(str(self.root), command)
+            self.assertNotIn(str(other), command)
 
     def test_isolated_summary_worker_passes_next_commands_loader(self) -> None:
         from dyro.config import load
