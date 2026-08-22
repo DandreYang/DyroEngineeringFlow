@@ -160,6 +160,8 @@ HOSTS: tuple[HostSpec, ...] = (
     HostSpec("grok", "GROK_HOME", ".grok"),
     HostSpec("pi", "PI_CODING_AGENT_DIR", ".pi/agent"),
     HostSpec("dsh", "DSH_HOME", ".dsh"),
+    HostSpec("opencode", "OPENCODE_CONFIG_DIR", ".config/opencode"),
+    HostSpec("hermes", "HERMES_HOME", ".hermes"),
 )
 
 
