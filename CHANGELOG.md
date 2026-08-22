@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Attach first-party Skill avatars to OpenCode and Hermes when those host
+  homes already exist (`~/.config/opencode/skills/<skill>`,
+  `~/.hermes/skills/<skill>`). Detection stays fail-closed: absent homes
+  stay silent, and Dyro does not create OpenCode or Hermes directories.
+  `OPENCODE_CONFIG_DIR` and `HERMES_HOME` remain the existing overrides.
+  Pi (`PI_CODING_AGENT_DIR`, `~/.pi/agent`) is unchanged.
+
 ## 0.7.10 - 2026-08-21
 
 - `dyro next` no longer reports `ready` when doctor has FAIL findings,

@@ -1259,6 +1259,8 @@ class IntegrationManagerTests(unittest.TestCase):
         avatar = pi_home / "skills" / "dyro-control-plane"
         self.assertTrue(avatar.is_symlink() or avatar.is_dir())
         self.assertTrue((avatar / "SKILL.md").is_file())
+        pi_status = integration_status("skill", host_homes={"pi": pi_home})
+        self.assertIn("pi", {row.host for row in pi_status.avatars})
 
     def test_dsh_skill_host_uses_dsh_home(self) -> None:
         spec = next(host for host in manager.HOSTS if host.host_id == "dsh")
@@ -1270,6 +1272,138 @@ class IntegrationManagerTests(unittest.TestCase):
         avatar = dsh_home / "skills" / "dyro-control-plane"
         self.assertTrue(avatar.is_symlink() or avatar.is_dir())
         self.assertTrue((avatar / "SKILL.md").is_file())
+
+    def test_opencode_and_hermes_host_specs_use_existing_homes(self) -> None:
+        opencode = next(host for host in manager.HOSTS if host.host_id == "opencode")
+        hermes = next(host for host in manager.HOSTS if host.host_id == "hermes")
+        self.assertEqual(opencode.env_var, "OPENCODE_CONFIG_DIR")
+        self.assertEqual(opencode.default_dirname, ".config/opencode")
+        self.assertEqual(hermes.env_var, "HERMES_HOME")
+        self.assertEqual(hermes.default_dirname, ".hermes")
+
+        opencode_home = self.root / "opencode-home"
+        hermes_home = self.root / "hermes-home"
+        homes = {"opencode": opencode_home, "hermes": hermes_home}
+        preview = integration_status("skill", host_homes=homes)
+        self.assertEqual(
+            {row.host: row.state for row in preview.avatars if row.host in homes},
+            {"opencode": "missing", "hermes": "missing"},
+        )
+        self.assertEqual(
+            manager._avatar_path(opencode_home, manager.CONTROL_PLANE_SPEC),
+            opencode_home / "skills" / "dyro-control-plane",
+        )
+        self.assertEqual(
+            manager._avatar_path(hermes_home, manager.CONTROL_PLANE_SPEC),
+            hermes_home / "skills" / "dyro-control-plane",
+        )
+
+        installed = install_integration("skill", yes=True, host_homes=homes)
+        self.assertEqual(installed.status.state, IntegrationState.CURRENT)
+        opencode_avatar = opencode_home / "skills" / "dyro-control-plane"
+        hermes_avatar = hermes_home / "skills" / "dyro-control-plane"
+        self.assertTrue(opencode_avatar.is_symlink())
+        self.assertTrue(hermes_avatar.is_symlink())
+        self.assertEqual(opencode_avatar.resolve(), self.mirror.resolve())
+        self.assertEqual(hermes_avatar.resolve(), self.mirror.resolve())
+        self.assertTrue((opencode_avatar / "SKILL.md").is_file())
+        self.assertTrue((hermes_avatar / "SKILL.md").is_file())
+        self.assertEqual(
+            {row.host: row.state for row in installed.status.avatars if row.host in homes},
+            {"opencode": "current", "hermes": "current"},
+        )
+
+        synced = sync_managed_skill(yes=True, host_homes=homes)
+        self.assertIsNone(synced)
+        self.assertEqual(
+            integration_status("skill", host_homes=homes).state,
+            IntegrationState.CURRENT,
+        )
+
+        removed = uninstall_integration("skill", yes=True, host_homes=homes)
+        self.assertEqual(removed.status.state, IntegrationState.ABSENT)
+        self.assertFalse(opencode_avatar.exists() or opencode_avatar.is_symlink())
+        self.assertFalse(hermes_avatar.exists() or hermes_avatar.is_symlink())
+
+    def test_absent_opencode_and_hermes_homes_stay_silent(self) -> None:
+        config_root = self.fake_home / ".config"
+        default_opencode = config_root / "opencode"
+        default_hermes = self.fake_home / ".hermes"
+
+        config_root.mkdir()
+        status = integration_status("skill")
+        hosts = {row.host for row in status.avatars}
+        self.assertIn("codex", hosts)
+        self.assertNotIn("opencode", hosts)
+        self.assertNotIn("hermes", hosts)
+        self.assertIsNone(
+            manager._host_home(
+                next(host for host in manager.HOSTS if host.host_id == "opencode"),
+                None,
+            )
+        )
+        self.assertIsNone(
+            manager._host_home(
+                next(host for host in manager.HOSTS if host.host_id == "hermes"),
+                None,
+            )
+        )
+
+        install_integration("skill", yes=True)
+        self.assertFalse(default_opencode.exists())
+        self.assertFalse(default_hermes.exists())
+        self.assertEqual(
+            {row.host for row in integration_status("skill").avatars},
+            {"codex"},
+        )
+
+    def test_present_opencode_and_hermes_default_homes_receive_avatars(self) -> None:
+        opencode_home = self.fake_home / ".config" / "opencode"
+        hermes_home = self.fake_home / ".hermes"
+        opencode_home.mkdir(parents=True)
+        hermes_home.mkdir()
+
+        status = integration_status("skill")
+        hosts = {row.host: row for row in status.avatars}
+        self.assertIn("opencode", hosts)
+        self.assertIn("hermes", hosts)
+        self.assertIn("codex", hosts)
+        self.assertEqual(hosts["opencode"].state, "missing")
+        self.assertEqual(hosts["hermes"].state, "missing")
+        self.assertEqual(
+            hosts["opencode"].path,
+            opencode_home / "skills" / "dyro-control-plane",
+        )
+        self.assertEqual(
+            hosts["hermes"].path,
+            hermes_home / "skills" / "dyro-control-plane",
+        )
+
+        installed = install_integration("skill", yes=True)
+        self.assertEqual(installed.status.state, IntegrationState.CURRENT)
+        opencode_avatar = opencode_home / "skills" / "dyro-control-plane"
+        hermes_avatar = hermes_home / "skills" / "dyro-control-plane"
+        self.assertTrue(opencode_avatar.is_symlink())
+        self.assertTrue(hermes_avatar.is_symlink())
+        self.assertEqual(
+            {row.host: row.state for row in installed.status.avatars},
+            {"codex": "current", "opencode": "current", "hermes": "current"},
+        )
+
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["integration", "status", "skill"])
+            main(["integration", "sync", "skill", "--yes"])
+        text = output.getvalue()
+        self.assertIn("avatar\topencode\tcurrent", text)
+        self.assertIn("avatar\thermes\tcurrent", text)
+        self.assertIn("无需同步", text)
+
+        uninstall_integration("skill", yes=True)
+        self.assertTrue(opencode_home.is_dir())
+        self.assertTrue(hermes_home.is_dir())
+        self.assertFalse(opencode_avatar.exists() or opencode_avatar.is_symlink())
+        self.assertFalse(hermes_avatar.exists() or hermes_avatar.is_symlink())
 
 
 if __name__ == "__main__":

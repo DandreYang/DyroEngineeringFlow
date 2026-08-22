@@ -74,6 +74,11 @@ dyro integration sync skill --yes   # upgrade-only; skips absent installs
 
 (`codex` is an alias for `skill`.)
 
+Avatars attach only to already-present agent homes. OpenCode uses
+`~/.config/opencode/skills` (`OPENCODE_CONFIG_DIR` when set) and Hermes uses
+`~/.hermes/skills` (`HERMES_HOME` when set). Absent homes stay silent; Dyro
+does not create those directories.
+
 The outbound `dyro-dispatch`, executor, and board Skills keep independent
 ownership state from the read-only control-plane Skill. One `dyro setup` opt-in
 installs the first-batch seat bundle. An existing managed control-plane
