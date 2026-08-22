@@ -685,7 +685,7 @@ def _timeout_unscoped_repair_commands(args: argparse.Namespace) -> list[str]:
     """Repair ads after config reload fails. Never emit a fold-matching --workspace."""
     root = _timeout_verified_root(args)
     if root is None:
-        return []
+        return [shlex.join(("dyro", "doctor"))]
     return [shlex.join(("dyro", "--root", str(root), "doctor"))]
 
 

@@ -1860,6 +1860,11 @@ write = ["codex"]
             if isinstance(item, str)
         ]
         self._assert_no_other_root_fold_ad(advertised, other)
+        self.assertTrue(advertised)
+        self.assertTrue(all("doctor" in item for item in advertised), advertised)
+        self.assertTrue(
+            all("--workspace" not in item for item in advertised), advertised
+        )
         rooted = self._timeout_args(root=str(self.root))
         with patch("dyro.cli._config", side_effect=OSError("profile unread")):
             rooted_commands = _timeout_repair_commands(
