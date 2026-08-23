@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.7.12 - 2026-08-23
+
+- Fix `dyro update` for uv-managed installs that were pinned with an exact
+  specifier. `uv tool install dyro==0.7.11 --force` writes
+  `specifier = "==0.7.11"` into the tool receipt, so
+  `uv tool upgrade … dyro==0.7.12` is unsatisfiable. The uv-tool plan now
+  runs `uv tool install --force --default-index https://pypi.org/simple
+  --no-config dyro==<version>` so the pin is replaced. Official PyPI and
+  `--no-config` stay required; pipx, pip, and uv-pip paths are unchanged.
+  If you already installed with `uv tool install dyro==…`, run one last
+  `uv tool install dyro==0.7.12 --force`. After that, `dyro update` works.
+
 ## 0.7.11 - 2026-08-23
 
 - Resolve `--workspace` aliases case-insensitively when exactly one

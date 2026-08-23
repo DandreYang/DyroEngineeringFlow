@@ -50,7 +50,7 @@ release, publish, console, install, or any confirmation/approval field.
 ```json
 {
   "protocol": {"major": 1, "minor": 0},
-  "client": {"name": "dyro-agent-bridge-skill", "version": "0.7.11"},
+  "client": {"name": "dyro-agent-bridge-skill", "version": "0.7.12"},
   "operation": "bridge.capabilities.compact",
   "input": {}
 }
