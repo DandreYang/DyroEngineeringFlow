@@ -382,6 +382,26 @@ class UpdateInstallerTests(unittest.TestCase):
                 editable=False,
             )
 
+    def test_changelog_0_7_12_recovery_matches_planner_safe_uv_tool_install(
+        self,
+    ) -> None:
+        root = Path(__file__).resolve().parents[1]
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        section = changelog.split("## 0.7.12", 1)[1].split("## 0.7.11", 1)[0]
+        normalized = " ".join(section.split())
+        self.assertIn("build_update_plan", section)
+        self.assertIn("https://pypi.org/simple", section)
+        self.assertIn("--no-config", section)
+        self.assertIn(
+            "uv tool install --force --default-index https://pypi.org/simple "
+            "--no-config dyro==0.7.12",
+            normalized,
+        )
+        self.assertIn("not bare", normalized)
+        self.assertIn("uv tool install dyro==0.7.12 --force", normalized)
+        self.assertIn("integration sync", section)
+        self.assertIn("asset version 2", section)
+
     def test_refuses_to_replace_an_editable_source_checkout(self) -> None:
         with self.assertRaisesRegex(DyroError, "editable"):
             build_update_plan("0.5.6", editable=True)
