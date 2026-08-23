@@ -42,7 +42,7 @@ from dyro.workspace import (
     status_rows,
 )
 
-from .support import WorkspaceCase
+from .support import WorkspaceCase, publish_origin_branch
 
 # Locked pre-merge Mac baseline: five consecutive JSON status walls, all
 # DEADLINE_EXCEEDED on the 5s protocol budget, zero successes. The faster
@@ -697,6 +697,40 @@ class ControlPlaneTimeoutFindingTests(WorkspaceCase):
                 self.assertEqual(payload["state"], "needs_repair")
                 self.assertTrue(payload["commands"], payload)
                 self.assertIn("doctor", payload["commands"][0])
+
+    def test_json_next_briefing_deadline_keeps_partial_and_code(self) -> None:
+        """Post-doctor briefing ceiling must not claim complete ready."""
+
+        publish_origin_branch(self.anchor, "feat/alpha")
+        create_line(load(self.root), line_id="alpha", branch="feat/alpha", base="main")
+        deadline = ReadLimitError(
+            ReadLimitCode.DEADLINE_EXCEEDED,
+            "Core observation deadline exceeded",
+        )
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            patch(
+                "dyro.continuation.ready_briefing.list_objectives",
+                side_effect=deadline,
+            ),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(["--root", str(self.root), "next", "--format", "json"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["kind"], "next_step")
+        self.assertNotEqual(payload.get("kind"), "error")
+        self.assertTrue(payload["partial"], payload)
+        self.assertEqual(payload["code"], "DEADLINE_EXCEEDED")
+        briefing = payload.get("briefing") or {}
+        self.assertIsInstance(briefing, dict)
+        self.assertFalse(briefing.get("available"))
+        self.assertNotEqual(payload.get("commands"), None)
+        self.assertFalse(payload.get("mutation_available"))
 
 
 if __name__ == "__main__":

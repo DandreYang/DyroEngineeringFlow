@@ -43,6 +43,7 @@ from .continuation.briefing import (
     render_briefing_text,
     render_human_attention,
     render_human_wave,
+    unread_briefing,
 )
 from .continuation.next_step import (
     bootstrap_repair_applicable,
@@ -2747,9 +2748,12 @@ def cmd_start(args: argparse.Namespace) -> None:
     failures = [finding for finding in findings if finding.startswith("FAIL")]
     if failures:
         print("\n".join(failures))
-        raise DyroError(
-            "工作区尚未就绪；先修复 doctor 失败项，或运行 dyro bootstrap --yes"
-        )
+        extra = ""
+        if bootstrap_repair_applicable(config, failures):
+            extra = "，或运行 " + _briefing_command(
+                args, config, "bootstrap", "--yes"
+            )
+        raise DyroError("工作区尚未就绪；先修复 doctor 失败项" + extra)
     alias = getattr(args, "workspace_alias", None) or config.name
     briefing, _ = build_ready_briefing(config, alias=str(alias))
     text = render_briefing_text(briefing) if briefing else ""
@@ -2906,9 +2910,20 @@ def cmd_next(args: argparse.Namespace) -> None:
         _print_family_unacked_attention(config)
         _print_push_disclosure(config)
         return
-    briefing, diagnostic_commands = _workspace_ready_briefing(
-        args, config, budget
-    )
+    try:
+        briefing, diagnostic_commands = _workspace_ready_briefing(
+            args, config, budget
+        )
+        briefing_deadline = False
+    except ReadLimitError as exc:
+        if exc.code != ReadLimitCode.DEADLINE_EXCEEDED:
+            raise
+        briefing_deadline = True
+        alias = getattr(args, "workspace_alias", None) or config.name
+        command = scoped_briefing_command(
+            config, str(alias), "objective", "list"
+        )
+        briefing, diagnostic_commands = unread_briefing(command), [command]
     if args.format == "json":
         payload: dict[str, object] = {
             "state": "ready",
@@ -2919,9 +2934,14 @@ def cmd_next(args: argparse.Namespace) -> None:
         if briefing is not None:
             payload["briefing"] = briefing
             payload["diagnostic_commands"] = diagnostic_commands
+        if briefing_deadline:
+            payload["partial"] = True
+            payload.update(_observation_timeout_fields(partial=True))
         payload.update(_family_unacked_fields(config))
         payload.update(_next_push_fields(config))
         _print_control_plane_json("next_step", **payload)
+        if briefing_deadline:
+            raise SystemExit(2)
         return
     if briefing is None:
         print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。")
