@@ -178,6 +178,9 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertNotIn("dyro image", content)
         self.assertIn("skip global discovery", content)
         self.assertIn("Never add `--include-paths`", content)
+        self.assertIn("already completed preflight this turn", content)
+        self.assertIn("line-family is the writer", content)
+        self.assertIn("Default forbid when line-family is not the active ask", content)
         for private_pattern in (
             r"/Users/[^<\s]",
             r"/home/[^<\s]",
@@ -238,6 +241,14 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertIn("user-invocable: true", content)
         self.assertNotIn("不要执行", content)
         self.assertNotIn("Never execute the mutation", content)
+        self.assertNotIn("Print only the matching verb", content)
+        self.assertNotIn("Do not run that command", content)
+        self.assertIn("Run only the matching verb", content)
+        self.assertIn("illegal until all four preflight", content)
+        self.assertLess(
+            content.index("## Preflight"),
+            content.index("## Apply"),
+        )
         self.assertIn("required, not optional", content)
         self.assertIn("same turn", content)
         self.assertIn("Stay preflight-only", content)
@@ -267,6 +278,11 @@ class IntegrationManagerTests(unittest.TestCase):
         yaml_text = metadata.read_text(encoding="utf-8")
         self.assertIn("$dyro-line-family", yaml_text)
         self.assertNotIn("不要执行", yaml_text)
+        self.assertNotIn("Print only the matching verb", yaml_text)
+        self.assertNotIn("Do not run that command", yaml_text)
+        self.assertNotIn("Never execute the mutation", yaml_text)
+        self.assertIn("Preflight before Apply", yaml_text)
+        self.assertIn("illegal until all four preflight", yaml_text)
         self.assertIn("matching --yes", yaml_text)
         for line in yaml_text.splitlines():
             if ": " in line:
@@ -282,6 +298,9 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertIn("`line spawn`", executor)
         self.assertIn("`line merge`", executor)
         self.assertIn("`line sync`", executor)
+        self.assertIn("already completed preflight this turn", executor)
+        self.assertIn("line-family is the writer", executor)
+        self.assertIn("Default forbid when line-family is not the active ask", executor)
 
     def test_dispatch_skill_installs_independently_from_control_plane(self) -> None:
         self.assertEqual(
