@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+## 0.7.12 - 2026-08-23
+
+- Fix `dyro update` for uv-managed installs that were pinned with an exact
+  specifier. `uv tool install dyro==0.7.11 --force` writes
+  `specifier = "==0.7.11"` into the tool receipt, so
+  `uv tool upgrade … dyro==0.7.12` is unsatisfiable. The uv-tool plan now
+  runs `uv tool install --force --default-index https://pypi.org/simple
+  --no-config dyro==<version>` so the pin is replaced. Official PyPI and
+  `--no-config` stay required; pipx, pip, and uv-pip paths are unchanged.
+  If you already installed with `uv tool install dyro==…`, recover with
+  the same planner-safe command as `build_update_plan` (official simple
+  index plus `--no-config`), not bare
+  `uv tool install dyro==0.7.12 --force` alone:
+  `uv tool install --force --default-index https://pypi.org/simple
+  --no-config dyro==0.7.12`. After that, `dyro update` works. If hosted
+  slash mirrors still serve the old line-family text, run
+  `dyro integration sync` (or a skill refresh) so they pick up asset
+  version 2.
+- `/dyro-line-family` still preflights with unchanged doctor blocking-FAIL
+  rules (`status` dirty=0, `line list`, matching `--dry-run`). When the
+  user asked to spawn / merge / sync (slash or harness; the mutation is
+  the ask) and preflight passes, the agent must run the matching
+  `line spawn|merge|sync --yes` in the same turn. It still never invents
+  `--push` and must not git merge / switch by hand. Preflight-only
+  remains when the user asked only for preflight or dry-run, or ran
+  `dyro --dry-run line …` themselves. CLI `--dry-run` is unchanged. On
+  apply success, report what ran. On preflight fail, `User action` is
+  still only `doctor` or the failed dry-run. Preflight appears before
+  Apply, and `--yes` is illegal until all four preflight steps pass.
+  If `/dyro-line-family` already completed that preflight this turn for
+  an explicit mutation ask, `dyro-control-plane` / `dyro-executor` must
+  not block the matching `line … --yes`; line-family is the writer.
+  Default forbid stays when line-family is not the active ask.
+
 ## 0.7.11 - 2026-08-23
 
 - Resolve `--workspace` aliases case-insensitively when exactly one

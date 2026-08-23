@@ -245,18 +245,23 @@ class UpdateInstallerTests(unittest.TestCase):
             pip_available=True,
         )
 
+        self.assertEqual(uv.manager, "uv tool")
+        self.assertEqual(uv.scope, "当前 uv tool 隔离环境")
         self.assertEqual(
             uv.argv,
             (
                 "/bin/uv",
                 "tool",
-                "upgrade",
+                "install",
+                "--force",
                 "--default-index",
                 "https://pypi.org/simple",
                 "--no-config",
                 "dyro==0.5.6",
             ),
         )
+        self.assertNotIn("upgrade", uv.argv)
+        self.assertEqual(uv.constraint, "")
         self.assertEqual(
             pipx.argv,
             (
@@ -283,6 +288,119 @@ class UpdateInstallerTests(unittest.TestCase):
             ),
         )
         self.assertNotIn("sh", uv.argv)
+        self.assertEqual(pipx.manager, "pipx")
+        self.assertEqual(pip.manager, "pip")
+
+    def test_uv_tool_plan_replaces_exact_pin_via_install_force(self) -> None:
+        commands = {"uv": "/bin/uv", "pipx": "/bin/pipx"}
+
+        def which(name: str) -> str | None:
+            return commands.get(name)
+
+        prefixes = (
+            "/home/me/.local/share/uv/tools/dyro",
+            "/home/me/.local/share/uv/tools/dyro/extra",
+            r"C:\Users\me\AppData\Roaming\uv\tools\dyro",
+        )
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                plan = build_update_plan(
+                    "0.7.12",
+                    prefix=prefix,
+                    executable="/tool/bin/python",
+                    which=which,
+                    editable=False,
+                    pip_available=True,
+                )
+                self.assertEqual(plan.manager, "uv tool")
+                self.assertEqual(plan.scope, "当前 uv tool 隔离环境")
+                self.assertEqual(plan.argv[0], "/bin/uv")
+                self.assertEqual(plan.argv[1:4], ("tool", "install", "--force"))
+                self.assertNotIn("upgrade", plan.argv)
+                self.assertEqual(
+                    plan.argv[4:],
+                    (
+                        "--default-index",
+                        "https://pypi.org/simple",
+                        "--no-config",
+                        "dyro==0.7.12",
+                    ),
+                )
+                self.assertEqual(plan.constraint, "")
+
+        pipx = build_update_plan(
+            "0.7.12",
+            prefix="/home/me/.local/pipx/venvs/dyro",
+            executable="/tool/bin/python",
+            which=which,
+            editable=False,
+        )
+        self.assertEqual(pipx.manager, "pipx")
+        self.assertEqual(
+            pipx.argv,
+            (
+                "/bin/pipx",
+                "upgrade",
+                "--index-url",
+                "https://pypi.org/simple",
+                "dyro",
+            ),
+        )
+        self.assertEqual(pipx.constraint, "dyro==0.7.12")
+
+        pip = build_update_plan(
+            "0.7.12",
+            prefix="/home/me/venv",
+            executable="/home/me/venv/bin/python",
+            which=lambda _: None,
+            editable=False,
+            pip_available=True,
+        )
+        self.assertEqual(pip.manager, "pip")
+        self.assertIn("--upgrade", pip.argv)
+        self.assertNotIn("--force", pip.argv)
+
+        uv_pip = build_update_plan(
+            "0.7.12",
+            prefix="/home/me/venv",
+            base_prefix="/usr/local",
+            executable="/home/me/venv/bin/python",
+            which=lambda name: "/bin/uv" if name == "uv" else None,
+            editable=False,
+            pip_available=False,
+        )
+        self.assertEqual(uv_pip.manager, "uv pip")
+        self.assertEqual(uv_pip.argv[1:3], ("pip", "install"))
+        self.assertIn("--upgrade", uv_pip.argv)
+        self.assertNotIn("--force", uv_pip.argv)
+
+        with self.assertRaisesRegex(DyroError, "找不到 uv"):
+            build_update_plan(
+                "0.7.12",
+                prefix="/home/me/.local/share/uv/tools/dyro",
+                which=lambda _: None,
+                editable=False,
+            )
+
+    def test_changelog_0_7_12_recovery_matches_planner_safe_uv_tool_install(
+        self,
+    ) -> None:
+        root = Path(__file__).resolve().parents[1]
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        section = changelog.split("## 0.7.12", 1)[1].split("## 0.7.11", 1)[0]
+        normalized = " ".join(section.split())
+        self.assertIn("build_update_plan", section)
+        self.assertIn("https://pypi.org/simple", section)
+        self.assertIn("--no-config", section)
+        self.assertIn(
+            "uv tool install --force --default-index https://pypi.org/simple "
+            "--no-config dyro==0.7.12",
+            normalized,
+        )
+        self.assertIn("not bare", normalized)
+        self.assertIn("uv tool install dyro==0.7.12 --force", normalized)
+        self.assertIn("integration sync", section)
+        self.assertIn("asset version 2", normalized)
 
     def test_refuses_to_replace_an_editable_source_checkout(self) -> None:
         with self.assertRaisesRegex(DyroError, "editable"):

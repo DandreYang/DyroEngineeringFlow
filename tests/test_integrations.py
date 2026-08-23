@@ -178,6 +178,9 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertNotIn("dyro image", content)
         self.assertIn("skip global discovery", content)
         self.assertIn("Never add `--include-paths`", content)
+        self.assertIn("already completed preflight this turn", content)
+        self.assertIn("line-family is the writer", content)
+        self.assertIn("Default forbid when line-family is not the active ask", content)
         for private_pattern in (
             r"/Users/[^<\s]",
             r"/home/[^<\s]",
@@ -225,7 +228,7 @@ class IntegrationManagerTests(unittest.TestCase):
             if ": " in line:
                 self.assertTrue(line.split(": ", 1)[1].startswith('"'))
 
-    def test_packaged_line_family_skill_is_preflight_only(self) -> None:
+    def test_packaged_line_family_skill_applies_when_user_asked(self) -> None:
         root = manager._asset_root("line-family")
         skill = root / "SKILL.md"
         metadata = root / "agents" / "openai.yaml"
@@ -236,8 +239,20 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertIn("name: dyro-line-family", content)
         self.assertIn("disable-model-invocation: true", content)
         self.assertIn("user-invocable: true", content)
-        self.assertIn("Never pass `--yes`", content)
-        self.assertIn("Do not invent `--yes` or `--push`", content)
+        self.assertNotIn("不要执行", content)
+        self.assertNotIn("Never execute the mutation", content)
+        self.assertNotIn("Print only the matching verb", content)
+        self.assertNotIn("Do not run that command", content)
+        self.assertIn("Run only the matching verb", content)
+        self.assertIn("illegal until all four preflight", content)
+        self.assertLess(
+            content.index("## Preflight"),
+            content.index("## Apply"),
+        )
+        self.assertIn("required, not optional", content)
+        self.assertIn("same turn", content)
+        self.assertIn("Stay preflight-only", content)
+        self.assertIn("Do not invent `--push`", content)
         self.assertIn("Do not add `--push`", content)
         self.assertIn("line spawn <parent> <child> --yes", content)
         self.assertIn("line merge <child> --into <parent> --yes", content)
@@ -245,6 +260,7 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertIn("--dry-run line spawn", content)
         self.assertIn("--dry-run line merge", content)
         self.assertIn("--dry-run line sync", content)
+        self.assertIn("report what", content)
         self.assertIn("git `main`", content)
         self.assertIn("/dyro-task-merge", content)
         self.assertNotIn("Any `FAIL` → stop", content)
@@ -259,8 +275,16 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertIn("`line inbox`", content)
         self.assertIn("`line ack`", content)
         self.assertIn("must not call `line post`", content)
-        self.assertIn("$dyro-line-family", metadata.read_text(encoding="utf-8"))
-        for line in metadata.read_text(encoding="utf-8").splitlines():
+        yaml_text = metadata.read_text(encoding="utf-8")
+        self.assertIn("$dyro-line-family", yaml_text)
+        self.assertNotIn("不要执行", yaml_text)
+        self.assertNotIn("Print only the matching verb", yaml_text)
+        self.assertNotIn("Do not run that command", yaml_text)
+        self.assertNotIn("Never execute the mutation", yaml_text)
+        self.assertIn("Preflight before Apply", yaml_text)
+        self.assertIn("illegal until all four preflight", yaml_text)
+        self.assertIn("matching --yes", yaml_text)
+        for line in yaml_text.splitlines():
             if ": " in line:
                 self.assertTrue(line.split(": ", 1)[1].startswith('"'))
 
@@ -271,9 +295,16 @@ class IntegrationManagerTests(unittest.TestCase):
         executor = (manager._asset_root("executor") / "SKILL.md").read_text(
             encoding="utf-8"
         )
+        executor_plain = " ".join(executor.split())
         self.assertIn("`line spawn`", executor)
         self.assertIn("`line merge`", executor)
         self.assertIn("`line sync`", executor)
+        self.assertIn("already completed preflight this turn", executor)
+        self.assertIn("line-family is the writer", executor)
+        self.assertIn(
+            "Default forbid when line-family is not the active ask",
+            executor_plain,
+        )
 
     def test_dispatch_skill_installs_independently_from_control_plane(self) -> None:
         self.assertEqual(

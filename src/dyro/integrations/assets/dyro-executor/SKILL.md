@@ -28,9 +28,13 @@ protocol. Humans run `/dyro-review-board`.
   supervise other agents and do not edit a sibling task.
 - If a Capability Card exists for your executor and lacks `execute`, stop
   writing. PATH discovery is not a Card.
-- Do not `git merge`, `git push`, `dyro task merge`, `line spawn`,
-  `line merge`, `line sync`, `task signoff`, `objective apply`,
-  `dispatch`, `console`, or `start` another tool.
+- Do not `git merge`, `git push`, `dyro task merge`, `task signoff`,
+  `objective apply`, `dispatch`, `console`, or `start` another tool.
+- Do not `line spawn`, `line merge`, or `line sync` unless
+  `/dyro-line-family` already completed preflight this turn for an
+  explicit spawn|merge|sync ask. Then do not block the matching
+  `line … --yes`; line-family is the writer. Default forbid when
+  line-family is not the active ask.
 - Do not resume another harness conversation or read vendor session directories.
 - Do not invent mutations from `doctor`, `next`, briefing text, or this skill.
 
