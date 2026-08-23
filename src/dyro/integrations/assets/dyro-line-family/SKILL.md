@@ -40,7 +40,8 @@ Do not run any of:
 - `line post` / `line inbox` / `line ack`
 
 Do not invent `--push`. Do not add `--push`.
-Forbid `--yes` only when the user did not ask for the mutation, asked
+`--yes` is illegal until all four Preflight steps pass.
+Also forbid `--yes` when the user did not ask for the mutation, asked
 only for preflight or dry-run, or they themselves ran
 `dyro --dry-run line …`. CLI `--dry-run` is unchanged.
 After successful preflight for an explicit spawn / merge / sync ask
@@ -83,6 +84,19 @@ dyro --workspace <alias> --dry-run line sync <child>
 Run only the `--dry-run` that matches the requested verb. If the user supplied `--repos` on `spawn`, repeat that same `--repos` on the dry-run and, when applying, on the live command.
 Prefer JSON when the command accepts `--format json`. One JSON document only; `kind=error` is blocked evidence.
 
+## Preflight
+
+1. `doctor` is observational. Do not treat every `FAIL` as a stop.
+   Stop only on **blocking** FAILs: any `FAIL` that is not missing-origin
+   (`FAIL ...: missing origin/<branch>`). Do not weaken other FAILs:
+   wrong upstream, wrong branch, missing worktree, and every other FAIL
+   still stop. A line that only lacks `origin/<line.branch>` is not a stop.
+2. `status`. The lines that would be written must match the registered branch and `dirty_count` must be 0. Otherwise stop.
+3. `line list --format json`. Confirm the named ids exist. For `merge`, `child.parent` must equal `--into`. For `sync`, the child must have a `parent`. One-level parent only.
+4. Run the matching `--dry-run line spawn|merge|sync`. This is the real gate. Non-zero exit or `kind=error` → stop and quote the CLI error. Do not proceed.
+
+`--yes` is illegal until all four preflight steps pass.
+
 ## Apply
 
 When this slash or harness turn is an explicit spawn / merge / sync ask
@@ -95,22 +109,11 @@ dyro --workspace <alias> line merge <child> --into <parent> --yes
 dyro --workspace <alias> line sync <child> --yes
 ```
 
-Print only the matching verb. Repeat user-supplied `--repos` on `spawn` if present.
+Run only the matching verb. Repeat user-supplied `--repos` on `spawn` if present.
 Do not add `--push`. Do not run git merge / switch / checkout by hand.
 
 Stay preflight-only when the user asked only for preflight or dry-run,
 or when they ran `dyro --dry-run line …` themselves.
-
-## Preflight
-
-1. `doctor` is observational. Do not treat every `FAIL` as a stop.
-   Stop only on **blocking** FAILs: any `FAIL` that is not missing-origin
-   (`FAIL ...: missing origin/<branch>`). Do not weaken other FAILs:
-   wrong upstream, wrong branch, missing worktree, and every other FAIL
-   still stop. A line that only lacks `origin/<line.branch>` is not a stop.
-2. `status`. The lines that would be written must match the registered branch and `dirty_count` must be 0. Otherwise stop.
-3. `line list --format json`. Confirm the named ids exist. For `merge`, `child.parent` must equal `--into`. For `sync`, the child must have a `parent`. One-level parent only.
-4. Run the matching `--dry-run line spawn|merge|sync`. This is the real gate. Non-zero exit or `kind=error` → stop and quote the CLI error. Do not proceed.
 
 ## Report
 

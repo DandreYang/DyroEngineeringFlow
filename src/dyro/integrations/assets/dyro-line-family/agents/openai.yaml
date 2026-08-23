@@ -1,4 +1,4 @@
 interface:
   display_name: "Dyro 开发线家族"
   short_description: "预检后、在用户请求突变时执行子线派生 / 合入父线 / 从父线同步"
-  default_prompt: "Use $dyro-line-family. Preflight with doctor/status/line list and matching --dry-run. If the user asked to spawn|merge|sync and preflight passed, run the matching --yes in this turn. Never invent --push or git merge. Stay preflight-only for a dry-run/preflight ask."
+  default_prompt: "Use $dyro-line-family. Preflight before Apply. --yes is illegal until all four preflight steps pass. If the user asked to spawn|merge|sync and preflight passed, run the matching --yes in this turn. Never invent --push or git merge. Stay preflight-only for a dry-run/preflight ask."
