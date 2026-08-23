@@ -400,7 +400,7 @@ class UpdateInstallerTests(unittest.TestCase):
         self.assertIn("not bare", normalized)
         self.assertIn("uv tool install dyro==0.7.12 --force", normalized)
         self.assertIn("integration sync", section)
-        self.assertIn("asset version 2", section)
+        self.assertIn("asset version 2", normalized)
 
     def test_refuses_to_replace_an_editable_source_checkout(self) -> None:
         with self.assertRaisesRegex(DyroError, "editable"):

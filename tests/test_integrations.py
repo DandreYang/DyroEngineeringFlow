@@ -295,12 +295,16 @@ class IntegrationManagerTests(unittest.TestCase):
         executor = (manager._asset_root("executor") / "SKILL.md").read_text(
             encoding="utf-8"
         )
+        executor_plain = " ".join(executor.split())
         self.assertIn("`line spawn`", executor)
         self.assertIn("`line merge`", executor)
         self.assertIn("`line sync`", executor)
         self.assertIn("already completed preflight this turn", executor)
         self.assertIn("line-family is the writer", executor)
-        self.assertIn("Default forbid when line-family is not the active ask", executor)
+        self.assertIn(
+            "Default forbid when line-family is not the active ask",
+            executor_plain,
+        )
 
     def test_dispatch_skill_installs_independently_from_control_plane(self) -> None:
         self.assertEqual(
