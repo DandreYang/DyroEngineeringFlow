@@ -13,6 +13,16 @@
   `--no-config` stay required; pipx, pip, and uv-pip paths are unchanged.
   If you already installed with `uv tool install dyro==…`, run one last
   `uv tool install dyro==0.7.12 --force`. After that, `dyro update` works.
+- `/dyro-line-family` still preflights with unchanged doctor blocking-FAIL
+  rules (`status` dirty=0, `line list`, matching `--dry-run`). When the
+  user asked to spawn / merge / sync (slash or harness; the mutation is
+  the ask) and preflight passes, the agent must run the matching
+  `line spawn|merge|sync --yes` in the same turn. It still never invents
+  `--push` and must not git merge / switch by hand. Preflight-only
+  remains when the user asked only for preflight or dry-run, or ran
+  `dyro --dry-run line …` themselves. CLI `--dry-run` is unchanged. On
+  apply success, report what ran. On preflight fail, `User action` is
+  still only `doctor` or the failed dry-run.
 
 ## 0.7.11 - 2026-08-23
 

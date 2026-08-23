@@ -3,17 +3,20 @@ name: dyro-line-family
 description: >
   Preflight Dyro line-family ops: spawn a child line, merge a child into
   its direct parent, or sync the parent into the child. Use when the user
-  runs /dyro-line-family. Never execute the mutation.
+  runs /dyro-line-family. After preflight passes, apply the matching
+  `--yes` command in the same turn when the user asked to spawn, merge,
+  or sync. Stay preflight-only when they asked only for preflight or
+  dry-run.
 disable-model-invocation: true
 user-invocable: true
 argument-hint: "[workspace-alias] spawn <parent> <child> | merge <child> --into <parent> | sync <child>"
 metadata:
-  short-description: "预检子线派生 / 合入父线 / 从父线同步；不要执行"
+  short-description: "预检后、在用户请求突变时执行子线派生 / 合入父线 / 从父线同步"
 ---
 
 # Dyro 开发线家族
 
-只做预检。这不是第一方自动座位，也不是 `task merge`。
+先预检，再按用户是否请求突变决定是否执行。这不是第一方自动座位，也不是 `task merge`。
 
 `line spawn` / `line merge` / `line sync` 只处理 **一层父线**：
 - `spawn`：从已有父线派生子开发线（不是任务）
@@ -30,14 +33,19 @@ If the user means **done task branch → owning line**, stop and point at `/dyro
 
 Do not run any of:
 
-- `dyro line spawn` / `line merge` / `line sync` with `--yes`
 - `git merge` / `git switch` / `git checkout`
 - `task merge`, `task signoff`, `task gates`, `task review`, `task run`
 - `objective apply`, `dispatch`, `console`, push, publish
 - `line create` / hotfix or Change Set creation
 - `line post` / `line inbox` / `line ack`
 
-Do not invent `--yes` or `--push`. Do not add `--push`.
+Do not invent `--push`. Do not add `--push`.
+Forbid `--yes` only when the user did not ask for the mutation, asked
+only for preflight or dry-run, or they themselves ran
+`dyro --dry-run line …`. CLI `--dry-run` is unchanged.
+After successful preflight for an explicit spawn / merge / sync ask
+(the mutation is the ask), running the matching
+`line spawn|merge|sync --yes` in the same turn is required, not optional.
 This slash does not send family signals and must not call `line post`, `inbox`, or `ack`.
 Default is no push; `policy.allow_push` is not permission to invent it.
 Do not restore a drifted line branch. Do not add `--include-paths`.
@@ -72,9 +80,26 @@ dyro --workspace <alias> --dry-run line merge <child> --into <parent>
 dyro --workspace <alias> --dry-run line sync <child>
 ```
 
-Run only the `--dry-run` that matches the requested verb. If the user supplied `--repos` on `spawn`, repeat that same `--repos` on the dry-run.
-Never pass `--yes` to `line spawn`, `line merge`, or `line sync`.
+Run only the `--dry-run` that matches the requested verb. If the user supplied `--repos` on `spawn`, repeat that same `--repos` on the dry-run and, when applying, on the live command.
 Prefer JSON when the command accepts `--format json`. One JSON document only; `kind=error` is blocked evidence.
+
+## Apply
+
+When this slash or harness turn is an explicit spawn / merge / sync ask
+and every preflight step passed, run exactly one matching command in
+the same turn:
+
+```bash
+dyro --workspace <alias> line spawn <parent> <child> --yes
+dyro --workspace <alias> line merge <child> --into <parent> --yes
+dyro --workspace <alias> line sync <child> --yes
+```
+
+Print only the matching verb. Repeat user-supplied `--repos` on `spawn` if present.
+Do not add `--push`. Do not run git merge / switch / checkout by hand.
+
+Stay preflight-only when the user asked only for preflight or dry-run,
+or when they ran `dyro --dry-run line …` themselves.
 
 ## Preflight
 
@@ -99,13 +124,10 @@ dyro --workspace <alias> doctor
 
 or the `--dry-run line spawn|merge|sync` that failed. Do not print a live command.
 
-If every preflight step passed, say clearly that `next.commands` did not emit this, then show **one** command for the user to run personally:
+If the user asked only for preflight or dry-run and every preflight step
+passed, say clearly that `next.commands` did not emit this, then show
+**one** command for the user to run personally. Do not run it.
 
-```bash
-dyro --workspace <alias> line spawn <parent> <child> --yes
-dyro --workspace <alias> line merge <child> --into <parent> --yes
-dyro --workspace <alias> line sync <child> --yes
-```
-
-Print only the matching verb. Repeat user-supplied `--repos` on `spawn` if present.
-Do not add `--push`. Do not run that command.
+If the user asked to spawn / merge / sync and every preflight step
+passed, run the matching `--yes` command in this turn, then report what
+ran. Do not add `--push`.

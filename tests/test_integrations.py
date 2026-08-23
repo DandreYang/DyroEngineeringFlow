@@ -225,7 +225,7 @@ class IntegrationManagerTests(unittest.TestCase):
             if ": " in line:
                 self.assertTrue(line.split(": ", 1)[1].startswith('"'))
 
-    def test_packaged_line_family_skill_is_preflight_only(self) -> None:
+    def test_packaged_line_family_skill_applies_when_user_asked(self) -> None:
         root = manager._asset_root("line-family")
         skill = root / "SKILL.md"
         metadata = root / "agents" / "openai.yaml"
@@ -236,8 +236,12 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertIn("name: dyro-line-family", content)
         self.assertIn("disable-model-invocation: true", content)
         self.assertIn("user-invocable: true", content)
-        self.assertIn("Never pass `--yes`", content)
-        self.assertIn("Do not invent `--yes` or `--push`", content)
+        self.assertNotIn("不要执行", content)
+        self.assertNotIn("Never execute the mutation", content)
+        self.assertIn("required, not optional", content)
+        self.assertIn("same turn", content)
+        self.assertIn("Stay preflight-only", content)
+        self.assertIn("Do not invent `--push`", content)
         self.assertIn("Do not add `--push`", content)
         self.assertIn("line spawn <parent> <child> --yes", content)
         self.assertIn("line merge <child> --into <parent> --yes", content)
@@ -245,6 +249,7 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertIn("--dry-run line spawn", content)
         self.assertIn("--dry-run line merge", content)
         self.assertIn("--dry-run line sync", content)
+        self.assertIn("report what", content)
         self.assertIn("git `main`", content)
         self.assertIn("/dyro-task-merge", content)
         self.assertNotIn("Any `FAIL` → stop", content)
@@ -259,8 +264,11 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertIn("`line inbox`", content)
         self.assertIn("`line ack`", content)
         self.assertIn("must not call `line post`", content)
-        self.assertIn("$dyro-line-family", metadata.read_text(encoding="utf-8"))
-        for line in metadata.read_text(encoding="utf-8").splitlines():
+        yaml_text = metadata.read_text(encoding="utf-8")
+        self.assertIn("$dyro-line-family", yaml_text)
+        self.assertNotIn("不要执行", yaml_text)
+        self.assertIn("matching --yes", yaml_text)
+        for line in yaml_text.splitlines():
             if ": " in line:
                 self.assertTrue(line.split(": ", 1)[1].startswith('"'))
 
