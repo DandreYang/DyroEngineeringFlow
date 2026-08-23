@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.11 - 2026-08-23
+
 - Resolve `--workspace` aliases case-insensitively when exactly one
   registered name folds to the same key, and keep that canonical spelling
   in outputs. Two registered aliases that differ only by case fail closed
