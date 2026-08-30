@@ -21,7 +21,7 @@ from dyro.errors import DyroError
 from dyro.tasks import load_task, set_status, status, task_template
 from dyro.workspace import create_line
 
-from .support import WorkspaceCase
+from .support import WorkspaceCase, executor_writes_receipt
 
 
 def _contract(*, max_actions: int = 20) -> str:
@@ -90,10 +90,10 @@ class SupervisedContinuationTests(WorkspaceCase):
         self.assertEqual(record.intent.budget_reservation.attempts, 1)
 
     def test_supervised_execute_uses_the_real_local_task_path_after_action_start(self) -> None:
-        self.task_directory.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
         wave = self._wave()
 
-        outcomes = apply_supervised_wave(self.config, wave, clock=lambda: self.now)
+        with executor_writes_receipt(self.task_directory):
+            outcomes = apply_supervised_wave(self.config, wave, clock=lambda: self.now)
 
         self.assertEqual([(item.status, item.result) for item in outcomes], [(ActionStatus.SUCCEEDED, "review")])
         self.assertEqual(status(self.config, load_task(self.config, "TASK-A")), "review")
@@ -201,11 +201,9 @@ class SupervisedContinuationTests(WorkspaceCase):
         )
         self.config = load(self.root)
         compile_hosts(self.config)
-        self.task_directory.joinpath("receipt.md").write_text(
-            "result: DONE\n", encoding="utf-8"
-        )
         wave = self._wave()
-        outcomes = apply_supervised_wave(self.config, wave, clock=lambda: self.now)
+        with executor_writes_receipt(self.task_directory):
+            outcomes = apply_supervised_wave(self.config, wave, clock=lambda: self.now)
         self.assertEqual(
             [(item.status, item.result) for item in outcomes],
             [(ActionStatus.SUCCEEDED, "review")],

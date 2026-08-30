@@ -87,7 +87,7 @@ class WorkspaceTests(WorkspaceCase):
         findings = doctor(config)
         self.assertFalse(any(item.startswith("FAIL") for item in findings), findings)
 
-    def test_local_only_line_creates_but_doctor_and_next_are_not_ready(self) -> None:
+    def test_local_only_line_creates_and_next_is_ready(self) -> None:
         from contextlib import redirect_stdout
         from io import StringIO
         import json
@@ -110,36 +110,24 @@ class WorkspaceTests(WorkspaceCase):
         )
         self.assertIn(upstream, ("", "-"))
         findings = doctor(config)
-        self.assertTrue(
-            any("missing origin/feat/local-only" in item for item in findings),
-            findings,
-        )
+        origin = [
+            item for item in findings if "missing origin/feat/local-only" in item
+        ]
+        self.assertEqual(len(origin), 1, findings)
+        self.assertTrue(origin[0].startswith("WARN "), origin[0])
+        self.assertFalse(any(item.startswith("FAIL") for item in findings), findings)
         output = StringIO()
         with redirect_stdout(output):
             main(["--root", str(self.root), "next"])
         rendered = output.getvalue()
-        # doctor FAILs missing origin; next must not sell that as ready.
-        self.assertIn("missing origin/feat/local-only", rendered)
-        self.assertIn("还不能开始任务", rendered)
-        self.assertNotIn("工作区已就绪", rendered)
-        self.assertIn("dyro --workspace test-workspace doctor", rendered)
+        self.assertIn("工作区已就绪", rendered)
+        self.assertNotIn("还不能开始任务", rendered)
         json_out = StringIO()
         with redirect_stdout(json_out):
             main(["--root", str(self.root), "next", "--format", "json"])
         payload = json.loads(json_out.getvalue())
-        self.assertEqual(payload["state"], "needs_repair")
-        self.assertNotEqual(payload["state"], "ready")
-        self.assertIn(
-            "dyro --workspace test-workspace doctor", payload["commands"]
-        )
-        self.assertFalse(payload["mutation_available"])
-        self.assertTrue(
-            any(
-                "missing origin/feat/local-only" in item.get("message", "")
-                for item in payload.get("findings", [])
-            ),
-            payload,
-        )
+        self.assertEqual(payload["state"], "ready")
+        self.assertNotEqual(payload["state"], "needs_repair")
         # Narrow exception: open / home create-and-open may still enter a
         # just-created local-only line. start and next refuse.
         line, workspace = existing_line_workspace(config, "local-only", "line")
@@ -265,9 +253,16 @@ class WorkspaceTests(WorkspaceCase):
         findings = doctor(config)
         self.assertTrue(
             any(
-                item.startswith("FAIL")
+                item.startswith("WARN")
                 and "web" in item
                 and "missing origin/feat/partial-remote" in item
+                for item in findings
+            ),
+            findings,
+        )
+        self.assertFalse(
+            any(
+                item.startswith("FAIL") and "missing origin/feat/partial-remote" in item
                 for item in findings
             ),
             findings,
@@ -511,7 +506,7 @@ class LineFamilyTests(WorkspaceCase):
         self.assertEqual(child.id, "onboard_tryon")
         self.assertEqual(child.parent, "onboard")
         self.assertEqual(child.repositories, parent.repositories)
-        self.assertEqual(child.base, "origin/feat/onboard")
+        self.assertEqual(child.base, "feat/onboard")
         manifest = (config.lines_state_dir / "onboard_tryon.toml").read_text(
             encoding="utf-8"
         )
@@ -883,6 +878,9 @@ class MissingOriginFindingTests(unittest.TestCase):
     def test_recognizes_only_missing_origin_doctor_fails(self) -> None:
         self.assertTrue(
             is_missing_origin_finding("FAIL line:alpha/api: missing origin/feat/alpha")
+        )
+        self.assertTrue(
+            is_missing_origin_finding("WARN line:alpha/api: missing origin/feat/alpha")
         )
         self.assertTrue(
             is_missing_origin_finding(

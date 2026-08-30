@@ -665,12 +665,15 @@ def resolve_spawn_child_id(parent_id: str, child: str) -> str:
 
 
 def _spawn_base_for(config: Config, parent: Line, repo_id: str) -> str:
+    worktree = line_repository_path(config, parent, repo_id)
+    if _rev_parse(worktree, parent.branch) or _rev_parse(worktree, "HEAD"):
+        return parent.branch
     anchor = repository_path(config, repo_id)
+    if _rev_parse(anchor, parent.branch):
+        return parent.branch
     remote = _expected_remote_branch(parent.branch)
     if _ref_exists(anchor, f"refs/remotes/{remote}"):
         return remote
-    if _rev_parse(anchor, parent.branch):
-        return parent.branch
     raise DyroError(
         f"{repo_id} 找不到父线分支 {parent.branch} 或其 origin 跟踪引用"
     )
@@ -945,6 +948,7 @@ def _merge_line_repositories_locked(
     probed: list[_LineMergePlan] = []
     try:
         for plan in plans:
+            probed.append(plan)
             result = git(
                 plan.target,
                 "merge",
@@ -953,7 +957,6 @@ def _merge_line_repositories_locked(
                 plan.source_head,
                 timeout=300,
             )
-            probed.append(plan)
             if result.code != 0:
                 raise DyroError(
                     f"预检合并 {plan.repository} 存在冲突，拒绝合并"
@@ -1418,7 +1421,7 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
                     worktree, f"refs/remotes/{expected_remote}", read_budget=read_budget
                 ):
                     findings.append(
-                        f"FAIL {line.kind}:{line.id}/{repo_id}: missing {expected_remote}"
+                        f"WARN {line.kind}:{line.id}/{repo_id}: missing {expected_remote}"
                     )
                     continue
                 upstream = _branch_upstream(worktree, read_budget=read_budget)
@@ -1447,23 +1450,24 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
 
 _SAFE_FINDING_ID = r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}"
 _MISSING_ORIGIN_FINDING = re.compile(
-    rf"^FAIL (?:line|hotfix):{_SAFE_FINDING_ID}/{_SAFE_FINDING_ID}: missing origin/\S+$"
+    rf"^(?:FAIL|WARN) (?:line|hotfix):{_SAFE_FINDING_ID}/{_SAFE_FINDING_ID}: missing origin/\S+$"
 )
 
 
 def is_missing_origin_finding(finding: str) -> bool:
-    """True only for doctor FAILs that mean origin/<line.branch> is absent.
+    """True only for doctor findings that mean origin/<line.branch> is absent.
 
     Matches the constructed shape
-    ``FAIL <kind>:<id>/<repo>: missing origin/<branch>`` and nothing else.
+    ``WARN|FAIL <kind>:<id>/<repo>: missing origin/<branch>`` and nothing else.
     A path or message that merely embeds ``: missing origin/`` does not match.
 
-    Join completion, setup post-doctor, home create-and-open, and
-    ``existing_line_workspace`` / ``dyro open`` skip only this constructed
+    Dyro does not push, so an unpublished line branch is advisory. Join
+    completion, setup post-doctor, home create-and-open, and
+    ``existing_line_workspace`` / ``dyro open`` skip this constructed
     shape so SHA-pinned / local-only lines can exist (and be opened)
     before the remote-tracking ref is published. Every other doctor FAIL
     — including workspace-level ``FAIL external Profile requires …`` —
-    still blocks open. ``dyro next``, ``dyro start``, and Isolated Console
-    do not skip: a FAIL is not ready.
+    still blocks open. ``dyro next`` and ``dyro start`` only stop on FAIL,
+    so a missing-origin WARN is ready.
     """
     return _MISSING_ORIGIN_FINDING.fullmatch(finding) is not None

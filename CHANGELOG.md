@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+对使用者的影响：未 push 的开发线不再把 `dyro next` / `dyro start`
+卡成 needs_repair；doctor 只 WARN 缺 `origin/<branch>`。`line spawn`
+从父线本地 HEAD 起，不再跟过期远端。`task create` 可多仓、默认本机
+adapter，并把 Profile `verify` 写成门禁。`task review` 拒绝时非零退出。
+`--dry-run host compile` / `proof export` 不再落盘；本地 Profile 的
+`task gates --dry-run` 会真跑门禁，外部 Profile 则拒绝在本机执行。
+`task merge --dry-run` 会探测冲突并 abort。新增 `task close`。
+
+- Missing `origin/<line.branch>` is a doctor WARN, not FAIL. Dyro still
+  does not push; `line create` prints the `git push -u` command to run
+  yourself. `dyro next` / `dyro start` stay ready when that is the only
+  gap. `line spawn` uses the parent line's local branch, not a stale
+  `origin/<parent.branch>`.
+- `task create --repository` may be repeated. New tasks copy Profile
+  `repositories.*.verify` into `[[gates]]`, default executor/reviewer to
+  the first configured adapter, require the line worktree to sit on
+  `line.branch` before releasing a dependency, rotate `events.jsonl`
+  instead of failing at 2 MiB, keep status writes if event append fails,
+  and discard a leftover `receipt.md` at the start of each run.
+- `--dry-run` no longer writes host projections, proof zip files, or a
+  fake merged task. Gate dry-run executes the gate argv on a local
+  Profile; an external Profile refuses to run argv on the operator host.
+  `task review` exits non-zero on reject, including a binding mismatch,
+  without treating that reject as an uncertain supervised action.
+  `task close` removes the task worktree and `task/<id>` branch after
+  done/failed: symlink mounts are refused, done close requires a clean
+  tree already merged into `line.branch`, and failed close force-removes
+  a dirty tree. Empty-`verify` multi-repo tasks get unique
+  `diff-check-<repo>` gate names. Overlay event readers stitch
+  `events.jsonl.<seq>` archives when the current file is missing and
+  ignore non-seq suffixes such as `.bak`. Dispatch Skill no longer cites
+  a nonexistent `--mode` flag.
+
 ## 0.7.12 - 2026-08-23
 
 - Fix `dyro update` for uv-managed installs that were pinned with an exact

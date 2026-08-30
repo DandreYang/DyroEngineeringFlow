@@ -26,10 +26,14 @@ from dyro.tasks import (
 )
 from dyro.workspace import create_line
 
-from .support import WorkspaceCase, shell
+from .support import WorkspaceCase, executor_writes_receipt, shell
 
 
 class TaskTests(WorkspaceCase):
+    def _run_with_receipt(self, config, task, content: str = "result: DONE\n"):
+        with executor_writes_receipt(task.directory, content):
+            return run_task(config, task)
+
     def _external_config(self):
         config_path = self.root / "dyro.toml"
         config_path.write_text(
@@ -103,9 +107,8 @@ class TaskTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: QUESTION\n", encoding="utf-8")
         task = load_task(config, "TASK-1")
-        self.assertEqual(run_task(config, task), "waiting_answer")
+        self.assertEqual(self._run_with_receipt(config, task, "result: QUESTION\n"), "waiting_answer")
         task_repository = self.root / "worktrees/alpha/TASK-1/services/api"
         task_repository.joinpath("README.md").write_text("task change\n", encoding="utf-8")
         shell("git", "add", "README.md", cwd=task_repository)
@@ -138,9 +141,8 @@ class TaskTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
         task = load_task(config, "TASK-REVIEW-GATE")
-        self.assertEqual(run_task(config, task), "review")
+        self.assertEqual(self._run_with_receipt(config, task), "review")
 
         with self.assertRaisesRegex(DyroError, "质量门"):
             set_status(config, task, "done")
@@ -158,9 +160,8 @@ class TaskTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
         task = load_task(config, "TASK-MERGE-RECHECK")
-        self.assertEqual(run_task(config, task), "review")
+        self.assertEqual(self._run_with_receipt(config, task), "review")
         self._write_bound_review(task_path)
         self.assertEqual(review_task(config, task), "done")
         task_path.joinpath("review.md").write_text("verdict: PASS\n", encoding="utf-8")
@@ -237,9 +238,8 @@ class TaskTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
         task = load_task(config, "TASK-SIGNOFF")
-        self.assertEqual(run_task(config, task), "review")
+        self.assertEqual(self._run_with_receipt(config, task), "review")
         self._write_bound_review(task_path)
 
         self.assertEqual(review_task(config, task), "review_pending_signoff")
@@ -614,9 +614,8 @@ class TaskTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
         task = load_task(config, "TASK-GATE-NAME")
-        self.assertEqual(run_task(config, task), "review")
+        self.assertEqual(self._run_with_receipt(config, task), "review")
         self.assertTrue((task_path / "logs/gate-1.log").is_file())
         self.assertFalse((task_path / "logs/unit tests / edge cases.log").exists())
 
@@ -647,9 +646,8 @@ class TaskTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
         task = load_task(config, "TASK-DRIFT")
-        self.assertEqual(run_task(config, task), "review")
+        self.assertEqual(self._run_with_receipt(config, task), "review")
         self._write_bound_review(task_path)
 
         task_repository = self.root / "worktrees/alpha/TASK-DRIFT/services/api"
@@ -681,9 +679,8 @@ class TaskTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
         task = load_task(config, "TASK-REVIEW-GUARD")
-        self.assertEqual(run_task(config, task), "review")
+        self.assertEqual(self._run_with_receipt(config, task), "review")
         self._write_bound_review(task_path)
 
         with self.assertRaisesRegex(DyroError, "复核期间任务源码发生变化"):
@@ -728,11 +725,10 @@ class TaskTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
         task = load_task(config, "TASK-DIRTY")
 
         with self.assertRaisesRegex(DyroError, "必须先提交全部改动"):
-            run_task(config, task)
+            self._run_with_receipt(config, task)
         self.assertEqual(status(config, task), "failed")
 
     def test_pass_review_never_runs_implicit_merge_or_push(self) -> None:
@@ -748,9 +744,8 @@ class TaskTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
         task = load_task(config, "TASK-AUTO")
-        self.assertEqual(run_task(config, task), "review")
+        self.assertEqual(self._run_with_receipt(config, task), "review")
         self._write_bound_review(task_path)
 
         with patch("dyro.tasks._merge_task_repositories") as merge_repositories:
@@ -784,9 +779,8 @@ class TaskTests(WorkspaceCase):
         manifest = manifest.replace('[[gates]]', '[[repositories]]\nid = "web"\n\n[[gates]]', 1)
         task_path.joinpath("task.toml").write_text(manifest, encoding="utf-8")
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: QUESTION\n", encoding="utf-8")
         task = load_task(config, "TASK-TXN")
-        self.assertEqual(run_task(config, task), "waiting_answer")
+        self.assertEqual(self._run_with_receipt(config, task, "result: QUESTION\n"), "waiting_answer")
 
         for repository, content in (("api", "task api\n"), ("web", "task web\n")):
             task_repository = self.root / f"worktrees/alpha/TASK-TXN/services/{repository}"
@@ -827,9 +821,8 @@ class TaskTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
         task = load_task(config, "TASK-LOCK")
-        self.assertEqual(run_task(config, task), "review")
+        self.assertEqual(self._run_with_receipt(config, task), "review")
         self._write_bound_review(task_path)
         self.assertEqual(review_task(config, task), "done")
 

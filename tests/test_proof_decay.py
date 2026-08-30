@@ -49,7 +49,7 @@ from dyro.tasks import (
 )
 from dyro.workspace import create_line
 
-from .support import WorkspaceCase, shell
+from .support import WorkspaceCase, executor_writes_receipt, shell
 
 CLOCK = datetime(2026, 8, 15, 5, 20, tzinfo=timezone.utc)
 
@@ -302,9 +302,9 @@ class ProofDecayWorkspaceTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
         task = load_task(config, task_id)
-        self.assertEqual(run_task(config, task), "review")
+        with executor_writes_receipt(task_path):
+            self.assertEqual(run_task(config, task), "review")
         _write_bound_review(task_path)
         self.assertEqual(review_task(config, task), "done")
         return config, load_task(config, task_id)
@@ -402,11 +402,11 @@ class ProofDecayWorkspaceTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: QUESTION\n", encoding="utf-8")
         task = load_task(config, "TASK-UP")
         from dyro.tasks import answer_task
 
-        self.assertEqual(run_task(config, task), "waiting_answer")
+        with executor_writes_receipt(task_path, "result: QUESTION\n"):
+            self.assertEqual(run_task(config, task), "waiting_answer")
         repository = self.root / "worktrees/alpha/TASK-UP/services/api"
         repository.joinpath("UNMERGED.md").write_text("pending\n", encoding="utf-8")
         shell("git", "add", "UNMERGED.md", cwd=repository)

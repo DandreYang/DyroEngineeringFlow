@@ -33,7 +33,7 @@ The dashboard surfaces workspace health, attention, task execution counts, activ
 - Gates are executed by the orchestrator; an agent's self-report is not evidence of success.
 - Review is bound to the execution receipt and exact per-repository task HEADs; source drift invalidates it.
 - A task needs independent review before it becomes `done`; merge and push require explicit confirmation by default.
-- A completed dependency releases downstream work only after its exact task HEADs are integrated into the owning development line.
+- A completed dependency releases downstream work only after its exact task HEADs are integrated into the owning development line **and** that line worktree is on `line.branch` (enforced). Detached/wrong-branch is a merge/dispatch preflight, not Proof decay.
 - Executable configuration is represented as argv arrays. The core never runs TOML-provided shell strings.
 
 ## Architecture and flow diagrams
@@ -646,7 +646,7 @@ This README is maintained in English, Simplified Chinese, Korean, Spanish, Frenc
 
 ## Current boundaries
 
-DyroEngineeringFlow provides a complete local workflow loop and policy controls for keeping stricter teams in planning-only local mode. It does not create remote repositories, ship SaaS credentials, or provision external runners; it does provide a portable evidence-package contract for external execution. The optional local dispatch harness ships as `experiments.local_agent_dispatch` and is available as `dyro dispatch …`; it is advisory and never replaces gates, review, signoff, or merge. Local multi-repository merges are preflighted and recovered as one operation; remote Git servers cannot provide atomic cross-repository push, so partial push failure is recorded for recovery. Automatic merge requires permission in both the task manifest and local policy. It is available under the [MIT License](LICENSE) and as [`dyro` on PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow provides a complete local workflow loop and policy controls for keeping stricter teams in planning-only local mode. It does not create remote repositories, ship SaaS credentials, provision external runners, or `git push` unless `policy.allow_push` is on and the command is explicit. Unpublished `origin/<line.branch>` is a doctor WARN, not a FAIL. It does provide a portable evidence-package contract for external execution. The optional local dispatch harness ships as `experiments.local_agent_dispatch` and is available as `dyro dispatch …`; it is advisory and never replaces gates, review, signoff, or merge. Local multi-repository merges are preflighted and recovered as one operation; remote Git servers cannot provide atomic cross-repository push, so partial push failure is recorded for recovery. Automatic merge requires permission in both the task manifest and local policy. `--dry-run` means no Dyro writes and, for merge, a real conflict probe that is aborted. It is available under the [MIT License](LICENSE) and as [`dyro` on PyPI](https://pypi.org/project/dyro/).
 
 ### Graph Engineering (optional reading)
 

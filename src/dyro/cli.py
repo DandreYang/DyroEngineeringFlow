@@ -217,9 +217,11 @@ from .tasks import (
     import_review_evidence,
     list_tasks,
     load_task,
+    close_task,
     loop_tasks,
     merge_task,
     plan_tasks,
+    profile_task_gates,
     review_task,
     run_gates,
     run_task,
@@ -3025,6 +3027,8 @@ def _create_line(args: argparse.Namespace, kind: str) -> None:
     print(
         f"{'DRY RUN: ' if args.dry_run else ''}已创建 {line.kind} {line.id}，分支 {line.branch}，仓库基线：{bases}"
     )
+    if not args.dry_run:
+        print(f"发布此线（Dyro 不会代你执行）：git push -u origin {line.branch}")
 
 
 def cmd_line_create(args: argparse.Namespace) -> None:
@@ -3221,20 +3225,39 @@ def cmd_task_create(args: argparse.Namespace) -> None:
     config = _config(args)
     validate_id(args.id, "任务 ID")
     get_line(config, args.line)
-    if args.repository not in config.repositories:
-        raise DyroError(f"未配置仓库：{args.repository}")
+    repository_ids: list[str] = []
+    for repo_id in args.repository:
+        if repo_id not in config.repositories:
+            raise DyroError(f"未配置仓库：{repo_id}")
+        if repo_id not in repository_ids:
+            repository_ids.append(repo_id)
     path = config.task_specs_dir / args.id
+    if not config.adapters:
+        raise DyroError("未配置任何 Agent adapter，无法创建任务")
     if args.dry_run:
         print(f"DRY RUN: 将创建 {path}")
         return
+    executor = next(iter(config.adapters))
+    primary = repository_ids[0]
+    extra = tuple(repository_ids[1:])
+    gates = profile_task_gates(config, repository_ids)
     with exclusive_lock(config.task_specs_dir / ".tasks.lock"):
         if path.exists():
             raise DyroError(f"任务目录已存在：{path}")
         path.mkdir(parents=True)
-        mount = config.repositories[args.repository].mount
+        mount = config.repositories[primary].mount
         atomic_write_text(
             path / "task.toml",
-            task_template(args.id, args.title, args.line, args.repository, mount),
+            task_template(
+                args.id,
+                args.title,
+                args.line,
+                primary,
+                mount,
+                executor=executor,
+                extra_repositories=extra,
+                gates=gates,
+            ),
         )
         atomic_write_text(
             path / "handoff.md", f"# {args.title}\n\n- 目标：\n- 范围：\n- 验收：\n"
@@ -3448,7 +3471,8 @@ def cmd_task_gates(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
     passed = run_gates(config, task, dry_run=args.dry_run)
-    print("PASS" if passed else "FAIL")
+    prefix = "DRY RUN: " if args.dry_run else ""
+    print(f"{prefix}{'PASS' if passed else 'FAIL'}")
     if not passed:
         raise DyroError(f"任务 {task.id} 门禁未通过")
 
@@ -3456,7 +3480,10 @@ def cmd_task_gates(args: argparse.Namespace) -> None:
 def cmd_task_review(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
-    print(f"{task.id} -> {review_task(config, task, dry_run=args.dry_run)}")
+    result = review_task(config, task, dry_run=args.dry_run)
+    print(f"{task.id} -> {result}")
+    if result == "failed":
+        raise DyroError(f"任务 {task.id} 复核拒绝")
 
 
 def cmd_task_signoff(args: argparse.Namespace) -> None:
@@ -3776,8 +3803,18 @@ def cmd_task_merge(args: argparse.Namespace) -> None:
     task = load_task(config, args.id)
     merge_task(config, task, push=args.push, dry_run=args.dry_run)
     print(
-        f"{'DRY RUN: ' if args.dry_run else ''}已合并 {task.id}"
+        f"{'DRY RUN: 可合并' if args.dry_run else '已合并'} {task.id}"
         + (" 并推送" if args.push else "")
+    )
+
+
+def cmd_task_close(args: argparse.Namespace) -> None:
+    _require_yes(args, "关闭任务")
+    config = _config(args)
+    task = load_task(config, args.id)
+    close_task(config, task, dry_run=args.dry_run)
+    print(
+        f"{'DRY RUN: 将关闭' if args.dry_run else '已关闭'} {task.id} 的任务 worktree"
     )
 
 
@@ -3838,6 +3875,9 @@ def cmd_proof_export(args: argparse.Namespace) -> None:
 
     if bool(args.proof_id) == bool(args.task):
         raise ValidationError("proof export 的位置参数 proof-id 与 --task 互斥，且必须提供其一")
+    if args.dry_run:
+        print(f"DRY RUN: 将导出 Proof 到 {args.bundle}")
+        return
     proofs = _proofs_from_args(args, proof_id=args.proof_id)
     if not proofs:
         raise DyroError("没有可导出的 Proof")
@@ -4449,7 +4489,7 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="仅输出计划，不写文件、不调用 Agent 或 Git 写操作",
+        help="仅输出计划，不写 Dyro overlay；本地门禁会执行 argv；merge 会做可 abort 的冲突探测",
     )
 
 
@@ -4771,7 +4811,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="写入用户级 host-projections；默认只写当前工作区",
     )
-    host_compile.add_argument("--dry-run", action="store_true")
+    host_compile.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只规划宿主投影，不写入 host-projections 或 host.lock（兼容全局 --dry-run）",
+    )
     host_compile.add_argument("--format", choices=("text", "json"), default="text")
     host_compile.set_defaults(func=cmd_host_compile)
     host_status = host_sub.add_parser("status", help="查看已编译投影是否仍与当前 Card 一致")
@@ -5513,7 +5559,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_create.add_argument("id")
     task_create.add_argument("--title", required=True)
     task_create.add_argument("--line", required=True)
-    task_create.add_argument("--repository", required=True)
+    task_create.add_argument("--repository", action="append", required=True)
     task_create.set_defaults(func=cmd_task_create)
     task_sub.add_parser("list").set_defaults(func=cmd_task_list)
     task_sub.add_parser("board").set_defaults(func=cmd_task_board)
@@ -5668,6 +5714,10 @@ def build_parser() -> argparse.ArgumentParser:
     task_merge.add_argument("--yes", action="store_true")
     task_merge.add_argument("--push", action="store_true")
     task_merge.set_defaults(func=cmd_task_merge)
+    task_close = task_sub.add_parser("close", help="移除已完成或失败任务的 worktree 与任务分支")
+    task_close.add_argument("id")
+    task_close.add_argument("--yes", action="store_true")
+    task_close.set_defaults(func=cmd_task_close)
     task_sub.add_parser("decisions").set_defaults(func=cmd_task_decisions)
     task_sub.add_parser("stats").set_defaults(func=cmd_task_stats)
     task_sub.add_parser("loop").set_defaults(func=cmd_task_loop)

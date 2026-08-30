@@ -3,7 +3,9 @@
 This is not Objective ``events.jsonl`` and not the delivery ledger.  Rows are
 append-only, one ``kind`` each.  Truncation, replacement, or a partial last
 line fail closed: readers refuse the log and writers refuse to invent the
-missing rows.
+missing rows.  A current file that would exceed ``MAX_EVENT_LOG_BYTES`` is
+rotated to ``events.jsonl.<last-seq>`` before the next append; readers stitch
+archives in sequence order.
 """
 
 from __future__ import annotations
@@ -152,7 +154,28 @@ def _decode_event(raw: str) -> dict[str, object]:
     }
 
 
-def _read_locked_records(path: Path) -> list[dict[str, object]]:
+def _event_archive_seq(path: Path, item: Path) -> int | None:
+    prefix = path.name + "."
+    if not item.name.startswith(prefix):
+        return None
+    suffix = item.name[len(prefix) :]
+    if not suffix.isascii() or not suffix.isdigit():
+        return None
+    seq = int(suffix)
+    return seq if seq >= 1 else None
+
+
+def _event_archive_files(path: Path) -> list[Path]:
+    return [
+        item
+        for item in path.parent.glob(path.name + ".*")
+        if item.is_file()
+        and not item.is_symlink()
+        and _event_archive_seq(path, item) is not None
+    ]
+
+
+def _read_one_event_file(path: Path) -> list[dict[str, object]]:
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise EventLogError("EVENT_LOG_INVALID")
     if not path.exists():
@@ -171,16 +194,42 @@ def _read_locked_records(path: Path) -> list[dict[str, object]]:
     if not text.endswith("\n"):
         raise EventLogError("EVENT_LOG_INVALID")
     records: list[dict[str, object]] = []
-    expected = 1
+    expected: int | None = None
     for line in text.splitlines():
         if not line:
             raise EventLogError("EVENT_LOG_INVALID")
         record = _decode_event(line)
-        if record["seq"] != expected:
+        seq = record["seq"]
+        if type(seq) is not int:
+            raise EventLogError("EVENT_LOG_INVALID")
+        if expected is None:
+            if seq < 1:
+                raise EventLogError("EVENT_LOG_INVALID")
+            expected = seq
+        elif seq != expected:
             raise EventLogError("EVENT_LOG_INVALID")
         records.append(record)
         expected += 1
     return records
+
+
+def _read_locked_records(path: Path) -> list[dict[str, object]]:
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise EventLogError("EVENT_LOG_INVALID")
+    chunks = [_read_one_event_file(item) for item in _event_archive_files(path)]
+    if path.exists():
+        chunks.append(_read_one_event_file(path))
+    chunks = [chunk for chunk in chunks if chunk]
+    chunks.sort(key=lambda chunk: int(chunk[0]["seq"]))
+    combined: list[dict[str, object]] = []
+    expected = 1
+    for chunk in chunks:
+        for record in chunk:
+            if record["seq"] != expected:
+                raise EventLogError("EVENT_LOG_INVALID")
+            combined.append(record)
+            expected += 1
+    return combined
 
 
 def read_overlay_events(config: object) -> tuple[tuple[dict[str, object], ...], bool]:
@@ -194,7 +243,7 @@ def read_overlay_events(config: object) -> tuple[tuple[dict[str, object], ...], 
         path = events_path(config)  # type: ignore[arg-type]
         if path.is_symlink():
             return (), False
-        if not path.exists():
+        if not path.exists() and not _event_archive_files(path):
             return (), True
         return tuple(_read_locked_records(path)), True
     except (EventLogError, OSError, TypeError, AttributeError):
@@ -293,10 +342,16 @@ def append_event_locked(
             "family": family,
             "facts": cleaned,
         }
-        append_text(
-            path,
-            json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n",
-        )
+        encoded = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+        current_size = path.stat().st_size if path.is_file() else 0
+        if current_size and current_size + len(encoded.encode("utf-8")) > MAX_EVENT_LOG_BYTES:
+            current_records = _read_one_event_file(path)
+            last_seq = current_records[-1]["seq"] if current_records else seq - 1
+            archive = path.with_name(f"{path.name}.{last_seq}")
+            if archive.exists() or archive.is_symlink():
+                raise EventLogError("EVENT_LOG_INVALID")
+            path.replace(archive)
+        append_text(path, encoded)
     except EventLogError:
         raise
     except OSError as exc:
