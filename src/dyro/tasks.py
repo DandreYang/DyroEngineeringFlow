@@ -877,7 +877,7 @@ def set_status(
             ledger(
                 config, task.id, "status", from_status=current, to_status=next_status
             )
-            from .events import EventLogError, append_event
+            from .events import EventLogError, append_event, record_event_gap
 
             try:
                 append_event(
@@ -897,6 +897,7 @@ def set_status(
                     to_status=next_status,
                     error_code=exc.code,
                 )
+                record_event_gap(config, code=exc.code)
 
 
 def _set_quality_gate_status(
@@ -2960,7 +2961,6 @@ def _prepare_merge(
                     "--dry-run",
                     "origin",
                     line.branch,
-                    dry_run=dry_run,
                 ),
                 f"预检推送 {plan.repository}",
             )

@@ -18,10 +18,11 @@ from typing import Any
 
 from .config import Config
 from .errors import DyroError, ValidationError
-from .state import append_text, exclusive_lock
+from .state import append_text, atomic_write_text, exclusive_lock
 
 
 EVENTS_FILE = ".dyro/events.jsonl"
+EVENTS_GAP = ".dyro/events.gap"
 EVENTS_LOCK = ".dyro/events.lock"
 MAX_EVENT_LOG_BYTES = 2 * 1024 * 1024
 EVENT_KINDS = frozenset(
@@ -56,6 +57,34 @@ class EventLogError(DyroError):
 
 def events_path(config: Config) -> Path:
     return config.root / EVENTS_FILE
+
+
+def events_gap_path(config: Config) -> Path:
+    return config.root / EVENTS_GAP
+
+
+def record_event_gap(config: Config, *, code: str) -> None:
+    """Mark overlay events incomplete after a failed append.
+
+    Status files remain the source of truth.  Readers must not treat a
+    contiguous log as proof that every status write produced a row.
+    """
+    token = (
+        code
+        if isinstance(code, str) and code.isascii() and code.replace("_", "").isalnum()
+        else "EVENT_WRITE_INVALID"
+    )
+    path = events_gap_path(config)
+    try:
+        with overlay_lock(config):
+            if path.exists() or path.is_symlink():
+                return
+            atomic_write_text(
+                path,
+                json.dumps({"code": token}, ensure_ascii=False, sort_keys=True) + "\n",
+            )
+    except OSError:
+        return
 
 
 def _utc(clock: Callable[[], datetime] | None) -> datetime:
@@ -244,8 +273,13 @@ def read_overlay_events(config: object) -> tuple[tuple[dict[str, object], ...], 
         if path.is_symlink():
             return (), False
         if not path.exists() and not _event_archive_files(path):
-            return (), True
-        return tuple(_read_locked_records(path)), True
+            records: tuple[dict[str, object], ...] = ()
+        else:
+            records = tuple(_read_locked_records(path))
+        gap = events_gap_path(config)  # type: ignore[arg-type]
+        if gap.is_symlink() or gap.exists():
+            return records, False
+        return records, True
     except (EventLogError, OSError, TypeError, AttributeError):
         return (), False
 

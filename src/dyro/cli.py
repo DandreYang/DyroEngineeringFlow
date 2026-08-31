@@ -3064,20 +3064,27 @@ def cmd_line_merge(args: argparse.Namespace) -> None:
         push=args.push,
         dry_run=args.dry_run,
     )
-    print(
-        f"{'DRY RUN: ' if args.dry_run else ''}已将 {args.child} 合并入 {args.parent}"
-        + (" 并推送" if args.push else "")
-    )
+    if args.dry_run:
+        extra = "（已预检 push）" if args.push else ""
+        print(f"DRY RUN: 已将 {args.child} 合并入 {args.parent}{extra}")
+    else:
+        print(
+            f"已将 {args.child} 合并入 {args.parent}"
+            + (" 并推送" if args.push else "")
+        )
 
 
 def cmd_line_sync(args: argparse.Namespace) -> None:
     _require_yes(args, "同步父开发线")
     config = _config(args)
     sync_line(config, args.child, push=args.push, dry_run=args.dry_run)
-    print(
-        f"{'DRY RUN: ' if args.dry_run else ''}已将父线同步到 {args.child}"
-        + (" 并推送" if args.push else "")
-    )
+    if args.dry_run:
+        extra = "（已预检 push）" if args.push else ""
+        print(f"DRY RUN: 已将父线同步到 {args.child}{extra}")
+    else:
+        print(
+            f"已将父线同步到 {args.child}" + (" 并推送" if args.push else "")
+        )
 
 
 def cmd_line_post(args: argparse.Namespace) -> None:
@@ -3802,10 +3809,11 @@ def cmd_task_merge(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
     merge_task(config, task, push=args.push, dry_run=args.dry_run)
-    print(
-        f"{'DRY RUN: 可合并' if args.dry_run else '已合并'} {task.id}"
-        + (" 并推送" if args.push else "")
-    )
+    if args.dry_run:
+        extra = "（已预检 push）" if args.push else ""
+        print(f"DRY RUN: 可合并 {task.id}{extra}")
+    else:
+        print(f"已合并 {task.id}" + (" 并推送" if args.push else ""))
 
 
 def cmd_task_close(args: argparse.Namespace) -> None:
@@ -3924,8 +3932,13 @@ def cmd_task_stats(args: argparse.Namespace) -> None:
 
 
 def cmd_task_loop(args: argparse.Namespace) -> None:
+    failed: list[str] = []
     for task_id, result in loop_tasks(_config(args), dry_run=args.dry_run):
         print(f"{task_id} -> {result}")
+        if result == "failed":
+            failed.append(task_id)
+    if failed:
+        raise DyroError("任务失败：" + ", ".join(failed))
 
 
 def cmd_objective_start(args: argparse.Namespace) -> None:
@@ -4434,6 +4447,7 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
             print(f"warning: {note}")
         for item in decision.deferred:
             print(f"defer {item.task.id}: {item.reason}")
+        failed: list[str] = []
         if bound:
             overrides = {item.task_id: item.executor for item in decision.bindings}
             with ThreadPoolExecutor(
@@ -4453,7 +4467,10 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
                 for future in as_completed(futures):
                     task = futures[future]
                     try:
-                        print(f"dispatch {task.id} -> {future.result()}")
+                        result = future.result()
+                        print(f"dispatch {task.id} -> {result}")
+                        if result == "failed":
+                            failed.append(task.id)
                     except DyroError as exc:
                         print(f"skip {task.id}: {exc}")
         review_queue = list(plan_tasks(config).review)
@@ -4468,9 +4485,14 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
                 for future in as_completed(futures):
                     task = futures[future]
                     try:
-                        print(f"review {task.id} -> {future.result()}")
+                        result = future.result()
+                        print(f"review {task.id} -> {result}")
+                        if result == "failed":
+                            failed.append(task.id)
                     except DyroError as exc:
                         print(f"keep review {task.id}: {exc}")
+        if failed:
+            raise DyroError("任务失败：" + ", ".join(sorted(set(failed))))
         if args.once or args.dry_run:
             return
         time.sleep(max(10, args.interval))

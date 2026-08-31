@@ -32,8 +32,12 @@ adapter，并把 Profile `verify` 写成门禁。`task review` 拒绝时非零�
   a dirty tree. Empty-`verify` multi-repo tasks get unique
   `diff-check-<repo>` gate names. Overlay event readers stitch
   `events.jsonl.<seq>` archives when the current file is missing and
-  ignore non-seq suffixes such as `.bak`. Dispatch Skill no longer cites
-  a nonexistent `--mode` flag.
+  ignore non-seq suffixes such as `.bak`. A failed event append still
+  writes task status, and marks overlay events incomplete via
+  `.dyro/events.gap`. `task loop` / `task daemon` exit non-zero when a
+  review or run returns `failed`. Merge `--dry-run --push` actually runs
+  `git push --dry-run` and says so. Dispatch Skill no longer cites a
+  nonexistent `--mode` flag.
 
 ## 0.7.12 - 2026-08-23
 

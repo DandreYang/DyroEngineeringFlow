@@ -291,6 +291,11 @@ class EventLogRotationTests(WorkspaceCase):
         ledger = (self.root / ".dyro/ledger.jsonl").read_text(encoding="utf-8")
         self.assertIn("event_append_failed", ledger)
         self.assertIn('"error_code": "EVENT_LOG_INVALID"', ledger)
+        from dyro.events import read_overlay_events
+
+        _records, complete = read_overlay_events(config)
+        self.assertFalse(complete)
+        self.assertTrue((self.root / ".dyro" / "events.gap").is_file())
 
     def test_read_overlay_events_stitches_archives_when_current_missing(self) -> None:
         from dyro import events
@@ -639,6 +644,84 @@ class HonestyRepairTests(WorkspaceCase):
                 ]
             )
         self.assertEqual(dry.exception.code, 2)
+
+    def _reach_done_with_commit(self, config, task):
+        from dyro.provenance import review_binding
+        from dyro.tasks import answer_task, review_task, run_task, worktree_root
+
+        task_dir = task.directory
+        with executor_writes_receipt(task_dir, "result: QUESTION\n"):
+            self.assertEqual(run_task(config, task), "waiting_answer")
+        wt = worktree_root(config, task) / "services/api"
+        (wt / "change.txt").write_text("change\n", encoding="utf-8")
+        shell("git", "add", "change.txt", cwd=wt)
+        shell("git", "commit", "-m", "feat: change", cwd=wt)
+        task_dir.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
+        self.assertEqual(answer_task(config, task, "continue"), "review")
+        receipt_hash = hashlib.sha256(task_dir.joinpath("receipt.md").read_bytes()).hexdigest()
+        heads_hash = hashlib.sha256(
+            task_dir.joinpath("task-heads.json").read_bytes()
+        ).hexdigest()
+        binding = review_binding(task_dir)
+        task_dir.joinpath("review.md").write_text(
+            "verdict: PASS\n"
+            f"receipt_sha256: {receipt_hash}\n"
+            f"task_heads_sha256: {heads_hash}\n"
+            f"attempt_id: {binding[0]}\n"
+            f"plan_sha256: {binding[1]}\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(review_task(config, task), "done")
+        return wt
+
+    def test_task_close_refuses_dirty_done_worktree(self) -> None:
+        from dyro.tasks import close_task, load_task
+
+        self._create_named_task()
+        config = load(self.root)
+        task = load_task(config, "T1")
+        wt = self._reach_done_with_commit(config, task)
+        (wt / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+        with self.assertRaisesRegex(DyroError, "不干净"):
+            close_task(config, task)
+
+    def test_task_close_refuses_unmerged_done_branch(self) -> None:
+        from dyro.tasks import close_task, load_task
+
+        self._create_named_task()
+        config = load(self.root)
+        task = load_task(config, "T1")
+        self._reach_done_with_commit(config, task)
+        with self.assertRaisesRegex(DyroError, "尚未合入"):
+            close_task(config, task)
+
+    def test_task_loop_exits_nonzero_on_review_failed(self) -> None:
+        from dyro.cli import main
+        from dyro.tasks import load_task, run_task
+
+        self._create_named_task()
+        config = load(self.root)
+        task = load_task(config, "T1")
+        with executor_writes_receipt(task.directory):
+            self.assertEqual(run_task(config, task), "review")
+        task.directory.joinpath("review.md").write_text("verdict: FAIL\n", encoding="utf-8")
+        with redirect_stdout(StringIO()), self.assertRaises(SystemExit) as raised:
+            main(["--root", str(self.root), "task", "loop"])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_task_daemon_once_exits_nonzero_on_review_failed(self) -> None:
+        from dyro.cli import main
+        from dyro.tasks import load_task, run_task
+
+        self._create_named_task()
+        config = load(self.root)
+        task = load_task(config, "T1")
+        with executor_writes_receipt(task.directory):
+            self.assertEqual(run_task(config, task), "review")
+        task.directory.joinpath("review.md").write_text("verdict: FAIL\n", encoding="utf-8")
+        with redirect_stdout(StringIO()), self.assertRaises(SystemExit) as raised:
+            main(["--root", str(self.root), "task", "daemon", "--once"])
+        self.assertEqual(raised.exception.code, 2)
 
 
 class LineMergeProbeTests(WorkspaceCase):

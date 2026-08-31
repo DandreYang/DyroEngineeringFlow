@@ -831,7 +831,6 @@ def _prepare_line_merge_plans(
                     "--dry-run",
                     "origin",
                     target.branch,
-                    dry_run=dry_run,
                 ),
                 f"预检推送 {plan.repository}",
             )
