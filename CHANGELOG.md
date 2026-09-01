@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.13 - 2026-09-01
+
 对使用者的影响：未 push 的开发线不再把 `dyro next` / `dyro start`
 卡成 needs_repair；doctor 只 WARN 缺 `origin/<branch>`。`line spawn`
 从父线本地 HEAD 起，不再跟过期远端。`task create` 可多仓、默认本机
