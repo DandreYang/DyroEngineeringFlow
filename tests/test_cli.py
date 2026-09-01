@@ -1246,7 +1246,24 @@ class ObjectiveCliTests(WorkspaceCase):
                 self.assertEqual(load_registry().workspaces[0].name, "Acme")
 
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["commands"], ["dyro --workspace Acme doctor"])
+        self.assertEqual(payload["state"], "ready")
+        self.assertNotEqual(payload["state"], "needs_repair")
+        self.assertEqual(payload["commands"], [])
+        advertised = [
+            item
+            for item in (
+                *(payload.get("commands") or []),
+                *(payload.get("diagnostic_commands") or []),
+                ((payload.get("briefing") or {}) or {}).get("command")
+                if isinstance(payload.get("briefing"), dict)
+                else None,
+            )
+            if isinstance(item, str)
+        ]
+        for command in advertised:
+            if "--workspace" in command:
+                self.assertIn("--workspace Acme", command)
+                self.assertNotIn("--workspace acme", command)
 
     def test_control_plane_json_runtime_errors_use_one_stable_envelope(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-registry-") as registry_home:

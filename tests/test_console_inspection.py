@@ -763,7 +763,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         )
         self.assertTrue(IsolatedOverviewService._safe_command("", "demo"))
 
-    def test_missing_origin_fail_is_not_ready_or_a_bare_workspace_command(self) -> None:
+    def test_missing_origin_warn_is_not_fail_and_not_a_bare_workspace_command(self) -> None:
         from dyro.config import load
         from dyro.workspace import create_line, spawn_line
 
@@ -787,22 +787,22 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         card = overview["data"]["workspaces"][0]
         reasons = {(item["reason"], item["line"]) for item in card["findings"]}
 
-        self.assertIn(("MISSING_ORIGIN", "core"), reasons)
-        self.assertIn(("MISSING_ORIGIN", "core_pay"), reasons)
-        self.assertIn(("MISSING_ORIGIN", "release_a"), reasons)
-        self.assertEqual(card["recommendation"]["command"], "dyro --workspace demo doctor")
+        self.assertNotIn(("MISSING_ORIGIN", "core"), reasons)
+        self.assertNotIn(("MISSING_ORIGIN", "core_pay"), reasons)
+        self.assertNotIn(("MISSING_ORIGIN", "release_a"), reasons)
+        self.assertEqual(card["health"], "healthy")
         self.assertNotEqual(card["recommendation"]["command"], "dyro --workspace demo")
-        self.assertEqual(card["health"], "degraded")
-        self.assertNotEqual(card["recommendation"]["reason"], "HOME_GUIDANCE")
+        self.assertNotEqual(card["recommendation"]["reason"], "MISSING_ORIGIN")
+        self.assertEqual(card["recommendation"]["reason"], "HOME_GUIDANCE")
         self.assertNotIn(str(self.root), repr(overview))
         workspace = service.workspace("demo")
-        self.assertEqual(
-            workspace["data"]["workspace"]["recommendation"]["command"],
-            "dyro --workspace demo doctor",
-        )
         self.assertNotEqual(
             workspace["data"]["workspace"]["recommendation"]["command"],
             "dyro --workspace demo",
+        )
+        self.assertNotEqual(
+            workspace["data"]["workspace"]["recommendation"]["reason"],
+            "MISSING_ORIGIN",
         )
 
     def test_fold_twin_cards_do_not_advertise_fail_closed_workspace_selector(self) -> None:
@@ -912,7 +912,8 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
 
         self.assertIs(seen.get("commands_loader"), next_commands)
         commands = next_commands(load(self.root), alias="demo")
-        self.assertIn("dyro --workspace demo doctor", commands)
+        self.assertEqual(commands, [])
+        self.assertNotIn("dyro --workspace demo doctor", commands)
         self.assertNotIn("dyro --workspace demo", commands)
 
     def test_worker_cannot_serve_or_write_artifacts_via_a_mutation_op(self) -> None:
