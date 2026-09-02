@@ -19,7 +19,7 @@ from dyro.provenance import review_binding
 from dyro.tasks import load_task, review_task, run_task, task_template
 from dyro.workspace import create_line
 
-from .support import WorkspaceCase
+from .support import WorkspaceCase, executor_writes_receipt
 
 
 def _write_bound_review(task_path: Path) -> None:
@@ -48,9 +48,9 @@ class ProofCliTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
         task = load_task(config, task_id)
-        self.assertEqual(run_task(config, task), "review")
+        with executor_writes_receipt(task_path):
+            self.assertEqual(run_task(config, task), "review")
         _write_bound_review(task_path)
         self.assertEqual(review_task(config, task), "done")
         return task_id

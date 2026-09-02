@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import subprocess
@@ -39,6 +40,22 @@ verify = [["git", "diff", "--check"]]
 
 def shell(*args: str, cwd: Path) -> None:
     subprocess.run(args, cwd=cwd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+@contextmanager
+def executor_writes_receipt(task_directory: Path, content: str = "result: DONE\n"):
+    """Write the task receipt during executor run, not before the attempt starts."""
+    from dyro import tasks as tasks_mod
+
+    original = tasks_mod._execute_task_agent
+
+    def wrapped(*args, **kwargs):
+        result = original(*args, **kwargs)
+        task_directory.joinpath("receipt.md").write_text(content, encoding="utf-8")
+        return result
+
+    with patch.object(tasks_mod, "_execute_task_agent", side_effect=wrapped):
+        yield
 
 
 def publish_origin_branch(repo: Path, branch: str) -> Path:

@@ -35,7 +35,7 @@ from dyro.workspace import (
     spawn_line,
 )
 
-from .support import WorkspaceCase, publish_origin_branch
+from .support import WorkspaceCase, executor_writes_receipt, publish_origin_branch
 
 
 class CliTests(unittest.TestCase):
@@ -829,16 +829,12 @@ class StartTests(WorkspaceCase):
         self.assertIn("座位  控制面 · dyro-control-plane", rendered)
         self.assertIn("先观察 next / attention", rendered)
 
-    def test_start_refuses_when_doctor_has_missing_origin_only(self) -> None:
+    def test_start_proceeds_when_doctor_has_missing_origin_only(self) -> None:
         config = load(self.root)
         create_line(config, line_id="local-only", branch="feat/local-only", base="main")
         stdout = StringIO()
         stderr = StringIO()
-        with (
-            redirect_stdout(stdout),
-            redirect_stderr(stderr),
-            self.assertRaises(SystemExit) as raised,
-        ):
+        with redirect_stdout(stdout), redirect_stderr(stderr):
             main(
                 [
                     "--root",
@@ -851,11 +847,9 @@ class StartTests(WorkspaceCase):
                     "noop",
                 ]
             )
-        self.assertEqual(raised.exception.code, 2)
         combined = stdout.getvalue() + stderr.getvalue()
-        self.assertIn("missing origin/feat/local-only", combined)
-        self.assertIn("尚未就绪", combined)
-        self.assertNotIn("座位", stdout.getvalue())
+        self.assertNotIn("尚未就绪", combined)
+        self.assertNotIn("missing origin/feat/local-only", combined)
 
     def test_start_refuses_fail_whose_path_embeds_missing_origin_token(self) -> None:
         config_path = self.root / "dyro.toml"
@@ -1207,20 +1201,23 @@ class ObjectiveCliTests(WorkspaceCase):
                     )
 
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["state"], "needs_repair")
-        self.assertNotEqual(payload["state"], "ready")
-        self.assertEqual(
-            payload["commands"],
-            ["dyro --workspace selected doctor"],
-        )
-        self.assertFalse(payload["mutation_available"])
-        self.assertTrue(
-            any(
-                "missing origin/" in item.get("message", "")
-                for item in payload.get("findings", [])
-            ),
-            payload,
-        )
+        self.assertEqual(payload["state"], "ready")
+        self.assertNotEqual(payload["state"], "needs_repair")
+        advertised = [
+            item
+            for item in (
+                *(payload.get("commands") or []),
+                *(payload.get("diagnostic_commands") or []),
+                ((payload.get("briefing") or {}) or {}).get("command")
+                if isinstance(payload.get("briefing"), dict)
+                else None,
+            )
+            if isinstance(item, str)
+        ]
+        for command in advertised:
+            self.assertNotIn("--workspace test-workspace", command)
+            if "--workspace" in command:
+                self.assertIn("--workspace selected", command)
 
     def test_control_plane_next_uses_canonical_alias_spelling(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-registry-") as registry_home:
@@ -1249,7 +1246,24 @@ class ObjectiveCliTests(WorkspaceCase):
                 self.assertEqual(load_registry().workspaces[0].name, "Acme")
 
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["commands"], ["dyro --workspace Acme doctor"])
+        self.assertEqual(payload["state"], "ready")
+        self.assertNotEqual(payload["state"], "needs_repair")
+        self.assertEqual(payload["commands"], [])
+        advertised = [
+            item
+            for item in (
+                *(payload.get("commands") or []),
+                *(payload.get("diagnostic_commands") or []),
+                ((payload.get("briefing") or {}) or {}).get("command")
+                if isinstance(payload.get("briefing"), dict)
+                else None,
+            )
+            if isinstance(item, str)
+        ]
+        for command in advertised:
+            if "--workspace" in command:
+                self.assertIn("--workspace Acme", command)
+                self.assertNotIn("--workspace acme", command)
 
     def test_control_plane_json_runtime_errors_use_one_stable_envelope(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-registry-") as registry_home:
@@ -2107,9 +2121,9 @@ class DaemonSelectionTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
 
-        main(["--root", str(self.root), "task", "daemon", "--once", "--parallel", "1"])
+        with executor_writes_receipt(task_path):
+            main(["--root", str(self.root), "task", "daemon", "--once", "--parallel", "1"])
         self.assertEqual(status(config, load_task(config, "TASK-ONCE")), "review")
 
 
@@ -2256,6 +2270,6 @@ class VersionTests(unittest.TestCase):
         from dyro import __version__
 
         metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-        self.assertEqual(metadata["project"]["version"], "0.7.12")
-        self.assertEqual(__version__, "0.7.12")
+        self.assertEqual(metadata["project"]["version"], "0.7.13")
+        self.assertEqual(__version__, "0.7.13")
         self.assertEqual(__version__, metadata["project"]["version"])

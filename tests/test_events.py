@@ -16,7 +16,7 @@ from dyro.process import Result
 from dyro.tasks import _execute_task_agent, load_task, set_status, task_template
 from dyro.workspace import create_line, line_repository_path, merge_line, spawn_line, sync_line
 
-from .support import WorkspaceCase, publish_origin_branch, shell
+from .support import WorkspaceCase, executor_writes_receipt, publish_origin_branch, shell
 
 
 class WorkspaceEventLogTests(WorkspaceCase):
@@ -350,7 +350,6 @@ class WorkspaceEventLogTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_dir.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_dir.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
         create_objective(
             self.config,
             '''schema_version = 1
@@ -373,7 +372,8 @@ max_parallel = 1
         )
         now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
         wave = build_supervised_wave(self.config, "release", clock=lambda: now)
-        apply_supervised_wave(self.config, wave, clock=lambda: now)
+        with executor_writes_receipt(task_dir):
+            apply_supervised_wave(self.config, wave, clock=lambda: now)
         kinds = self._event_kinds()
         self.assertIn("objective_wave", kinds)
         page, _last = read_events(self.config)

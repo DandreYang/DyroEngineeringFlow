@@ -176,8 +176,10 @@ class BlueprintJoinTests(unittest.TestCase):
         self.assertEqual(line.base_for("web"), self.web_head)
         findings = doctor(config)
         failures = [item for item in findings if item.startswith("FAIL")]
-        self.assertTrue(failures, findings)
-        self.assertTrue(all(is_missing_origin_finding(item) for item in failures), findings)
+        self.assertFalse(failures, findings)
+        origin = [item for item in findings if is_missing_origin_finding(item)]
+        self.assertTrue(origin, findings)
+        self.assertTrue(all(item.startswith("WARN ") for item in origin), origin)
         self.assertEqual(
             target.joinpath(".dyro/join.json").read_text(encoding="utf-8").count('"status": "complete"'),
             1,

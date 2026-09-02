@@ -15,9 +15,10 @@ Treat `dyro dispatch` as an outbound harness, separate from the read-only
   Provider. Starting one still requires this-turn parallel intent.
 - Treat Provider execution as a local-state, process, and potentially network or
   usage-billed effect even when the delegated task is read-only.
-- Use `mode=edit` only when the user also authorizes code changes. Scratch
-  `dispatch run --mode edit` stays in a detached worktree and returns a patch
-  reference. Delivery writes go to a Core task worktree, not a scratch tree.
+- Use TaskContract `mode=edit` only when the user also authorizes code changes.
+  There is no `dispatch run --mode` CLI flag; `mode` is a stdin contract field.
+  Scratch edit runs stay in a detached worktree and return a patch reference.
+  Delivery writes go to a Core task worktree, not a scratch tree.
 - Never merge, push, commit, signoff, release, publish, import production
   evidence, or represent a dispatch result as a Dyro gate.
 - Never enable `echo` as a fallback. It is an explicit offline simulation, not a
