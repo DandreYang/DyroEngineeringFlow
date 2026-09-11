@@ -59,7 +59,14 @@ class _FrozenClock:
 
 
 def _raise_deadline_on_worktree(repo, *args, read_budget=None, **kwargs):
-    if read_budget is not None and "versions/" in str(repo):
+    """Stall every read that observes a line worktree.
+
+    ``status`` reads each worktree path directly; ``doctor`` reads them all at
+    once through the anchor's ``git worktree list``.  Both are the moment a
+    stalled worktree must surface as a partial observation, not a bare error.
+    """
+    observes_worktree = "versions/" in str(repo) or (args and args[0] == "worktree")
+    if read_budget is not None and observes_worktree:
         raise ReadLimitError(
             ReadLimitCode.DEADLINE_EXCEEDED,
             "Core observation deadline exceeded",
