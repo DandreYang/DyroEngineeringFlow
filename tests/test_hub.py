@@ -2001,7 +2001,7 @@ write = ["codex"]
             main(["--dry-run", "--workspace", "demo", "console"])
         self.assertIn("初始焦点：Demo", output.getvalue())
         self.assertNotIn("初始焦点：demo", output.getvalue())
-        with patch("dyro.cli.launch_console") as launch:
+        with patch("dyro.console.launcher.launch_console") as launch:
             main(["--workspace", "demo", "console"])
         launch.assert_called_once()
         self.assertEqual(launch.call_args.kwargs["initial_workspace"], "Demo")
