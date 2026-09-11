@@ -28,7 +28,6 @@ from .changesets import (
     verify_changeset,
 )
 from .config import CONFIG_NAME, Config, load, load_profile_exact, push_disclosure, push_policy_fields, validate_id
-from .console.launcher import launch_console, render_console_plan
 from .continuation.attention import (
     build_attention_projection,
     render_attention_json,
@@ -1966,6 +1965,11 @@ def cmd_home(args: argparse.Namespace) -> None:
 
 
 def cmd_console(args: argparse.Namespace) -> None:
+    # Imported here, not at module scope: the console subsystem pulls in
+    # inspection/events/overview and costs ~80ms of every `dyro` start that
+    # never opens a console.  `home.py` already imports it this way.
+    from .console.launcher import launch_console, render_console_plan
+
     initial_workspace = getattr(args, "workspace_alias", None)
     root_arg = getattr(args, "root", None)
     target_root: Path | None = None

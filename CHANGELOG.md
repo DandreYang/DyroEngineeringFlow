@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.7.15 - 2026-09-12
+
+对使用者的影响：`dyro dispatch` 的异步运行不再因为并发读取运行状态而
+偶发失败。
+
+- `dyro dispatch` runs no longer fail intermittently with exit code 2 and
+  `run state path changed while opening: run-<id>`. `RunStore.load` opened
+  the run-state file, then re-checked that the path still named the same
+  inode. Updates are published with `os.replace`, and reads are not taken
+  under the write lock, so an async worker publishing a legitimate update
+  between the reader's `open` and its re-check failed that check exactly
+  the way a swapped path does. The read now re-opens a bounded number of
+  times; a path that is still changing after every attempt is refused as
+  before. No safety property was relaxed: `O_NOFOLLOW` applies on every
+  attempt, `fstat` still enforces regular-file and size limits, symlinks
+  are still refused, and reads still come only from the opened descriptor.
+  A file swapped for a symlink now reports the more precise `run state is
+  a symbolic link`.
+- `dyro` no longer imports the console subsystem at startup. `cli.py` pulled
+  in `console.launcher` (and inspection/events/overview behind it) at module
+  scope although only `dyro console` uses it; it is now imported inside that
+  command, as `home.py` already did. Worth about 20ms of a ~250ms import.
+
 ## 0.7.14 - 2026-09-11
 
 对使用者的影响：`dyro doctor`、首页菜单、`dyro next` / `dyro status` 以及
