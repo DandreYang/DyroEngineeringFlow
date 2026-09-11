@@ -1345,6 +1345,85 @@ def status_rows(
     return rows
 
 
+def _worktree_inventory(
+    anchor: Path, *, read_budget: ReadBudget | None = None
+) -> dict[Path, tuple[str, str]]:
+    """Map每个与 anchor 共用 Git 公共目录的 worktree 到 (HEAD, 分支)。
+
+    ``git worktree list`` 只报告同一个仓库的 worktree，所以"出现在这份清单里"
+    本身就是共用公共目录的证据；这取代了过去对每个 worktree 各发一对
+    ``rev-parse --git-common-dir`` 的做法。
+    """
+    result = git_read(
+        anchor, "worktree", "list", "--porcelain", read_budget=read_budget
+    )
+    if result.code != 0:
+        return {}
+    inventory: dict[Path, tuple[str, str]] = {}
+    path: Path | None = None
+    head = ""
+    branch = ""
+    prunable = False
+
+    def flush() -> None:
+        nonlocal path, head, branch, prunable
+        if path is not None and not prunable:
+            inventory[path] = (head, branch)
+        path, head, branch, prunable = None, "", "", False
+
+    for raw in result.stdout.splitlines():
+        entry = raw.strip()
+        if not entry:
+            flush()
+            continue
+        key, _, value = entry.partition(" ")
+        if key == "worktree":
+            flush()
+            path = Path(value).resolve()
+        elif key == "HEAD":
+            head = value.strip()
+        elif key == "branch":
+            branch = value.strip()
+            if branch.startswith("refs/heads/"):
+                branch = branch[len("refs/heads/") :]
+        elif key == "prunable":
+            prunable = True
+    flush()
+    return inventory
+
+
+def _ref_inventory(
+    anchor: Path, *, read_budget: ReadBudget | None = None
+) -> tuple[dict[str, str], dict[str, str]]:
+    """返回 (本地分支 → 上游, 引用全名 → 对象 ID)。
+
+    引用存放在共用的公共目录里，所以从 anchor 读到的就是每个 linked worktree
+    会读到的同一份；一条 ``for-each-ref`` 取代了逐开发线的 ``show-ref``、
+    ``rev-parse <origin/branch>`` 与 ``rev-parse @{upstream}``。
+    """
+    upstreams: dict[str, str] = {}
+    objects: dict[str, str] = {}
+    result = git_read(
+        anchor,
+        "for-each-ref",
+        "--format=%(refname)%09%(objectname)%09%(upstream)",
+        "refs/heads",
+        "refs/remotes/origin",
+        read_budget=read_budget,
+    )
+    if result.code != 0:
+        return upstreams, objects
+    for raw in result.stdout.splitlines():
+        parts = raw.split("\t")
+        if len(parts) != 3:
+            continue
+        refname, objectname, upstream = parts
+        objects[refname] = objectname
+        if refname.startswith("refs/heads/"):
+            upstreams[refname[len("refs/heads/") :]] = _normalize_upstream(upstream)
+    return upstreams, objects
+
+
 def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str]:
     """Return diagnostics.  Callers decide whether any FAIL means non-zero."""
     findings: list[str] = []
@@ -1365,23 +1444,43 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
                 findings.append(f"PASS repository {repo_id}: {anchor}")
             else:
                 findings.append(f"FAIL repository {repo_id}: missing or not Git: {anchor}")
-        for line in list_lines(config, read_budget=read_budget):
+        lines = list_lines(config, read_budget=read_budget)
+        observed: dict[str, tuple[dict[Path, tuple[str, str]], dict[str, str], dict[str, str]]] = {}
+        for repo_id in sorted(
+            {repo for line in lines for repo in line.repositories}
+            & set(config.repositories)
+        ):
+            anchor = repository_path(config, repo_id)
+            worktrees = _worktree_inventory(anchor, read_budget=read_budget)
+            upstreams, objects = _ref_inventory(anchor, read_budget=read_budget)
+            observed[repo_id] = (worktrees, upstreams, objects)
+        for line in lines:
             for repo_id in line.repositories:
                 anchor = repository_path(config, repo_id)
                 worktree = line_repository_path(config, line, repo_id)
                 storage_mode = line.storage_for(repo_id)
-                if not _is_git_repo(worktree, read_budget=read_budget):
+                worktrees, upstreams, objects = observed.get(repo_id, ({}, {}, {}))
+                entry = worktrees.get(worktree.resolve())
+                if entry is None and not _is_git_repo(worktree, read_budget=read_budget):
                     findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: missing worktree")
                     continue
-                actual_branch = git_read(
-                    worktree,
-                    "branch",
-                    "--show-current",
-                    read_budget=read_budget,
-                )
-                if actual_branch.code != 0 or actual_branch.stdout.strip() != line.branch:
-                    actual = actual_branch.stdout.strip() if actual_branch.code == 0 else "UNREADABLE"
-                    findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: expected {line.branch}, found {actual or 'DETACHED'}")
+                if entry is not None:
+                    head, actual_branch = entry
+                else:
+                    # A Git repository the anchor does not own: read its branch
+                    # directly so a foreign checkout still reports as before.
+                    probe = git_read(
+                        worktree,
+                        "branch",
+                        "--show-current",
+                        read_budget=read_budget,
+                    )
+                    head = ""
+                    actual_branch = (
+                        probe.stdout.strip() if probe.code == 0 else "UNREADABLE"
+                    )
+                if actual_branch != line.branch:
+                    findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: expected {line.branch}, found {actual_branch or 'DETACHED'}")
                     continue
                 if storage_mode == "anchor-reference":
                     if not worktree.is_symlink():
@@ -1394,38 +1493,17 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
                 if worktree.is_symlink():
                     findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: linked-worktree cannot be a symlink")
                     continue
-                anchor_common = git_read(
-                    anchor,
-                    "rev-parse",
-                    "--path-format=absolute",
-                    "--git-common-dir",
-                    read_budget=read_budget,
-                )
-                worktree_common = git_read(
-                    worktree,
-                    "rev-parse",
-                    "--path-format=absolute",
-                    "--git-common-dir",
-                    read_budget=read_budget,
-                )
-                if not (
-                    anchor_common.code == 0
-                    and worktree_common.code == 0
-                    and anchor_common.stdout.strip() == worktree_common.stdout.strip()
-                ):
+                if entry is None:
                     findings.append(f"FAIL {line.kind}:{line.id}/{repo_id}: unexpected Git common-dir")
                     continue
                 expected_remote = _expected_remote_branch(line.branch)
-                if not _ref_exists(
-                    worktree, f"refs/remotes/{expected_remote}", read_budget=read_budget
-                ):
+                remote_head = objects.get(f"refs/remotes/{expected_remote}")
+                if remote_head is None:
                     findings.append(
                         f"WARN {line.kind}:{line.id}/{repo_id}: missing {expected_remote}"
                     )
                     continue
-                upstream = _branch_upstream(worktree, read_budget=read_budget)
-                head = _rev_parse(worktree, "HEAD", read_budget=read_budget)
-                remote_head = _rev_parse(worktree, expected_remote, read_budget=read_budget)
+                upstream = upstreams.get(line.branch, "")
                 if upstream == expected_remote or (
                     not upstream and head and head == remote_head
                 ):

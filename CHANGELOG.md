@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.7.14 - 2026-09-11
+
+对使用者的影响：`dyro doctor`、首页菜单、`dyro next` / `dyro status` 以及
+开发线准入检查在多仓库、多开发线的工作区上明显变快，诊断结论不变。
+
+- `doctor` observes each repository in two batched Git reads instead of
+  walking every (line, repository) pair one subprocess at a time.
+  `git worktree list --porcelain` returns the path, HEAD, and branch of
+  every worktree at once — appearing in that list is itself the proof
+  that a worktree shares the anchor's Git common directory, so the
+  paired `rev-parse --git-common-dir` probes are gone. A single
+  `git for-each-ref refs/heads refs/remotes/origin` returns each local
+  branch's upstream and each ref's object id, replacing the per-line
+  `show-ref`, `rev-parse origin/<branch>`, and `rev-parse @{upstream}`
+  calls. A worktree missing from the anchor's list still falls back to
+  the previous single probe, so `missing worktree` and `unexpected Git
+  common-dir` remain distinguishable. Findings, their wording, and their
+  order are unchanged; `ReadBudget` byte accounting and the observation
+  deadline still apply, now charged per repository rather than per line.
+  A five-repository, thirteen-line workspace drops from 399 Git
+  subprocesses and 5.61s to 16 subprocesses and 0.30s.
+
 ## 0.7.13 - 2026-09-01
 
 对使用者的影响：未 push 的开发线不再把 `dyro next` / `dyro start`
