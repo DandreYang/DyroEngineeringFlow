@@ -69,6 +69,7 @@ from experiments.local_agent_dispatch.process_identity import (
 from experiments.local_agent_dispatch.result_envelope import build_result
 from experiments.local_agent_dispatch.run_store import (
     ASYNC_RESERVATION_GRACE_SECONDS,
+    RUN_STATE_REOPEN_ATTEMPTS,
     RunRecord,
 )
 import experiments.local_agent_dispatch.lease as lease_module
@@ -2613,6 +2614,74 @@ class ProcessAndLifecycleTests(unittest.TestCase):
         )
         self.assertTrue(completed.output_limited)
         self.assertLessEqual(len(completed.stdout.encode("utf-8")), 4096)
+
+    def _accepted_run(self, root: Path):
+        project = root / "project"
+        project.mkdir()
+        (project / "app.py").write_text("safe = True\n", encoding="utf-8")
+        home = root / "home"
+        payload = _payload()
+        payload["backend"] = "echo"
+        payload["allow_offline_simulation"] = True
+        record = DispatchSupervisor(home=home).accept(payload, project_root=project)
+        store = supervisor_module.RunStore(home)
+        return store, record.run_id, store._path(record.run_id)
+
+    def _replace_state_during_read(self, path: Path, *, every_time: bool):
+        """Publish an atomic update inside the reader's open/re-check window."""
+        real_fstat = os.fstat
+        replacements: list[int] = []
+
+        def fstat_then_replace(descriptor):
+            result = real_fstat(descriptor)
+            if every_time or not replacements:
+                replacements.append(1)
+                current = json.loads(path.read_text(encoding="utf-8"))
+                current["status"] = "running"
+                atomic_write_json(path, current)
+            return result
+
+        return fstat_then_replace, replacements
+
+    def test_run_state_read_survives_a_concurrent_atomic_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store, run_id, path = self._accepted_run(Path(tmp))
+            replace, replacements = self._replace_state_during_read(
+                path, every_time=False
+            )
+
+            with patch(
+                "experiments.local_agent_dispatch.run_store.os.fstat",
+                side_effect=replace,
+            ):
+                reloaded = store.load(run_id)
+
+            self.assertTrue(replacements, "the atomic replace never ran")
+            self.assertEqual(reloaded.status, "running")
+
+    def test_run_state_read_still_refuses_a_path_that_keeps_changing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store, run_id, path = self._accepted_run(Path(tmp))
+            replace, replacements = self._replace_state_during_read(
+                path, every_time=True
+            )
+
+            with (
+                patch(
+                    "experiments.local_agent_dispatch.run_store.os.fstat",
+                    side_effect=replace,
+                ),
+                self.assertRaisesRegex(
+                    DispatchValidationError,
+                    "run state path changed while opening",
+                ),
+            ):
+                store.load(run_id)
+
+            self.assertEqual(
+                len(replacements),
+                RUN_STATE_REOPEN_ATTEMPTS,
+            )
 
     def test_default_cli_run_starts_async_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
