@@ -5,10 +5,8 @@ from datetime import datetime, timezone
 import fnmatch
 from pathlib import Path
 import time
-from typing import Sequence
 
 from .config import Config
-from .errors import DyroError, ValidationError
 from .process import git, run
 from .workspace import get_line, line_repository_path, Line
 
@@ -171,7 +169,7 @@ def analyze_repo_diff(
         parts = line_item.split(maxsplit=1)
         if len(parts) < 2:
             continue
-        status, file_path = parts[0], parts[1]
+        _status, file_path = parts[0], parts[1]
         if " -> " in file_path:
             file_path = file_path.split(" -> ")[1].strip()
 
@@ -229,7 +227,7 @@ def build_review_pack(
     now_str = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
     sections: list[str] = [
-        f"# Dyro 开发线复核审查靶区包（Review Pack）",
+        "# Dyro 开发线复核审查靶区包（Review Pack）",
         f"- **开发线 ID**：`{line.id}`",
         f"- **分支**：`{line.branch}`",
         f"- **对比基线（Base）**：`{base or line.base}`",

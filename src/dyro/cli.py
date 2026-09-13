@@ -3247,7 +3247,7 @@ def cmd_review_verify(args: argparse.Namespace) -> None:
         status_str = "PASS" if r.passed else "FAIL"
         print(f"[{status_str}] {r.repo_id}: {' '.join(r.argv)} ({r.elapsed_seconds:.2f}s)")
         if not r.passed and r.stdout:
-            print(f"  --- 失败日志摘录 ---\n  " + "\n  ".join(r.stdout.splitlines()[-15:]))
+            print("  --- 失败日志摘录 ---\n  " + "\n  ".join(r.stdout.splitlines()[-15:]))
     if failures:
         raise DyroError(f"开发线 {line.id} 本地静态门禁未通过（{len(failures)}/{len(results)} 失败）")
     print(f"\n全部门禁通过（共 {len(results)} 项）。")
