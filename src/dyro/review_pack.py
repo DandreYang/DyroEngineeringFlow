@@ -132,6 +132,7 @@ def analyze_repo_diff(
     repo_id: str,
     *,
     base: str | None = None,
+    scope: str = "contracts",
     max_lines_per_file: int = 250,
 ) -> RepoDiffSummary | None:
     repo_path = line_repository_path(config, line, repo_id)
@@ -140,10 +141,8 @@ def analyze_repo_diff(
 
     actual_base = base or line.base_for(repo_id)
 
-    # Check if base ref exists
     verify_base = git(repo_path, "rev-parse", "--verify", "-q", actual_base)
     if verify_base.code != 0:
-        # Fallback to origin/base if local doesn't exist
         alt_base = f"origin/{actual_base}"
         if git(repo_path, "rev-parse", "--verify", "-q", alt_base).code == 0:
             actual_base = alt_base
@@ -173,7 +172,6 @@ def analyze_repo_diff(
         if len(parts) < 2:
             continue
         status, file_path = parts[0], parts[1]
-        # For rename, parts[1] might contain "old -> new"
         if " -> " in file_path:
             file_path = file_path.split(" -> ")[1].strip()
 
@@ -185,14 +183,21 @@ def analyze_repo_diff(
         else:
             other_files.append(file_path)
 
-        # Get diff for this single file
+    # Determine which files need full diff based on scope
+    files_to_diff: list[str] = []
+    if scope == "contracts":
+        files_to_diff = list(contract_files)
+    elif scope == "all":
+        files_to_diff = list(contract_files) + list(other_files)
+
+    for file_path in files_to_diff:
         diff_res = git(repo_path, "diff", f"{actual_base}...HEAD", "--", file_path)
         raw_diff = diff_res.stdout
         diff_lines = raw_diff.splitlines()
 
         if len(diff_lines) > max_lines_per_file:
             truncated_diff = "\n".join(diff_lines[:max_lines_per_file])
-            truncated_diff += f"\n... [Dyro Review Pack 提示：该文件改动超过 {max_lines_per_file} 行，已截断以防止 Token 膨胀。共 {len(diff_lines)} 行]"
+            truncated_diff += f"\n... [Dyro 提示：该文件改动超过 {max_lines_per_file} 行，已智能截断以降低 Token 消耗。原文件共 {len(diff_lines)} 行]"
             file_diffs[file_path] = truncated_diff
         else:
             file_diffs[file_path] = raw_diff
@@ -215,6 +220,7 @@ def build_review_pack(
     line_id: str,
     *,
     base: str | None = None,
+    scope: str = "contracts",
     run_verify: bool = True,
     max_lines_per_file: int = 250,
     dry_run: bool = False,
@@ -227,6 +233,7 @@ def build_review_pack(
         f"- **开发线 ID**：`{line.id}`",
         f"- **分支**：`{line.branch}`",
         f"- **对比基线（Base）**：`{base or line.base}`",
+        f"- **审查模式（Scope）**：`{scope}`（{'契约与协议靶区高亮·Token优化' if scope == 'contracts' else '全量改动Diff' if scope == 'all' else '改动概览与索引'}）",
         f"- **生成时间**：{now_str}",
         "",
     ]
@@ -266,6 +273,7 @@ def build_review_pack(
             line,
             repo_id,
             base=base,
+            scope=scope,
             max_lines_per_file=max_lines_per_file,
         )
         if summary is not None:
@@ -303,6 +311,18 @@ def build_review_pack(
     if not has_any_contract:
         sections.append("> 无显式 DTO / Schema / API 契约文件名变更。\n")
 
+    has_other_files = any(bool(rs.other_files) for rs in repo_summaries)
+    if has_other_files:
+        sections.append("### 其他业务实现文件变更清单（不展开 Diff 以免消耗大量 Token）：")
+        for rs in repo_summaries:
+            if rs.other_files:
+                sections.append(f"**仓 `{rs.repo_id}`（{len(rs.other_files)} 个文件）**：")
+                for of in rs.other_files[:60]:
+                    sections.append(f"- `{of}`")
+                if len(rs.other_files) > 60:
+                    sections.append(f"- ... (省略剩余 {len(rs.other_files) - 60} 个文件)")
+                sections.append("")
+
     # 4. Recommended Review Seats
     sections.append("## 四、 分席位独立审查建议（阻断上下文二次方膨胀）")
     sections.append("> 💡 **审查指南**：不要把整个大包塞进同一个 AI 会话。推荐使用独立对话分别委派以下三个席位，各席位完成审查后向主会话仅汇总结论：\n")
@@ -313,31 +333,32 @@ def build_review_pack(
     )
 
     # 5. Compact Code Diffs
-    sections.append("## 五、 精简增量代码 Diff（Compact Diff）")
-    for rs in repo_summaries:
-        if not rs.file_diffs:
-            continue
-        sections.append(f"### 仓库 `{rs.repo_id}`")
-        if rs.commits_log:
-            sections.append("<details><summary>最近提交记录（点击展开）</summary>\n")
-            sections.append(f"```text\n{rs.commits_log}\n```\n</details>\n")
+    if scope != "summary":
+        sections.append("## 五、 增量代码 Diff（Compact Diff）")
+        for rs in repo_summaries:
+            if not rs.file_diffs:
+                continue
+            sections.append(f"### 仓库 `{rs.repo_id}`")
+            if rs.commits_log:
+                sections.append("<details><summary>最近提交记录（点击展开）</summary>\n")
+                sections.append(f"```text\n{rs.commits_log}\n```\n</details>\n")
 
-        # Contract diffs first
-        if rs.contract_files:
-            sections.append(f"#### 1. 契约与协议代码 Diff（{len(rs.contract_files)} 个）")
-            for cf in rs.contract_files:
-                diff_text = rs.file_diffs.get(cf, "")
-                if diff_text.strip():
-                    sections.append(f"**文件：`{cf}`**")
-                    sections.append(f"```diff\n{diff_text.strip()}\n```\n")
+            # Contract diffs first
+            if rs.contract_files:
+                sections.append(f"#### 1. 契约与协议代码 Diff（{len(rs.contract_files)} 个）")
+                for cf in rs.contract_files:
+                    diff_text = rs.file_diffs.get(cf, "")
+                    if diff_text.strip():
+                        sections.append(f"**文件：`{cf}`**")
+                        sections.append(f"```diff\n{diff_text.strip()}\n```\n")
 
-        # Other diffs
-        if rs.other_files:
-            sections.append(f"#### 2. 业务实现代码 Diff（{len(rs.other_files)} 个）")
-            for of in rs.other_files:
-                diff_text = rs.file_diffs.get(of, "")
-                if diff_text.strip():
-                    sections.append(f"<details><summary><code>{of}</code>（点击展开 Diff）</summary>\n")
-                    sections.append(f"```diff\n{diff_text.strip()}\n```\n</details>\n")
+            # Other diffs
+            if scope == "all" and rs.other_files:
+                sections.append(f"#### 2. 业务实现代码 Diff（{len(rs.other_files)} 个）")
+                for of in rs.other_files:
+                    diff_text = rs.file_diffs.get(of, "")
+                    if diff_text.strip():
+                        sections.append(f"<details><summary><code>{of}</code>（点击展开 Diff）</summary>\n")
+                        sections.append(f"```diff\n{diff_text.strip()}\n```\n</details>\n")
 
     return "\n".join(sections)

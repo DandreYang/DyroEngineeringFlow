@@ -3262,6 +3262,7 @@ def cmd_review_pack(args: argparse.Namespace) -> None:
         config,
         args.line,
         base=args.base,
+        scope=args.scope,
         run_verify=not args.no_verify,
         max_lines_per_file=args.max_lines,
         dry_run=args.dry_run,
@@ -5405,6 +5406,12 @@ def build_parser() -> argparse.ArgumentParser:
     review_pack = review_sub.add_parser("pack", help="提取开发线跨仓精简 Diff 与审查上下文")
     review_pack.add_argument("--line", required=True, help="开发线 ID")
     review_pack.add_argument("--base", help="对比基线；默认开发线 base")
+    review_pack.add_argument(
+        "--scope",
+        choices=("contracts", "all", "summary"),
+        default="contracts",
+        help="审查靶区范围：contracts (仅核心契约/协议Diff，默认), all (全量文件Diff), summary (仅改动索引不含Diff)",
+    )
     review_pack.add_argument("--no-verify", action="store_true", help="跳过本地 verify 门禁检查")
     review_pack.add_argument("--max-lines", type=int, default=250, help="单文件 Diff 最大保留行数（防 Token 膨胀）")
     review_pack.add_argument("--out", help="输出 Markdown 审查包文件路径；默认标准输出")
