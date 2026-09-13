@@ -3232,6 +3232,49 @@ def cmd_changeset_verify(args: argparse.Namespace) -> None:
         raise DyroError(f"Change Set {args.id} 未通过核验")
 
 
+def cmd_review_verify(args: argparse.Namespace) -> None:
+    from .review_pack import run_line_verify
+    from .workspace import get_line
+
+    config = _config(args)
+    line = get_line(config, args.line)
+    results = run_line_verify(config, line, dry_run=args.dry_run)
+    if not results:
+        print(f"开发线 {line.id} 无已配置门禁指令。")
+        return
+    failures = [r for r in results if not r.passed]
+    for r in results:
+        status_str = "PASS" if r.passed else "FAIL"
+        print(f"[{status_str}] {r.repo_id}: {' '.join(r.argv)} ({r.elapsed_seconds:.2f}s)")
+        if not r.passed and r.stdout:
+            print(f"  --- 失败日志摘录 ---\n  " + "\n  ".join(r.stdout.splitlines()[-15:]))
+    if failures:
+        raise DyroError(f"开发线 {line.id} 本地静态门禁未通过（{len(failures)}/{len(results)} 失败）")
+    print(f"\n全部门禁通过（共 {len(results)} 项）。")
+
+
+def cmd_review_pack(args: argparse.Namespace) -> None:
+    from .review_pack import build_review_pack
+    from pathlib import Path
+
+    config = _config(args)
+    content = build_review_pack(
+        config,
+        args.line,
+        base=args.base,
+        run_verify=not args.no_verify,
+        max_lines_per_file=args.max_lines,
+        dry_run=args.dry_run,
+    )
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(content, encoding="utf-8")
+        print(f"已生成审查靶区包：{out_path}")
+    else:
+        print(content)
+
+
 def cmd_task_create(args: argparse.Namespace) -> None:
     config = _config(args)
     validate_id(args.id, "任务 ID")
@@ -5352,6 +5395,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--format", choices=("text", "json"), default="text"
     )
     changeset_verify.set_defaults(func=cmd_changeset_verify)
+
+    review = sub.add_parser("review", help="开发线增量审查靶区提取与门禁核验")
+    review_sub = review.add_subparsers(dest="review_command", required=True)
+    review_verify = review_sub.add_parser("verify", help="运行开发线各仓本地 verify 静态门禁")
+    review_verify.add_argument("--line", required=True, help="开发线 ID")
+    review_verify.set_defaults(func=cmd_review_verify)
+
+    review_pack = review_sub.add_parser("pack", help="提取开发线跨仓精简 Diff 与审查上下文")
+    review_pack.add_argument("--line", required=True, help="开发线 ID")
+    review_pack.add_argument("--base", help="对比基线；默认开发线 base")
+    review_pack.add_argument("--no-verify", action="store_true", help="跳过本地 verify 门禁检查")
+    review_pack.add_argument("--max-lines", type=int, default=250, help="单文件 Diff 最大保留行数（防 Token 膨胀）")
+    review_pack.add_argument("--out", help="输出 Markdown 审查包文件路径；默认标准输出")
+    review_pack.set_defaults(func=cmd_review_pack)
 
     objective = sub.add_parser(
         "objective", help="持久化并观察一个跨任务 Objective；此阶段不执行 Task"
