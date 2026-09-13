@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.7.16 - 2026-09-13
+
+对使用者的影响：新增开发线增量审查靶区提取与本地门禁核验（`dyro review verify` 与 `dyro review pack`），大幅降低多仓协同中代码审查与 LLM 交互的 Token 消耗与注意力稀释。
+
+- 新增 `dyro review verify --line <LINE>`：一键自动化运行指定开发线各挂载仓的本地静态门禁，0 Token 拦截编译错误、类型错误与语法测试报错。
+- 新增 `dyro review pack --line <LINE> [--scope contracts|all|summary] [--out <PATH>]`：自动提取跨仓增量 Diff，自动识别高危 Schema/DTO/API 契约文件并建立索引；支持 `--scope contracts`（仅提取核心契约Diff，默认）、`--scope all`（全量Diff带防膨胀截断）与 `--scope summary`（仅改动索引总览），将输入 Token 压缩 90% 以上。
+
 ## 0.7.15 - 2026-09-12
 
 对使用者的影响：`dyro dispatch` 的异步运行不再因为并发读取运行状态而
