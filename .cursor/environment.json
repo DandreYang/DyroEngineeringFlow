@@ -1,0 +1,4 @@
+{
+  "name": "DyroEngineeringFlow (dyro)",
+  "install": "bash .cursor/install.sh"
+}
