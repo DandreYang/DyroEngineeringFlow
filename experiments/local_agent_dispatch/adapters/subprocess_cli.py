@@ -1683,13 +1683,14 @@ class CursorAdapter(SubprocessCliAdapter):
             if fallback and not contract.allow_unconfined_provider:
                 return AdapterResult(status="error", summary="",
                                      error_code="unconfined_provider_refused")
-            if fallback and contract.mode == "edit":
-                # Never combine the real HOME (user MCP/plugins) with --force.
+            if fallback and contract.mode == "edit" and not contract.allow_user_home_provider:
                 return AdapterResult(
                     status="error", summary="",
                     error_code="cursor_edit_requires_isolated_login",
                     warnings=["Cursor edit needs CURSOR_API_KEY or a file credential: "
-                              "run `AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login`"],
+                              "run `AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login`, "
+                              "or explicitly set allow_user_home_provider=true with "
+                              "allow_unconfined_provider=true"],
                 )
             argv = [
                 "cursor-agent",
@@ -1724,6 +1725,8 @@ class CursorAdapter(SubprocessCliAdapter):
             if fallback:
                 result.warnings.append(
                     "Cursor uses real HOME for CLI login; user MCP servers and plugins may load"
+                    + ("; commands are auto-approved inside Cursor's sandbox"
+                       if contract.mode == "edit" else "")
                 )
             return result
 

@@ -40,9 +40,10 @@ Treat `dyro dispatch` as an outbound harness, separate from the read-only
    planning candidates. Supported Provider IDs are `codex`, `claude`,
    `cursor-agent`, `opencode`, `grok`, `hermes`, `kimi`, `dsh`, and `pi`; an
    installed command may still be unready. Cursor uses its CLI login or
-   `CURSOR_API_KEY`; keychain login is read-only and may load user MCP/plugins.
-   Cursor edit needs a key or file login
-   (`AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login`). Kimi file OAuth is isolated per run; keyring
+   `CURSOR_API_KEY` or file login. Keychain edit requires both
+   `allow_unconfined_provider=true` and `allow_user_home_provider=true` (default
+   false); user MCP/plugins may load and commands auto-approve inside Cursor’s
+   sandbox. Kimi file OAuth is isolated per run; keyring
    OAuth fails closed. DSH uses `deepseek-official/deepseek-v4-flash`.
 
 2. Choose the smallest useful strategy:
@@ -84,7 +85,7 @@ Treat `dyro dispatch` as an outbound harness, separate from the read-only
    positive `timeout_seconds` sets the run timeout; explicit CLI `--timeout`
    overrides it. Defaults: edit 1800 seconds, read-only 120 seconds.
 
-   A single delegated role keeps the existing asynchronous run lifecycle:
+   Single-run lifecycle:
 
    ```bash
    dyro dispatch run --project <absolute-project-root> --stdin

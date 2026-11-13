@@ -583,10 +583,20 @@ class AdapterRepairTests(unittest.TestCase):
             self.assertTrue(any('MCP servers and plugins may load' in warning for warning in result.warnings))
             self.assertEqual(run.call_args.kwargs['env']['HOME'], str(Path.home()))
             run.reset_mock()
-            # Real HOME must never be combined with --force edits.
-            refused = adapter.run(contract=SimpleNamespace(mode='edit', allow_unconfined_provider=True), cwd=Path(tmp), context_files={}, timeout_seconds=10)
+            # Real HOME edits require a separate explicit opt-in.
+            refused = adapter.run(contract=SimpleNamespace(mode='edit', allow_unconfined_provider=True, allow_user_home_provider=False), cwd=Path(tmp), context_files={}, timeout_seconds=10)
             self.assertEqual(refused.error_code, 'cursor_edit_requires_isolated_login')
             run.assert_not_called()
+            self.assertIn('allow_user_home_provider', ' '.join(refused.warnings))
+            refused = adapter.run(contract=SimpleNamespace(mode='edit', allow_unconfined_provider=False, allow_user_home_provider=True), cwd=Path(tmp), context_files={}, timeout_seconds=10)
+            self.assertEqual(refused.error_code, 'unconfined_provider_refused')
+            run.assert_not_called()
+            result = adapter.run(contract=SimpleNamespace(mode='edit', allow_unconfined_provider=True, allow_user_home_provider=True), cwd=Path(tmp), context_files={}, timeout_seconds=10)
+            argv = run.call_args.args[0]
+            self.assertEqual(run.call_args.kwargs['env']['HOME'], str(Path.home()))
+            self.assertEqual(argv[argv.index('--sandbox') + 1], 'enabled')
+            self.assertIn('--force', argv)
+            self.assertTrue(any("commands are auto-approved inside Cursor's sandbox" in warning for warning in result.warnings))
 
     def test_cursor_edit_runs_inside_cursor_sandbox(self):
         import experiments.local_agent_dispatch.adapters.subprocess_cli as module

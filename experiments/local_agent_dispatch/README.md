@@ -92,8 +92,8 @@ Integrated Provider IDs are `codex`, `claude`,
 `cursor-agent`, `opencode`, `grok`, `hermes`, `kimi`, `dsh`, and `pi`. A Provider
 is routable only when its backend-specific authentication probe succeeds. Cursor
 supports read-only and edit dispatch via its own CLI login (`cursor-agent status`)
-or `CURSOR_API_KEY`. Read-only adds `--mode ask`; edit adds `--force`.
-Both use `--print --output-format json --sandbox disabled --workspace <cwd>
+or `CURSOR_API_KEY`. Read-only adds `--mode ask --sandbox disabled`; edit adds
+`--force --sandbox enabled`. Both use `--print --output-format json --workspace <cwd>
 --model <model> --trust` and a temporary task-file prompt, with cwd pinned to the
 projection or scratch edit worktree. Empty output is a failure.
 
@@ -108,8 +108,11 @@ File-backed login copies only private `auth.json` into a per-run HOME with an
 isolated XDG config directory and forces file storage. No CLI config is needed
 with the explicit flags; `cli-config.json`, MCP configuration and plugins are
 not copied. API-key runs use an empty isolated home. If file credentials cannot
-be copied, real HOME is used only with `allow_unconfined_provider=true`, and a
-warning names user MCP servers and plugins that may load. Project-local Cursor
+be copied, read-only uses real HOME only with `allow_unconfined_provider=true`.
+Edit additionally requires `allow_user_home_provider=true` (optional boolean,
+default false, also accepted in batch member contracts). The warning names user
+MCP servers and plugins that may load; edit commands are auto-approved inside
+Cursor's sandbox. Project-local Cursor
 configuration can still load; these are unconfined Provider executions.
 
 AGY (`agy`) has a read-only print/plan/JSON runner with a print timeout and a

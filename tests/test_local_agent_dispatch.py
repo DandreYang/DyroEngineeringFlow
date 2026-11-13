@@ -98,6 +98,19 @@ class TaskContractTests(unittest.TestCase):
             )
 
 
+    def test_user_home_provider_roundtrip_and_validation(self) -> None:
+        payload = {"schema_version": 1, "files": ["src/a.py"],
+                   "task": {name: "review" for name in
+                            ("briefing", "locations", "objective", "constraints", "output_contract")}}
+        self.assertFalse(parse_task_contract(payload).allow_user_home_provider)
+        for value in (False, True):
+            contract = parse_task_contract({**payload, "allow_user_home_provider": value})
+            self.assertEqual(parse_task_contract(contract.to_mapping()), contract)
+            self.assertIs(contract.to_mapping()["allow_user_home_provider"], value)
+        for value in (None, 0, 1, "true", [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(DispatchValidationError, "allow_user_home_provider"):
+                parse_task_contract({**payload, "allow_user_home_provider": value})
+
     def test_timeout_roundtrip_and_validation(self) -> None:
         payload = {"schema_version": 1, "files": ["src/a.py"],
                    "task": {name: "review" for name in

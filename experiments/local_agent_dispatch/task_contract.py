@@ -48,6 +48,7 @@ class TaskContract:
     files: tuple[str, ...]
     task: TaskBody
     timeout_seconds: float | None = None
+    allow_user_home_provider: bool = False
 
     def to_mapping(self) -> dict[str, object]:
         return {
@@ -59,6 +60,7 @@ class TaskContract:
             "strict": self.strict,
             "allow_unconfined_provider": self.allow_unconfined_provider,
             "allow_offline_simulation": self.allow_offline_simulation,
+            "allow_user_home_provider": self.allow_user_home_provider,
             "files": list(self.files),
             "task": self.task.to_mapping(),
         }
@@ -98,6 +100,10 @@ def parse_task_contract(payload: Mapping[str, Any]) -> TaskContract:
     allow_offline_simulation = payload.get("allow_offline_simulation", False)
     if type(allow_offline_simulation) is not bool:
         raise DispatchValidationError("allow_offline_simulation must be a boolean")
+
+    allow_user_home_provider = payload.get("allow_user_home_provider", False)
+    if type(allow_user_home_provider) is not bool:
+        raise DispatchValidationError("allow_user_home_provider must be a boolean")
 
     timeout = payload.get("timeout_seconds")
     if "timeout_seconds" in payload:
@@ -140,4 +146,5 @@ def parse_task_contract(payload: Mapping[str, Any]) -> TaskContract:
         files=tuple(str(item).strip() for item in files),
         task=task,
         timeout_seconds=timeout,
+        allow_user_home_provider=allow_user_home_provider,
     )

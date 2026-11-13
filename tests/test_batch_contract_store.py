@@ -32,6 +32,7 @@ def _contract(*, backend: str = "codex", mode: str = "read-only") -> dict:
         "strict": False,
         "allow_unconfined_provider": True,
         "allow_offline_simulation": False,
+        "allow_user_home_provider": False,
         "files": ["src/*.py"],
         "task": {
             "briefing": "small project",
@@ -91,6 +92,15 @@ def _plan(project_root: Path, *, request_id: str = "batch-001") -> BatchPlan:
 
 
 class BatchContractTests(unittest.TestCase):
+    def test_optional_user_home_provider(self) -> None:
+        payload = _request()
+        payload["members"][0]["contract"]["allow_user_home_provider"] = True
+        del payload["members"][1]["contract"]["allow_user_home_provider"]
+        request = parse_batch_request(payload)
+        self.assertTrue(request.members[0].contract.allow_user_home_provider)
+        self.assertFalse(request.members[1].contract.allow_user_home_provider)
+        self.assertEqual(parse_batch_request(request.to_mapping()), request)
+
     def test_strict_schema_unknown_fields_and_complete_contract(self) -> None:
         valid = _request()
         self.assertEqual(parse_batch_request(valid).to_mapping(), valid)
