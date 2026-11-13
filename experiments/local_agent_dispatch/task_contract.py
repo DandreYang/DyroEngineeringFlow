@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Mapping, Sequence
 
 from .context_guard import assert_content_allowed
@@ -46,15 +47,20 @@ class TaskContract:
     allow_offline_simulation: bool
     files: tuple[str, ...]
     task: TaskBody
+    timeout_seconds: float | None = None
+    allow_user_home_provider: bool = False
 
     def to_mapping(self) -> dict[str, object]:
         return {
+            **({"timeout_seconds": self.timeout_seconds}
+               if self.timeout_seconds is not None else {}),
             "schema_version": self.schema_version,
             "backend": self.backend,
             "mode": self.mode,
             "strict": self.strict,
             "allow_unconfined_provider": self.allow_unconfined_provider,
             "allow_offline_simulation": self.allow_offline_simulation,
+            "allow_user_home_provider": self.allow_user_home_provider,
             "files": list(self.files),
             "task": self.task.to_mapping(),
         }
@@ -95,6 +101,19 @@ def parse_task_contract(payload: Mapping[str, Any]) -> TaskContract:
     if type(allow_offline_simulation) is not bool:
         raise DispatchValidationError("allow_offline_simulation must be a boolean")
 
+    allow_user_home_provider = payload.get("allow_user_home_provider", False)
+    if type(allow_user_home_provider) is not bool:
+        raise DispatchValidationError("allow_user_home_provider must be a boolean")
+
+    timeout = payload.get("timeout_seconds")
+    if "timeout_seconds" in payload:
+        try:
+            valid_timeout = type(timeout) in {int, float} and math.isfinite(timeout) and timeout > 0
+        except OverflowError:
+            valid_timeout = False
+        if not valid_timeout:
+            raise DispatchValidationError("timeout_seconds must be finite and positive")
+
     files = payload.get("files")
     if not isinstance(files, Sequence) or isinstance(files, (str, bytes)):
         raise DispatchValidationError("files must be a list of glob strings")
@@ -126,4 +145,6 @@ def parse_task_contract(payload: Mapping[str, Any]) -> TaskContract:
         allow_offline_simulation=allow_offline_simulation,
         files=tuple(str(item).strip() for item in files),
         task=task,
+        timeout_seconds=timeout,
+        allow_user_home_provider=allow_user_home_provider,
     )

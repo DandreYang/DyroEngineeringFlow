@@ -11,12 +11,13 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import sys
 import tempfile
 import tomllib
 from typing import Callable, Iterator, Mapping, Sequence
 
 from ..bounded_process import BoundedCompletedProcess, run_bounded
-from ..context_guard import assert_content_allowed, safe_error_text
+from ..context_guard import assert_content_allowed, check_content, safe_error_text
 from ..errors import DispatchValidationError
 from ..process_identity import identity_for_pid
 from ..task_contract import TaskContract
@@ -54,7 +55,8 @@ _BACKEND_ENV_ALLOWLIST = {
         }
     ),
     "cursor-agent": frozenset(
-        {"CURSOR_API_KEY", "CURSOR_API_ENDPOINT", "XDG_CONFIG_HOME"}
+        {"CURSOR_API_KEY", "CURSOR_API_ENDPOINT", "XDG_CONFIG_HOME",
+         "AGENT_CLI_CREDENTIAL_STORE"}
     ),
     "opencode": frozenset(
         {
@@ -583,7 +585,7 @@ def _configured_model(backend: str) -> tuple[str, str] | None:
         model = payload.get("model")
         return ("anthropic", model) if isinstance(model, str) and model else None
     if backend == "cursor-agent":
-        return ("cursor", os.environ.get("DYRO_CURSOR_MODEL", "gpt-5"))
+        return ("cursor", os.environ.get("DYRO_CURSOR_MODEL", "auto"))
     if backend == "opencode":
         root = Path(
             environment.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
@@ -755,6 +757,30 @@ def _create_worker_home(path: Path) -> None:
     if path.is_symlink() or not path.is_dir():
         raise DispatchValidationError("isolated async worker home is unsafe")
     path.chmod(0o700)
+
+
+def _cursor_auth_file(environment: Mapping[str, str]) -> Path:
+    # Cursor 2026.11.11 cli-credentials/dist/index.js: getAuthFilePath.
+    home = Path(environment.get("HOME", str(Path.home())))
+    if sys.platform == "darwin":
+        return home / ".cursor" / "auth.json"
+    return Path(environment.get("XDG_CONFIG_HOME", str(home / ".config"))) / "cursor" / "auth.json"
+
+
+def _cursor_isolated_environment(source: Mapping[str, str], home: Path) -> dict[str, str] | None:
+    environment = {
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / "config"),
+        "AGENT_CLI_CREDENTIAL_STORE": "file",
+    }
+    if source.get("CURSOR_API_KEY"):
+        return environment
+    destination = _cursor_auth_file(environment)
+    destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if not _copy_private_file(_cursor_auth_file(source), destination, require_private=True):
+        return None
+    # Do not copy cli-config.json: it contains permissions and plugin settings.
+    return environment
 
 
 def _materialize_basic_worker_home(
@@ -962,6 +988,18 @@ def _parse_model_json(text: str) -> dict[str, object]:
         if isinstance(decoded, dict):
             payload = decoded
             break
+    if payload is None:
+        # Some CLIs (Cursor) prefix the JSON answer with a sentence of prose.
+        decoder = json.JSONDecoder()
+        start = raw.find("{")
+        while start != -1 and payload is None:
+            try:
+                decoded, end = decoder.raw_decode(raw, start)
+            except json.JSONDecodeError:
+                decoded, end = None, start
+            if isinstance(decoded, dict) and "summary" in decoded and not raw[end:].strip():
+                payload = decoded
+            start = raw.find("{", start + 1)
     if not isinstance(payload, dict):
         raise DispatchValidationError("backend result is not a JSON object")
 
@@ -1030,14 +1068,18 @@ def _parse_wrapped_model_json(text: str, *, backend: str) -> dict[str, object]:
 
     candidates: list[str] = []
     for value in decoded:
-        if backend == "cursor-agent":
+        if backend in {"cursor-agent", "agy"}:
             result = value.get("result")
             if isinstance(result, str):
                 candidates.append(result)
         elif backend == "grok":
-            result = value.get("text")
-            if isinstance(result, str):
-                candidates.append(result)
+            for key in ("text", "result", "response", "output"):
+                result = value.get(key)
+                if isinstance(result, str):
+                    candidates.append(result)
+            message = value.get("message")
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                candidates.append(_message_content_text(message.get("content")))
         elif backend == "opencode":
             part = value.get("part")
             if isinstance(part, dict) and part.get("type") == "text":
@@ -1069,6 +1111,13 @@ def _parse_wrapped_model_json(text: str, *, backend: str) -> dict[str, object]:
     )
 
 
+def _safe_output_tail(text: str, *, fallback: str = "dispatch failure") -> str:
+    # Scan before slicing so a credential anchor outside the tail still withholds it.
+    if not check_content(text).allowed:
+        return "dispatch failure detail withheld because secret-like content was detected"
+    return safe_error_text(text[-2000:], fallback=fallback)
+
+
 def _completed_to_result(
     completed: BoundedCompletedProcess,
     *,
@@ -1090,11 +1139,29 @@ def _completed_to_result(
             warnings=["backend process group exceeded its deadline and was terminated"],
         )
     if completed.output_limited:
+        parsed = None
+        # Whole JSON may have been followed by truncated protocol events.
+        candidates = [completed.stdout, *reversed(completed.stdout.splitlines())]
+        try:
+            _, end = json.JSONDecoder().raw_decode(completed.stdout.lstrip())
+            candidates.insert(1, completed.stdout.lstrip()[:end])
+        except json.JSONDecodeError:
+            pass
+        for candidate in candidates:
+            try:
+                parsed = parser(candidate)
+                break
+            except DispatchValidationError:
+                continue
         return AdapterResult(
             status="error",
-            summary="",
+            summary=str(parsed["summary"]) if parsed else "",
+            evidence=list(parsed["evidence"]) if parsed else [],
+            confidence="low",
             error_code="output_limit",
-            warnings=["backend output exceeded the byte limit and was terminated"],
+            usage={"partial": True, "backend": backend},
+            raw_preview=_safe_output_tail(completed.stdout),
+            warnings=["partial result: backend output exceeded the byte limit and was terminated"],
         )
     if completed.returncode != 0:
         return AdapterResult(
@@ -1110,7 +1177,11 @@ def _completed_to_result(
             status="error",
             summary="",
             error_code="protocol_error",
-            warnings=[safe_error_text(exc, fallback="backend result failed validation")],
+            warnings=[safe_error_text(exc, fallback="backend result failed validation"),
+                      _safe_output_tail(completed.stderr if not completed.stdout.strip()
+                                      else completed.stdout,
+                                      fallback="backend returned empty stdout")],
+            raw_preview=_safe_output_tail(completed.stdout),
         )
     return AdapterResult(
         status="ok",
@@ -1337,7 +1408,7 @@ class SubprocessCliAdapter:
         return self.available()
 
     def readiness_reason(self) -> str:
-        return "authentication probe failed"
+        return getattr(self, "_probe_failure_reason", "authentication probe failed")
 
     def _probe(
         self,
@@ -1346,6 +1417,7 @@ class SubprocessCliAdapter:
         timeout_seconds: float = 5.0,
         environment_overrides: Mapping[str, str] | None = None,
     ):
+        self._probe_retryable = False
         if not self.available():
             return None
         try:
@@ -1359,9 +1431,19 @@ class SubprocessCliAdapter:
                 env=environment,
                 max_output_bytes=64 * 1024,
             )
-        except OSError:
+        except OSError as exc:
+            self._probe_retryable = True
+            self._probe_failure_reason = safe_error_text(exc)
+            return None
+        if completed is None:
+            self._probe_retryable = True
+            self._probe_failure_reason = "authentication probe returned no result"
             return None
         if completed.returncode != 0 or completed.timed_out or completed.output_limited:
+            self._probe_retryable = completed.timed_out or completed.output_limited
+            self._probe_failure_reason = safe_error_text(
+                completed.stderr or f"{self.id} auth probe exit={completed.returncode}, timeout={completed.timed_out}, output_limit={completed.output_limited}"
+            )
             return None
         return completed
 
@@ -1455,17 +1537,7 @@ class CodexAdapter(SubprocessCliAdapter):
     def authenticated(self) -> bool:
         if not self.available():
             return False
-        try:
-            completed = run_bounded(
-                ["codex", "login", "status"],
-                cwd=Path.cwd(),
-                timeout_seconds=3.0,
-                env=_backend_environment("codex"),
-                max_output_bytes=32 * 1024,
-            )
-        except OSError:
-            return False
-        return completed.returncode == 0 and not completed.timed_out
+        return self._probe(["codex", "login", "status"], timeout_seconds=3.0) is not None
 
     def run(
         self,
@@ -1515,17 +1587,8 @@ class ClaudeAdapter(SubprocessCliAdapter):
     def authenticated(self) -> bool:
         if not self.available():
             return False
-        try:
-            completed = run_bounded(
-                ["claude", "auth", "status", "--json"],
-                cwd=Path.cwd(),
-                timeout_seconds=3.0,
-                env=_backend_environment("claude"),
-                max_output_bytes=32 * 1024,
-            )
-        except OSError:
-            return False
-        if completed.returncode != 0 or completed.timed_out:
+        completed = self._probe(["claude", "auth", "status", "--json"], timeout_seconds=3.0)
+        if completed is None:
             return False
         try:
             payload = json.loads(completed.stdout)
@@ -1576,27 +1639,27 @@ class ClaudeAdapter(SubprocessCliAdapter):
 
 
 class CursorAdapter(SubprocessCliAdapter):
-    supported_modes = frozenset({"read-only"})
-
-    def readiness_reason(self) -> str:
-        return (
-            "CURSOR_API_KEY is required so dispatch can isolate Cursor from "
-            "user MCP and plugin processes"
-        )
+    def worker_environment(self, *, isolated_home: Path | None = None) -> dict[str, str]:
+        environment = _backend_environment(self.id)
+        if isolated_home is not None:
+            _create_worker_home(isolated_home)
+            isolated = _cursor_isolated_environment(environment, isolated_home)
+            if isolated is not None:
+                environment.update(isolated)
+        # With keychain credentials, retain HOME until run() checks the contract.
+        return environment
 
     def authenticated(self) -> bool:
-        # Browser OAuth shares the user's full Cursor home, including MCP and
-        # plugin startup. Dyro only routes Cursor when an API key lets the run
-        # use an empty, ephemeral HOME.
-        if not os.environ.get("CURSOR_API_KEY"):
-            return False
         completed = self._probe(
             ["cursor-agent", "status"], timeout_seconds=15.0
         )
         if completed is None:
             return False
         plain = re.sub(r"\x1b\[[0-9;]*m", "", completed.stdout)
-        return "Logged in" in plain
+        ready = "Logged in" in plain
+        if not ready:
+            self._probe_failure_reason = "Cursor status did not confirm a logged-in session"
+        return ready
 
     def run(
         self,
@@ -1608,44 +1671,48 @@ class CursorAdapter(SubprocessCliAdapter):
     ) -> AdapterResult:
         if not self.available():
             return _not_installed(self.id, self.command)
-        if contract.mode == "edit":
-            return AdapterResult(
-                status="error",
-                summary="",
-                error_code="backend_mode_unsupported",
-                warnings=[
-                    "Cursor edit dispatch is disabled because its sandbox "
-                    "lifecycle cannot yet be proven"
-                ],
-                usage={"backend": self.id},
-            )
         prompt = _build_prompt(contract, context_files)
         with (
             _temporary_text_file(cwd, suffix=".md", content=prompt) as task_file,
             tempfile.TemporaryDirectory(prefix="dyro-cursor-home-") as cursor_home,
         ):
+            environment = _cursor_isolated_environment(
+                _backend_environment(self.id), Path(cursor_home)
+            )
+            fallback = environment is None
+            if fallback and not contract.allow_unconfined_provider:
+                return AdapterResult(status="error", summary="",
+                                     error_code="unconfined_provider_refused")
+            if fallback and contract.mode == "edit" and not contract.allow_user_home_provider:
+                return AdapterResult(
+                    status="error", summary="",
+                    error_code="cursor_edit_requires_isolated_login",
+                    warnings=["Cursor edit needs CURSOR_API_KEY or a file credential: "
+                              "run `AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login`, "
+                              "or explicitly set allow_user_home_provider=true with "
+                              "allow_unconfined_provider=true"],
+                )
             argv = [
                 "cursor-agent",
                 "--print",
                 "--output-format",
                 "json",
-                # Cursor's sandbox helper currently daemonizes after the CLI
-                # exits, which breaks Dyro's prove-before-release process-group
-                # contract. The task still runs only after the caller accepts
-                # best-effort unconfined read-only execution in a projection.
+                # Edits auto-approve commands, so they run inside Cursor's sandbox;
+                # its helper daemon is reaped by the run's process-group cleanup.
+                # Read-only ask mode executes no commands and keeps it disabled.
                 "--sandbox",
-                "disabled",
+                "enabled" if contract.mode == "edit" else "disabled",
                 "--workspace",
                 str(cwd),
                 "--model",
                 self._execution_value("model"),
                 "--trust",
             ]
-            argv.extend(["--mode", "ask"])
+            argv.extend(["--force"] if contract.mode == "edit" else ["--mode", "ask"])
             argv.append(
                 f"Read and follow the complete task in @{task_file.name}."
             )
-            return self._run(
+            result = self._run(
                 argv,
                 cwd=cwd,
                 prompt="",
@@ -1653,8 +1720,15 @@ class CursorAdapter(SubprocessCliAdapter):
                 parser=lambda text: _parse_wrapped_model_json(
                     text, backend=self.id
                 ),
-                environment_overrides={"HOME": cursor_home},
+                environment_overrides=environment,
             )
+            if fallback:
+                result.warnings.append(
+                    "Cursor uses real HOME for CLI login; user MCP servers and plugins may load"
+                    + ("; commands are auto-approved inside Cursor's sandbox"
+                       if contract.mode == "edit" else "")
+                )
+            return result
 
 
 def _opencode_permissions(*, edit_mode: bool) -> str:
@@ -1818,7 +1892,10 @@ class GrokAdapter(SubprocessCliAdapter):
         if completed is None:
             return False
         plain = re.sub(r"\x1b\[[0-9;]*m", "", completed.stdout)
-        return "You are logged in with" in plain
+        ready = "You are logged in with" in plain
+        if not ready:
+            self._probe_failure_reason = "Grok models did not confirm a logged-in session"
+        return ready
 
     def run(
         self,
@@ -1842,7 +1919,6 @@ class GrokAdapter(SubprocessCliAdapter):
                 "--output-format",
                 "json",
                 "--verbatim",
-                "--no-memory",
                 "--no-subagents",
                 "--disable-web-search",
                 "--cwd",
@@ -2143,18 +2219,25 @@ def _kimi_agent_markdown(*, edit_mode: bool, prompt: str) -> str:
 
 class KimiAdapter(SubprocessCliAdapter):
     def readiness_reason(self) -> str:
-        return "no configured Kimi provider passed the local readiness probe"
+        if not self.available():
+            return "command not installed"
+        return getattr(self, "_probe_failure_reason", "")
 
     def authenticated(self) -> bool:
+        self._probe_failure_reason = ""
         try:
             if _kimi_env_route(os.environ) is not None:
                 return self.available()
         except DispatchValidationError:
+            self._probe_failure_reason = "Kimi local route configuration is invalid"
             return False
         completed = self._probe(["kimi", "provider", "list"])
         if completed is None:
             return False
-        return "No providers configured" not in completed.stdout
+        ready = "No providers configured" not in completed.stdout
+        if not ready:
+            self._probe_failure_reason = "no local Kimi provider route is configured"
+        return ready
 
     def run(
         self,
@@ -2512,3 +2595,40 @@ def dsh_adapter() -> SubprocessCliAdapter:
 
 def pi_adapter() -> SubprocessCliAdapter:
     return PiAdapter(backend_id="pi", command="pi")
+
+
+class AgyAdapter(SubprocessCliAdapter):
+    supported_modes = frozenset({"read-only"})
+
+    def authenticated(self) -> bool:
+        # Help exposes no non-generating authentication-status command.
+        return False
+
+    def readiness_reason(self) -> str:
+        return "AGY help exposes no authentication-status probe; login readiness cannot be verified"
+
+    def run(
+        self,
+        *,
+        contract: TaskContract,
+        cwd: Path,
+        context_files: Mapping[str, str],
+        timeout_seconds: float,
+    ) -> AdapterResult:
+        if not self.available():
+            return _not_installed(self.id, self.command)
+        if contract.mode != "read-only":
+            return AdapterResult(status="error", summary="", error_code="backend_mode_unsupported")
+        if not contract.allow_unconfined_provider:
+            return AdapterResult(status="error", summary="", error_code="unconfined_provider_refused")
+        return self._run(
+            ["agy", "--print", "--mode", "plan", "--output-format", "json",
+             "--print-timeout", f"{timeout_seconds:g}s", "--disable-slash-commands"],
+            cwd=cwd, prompt="Do not run shell commands. Use only supplied context.\n" + _build_prompt(contract, context_files),
+            timeout_seconds=timeout_seconds,
+            parser=lambda text: _parse_wrapped_model_json(text, backend=self.id),
+        )
+
+
+def agy_adapter() -> SubprocessCliAdapter:
+    return AgyAdapter(backend_id="agy", command="agy")

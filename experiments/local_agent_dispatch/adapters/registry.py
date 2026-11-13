@@ -14,6 +14,7 @@ from ..context_guard import assert_content_allowed
 from .base import BackendAdapter
 from .echo import EchoAdapter
 from .subprocess_cli import (
+    agy_adapter,
     claude_adapter,
     codex_adapter,
     cursor_adapter,
@@ -36,12 +37,14 @@ REAL_PROVIDER_IDS = (
     "kimi",
     "dsh",
     "pi",
+    "agy",
 )
 
 
 def _all() -> dict[str, BackendAdapter]:
     adapters: list[BackendAdapter] = [
         EchoAdapter(),
+        agy_adapter(),
         codex_adapter(),
         claude_adapter(),
         cursor_adapter(),
@@ -69,10 +72,18 @@ def adapter_is_authenticated(adapter: BackendAdapter) -> bool:
         return adapter.id == "echo"
     authenticated = getattr(adapter, "authenticated", None)
     if callable(authenticated):
-        try:
-            return bool(authenticated())
-        except DispatchValidationError:
-            return False
+        for _ in range(2):
+            adapter._probe_retryable = False
+            try:
+                if authenticated():
+                    return True
+            except OSError:
+                adapter._probe_retryable = True
+            except DispatchValidationError:
+                return False
+            if getattr(adapter, "_probe_retryable", False) is not True:
+                return False
+        return False
     # Preserve the original adapter-test/extension compatibility contract:
     # adapters predating the explicit auth probe use availability as the probe.
     return adapter.available()
@@ -176,7 +187,9 @@ def probe_backends(*, passive: bool = False) -> list[dict[str, object]]:
             ),
             "authentication_probe": "not_run" if passive else "completed",
         }
-        if passive and available and adapter.id != "echo":
+        if not available and adapter.id != "echo":
+            row["reason"] = "command not installed"
+        elif passive and available and adapter.id != "echo":
             row["reason"] = "authentication probe not run in dry-run mode"
         elif available and adapter.id != "echo" and not authenticated:
             reason = getattr(adapter, "readiness_reason", None)

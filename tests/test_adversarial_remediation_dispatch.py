@@ -1340,6 +1340,7 @@ class ProcessAndLifecycleTests(unittest.TestCase):
             {
                 **_payload(),
                 "backend": "fake",
+                "allow_unconfined_provider": True,
             }
         )
         provider_payload = json.dumps(
@@ -2076,7 +2077,8 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 for value in required:
                     self.assertIn(value, argv)
 
-    def test_cursor_edit_fails_closed_before_spawn(self) -> None:
+    @patch("experiments.local_agent_dispatch.adapters.subprocess_cli._cursor_isolated_environment", return_value=None)
+    def test_cursor_fallback_requires_acknowledgement(self, isolated) -> None:
         contract = parse_task_contract(
             {
                 **_payload(mode="edit"),
@@ -2098,7 +2100,7 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 context_files={"app.py": "safe = True\n"},
                 timeout_seconds=10.0,
             )
-        self.assertEqual(result.error_code, "backend_mode_unsupported")
+        self.assertEqual(result.error_code, "unconfined_provider_refused")
         bounded.assert_not_called()
 
     def test_provider_credentials_are_selected_not_shared(self) -> None:
@@ -2151,39 +2153,18 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 ):
                     pass
 
-    def test_cursor_dispatch_auth_requires_api_key_and_positive_status(self) -> None:
+    def test_cursor_dispatch_auth_uses_cli_login_and_positive_status(self) -> None:
         adapter = cursor_adapter()
-        with (
-            patch.dict("os.environ", {}, clear=True),
-            patch(
-                "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
-                return_value="/usr/local/bin/cursor-agent",
-            ),
-            patch(
-                "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded"
-            ) as bounded,
-        ):
-            self.assertFalse(adapter.authenticated())
-        bounded.assert_not_called()
-
-        completed = BoundedCompletedProcess(
-            args=("cursor-agent",),
-            returncode=0,
-            stdout="Not logged in",
-            stderr="",
-        )
-        with (
-            patch.dict("os.environ", {"CURSOR_API_KEY": "test-key"}, clear=True),
-            patch(
-                "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
-                return_value="/usr/local/bin/cursor-agent",
-            ),
-            patch(
-                "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
-                return_value=completed,
-            ),
-        ):
-            self.assertFalse(adapter.authenticated())
+        for message, expected in (("Logged in", True), ("Not logged in", False), ("", False)):
+            with (
+                patch.dict("os.environ", {}, clear=True),
+                patch.object(adapter, "available", return_value=True),
+                patch("experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
+                      return_value=BoundedCompletedProcess(args=("cursor-agent",), returncode=0,
+                                                          stdout=message, stderr="")) as bounded,
+            ):
+                self.assertEqual(adapter.authenticated(), expected)
+                self.assertEqual(bounded.call_args.args[0], ["cursor-agent", "status"])
 
     def test_grok_auth_rejects_unauthenticated_model_listing(self) -> None:
         completed = BoundedCompletedProcess(
@@ -2535,6 +2516,10 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 "experiments.local_agent_dispatch.bounded_process.time.sleep",
                 side_effect=lambda _seconds: events.append("grace"),
             ),
+            patch(
+                "experiments.local_agent_dispatch.bounded_process.process_group_has_live_members",
+                return_value=False,
+            ),
         ):
             _terminate_process_group(process)
 
@@ -2600,6 +2585,41 @@ class ProcessAndLifecycleTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0)
             time.sleep(0.9)
             self.assertFalse(marker.exists())
+
+    def test_tracked_cli_result_with_lingering_group_child(self) -> None:
+        from experiments.local_agent_dispatch.process_identity import process_group_has_live_members
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ready = root / "ready"
+            child = (
+                "import signal,time,pathlib;"
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                f"pathlib.Path({str(ready)!r}).touch();"
+                "time.sleep(30)"
+            )
+            cli = root / "fake_cli.py"
+            cli.write_text(
+                "import subprocess,sys,time,pathlib\n"
+                f"subprocess.Popen([sys.executable,'-c',{child!r}],"
+                "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                f"while not pathlib.Path({str(ready)!r}).exists(): time.sleep(0.01)\n"
+                "print(" + repr('{"summary":"done","confidence":"high","evidence":[]}') + ")\n",
+                encoding="utf-8",
+            )
+            groups = []
+            completed = run_bounded(
+                [sys.executable, str(cli)], cwd=root, timeout_seconds=5,
+                on_spawn=groups.append, lifetime_lock_path=root / "lifetime",
+            )
+            self.assertEqual(completed.returncode, 0)
+            self.assertIn('"summary":"done"', completed.stdout)
+            try:
+                os.killpg(groups[0], 0)
+            except ProcessLookupError:
+                pass
+            else:
+                self.assertIs(process_group_has_live_members(groups[0]), False)
 
     def test_output_limit_terminates_backend(self) -> None:
         completed = run_bounded(

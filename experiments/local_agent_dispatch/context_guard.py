@@ -33,6 +33,8 @@ CREDENTIAL_DIRS = frozenset({".ssh", ".aws", ".gnupg", ".kube"})
 CONTENT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"),
     re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"(?i)\bBearer[ \t]+[A-Za-z0-9._~+/=-]{20,}"),
+    re.compile(r"\b(?:xai-|gsk_)[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bghp_[A-Za-z0-9]{36,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),

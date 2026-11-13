@@ -10,7 +10,7 @@ from typing import Mapping, Sequence
 from .errors import DispatchValidationError
 
 
-_LINES_RE = re.compile(r"^(\d+)(?:\s*-\s*(\d+))?$")
+_LINES_RE = re.compile(r"^L?(\d+)(?:\s*[-–—]\s*L?(\d+))?$")
 
 
 @dataclass(frozen=True)
@@ -80,8 +80,8 @@ def verify_evidence_item(item: EvidenceItem, *, cwd: Path) -> EvidenceItem:
             verified=True,
             verify_note="",
         )
-    match = _LINES_RE.match(item.lines.strip())
-    if not match:
+    matches = [_LINES_RE.fullmatch(part.strip()) for part in item.lines.split(",")]
+    if not all(matches):
         return EvidenceItem(
             file=item.file,
             claim=item.claim,
@@ -89,8 +89,6 @@ def verify_evidence_item(item: EvidenceItem, *, cwd: Path) -> EvidenceItem:
             verified=False,
             verify_note=f"unparseable lines: {item.lines}",
         )
-    start = int(match.group(1))
-    end = int(match.group(2) or match.group(1))
     try:
         total = len(abs_path.read_text(encoding="utf-8").splitlines())
     except (OSError, UnicodeDecodeError):
@@ -101,7 +99,9 @@ def verify_evidence_item(item: EvidenceItem, *, cwd: Path) -> EvidenceItem:
             verified=False,
             verify_note="file unreadable for line check",
         )
-    if start < 1 or end < start or end > total:
+    ranges = [(int(match.group(1)), int(match.group(2) or match.group(1)))
+              for match in matches if match is not None]
+    if any(start < 1 or end < start or end > total for start, end in ranges):
         return EvidenceItem(
             file=item.file,
             claim=item.claim,

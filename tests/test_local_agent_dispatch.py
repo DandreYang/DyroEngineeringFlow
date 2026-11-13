@@ -98,6 +98,32 @@ class TaskContractTests(unittest.TestCase):
             )
 
 
+    def test_user_home_provider_roundtrip_and_validation(self) -> None:
+        payload = {"schema_version": 1, "files": ["src/a.py"],
+                   "task": {name: "review" for name in
+                            ("briefing", "locations", "objective", "constraints", "output_contract")}}
+        self.assertFalse(parse_task_contract(payload).allow_user_home_provider)
+        for value in (False, True):
+            contract = parse_task_contract({**payload, "allow_user_home_provider": value})
+            self.assertEqual(parse_task_contract(contract.to_mapping()), contract)
+            self.assertIs(contract.to_mapping()["allow_user_home_provider"], value)
+        for value in (None, 0, 1, "true", [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(DispatchValidationError, "allow_user_home_provider"):
+                parse_task_contract({**payload, "allow_user_home_provider": value})
+
+    def test_timeout_roundtrip_and_validation(self) -> None:
+        payload = {"schema_version": 1, "files": ["src/a.py"],
+                   "task": {name: "review" for name in
+                            ("briefing", "locations", "objective", "constraints", "output_contract")}}
+        for value in (1, 1800.5):
+            contract = parse_task_contract({**payload, "timeout_seconds": value})
+            self.assertEqual(parse_task_contract(contract.to_mapping()).timeout_seconds, value)
+        self.assertNotIn("timeout_seconds", parse_task_contract(payload).to_mapping())
+        for value in (None, True, 0, -1, float("inf"), float("nan"), "120", 10**1000):
+            with self.subTest(value=value), self.assertRaises(DispatchValidationError):
+                parse_task_contract({**payload, "timeout_seconds": value})
+
+
 class ContextGuardTests(unittest.TestCase):
     def test_path_and_content_guards(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -161,6 +187,33 @@ class LocatorVerifyTests(unittest.TestCase):
             self.assertFalse(items[2].verified)
             self.assertFalse(items[3].verified)
             self.assertEqual(verified_ratio(items), 0.25)
+
+
+    def test_multiple_ranges_and_separator_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "mod.py").write_text("x\n" * 700, encoding="utf-8")
+            for lines in ("265-266, 636-638", "320–620", "L12-L20", "L1—L2, 700"):
+                with self.subTest(lines=lines):
+                    self.assertTrue(verify_evidence(
+                        [{"file": "mod.py", "lines": lines, "claim": "unchecked"}], cwd=root)[0].verified)
+            for lines in ("1-2, 700-701", "0, 1", "20-12", "1,", "Lx", "1-2-3"):
+                with self.subTest(lines=lines):
+                    self.assertFalse(verify_evidence(
+                        [{"file": "mod.py", "lines": lines, "claim": "unchecked"}], cwd=root)[0].verified)
+
+
+class ResultConfidenceTests(unittest.TestCase):
+    def test_failure_confidence_and_partial_patch_roundtrip(self) -> None:
+        from experiments.local_agent_dispatch.result_envelope import build_result, result_from_mapping
+        for status in ("ok", "error", "timeout", "cancelled"):
+            with self.subTest(status=status):
+                result = build_result(run_id="run-test", status=status, summary="test",
+                                      cwd=Path.cwd(), confidence="high", patch_ref="patch.diff")
+                self.assertEqual(result.confidence, "high" if status == "ok" else "low")
+                mapping = result_from_mapping(result.to_mapping(), cwd=Path.cwd()).to_mapping()
+                self.assertEqual(mapping["patch_partial"], status != "ok")
+                self.assertEqual(mapping["patch_ref"], "patch.diff")
 
 
 class ProcessIdentityTests(unittest.TestCase):
