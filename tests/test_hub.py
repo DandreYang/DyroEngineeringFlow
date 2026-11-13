@@ -1328,7 +1328,11 @@ mount = "web"
         self.assertNotIn("openclaw", load(self.root).adapters)
         self.assertEqual(self.root.joinpath("dyro.toml").read_bytes(), before)
 
-    def test_unhealthy_sibling_fail_blocks_opening_a_healthy_line(self) -> None:
+    def test_unhealthy_sibling_fail_does_not_block_opening_a_healthy_line(
+        self,
+    ) -> None:
+        # §4: other-line FAIL line:/hotfix: may be ignored at open; home still
+        # reports the global doctor count, then opens the healthy default.
         self._create_line()
         create_line(load(self.root), line_id="beta", branch="feat/beta", base="main")
         shell(
@@ -1348,15 +1352,13 @@ mount = "web"
             patch("builtins.input", return_value=""),
             redirect_stdout(output),
             redirect_stderr(stderr),
-            self.assertRaises(SystemExit) as raised,
         ):
             main(["--dry-run"])
 
-        self.assertEqual(raised.exception.code, 2)
         rendered = output.getvalue() + stderr.getvalue()
         self.assertIn("检测到 1 个结构问题", rendered)
-        self.assertIn("尚未就绪", rendered)
-        self.assertNotIn("/usr/bin/true", output.getvalue())
+        self.assertNotIn("尚未就绪", rendered)
+        self.assertIn("/usr/bin/true", output.getvalue())
 
     def test_task_open_uses_existing_worktree_without_changing_status(self) -> None:
         self._create_task_worktree()

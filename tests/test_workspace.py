@@ -9,14 +9,18 @@ from dyro.errors import DyroError
 from dyro.home import existing_line_workspace
 from dyro.process import Result
 from dyro.workspace import (
+    OBSERVATION_DEADLINE_FINDING,
+    blocking_line_doctor_failures,
     create_line,
     doctor,
     get_line,
+    is_blocking_line_doctor_finding,
     is_missing_origin_finding,
     line_repository_path,
     line_root,
     list_lines,
     merge_line,
+    merge_lock_path,
     preflight_line,
     spawn_line,
     status_rows,
@@ -226,6 +230,158 @@ class WorkspaceTests(WorkspaceCase):
             main(["--root", str(self.root), "next", "--format", "json"])
         payload = json.loads(next_out.getvalue())
         self.assertEqual(payload["state"], "needs_repair")
+
+    def test_open_and_start_ignore_other_line_fail_but_block_target(self) -> None:
+        from contextlib import redirect_stderr, redirect_stdout
+        from io import StringIO
+        import shutil
+
+        from dyro.cli import main
+
+        publish_origin_branch(self.anchor, "feat/healthy")
+        publish_origin_branch(self.anchor, "feat/broken")
+        config = load(self.root)
+        healthy = create_line(
+            config, line_id="healthy", branch="feat/healthy", base="main"
+        )
+        broken = create_line(
+            config, line_id="broken", branch="feat/broken", base="main"
+        )
+        shutil.rmtree(line_repository_path(config, broken, "api"))
+        findings = doctor(config)
+        self.assertTrue(
+            any(item.startswith("FAIL line:broken/") for item in findings),
+            findings,
+        )
+        self.assertFalse(
+            any(item.startswith("FAIL line:healthy/") for item in findings),
+            findings,
+        )
+        # Other-line FAIL is visible globally but does not block the target.
+        line, workspace = existing_line_workspace(config, "healthy", "line")
+        self.assertEqual(line.id, "healthy")
+        self.assertTrue(workspace.is_dir())
+        self.assertEqual(
+            blocking_line_doctor_failures(config, healthy, findings=findings),
+            [],
+        )
+        self.assertTrue(
+            any(
+                is_blocking_line_doctor_finding(item, broken)
+                for item in findings
+                if item.startswith("FAIL")
+            ),
+            findings,
+        )
+        with self.assertRaisesRegex(DyroError, "broken|尚未就绪"):
+            existing_line_workspace(config, "broken", "line")
+
+        start_out = StringIO()
+        start_err = StringIO()
+        with redirect_stdout(start_out), redirect_stderr(start_err):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "--dry-run",
+                    "start",
+                    "--line",
+                    "healthy",
+                    "--agent",
+                    "noop",
+                ]
+            )
+        self.assertNotIn("尚未就绪", start_out.getvalue() + start_err.getvalue())
+
+        with (
+            redirect_stdout(StringIO()),
+            redirect_stderr(StringIO()),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "--dry-run",
+                    "start",
+                    "--line",
+                    "broken",
+                    "--agent",
+                    "noop",
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_line_doctor_filter_keeps_external_repo_deadline_and_root(self) -> None:
+        publish_origin_branch(self.anchor, "feat/alpha")
+        config = load(self.root)
+        line = create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        synthetic = [
+            "FAIL line:other/api: missing worktree",
+            "FAIL hotfix:patch/api: missing worktree",
+            "FAIL line:alpha/api: missing worktree",
+            "FAIL external Profile requires require_signed_execution",
+            "FAIL repository api: missing or not Git: /tmp/api",
+            "FAIL repository unused: missing or not Git: /tmp/unused",
+            "FAIL workspace root is a Git repository",
+            OBSERVATION_DEADLINE_FINDING,
+            "WARN line:other/api: missing origin/feat/other",
+        ]
+        blocked = [
+            item
+            for item in synthetic
+            if is_blocking_line_doctor_finding(item, line)
+        ]
+        self.assertEqual(
+            blocked,
+            [
+                "FAIL line:alpha/api: missing worktree",
+                "FAIL external Profile requires require_signed_execution",
+                "FAIL repository api: missing or not Git: /tmp/api",
+                "FAIL workspace root is a Git repository",
+                OBSERVATION_DEADLINE_FINDING,
+            ],
+        )
+        self.assertFalse(
+            is_blocking_line_doctor_finding(
+                "FAIL repository unused: missing or not Git: /tmp/unused", line
+            )
+        )
+        self.assertFalse(
+            is_blocking_line_doctor_finding(
+                "FAIL line:other/api: missing worktree", line
+            )
+        )
+
+    def test_doctor_does_not_report_merge_lock_when_retired_tombstone_exists(
+        self,
+    ) -> None:
+        config = load(self.root)
+        retired = self.root / ".dyro" / "lines" / "retired"
+        retired.mkdir(parents=True, exist_ok=True)
+        (retired / "gone.toml").write_text(
+            "schema_version = 2\n"
+            'id = "gone"\n'
+            'kind = "line"\n'
+            'branch = "feat/gone"\n'
+            'base = "main"\n'
+            'repositories = ["api"]\n',
+            encoding="utf-8",
+        )
+        lock = merge_lock_path(config, "gone")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text("held\n", encoding="utf-8")
+        findings = doctor(config)
+        joined = "\n".join(findings)
+        self.assertNotIn("merge.lock", joined)
+        self.assertFalse(
+            any("gone" in item and "lock" in item.lower() for item in findings),
+            findings,
+        )
+        self.assertFalse(
+            any("residue" in item.lower() or "anomaly" in item.lower() for item in findings),
+            findings,
+        )
 
     def test_doctor_fails_when_one_repo_missing_origin_feat(self) -> None:
         web = self.root / "repositories/web"

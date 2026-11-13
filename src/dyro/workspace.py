@@ -11,6 +11,20 @@ from typing import Iterable, Mapping
 
 from .config import Config, external_security_errors, validate_id
 from .errors import DyroError, ValidationError
+from .line_ops import (
+    TERMINAL_PHASES,
+    anchor_locks,
+    create_op,
+    finish_op,
+    find_unfinished_op,
+    load_op,
+    line_identity_lock,
+    record_repo_intent,
+    record_repo_result,
+    require_compatible_options,
+    require_no_unfinished_op,
+    update_repo_phase,
+)
 from .process import git, git_read, require_ok
 from .read_limits import (
     ReadBudget,
@@ -483,6 +497,9 @@ def _build_line(
         raise ValidationError("branch 与 base 都必须明确指定")
     if kind not in ("line", "hotfix"):
         raise ValidationError("kind 只能是 line 或 hotfix")
+    tombstone = config.lines_state_dir / "retired" / f"{line_id}.toml"
+    if tombstone.exists() or tombstone.is_symlink():
+        raise DyroError(f"开发线 ID 已退役，不可复用：{line_id}")
     if _state_path(config, kind, line_id).exists():
         raise DyroError(f"开发线已登记：{line_id}")
     selected = tuple(repositories or config.repositories.keys())
@@ -598,17 +615,24 @@ def create_line(
     dry_run: bool = False,
 ) -> Line:
     """Create isolated linked worktrees from configured repository anchors."""
-    line = _build_line(
-        config,
-        line_id=line_id,
-        branch=branch,
-        base=base,
-        repositories=repositories,
-        repository_bases=repository_bases,
-        storage_modes=storage_modes,
-        kind=kind,
-        parent=parent,
-    )
+    with line_identity_lock(config):
+        line = _build_line(
+            config,
+            line_id=line_id,
+            branch=branch,
+            base=base,
+            repositories=repositories,
+            repository_bases=repository_bases,
+            storage_modes=storage_modes,
+            kind=kind,
+            parent=parent,
+        )
+        with anchor_locks(config, line.repositories):
+            return _create_line_worktrees(config, line, dry_run=dry_run)
+
+
+def _create_line_worktrees(config: Config, line: Line, *, dry_run: bool) -> Line:
+    """Create and roll back only while the caller holds L0 and every L2."""
     planned = _plan_line_creation(config, line)
 
     created: list[str] = []
@@ -698,41 +722,43 @@ def spawn_line(
     dry_run: bool = False,
 ) -> Line:
     """Create a child line from an existing parent line. No fetch, no push."""
-    parent = get_line(config, parent_id)
-    child_id = resolve_spawn_child_id(parent.id, child)
-    if repositories is None:
-        selected = parent.repositories
-    else:
-        selected = tuple(repositories)
-        if not selected:
-            raise ValidationError("至少选择一个仓库")
-        extra = [repo_id for repo_id in selected if repo_id not in parent.repositories]
-        if extra:
-            raise ValidationError(
-                f"子线仓库必须是父线 {parent.id} 仓库的子集：{', '.join(extra)}"
+    with line_identity_lock(config):
+        parent = get_line(config, parent_id)
+        child_id = resolve_spawn_child_id(parent.id, child)
+        if repositories is None:
+            selected = parent.repositories
+        else:
+            selected = tuple(repositories)
+            if not selected:
+                raise ValidationError("至少选择一个仓库")
+            extra = [repo_id for repo_id in selected if repo_id not in parent.repositories]
+            if extra:
+                raise ValidationError(
+                    f"子线仓库必须是父线 {parent.id} 仓库的子集：{', '.join(extra)}"
+                )
+        with anchor_locks(config, selected):
+            bases = {repo_id: _spawn_base_for(config, parent, repo_id) for repo_id in selected}
+            default_base = bases[selected[0]]
+            repository_bases = {
+                repo_id: base for repo_id, base in bases.items() if base != default_base
+            }
+            storage_modes = {
+                repo_id: parent.storage_for(repo_id)
+                for repo_id in selected
+                if parent.storage_for(repo_id) != "linked-worktree"
+            }
+            line = _build_line(
+                config,
+                line_id=child_id,
+                branch=f"feat/{child_id}",
+                base=default_base,
+                repositories=selected,
+                repository_bases=repository_bases,
+                storage_modes=storage_modes,
+                kind="line",
+                parent=parent.id,
             )
-    bases = {repo_id: _spawn_base_for(config, parent, repo_id) for repo_id in selected}
-    default_base = bases[selected[0]]
-    repository_bases = {
-        repo_id: base for repo_id, base in bases.items() if base != default_base
-    }
-    storage_modes = {
-        repo_id: parent.storage_for(repo_id)
-        for repo_id in selected
-        if parent.storage_for(repo_id) != "linked-worktree"
-    }
-    line = create_line(
-        config,
-        line_id=child_id,
-        branch=f"feat/{child_id}",
-        base=default_base,
-        repositories=selected,
-        repository_bases=repository_bases,
-        storage_modes=storage_modes,
-        kind="line",
-        parent=parent.id,
-        dry_run=dry_run,
-    )
+            line = _create_line_worktrees(config, line, dry_run=dry_run)
     if not dry_run:
         from .events import append_event
 
@@ -920,17 +946,27 @@ def _merge_line_repositories(
         merge_lock_path(config, lock_line_id),
         timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS,
     ):
-        _merge_line_repositories_locked(
-            config,
-            target=target,
-            source=source,
-            repositories=repositories,
-            message=message,
-            phase=phase,
-            push=push,
-            dry_run=dry_run,
-            extra_ledger=extra_ledger,
-        )
+        with anchor_locks(
+            config, repositories, timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS
+        ):
+            if get_line(config, target.id) != target or get_line(config, source.id) != source:
+                raise DyroError("开发线清单已变化，请重新运行合并或同步")
+            require_no_unfinished_op(config, target.id, kinds=MERGE_OP_KINDS)
+            for line in (target, source):
+                require_no_unfinished_op(config, line.id, kinds=["retire"])
+            _require_line_worktrees(config, target, clean=True, label="目标开发线")
+            _require_line_worktrees(config, source, clean=False, label="源开发线")
+            _merge_line_repositories_locked(
+                config,
+                target=target,
+                source=source,
+                repositories=repositories,
+                message=message,
+                phase=phase,
+                push=push,
+                dry_run=dry_run,
+                extra_ledger=extra_ledger,
+            )
 
 
 def _merge_line_repositories_locked(
@@ -1096,34 +1132,40 @@ def merge_line(
         raise DyroError(
             f"只能将子线合并到其直接父线：{child.id} 的父线是 {child.parent}，不是 {parent.id}"
         )
+    require_no_unfinished_op(config, parent.id, kinds=MERGE_OP_KINDS)
     _require_line_worktrees(config, parent, clean=True, label="父开发线")
     _require_line_worktrees(config, child, clean=False, label="子开发线")
     blocking = _child_blocking_doctor_findings(config, child)
     if blocking:
         raise DyroError(f"子线 {child.id} 未通过 doctor，拒绝合并：{blocking[0]}")
-    _merge_line_repositories(
+    missing = set(child.repositories) - set(parent.repositories)
+    if missing:
+        raise DyroError(f"仓库不在目标开发线 {parent.id} 上：{', '.join(sorted(missing))}")
+    _refuse_anchor_reference_targets(parent, child.repositories)
+    _run_journaled_line_merge(
         config,
+        kind="merge",
         target=parent,
         source=child,
-        repositories=child.repositories,
-        lock_line_id=parent.id,
+        repositories=tuple(sorted(child.repositories)),
         message=f"merge(line): {child.id} -> {parent.id}",
-        phase="line_merge",
+        effective_options={
+            "integration": "into",
+            "allow_partial": False,
+            "source": child.id,
+            "target": parent.id,
+        },
+        event_kind="merge",
+        event_actor=child.id,
+        event_subject=parent.id,
+        event_family=parent.id,
+        partial=False,
+        excluded=(),
+        ledger_subject_id=child.id,
+        ledger_extra={"parent": parent.id, "child": child.id},
         push=push,
         dry_run=dry_run,
-        extra_ledger={"parent": parent.id, "child": child.id},
     )
-    if not dry_run:
-        from .events import append_event
-
-        append_event(
-            config,
-            kind="merge",
-            actor=child.id,
-            subject=parent.id,
-            family=parent.id,
-            facts={"parent": parent.id, "child": child.id},
-        )
 
 
 def sync_line(
@@ -1139,6 +1181,7 @@ def sync_line(
     if not child.parent:
         raise DyroError(f"开发线 {child.id} 没有父线，无法同步")
     parent = get_line(config, child.parent)
+    require_no_unfinished_op(config, child.id, kinds=MERGE_OP_KINDS)
     _require_line_worktrees(config, child, clean=True, label="子开发线")
     _require_line_worktrees(config, parent, clean=False, label="父开发线")
     _merge_line_repositories(
@@ -1164,6 +1207,1188 @@ def sync_line(
             family=parent.id,
             facts={"parent": parent.id, "child": child.id},
         )
+
+
+MERGE_OP_KINDS = frozenset({"merge", "merge_into_base"})
+_MERGE_KNOWN_OUTCOMES = frozenset(
+    {"not_started", "committed", "already_included", "rolled_back"}
+)
+_GIT_IN_PROGRESS_NAMES = (
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REBASE_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+)
+
+
+@dataclass(frozen=True)
+class LineMergeResult:
+    op_id: str
+    target_id: str
+    source_id: str
+    repositories: tuple[str, ...]
+    excluded_repositories: tuple[str, ...]
+    partial: bool
+    outcomes: Mapping[str, str]
+    dry_run: bool = False
+
+
+def _repos_digest(repositories: Iterable[str]) -> str:
+    digest = "+".join(sorted(set(repositories)))
+    return digest[:80]
+
+
+def _is_ancestor(repo: Path, maybe_ancestor: str, head: str = "HEAD") -> bool:
+    return git(repo, "merge-base", "--is-ancestor", maybe_ancestor, head).code == 0
+
+
+def _head_sha(repo: Path) -> str:
+    return require_ok(git(repo, "rev-parse", "HEAD"), f"读取 {repo} HEAD").stdout.strip()
+
+
+def _has_merge_head(repo: Path) -> bool:
+    return git(repo, "rev-parse", "--verify", "-q", "MERGE_HEAD").code == 0
+
+
+def _git_in_progress(repo: Path) -> bool:
+    if any(
+        git(repo, "rev-parse", "--verify", "-q", name).code == 0
+        for name in _GIT_IN_PROGRESS_NAMES
+    ):
+        return True
+    git_dir = require_ok(
+        git(repo, "rev-parse", "--git-dir"), f"读取 {repo} git-dir"
+    ).stdout.strip()
+    root = Path(git_dir) if Path(git_dir).is_absolute() else repo / git_dir
+    return (root / "rebase-merge").exists() or (root / "rebase-apply").exists()
+
+
+def _refuse_anchor_reference_targets(target: Line, repositories: Iterable[str]) -> None:
+    blocked = [
+        repo_id
+        for repo_id in repositories
+        if target.storage_for(repo_id) == "anchor-reference"
+    ]
+    if blocked:
+        raise DyroError(
+            "Wave 1 拒绝对 anchor-reference 目标执行 git merge："
+            + ", ".join(blocked)
+        )
+
+
+def _intersection_repositories(
+    target: Line, source: Line
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    shared = tuple(sorted(set(target.repositories) & set(source.repositories)))
+    if not shared:
+        raise DyroError(
+            f"开发线 {source.id} 与 {target.id} 没有可合入的仓库交集"
+        )
+    excluded = tuple(sorted(set(source.repositories) - set(target.repositories)))
+    return shared, excluded
+
+
+def _ledger_has_op_repo(config: Config, *, op_id: str, repository: str) -> bool:
+    if not config.ledger_file.exists():
+        return False
+    try:
+        lines = config.ledger_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for raw in lines:
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if (
+            isinstance(row, dict)
+            and row.get("op_id") == op_id
+            and row.get("repository") == repository
+        ):
+            return True
+    return False
+
+
+def _event_has_op_id(config: Config, op_id: str) -> bool:
+    from .events import read_events_fail_closed
+
+    return any(
+        isinstance(event.get("facts"), dict) and event["facts"].get("op_id") == op_id
+        for event in read_events_fail_closed(config)
+    )
+
+
+def _merge_manual_recovery_commands(
+    repo_id: str, target_path: Path, original_head: str, *, has_merge_head: bool
+) -> list[str]:
+    quoted = str(target_path)
+    commands = []
+    if has_merge_head:
+        commands.append(f"git -C {quoted} merge --abort")
+    commands.append(
+        f"先把要保留的提交另存：git -C {quoted} branch <keep-name> HEAD"
+    )
+    commands.append(
+        f"破坏性：git -C {quoted} reset --hard {original_head}"
+        f"（会丢弃工作区未提交改动；仓 {repo_id}）"
+    )
+    commands.append(
+        "不要手动完成合并提交来收口；回到 original_head 后重跑 "
+        "`dyro line merge … --recover`，再以新 op 重新合并"
+    )
+    return commands
+
+
+def _write_merge_ledger_row(
+    config: Config,
+    *,
+    subject_id: str,
+    phase: str,
+    repository: str,
+    op_id: str,
+    branch: str,
+    source_head: str,
+    previous_head: str,
+    result_head: str,
+    outcome: str,
+    extra: Mapping[str, object] | None = None,
+) -> None:
+    if _ledger_has_op_repo(config, op_id=op_id, repository=repository):
+        return
+    fields = dict(extra or {})
+    _line_ledger(
+        config,
+        subject_id,
+        phase,
+        repository=repository,
+        op_id=op_id,
+        branch=branch,
+        source_head=source_head,
+        previous_head=previous_head,
+        result_head=result_head,
+        outcome=outcome,
+        **fields,
+    )
+
+
+def _require_anchor_base_ready(
+    config: Config, repo_id: str, *, base_ref: str
+) -> Path:
+    anchor = repository_path(config, repo_id)
+    inside = git(anchor, "rev-parse", "--is-inside-work-tree")
+    if inside.code != 0 or inside.stdout.strip() != "true":
+        raise DyroError(f"基线仓不是 Git worktree：{anchor}")
+    dirty = require_ok(
+        git(anchor, "status", "--porcelain=v1", "-uall"), f"读取 {repo_id} 基线状态"
+    ).stdout.strip()
+    if dirty:
+        raise DyroError(f"基线仓不干净，拒绝合入：{anchor}")
+    current = require_ok(
+        git(anchor, "branch", "--show-current"), f"读取 {repo_id} 基线分支"
+    ).stdout.strip()
+    if current != base_ref:
+        raise DyroError(
+            f"基线仓当前分支为 {current or 'DETACHED'}，期望 {base_ref}；"
+            "不会自动 checkout"
+        )
+    if _git_in_progress(anchor):
+        raise DyroError(f"基线仓有进行中的 Git 操作，拒绝合入：{anchor}")
+    return anchor
+
+
+def _resolve_merge_into_base_refs(
+    config: Config,
+    line: Line,
+    repositories: tuple[str, ...],
+    *,
+    base_ref: str | None,
+    policy_default: bool,
+) -> dict[str, str]:
+    if base_ref and policy_default:
+        raise ValidationError("--base-ref 与 --policy-default 不能同时使用")
+    resolved: dict[str, str] = {}
+    for repo_id in repositories:
+        if policy_default:
+            resolved[repo_id] = config.policy.default_base
+        elif base_ref:
+            resolved[repo_id] = base_ref
+        else:
+            resolved[repo_id] = line.base_for(repo_id)
+    return resolved
+
+
+def _prepare_cross_merge_plans(
+    config: Config,
+    *,
+    target_paths: Mapping[str, Path],
+    source: Line,
+    repositories: tuple[str, ...],
+) -> tuple[_LineMergePlan, ...]:
+    plans: list[_LineMergePlan] = []
+    for repo_id in repositories:
+        target_path = target_paths[repo_id]
+        source_path = line_repository_path(config, source, repo_id)
+        source_head = require_ok(
+            git(source_path, "rev-parse", "HEAD"), f"读取 {repo_id} 源 HEAD"
+        ).stdout.strip()
+        original_head = require_ok(
+            git(target_path, "rev-parse", "HEAD"), f"读取 {repo_id} 目标 HEAD"
+        ).stdout.strip()
+        plans.append(_LineMergePlan(repo_id, target_path, source_head, original_head))
+    return tuple(plans)
+
+
+def _probe_line_merge_plans(plans: tuple[_LineMergePlan, ...]) -> None:
+    probed: list[_LineMergePlan] = []
+    try:
+        for plan in plans:
+            probed.append(plan)
+            result = git(
+                plan.target,
+                "merge",
+                "--no-ff",
+                "--no-commit",
+                plan.source_head,
+                timeout=300,
+            )
+            if result.code != 0:
+                raise DyroError(
+                    f"预检合并 {plan.repository} 存在冲突，拒绝合并"
+                    + (f"\n{result.stdout.strip()}" if result.stdout.strip() else "")
+                )
+    except DyroError:
+        recovery_failures = _abort_line_merge_probes(probed)
+        if recovery_failures:
+            raise DyroError(
+                "预检合并后清理未完全成功：" + "; ".join(recovery_failures)
+            )
+        raise
+
+
+def _persist_rollback_outcomes(
+    config: Config,
+    op_id: str,
+    plans: tuple[_LineMergePlan, ...],
+    committed_heads: Mapping[str, str],
+    recovery_failures: list[str],
+) -> dict[str, str]:
+    failed_repos = {
+        item.split(":", 1)[0]
+        for item in recovery_failures
+        if ":" in item
+    }
+    outcomes: dict[str, str] = {}
+    for plan in plans:
+        repo_id = plan.repository
+        if repo_id in failed_repos:
+            update_repo_phase(config, op_id, repo_id, phase="unknown", outcome="unknown")
+            outcomes[repo_id] = "unknown"
+            continue
+        current = _head_sha(plan.target)
+        if current != plan.original_head or _has_merge_head(plan.target):
+            update_repo_phase(config, op_id, repo_id, phase="unknown", outcome="unknown")
+            outcomes[repo_id] = "unknown"
+            continue
+        if repo_id not in committed_heads:
+            if "merge" in load_op(config, op_id)["repositories"][repo_id]["steps"]:
+                step = load_op(config, op_id)["repositories"][repo_id]["steps"]["merge"]
+                if "result" not in step:
+                    record_repo_result(
+                        config,
+                        op_id,
+                        repo_id,
+                        "merge",
+                        outcome="not_started",
+                        new_tip=plan.original_head,
+                    )
+            update_repo_phase(
+                config, op_id, repo_id, phase="completed", outcome="not_started"
+            )
+            outcomes[repo_id] = "not_started"
+            continue
+        record_repo_intent(
+            config,
+            op_id,
+            repo_id,
+            "rollback",
+            original_head=plan.original_head,
+            target_sha=plan.original_head,
+            from_head=committed_heads[repo_id],
+        )
+        record_repo_result(
+            config,
+            op_id,
+            repo_id,
+            "rollback",
+            outcome="rolled_back",
+            new_tip=plan.original_head,
+        )
+        update_repo_phase(
+            config, op_id, repo_id, phase="completed", outcome="rolled_back"
+        )
+        outcomes[repo_id] = "rolled_back"
+    return outcomes
+
+
+def _commit_journaled_merge_plans(
+    config: Config,
+    *,
+    op_id: str,
+    plans: tuple[_LineMergePlan, ...],
+    message: str,
+) -> dict[str, str]:
+    committed_heads: dict[str, str] = {}
+    outcomes: dict[str, str] = {}
+    try:
+        for plan in plans:
+            record_repo_intent(
+                config,
+                op_id,
+                plan.repository,
+                "merge",
+                original_head=plan.original_head,
+                target_sha=plan.source_head,
+            )
+            if _has_merge_head(plan.target):
+                require_ok(
+                    git(plan.target, "commit", "-m", message, timeout=300),
+                    f"提交 {plan.repository} 合并",
+                )
+                result_head = _head_sha(plan.target)
+                record_repo_result(
+                    config,
+                    op_id,
+                    plan.repository,
+                    "merge",
+                    outcome="committed",
+                    new_tip=result_head,
+                )
+                update_repo_phase(
+                    config,
+                    op_id,
+                    plan.repository,
+                    phase="completed",
+                    outcome="committed",
+                )
+                committed_heads[plan.repository] = result_head
+                outcomes[plan.repository] = "committed"
+                continue
+            if not _is_ancestor(plan.target, plan.source_head, plan.original_head):
+                raise DyroError(
+                    f"仓库 {plan.repository} 无 MERGE_HEAD 且源提交不是目标祖先，拒绝合入"
+                )
+            record_repo_result(
+                config,
+                op_id,
+                plan.repository,
+                "merge",
+                outcome="already_included",
+                new_tip=plan.original_head,
+            )
+            update_repo_phase(
+                config,
+                op_id,
+                plan.repository,
+                phase="completed",
+                outcome="already_included",
+            )
+            outcomes[plan.repository] = "already_included"
+    except DyroError as exc:
+        recovery_failures = _rollback_line_merges(plans, committed_heads)
+        outcomes.update(
+            _persist_rollback_outcomes(
+                config, op_id, plans, committed_heads, recovery_failures
+            )
+        )
+        if recovery_failures:
+            raise DyroError(
+                f"{exc}\n自动恢复未完全成功：{'; '.join(recovery_failures)}"
+            ) from exc
+        raise
+    return outcomes
+
+
+def _ledger_successful_merge_repos(
+    config: Config,
+    *,
+    op: Mapping[str, object],
+    subject_id: str,
+    branches: Mapping[str, str],
+    extra: Mapping[str, object] | None = None,
+) -> None:
+    op_id = str(op["op_id"])
+    repositories = op["repositories"]
+    if not isinstance(repositories, dict):
+        raise ValidationError("操作日志仓库表格式错误")
+    for repo_id, repo in repositories.items():
+        if not isinstance(repo, dict):
+            continue
+        outcome = str(repo.get("outcome") or "")
+        if outcome not in {"committed", "already_included"}:
+            continue
+        snapshot = repo.get("snapshot") if isinstance(repo.get("snapshot"), dict) else {}
+        source_head = str(snapshot.get("source_head") or "")
+        original_head = str(snapshot.get("original_head") or "")
+        result_head = original_head
+        merge_step = repo.get("steps", {}).get("merge") if isinstance(repo.get("steps"), dict) else None
+        if isinstance(merge_step, dict) and isinstance(merge_step.get("result"), dict):
+            tip = merge_step["result"].get("new_tip")
+            if isinstance(tip, str) and tip:
+                result_head = tip
+        target_path = Path(str(snapshot.get("path") or ""))
+        if outcome == "committed" and (
+            not target_path.exists() or not isinstance(merge_step, dict)
+            or merge_step.get("result", {}).get("outcome") != "committed"
+            or _head_sha(target_path) != result_head or _has_merge_head(target_path)
+        ):
+            raise DyroError(f"{repo_id}: committed 记录与 HEAD 不一致；请 --recover 对账")
+        if outcome == "already_included":
+            if (not target_path.exists() or not source_head
+                    or _head_sha(target_path) != original_head
+                    or _has_merge_head(target_path)
+                    or not _is_ancestor(target_path, source_head)):
+                if op["phase"] not in TERMINAL_PHASES:
+                    update_repo_phase(config, op_id, repo_id, phase="unknown", outcome="unknown")
+                raise DyroError(f"{repo_id}: already_included 核验失败；请 --recover 对账")
+        _write_merge_ledger_row(
+            config,
+            subject_id=subject_id,
+            phase="line_merge",
+            repository=str(repo_id),
+            op_id=op_id,
+            branch=branches[str(repo_id)],
+            source_head=source_head,
+            previous_head=original_head,
+            result_head=result_head,
+            outcome=outcome,
+            extra=extra,
+        )
+
+
+def _append_merge_event_if_needed(
+    config: Config,
+    *,
+    op_id: str,
+    kind: str,
+    actor: str,
+    subject: str,
+    family: str,
+    facts: Mapping[str, object],
+) -> None:
+    if _event_has_op_id(config, op_id):
+        return
+    from .events import append_event
+
+    append_event(
+        config,
+        kind=kind,
+        actor=actor,
+        subject=subject,
+        family=family,
+        facts=facts,
+    )
+
+
+def _create_merge_op(
+    config: Config,
+    *,
+    kind: str,
+    subject_line_ids: Iterable[str],
+    target_id: str,
+    source_id: str,
+    plans: tuple[_LineMergePlan, ...],
+    target_storage: Mapping[str, str],
+    effective_options: Mapping[str, object],
+    event_kind: str,
+    event_actor: str,
+    event_subject: str,
+    event_family: str,
+    partial: bool,
+) -> dict:
+    import uuid
+
+    from .events import validate_event_write
+
+    repos = tuple(plan.repository for plan in plans)
+    op_id = uuid.uuid4().hex
+    event_facts = {
+        "op_id": op_id,
+        "repo_count": len(repos),
+        "repos_digest": _repos_digest(repos),
+        "partial": partial,
+    }
+    validate_event_write(
+        kind=event_kind,
+        actor=event_actor,
+        subject=event_subject,
+        family=event_family,
+        facts=event_facts,
+    )
+    snapshots = {
+        plan.repository: {
+            "path": str(plan.target),
+            "storage_mode": target_storage.get(plan.repository, "linked-worktree"),
+            "original_head": plan.original_head,
+            "source_head": plan.source_head,
+        }
+        for plan in plans
+    }
+    create_op(
+        config,
+        op_id=op_id,
+        kind=kind,
+        subject_line_ids=subject_line_ids,
+        manifest_snapshot={
+            "target": target_id,
+            "source": source_id,
+            "repositories": list(repos),
+            "event": {
+                "kind": event_kind, "actor": event_actor,
+                "subject": event_subject, "family": event_family,
+            },
+        },
+        repos_ordered=repos,
+        effective_options=effective_options,
+        repository_snapshots=snapshots,
+        event_facts=event_facts,
+    )
+    for repo_id in repos:
+        update_repo_phase(
+            config, op_id, repo_id, phase="pending", outcome="not_started"
+        )
+    return load_op(config, op_id)
+
+
+def _run_journaled_line_merge(
+    config: Config,
+    *,
+    kind: str,
+    target: Line | None,
+    source: Line,
+    repositories: tuple[str, ...],
+    message: str,
+    effective_options: Mapping[str, object],
+    event_kind: str,
+    event_actor: str,
+    event_subject: str,
+    event_family: str,
+    partial: bool,
+    excluded: tuple[str, ...],
+    ledger_subject_id: str,
+    ledger_extra: Mapping[str, object] | None = None,
+    push: bool = False,
+    dry_run: bool = False,
+) -> LineMergeResult:
+    repos = repositories
+    target_id = target.id if target else "base"
+    lock_line_id = target.id if target else source.id
+    with exclusive_lock(
+        merge_lock_path(config, lock_line_id),
+        timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS,
+    ):
+        with anchor_locks(
+            config, repos, timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS
+        ):
+            require_no_unfinished_op(config, lock_line_id, kinds=MERGE_OP_KINDS)
+            for line in (source, target):
+                if line is not None:
+                    require_no_unfinished_op(config, line.id, kinds=["retire"])
+            if get_line(config, source.id) != source or (
+                target is not None and get_line(config, target.id) != target
+            ):
+                raise DyroError("开发线清单已变化，请重新运行合并")
+            _require_line_worktrees(config, source, clean=False, label="源开发线")
+            if target is not None:
+                _require_line_worktrees(config, target, clean=True, label="目标开发线")
+                paths = {repo: line_repository_path(config, target, repo) for repo in repos}
+                branches = {repo: target.branch for repo in repos}
+                storage = {repo: target.storage_for(repo) for repo in repos}
+            else:
+                branches = dict(effective_options["base_refs"])
+                paths = {
+                    repo: _require_anchor_base_ready(config, repo, base_ref=branches[repo])
+                    for repo in repos
+                }
+                storage = {repo: "anchor" for repo in repos}
+            for repo, path in paths.items():
+                if target is not None and _git_in_progress(path):
+                    raise DyroError(f"{repo} 有进行中的 Git 操作，拒绝合并")
+            plans = _prepare_cross_merge_plans(
+                config, target_paths=paths, source=source, repositories=repos
+            )
+            if push:
+                for plan in plans:
+                    require_ok(
+                        git(plan.target, "push", "--dry-run", "origin", branches[plan.repository]),
+                        f"预检推送 {plan.repository}",
+                    )
+            if dry_run:
+                _probe_line_merge_plans(plans)
+                failures = _abort_line_merge_probes(plans)
+                if failures:
+                    raise DyroError("预检合并后清理未完全成功：" + "; ".join(failures))
+                return LineMergeResult(
+                    op_id="", target_id=target_id, source_id=source.id,
+                    repositories=repos, excluded_repositories=excluded, partial=partial,
+                    outcomes={repo: "dry_run" for repo in repos}, dry_run=True,
+                )
+            op = _create_merge_op(
+                config,
+                kind=kind,
+                subject_line_ids=(lock_line_id,),
+                target_id=target_id,
+                source_id=source.id,
+                plans=plans,
+                target_storage=storage,
+                effective_options=effective_options,
+                event_kind=event_kind,
+                event_actor=event_actor,
+                event_subject=event_subject,
+                event_family=event_family,
+                partial=partial,
+            )
+            op_id = op["op_id"]
+            try:
+                _probe_line_merge_plans(plans)
+                outcomes = _commit_journaled_merge_plans(
+                    config, op_id=op_id, plans=plans, message=message
+                )
+            except DyroError:
+                op = load_op(config, op_id)
+                if all(
+                    isinstance(repo, dict)
+                    and str(repo.get("outcome")) in _MERGE_KNOWN_OUTCOMES
+                    for repo in op["repositories"].values()
+                ):
+                    try:
+                        finish_op(config, op_id, phase="aborted")
+                    except DyroError:
+                        pass
+                raise
+            op = load_op(config, op_id)
+            if effective_options.get("integration") == "into":
+                ledger_extra = dict(
+                    ledger_extra or {}, pushed=push,
+                    changeset_id=_record_line_merge_changeset(config, target, repos),
+                )
+            _ledger_successful_merge_repos(
+                config,
+                op=op,
+                subject_id=ledger_subject_id,
+                branches=branches,
+                extra=ledger_extra,
+            )
+            finish_op(config, op_id, phase="completed")
+            if push:
+                pushed: list[str] = []
+                for plan in plans:
+                    result = git(plan.target, "push", "origin", branches[plan.repository])
+                    if result.code != 0:
+                        _line_ledger(
+                            config, source.id, "push_failed", repository=plan.repository,
+                            pushed_repositories=pushed, error=result.stdout.strip(),
+                            **dict(ledger_extra or {}),
+                        )
+                        raise DyroError(
+                            f"推送 {plan.repository} 失败；本地合并已保留，已推送仓库："
+                            f"{', '.join(pushed) or '-'}\n{result.stdout.strip()}"
+                        )
+                    pushed.append(plan.repository)
+    _append_merge_event_if_needed(
+        config,
+        op_id=op_id,
+        kind=event_kind,
+        actor=event_actor,
+        subject=event_subject,
+        family=event_family,
+        facts=dict(load_op(config, op_id)["event_facts"]),
+    )
+    return LineMergeResult(
+        op_id=op_id,
+        target_id=target_id,
+        source_id=source.id,
+        repositories=repos,
+        excluded_repositories=excluded,
+        partial=partial,
+        outcomes=outcomes,
+    )
+
+
+def merge_line_from(
+    config: Config,
+    target_id: str,
+    source_id: str,
+    *,
+    allow_partial: bool = False,
+    push: bool = False,
+    dry_run: bool = False,
+) -> LineMergeResult:
+    """Merge source line tips into target line worktrees without changing parent."""
+    if push:
+        raise DyroError("跨线 merge --from 暂不支持 --push")
+    _require_push_allowed(config, push=push)
+    target = get_line(config, target_id)
+    source = get_line(config, source_id)
+    if target.id == source.id:
+        raise DyroError("不能将开发线合并到自身")
+    require_no_unfinished_op(config, target.id, kinds=MERGE_OP_KINDS)
+    repositories, excluded = _intersection_repositories(target, source)
+    partial = bool(excluded)
+    _refuse_anchor_reference_targets(target, repositories)
+    _require_line_worktrees(config, target, clean=True, label="目标开发线")
+    _require_line_worktrees(config, source, clean=False, label="源开发线")
+    return _run_journaled_line_merge(
+        config,
+        kind="merge",
+        target=target,
+        source=source,
+        repositories=repositories,
+        message=f"merge(line): {source.id} -> {target.id}",
+        effective_options={
+            "allow_partial": allow_partial,
+            "integration": "from",
+            "source": source.id,
+            "target": target.id,
+        },
+        event_kind="merge_cross",
+        event_actor=source.id,
+        event_subject=target.id,
+        event_family=target.id,
+        partial=partial,
+        excluded=excluded,
+        ledger_subject_id=source.id,
+        ledger_extra={"target": target.id, "source": source.id},
+        dry_run=dry_run,
+    )
+
+
+def merge_line_into_base(
+    config: Config,
+    line_id: str,
+    *,
+    base_ref: str | None = None,
+    policy_default: bool = False,
+    repositories: Iterable[str] | None = None,
+    push: bool = False,
+    dry_run: bool = False,
+) -> LineMergeResult:
+    """Merge a line into currently checked-out baseline branches on anchors."""
+    if push:
+        raise DyroError("merge-into-base 暂不支持 --push")
+    _require_push_allowed(config, push=push)
+    line = get_line(config, line_id)
+    require_no_unfinished_op(config, line.id, kinds=MERGE_OP_KINDS)
+    selected = tuple(repositories) if repositories is not None else line.repositories
+    if not selected:
+        raise ValidationError("至少选择一个仓库")
+    missing = [repo_id for repo_id in selected if repo_id not in line.repositories]
+    if missing:
+        raise DyroError(f"仓库不在开发线 {line.id} 上：{', '.join(missing)}")
+    selected = tuple(sorted(set(selected)))
+    base_refs = _resolve_merge_into_base_refs(
+        config,
+        line,
+        selected,
+        base_ref=base_ref,
+        policy_default=policy_default,
+    )
+    anchor_ref_repos = [
+        repo_id
+        for repo_id in selected
+        if line.storage_for(repo_id) == "anchor-reference"
+    ]
+    if anchor_ref_repos:
+        raise DyroError(
+            "merge-into-base 拒绝 anchor-reference 仓库（源与基线同为 anchor）："
+            + ", ".join(anchor_ref_repos)
+        )
+    _require_line_worktrees(config, line, clean=False, label="源开发线")
+    return _run_journaled_line_merge(
+        config,
+        kind="merge_into_base",
+        target=None,
+        source=line,
+        repositories=selected,
+        message=f"merge(line): {line.id} -> base",
+        effective_options={
+            "integration": "into_base",
+            "base_ref": base_ref or "",
+            "policy_default": policy_default,
+            "base_refs": base_refs,
+        },
+        event_kind="merge_cross",
+        event_actor=line.id,
+        event_subject=line.id,
+        event_family=line.parent or line.id,
+        partial=False,
+        excluded=(),
+        ledger_subject_id=line.id,
+        ledger_extra={"target": "base", "source": line.id},
+        dry_run=dry_run,
+    )
+
+
+def _reconcile_merge_repo(
+    config: Config,
+    op: dict,
+    repo_id: str,
+    *,
+    report: list[str],
+) -> str:
+    repo = op["repositories"][repo_id]
+    snapshot = repo.get("snapshot") if isinstance(repo.get("snapshot"), dict) else {}
+    target_path = Path(str(snapshot.get("path") or ""))
+    original_head = str(snapshot.get("original_head") or "")
+    source_head = str(snapshot.get("source_head") or "")
+    steps = repo.get("steps") if isinstance(repo.get("steps"), dict) else {}
+    merge_step = steps.get("merge") if isinstance(steps, dict) else None
+    merge_result = (
+        merge_step.get("result")
+        if isinstance(merge_step, dict) and isinstance(merge_step.get("result"), dict)
+        else None
+    )
+    rollback = steps.get("rollback") if isinstance(steps, dict) else None
+    current_outcome = str(repo.get("outcome") or "")
+
+    if not target_path.exists() or not original_head:
+        update_repo_phase(config, op["op_id"], repo_id, phase="unknown", outcome="unknown")
+        report.append(f"{repo_id}: unknown（目标路径或 original_head 不可用）")
+        return "unknown"
+
+    try:
+        head = _head_sha(target_path)
+    except DyroError:
+        update_repo_phase(config, op["op_id"], repo_id, phase="unknown", outcome="unknown")
+        report.append(f"{repo_id}: unknown（无法读取 HEAD）")
+        return "unknown"
+
+    has_merge = _has_merge_head(target_path)
+    result_head = ""
+    if isinstance(merge_result, dict):
+        tip = merge_result.get("new_tip")
+        if isinstance(tip, str):
+            result_head = tip
+        merge_outcome = str(merge_result.get("outcome") or "")
+    else:
+        merge_outcome = ""
+
+    # unknown is sticky only for one pass; always re-enter the table.
+    if isinstance(rollback, dict) and isinstance(rollback.get("result"), dict):
+        if str(rollback["result"].get("outcome")) == "rolled_back":
+            if head == original_head and not has_merge:
+                update_repo_phase(
+                    config, op["op_id"], repo_id, phase="completed", outcome="rolled_back"
+                )
+                report.append(f"{repo_id}: rolled_back（已调和）")
+                return "rolled_back"
+            update_repo_phase(
+                config, op["op_id"], repo_id, phase="unknown", outcome="unknown"
+            )
+            report.append(f"{repo_id}: unknown（标记 rolled_back 但 HEAD 已漂移）")
+            for command in _merge_manual_recovery_commands(
+                repo_id, target_path, original_head, has_merge_head=has_merge
+            ):
+                report.append(f"  手动：{command}")
+            return "unknown"
+
+    if merge_outcome == "committed" and result_head:
+        if head == result_head and not has_merge:
+            update_repo_phase(
+                config, op["op_id"], repo_id, phase="completed", outcome="committed"
+            )
+            report.append(f"{repo_id}: committed（已调和）")
+            return "committed"
+        if head == original_head and not has_merge:
+            record_repo_intent(
+                config,
+                op["op_id"],
+                repo_id,
+                "rollback",
+                original_head=original_head,
+                target_sha=original_head,
+                from_head=result_head,
+            )
+            record_repo_result(
+                config,
+                op["op_id"],
+                repo_id,
+                "rollback",
+                outcome="rolled_back",
+                new_tip=original_head,
+            )
+            update_repo_phase(
+                config, op["op_id"], repo_id, phase="completed", outcome="rolled_back"
+            )
+            report.append(f"{repo_id}: rolled_back（合并后已回滚；不补成功 ledger）")
+            return "rolled_back"
+        update_repo_phase(config, op["op_id"], repo_id, phase="unknown", outcome="unknown")
+        report.append(f"{repo_id}: unknown（committed 记录与 HEAD 不一致）")
+        for command in _merge_manual_recovery_commands(
+            repo_id, target_path, original_head, has_merge_head=has_merge
+        ):
+            report.append(f"  手动：{command}")
+        return "unknown"
+
+    if merge_outcome == "already_included" or current_outcome == "already_included":
+        if (
+            head == original_head
+            and not has_merge
+            and source_head
+            and _is_ancestor(target_path, source_head, head)
+        ):
+            update_repo_phase(
+                config,
+                op["op_id"],
+                repo_id,
+                phase="completed",
+                outcome="already_included",
+            )
+            report.append(f"{repo_id}: already_included（已调和）")
+            return "already_included"
+        update_repo_phase(config, op["op_id"], repo_id, phase="unknown", outcome="unknown")
+        report.append(f"{repo_id}: unknown（already_included 核验失败或 HEAD 漂移）")
+        for command in _merge_manual_recovery_commands(
+            repo_id, target_path, original_head, has_merge_head=has_merge
+        ):
+            report.append(f"  手动：{command}")
+        return "unknown"
+
+    if merge_result is None:
+        if has_merge:
+            update_repo_phase(
+                config, op["op_id"], repo_id, phase="unknown", outcome="unknown"
+            )
+            report.append(f"{repo_id}: unknown（存在 MERGE_HEAD）")
+            for command in _merge_manual_recovery_commands(
+                repo_id, target_path, original_head, has_merge_head=True
+            ):
+                report.append(f"  手动：{command}")
+            return "unknown"
+        if head == original_head:
+            if source_head and _is_ancestor(target_path, source_head, head):
+                current = load_op(config, op["op_id"])["repositories"][repo_id]
+                steps_now = current.get("steps") if isinstance(current.get("steps"), dict) else {}
+                merge_now = steps_now.get("merge") if isinstance(steps_now, dict) else None
+                if not isinstance(merge_now, dict):
+                    record_repo_intent(
+                        config,
+                        op["op_id"],
+                        repo_id,
+                        "merge",
+                        original_head=original_head,
+                        target_sha=source_head,
+                    )
+                    merge_now = {"intent": {}}
+                if "result" not in merge_now:
+                    record_repo_result(
+                        config,
+                        op["op_id"],
+                        repo_id,
+                        "merge",
+                        outcome="already_included",
+                        new_tip=original_head,
+                    )
+                update_repo_phase(
+                    config,
+                    op["op_id"],
+                    repo_id,
+                    phase="completed",
+                    outcome="already_included",
+                )
+                report.append(f"{repo_id}: already_included")
+                return "already_included"
+            if isinstance(merge_step, dict) and "result" not in merge_step:
+                record_repo_result(
+                    config,
+                    op["op_id"],
+                    repo_id,
+                    "merge",
+                    outcome="not_started",
+                    new_tip=original_head,
+                )
+            update_repo_phase(
+                config, op["op_id"], repo_id, phase="completed", outcome="not_started"
+            )
+            report.append(
+                f"{repo_id}: not_started；需要合并请重新执行 dyro line merge（新 op）"
+            )
+            return "not_started"
+        update_repo_phase(config, op["op_id"], repo_id, phase="unknown", outcome="unknown")
+        report.append(
+            f"{repo_id}: unknown（无 result 且 HEAD 不等于 original_head；禁止补成功 ledger）"
+        )
+        for command in _merge_manual_recovery_commands(
+            repo_id, target_path, original_head, has_merge_head=False
+        ):
+            report.append(f"  手动：{command}")
+        return "unknown"
+
+    if current_outcome == "rolled_back":
+        if head == original_head and not has_merge:
+            update_repo_phase(
+                config, op["op_id"], repo_id, phase="completed", outcome="rolled_back"
+            )
+            report.append(f"{repo_id}: rolled_back（已调和）")
+            return "rolled_back"
+        update_repo_phase(config, op["op_id"], repo_id, phase="unknown", outcome="unknown")
+        report.append(f"{repo_id}: unknown（rolled_back 但 HEAD 漂移）")
+        return "unknown"
+
+    if current_outcome == "not_started" and head == original_head and not has_merge:
+        update_repo_phase(
+            config, op["op_id"], repo_id, phase="completed", outcome="not_started"
+        )
+        report.append(f"{repo_id}: not_started")
+        return "not_started"
+
+    update_repo_phase(config, op["op_id"], repo_id, phase="unknown", outcome="unknown")
+    report.append(f"{repo_id}: unknown")
+    for command in _merge_manual_recovery_commands(
+        repo_id, target_path, original_head, has_merge_head=has_merge
+    ):
+        report.append(f"  手动：{command}")
+    return "unknown"
+
+
+def recover_line_merge(
+    config: Config,
+    subject_line_id: str,
+    *,
+    op_id: str | None = None,
+    allow_partial: bool | None = None,
+    base_ref: str | None = None,
+    policy_default: bool | None = None,
+    repositories: Iterable[str] | None = None,
+    kinds: Iterable[str] | None = None,
+) -> LineMergeResult:
+    """Report-only merge reconciliation: journal/ledger only, never Git mutation."""
+    selected_kinds = tuple(kinds) if kinds is not None else tuple(MERGE_OP_KINDS)
+    if op_id:
+        op = load_op(config, op_id)
+        if subject_line_id not in op["subject_line_ids"]:
+            raise DyroError(f"操作 {op_id} 不属于开发线 {subject_line_id}")
+        if op["kind"] not in selected_kinds:
+            raise DyroError(f"操作 {op_id} 不是 merge 类操作")
+    else:
+        found = find_unfinished_op(config, subject_line_id, kinds=selected_kinds)
+        if found is None:
+            raise DyroError(f"开发线 {subject_line_id} 没有未完成的 merge 操作")
+        op = found
+        op_id = op["op_id"]
+    supplied: dict[str, object] = {}
+    if allow_partial is not None:
+        supplied["allow_partial"] = allow_partial
+    if base_ref is not None:
+        supplied["base_ref"] = base_ref
+    if policy_default is not None:
+        supplied["policy_default"] = policy_default
+    if repositories is not None and sorted(set(repositories)) != op["repos_ordered"]:
+        raise DyroError(f"恢复选项冲突：repo；journal 冻结值为 {op['repos_ordered']!r}")
+    frozen = require_compatible_options(op, supplied)
+    terminal = op["phase"] in TERMINAL_PHASES
+    report = [f"对账操作 {op_id}（kind={op['kind']}）"]
+    outcomes: dict[str, str] = {}
+    for repo_id in op["repos_ordered"]:
+        outcomes[repo_id] = (
+            op["repositories"][repo_id]["outcome"] if terminal
+            else _reconcile_merge_repo(config, op, repo_id, report=report)
+        )
+    op = load_op(config, op_id)
+    # Stale ledger note when journal says rolled_back/unknown.
+    for repo_id, outcome in outcomes.items():
+        if outcome in {"rolled_back", "unknown", "not_started"} and _ledger_has_op_repo(
+            config, op_id=op_id, repository=repo_id
+        ):
+            report.append(f"{repo_id}: ledger 陈旧（存在 op_id 行但 journal 非成功终态）")
+    success_outcomes = {"committed", "already_included"}
+    if all(outcome in success_outcomes for outcome in outcomes.values()):
+        manifest = op.get("manifest_snapshot") if isinstance(op.get("manifest_snapshot"), dict) else {}
+        if op["kind"] == "merge":
+            target = get_line(config, str(manifest.get("target") or subject_line_id))
+            branches = {repo: target.branch for repo in op["repos_ordered"]}
+            ledger_subject = str(manifest.get("source") or subject_line_id)
+            extra = {
+                "target": str(manifest.get("target") or ""),
+                "source": str(manifest.get("source") or ""),
+            }
+            event_actor = str(manifest.get("source") or subject_line_id)
+            event_subject = str(manifest.get("target") or subject_line_id)
+            event_family = event_subject
+            if frozen.get("integration") == "into":
+                extra = {"parent": event_subject, "child": event_actor}
+        else:
+            branches = frozen["base_refs"]
+            ledger_subject = subject_line_id
+            extra = {"target": "base", "source": subject_line_id}
+            event_actor = subject_line_id
+            event_subject = subject_line_id
+            event_family = subject_line_id
+        _ledger_successful_merge_repos(
+            config,
+            op=load_op(config, op_id),
+            subject_id=ledger_subject,
+            branches=branches,
+            extra=extra,
+        )
+        if not terminal:
+            finish_op(config, op_id, phase="completed")
+        facts = op.get("event_facts") if isinstance(op.get("event_facts"), dict) else {}
+        if "op_id" not in facts:
+            facts = {
+                "op_id": op_id,
+                "repo_count": len(op["repos_ordered"]),
+                "repos_digest": _repos_digest(op["repos_ordered"]),
+                "partial": bool(frozen.get("allow_partial") and False)
+                or bool(facts.get("partial")),
+            }
+        event = manifest.get("event") or {
+            "kind": "merge" if frozen.get("integration") == "into" else "merge_cross",
+            "actor": event_actor, "subject": event_subject, "family": event_family,
+        }
+        _append_merge_event_if_needed(
+            config,
+            op_id=op_id,
+            **event,
+            facts=facts,
+        )
+        report.append(f"操作已 {op['phase'] if terminal else 'completed'}")
+    elif all(outcome in _MERGE_KNOWN_OUTCOMES for outcome in outcomes.values()) and not any(
+        outcome in success_outcomes for outcome in outcomes.values()
+    ):
+        if not terminal:
+            finish_op(config, op_id, phase="aborted")
+        report.append(
+            "操作已 aborted；需要合并请重新执行 dyro line merge（新 op）"
+        )
+    elif all(outcome in _MERGE_KNOWN_OUTCOMES for outcome in outcomes.values()):
+        # Mix of success and rolled_back/not_started after in-process failure.
+        if any(outcome in success_outcomes for outcome in outcomes.values()) and any(
+            outcome in {"rolled_back", "not_started"} for outcome in outcomes.values()
+        ):
+            if not terminal:
+                finish_op(config, op_id, phase="aborted")
+            report.append("操作已 aborted（存在回滚/未开始仓）")
+        else:
+            if not terminal:
+                finish_op(config, op_id, phase="completed")
+            report.append("操作已 completed")
+    else:
+        report.append("仍有 unknown 仓；操作保持打开并继续拦截")
+    for line in report:
+        print(line)
+    manifest = op.get("manifest_snapshot") if isinstance(op.get("manifest_snapshot"), dict) else {}
+    return LineMergeResult(
+        op_id=op_id,
+        target_id=str(manifest.get("target") or subject_line_id),
+        source_id=str(manifest.get("source") or subject_line_id),
+        repositories=tuple(op["repos_ordered"]),
+        excluded_repositories=(),
+        partial=bool(isinstance(op.get("event_facts"), dict) and op["event_facts"].get("partial")),
+        outcomes=outcomes,
+    )
 
 
 def _line_status_scope(line: Line) -> str:
@@ -1564,6 +2789,10 @@ _SAFE_FINDING_ID = r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}"
 _MISSING_ORIGIN_FINDING = re.compile(
     rf"^(?:FAIL|WARN) (?:line|hotfix):{_SAFE_FINDING_ID}/{_SAFE_FINDING_ID}: missing origin/\S+$"
 )
+_LINE_OR_HOTFIX_FAIL = re.compile(
+    rf"^FAIL (?:line|hotfix):({_SAFE_FINDING_ID})/"
+)
+_REPOSITORY_FAIL = re.compile(rf"^FAIL repository ({_SAFE_FINDING_ID}):")
 
 
 def is_missing_origin_finding(finding: str) -> bool:
@@ -1577,13 +2806,58 @@ def is_missing_origin_finding(finding: str) -> bool:
     completion, setup post-doctor, home create-and-open, and
     ``existing_line_workspace`` / ``dyro open`` skip this constructed
     shape so SHA-pinned / local-only lines can exist (and be opened)
-    before the remote-tracking ref is published. Every other doctor FAIL
-    — including workspace-level ``FAIL external Profile requires …`` —
-    still blocks open. ``dyro next`` and ``dyro start`` only stop on FAIL,
-    so a missing-origin WARN is ready.
+    before the remote-tracking ref is published. Workspace-level
+    ``FAIL external Profile requires …``, the target line's own FAIL,
+    and repository / observation-deadline FAILs still block open.
+    ``dyro next`` and ``dyro start`` only stop on FAIL, so a
+    missing-origin WARN is ready. Other lines' ``FAIL line:`` /
+    ``FAIL hotfix:`` findings are filtered at those callers (§4).
     """
     return _MISSING_ORIGIN_FINDING.fullmatch(finding) is not None
 
+
+def is_blocking_line_doctor_finding(finding: str, line: Line) -> bool:
+    """True when a doctor FAIL should block open/start for ``line``.
+
+    Filtering is caller-side: ``doctor`` still scans every line. Other
+    lines' ``FAIL line:`` / ``FAIL hotfix:`` findings may be ignored.
+    Still blocks ``FAIL external…``, the target line's own prefix FAIL,
+    workspace-root FAIL, ``FAIL repository`` for repos the target line
+    uses, observation-deadline FAIL, and any unrecognized FAIL shape.
+    Missing-origin remains a separate skip via
+    ``is_missing_origin_finding``.
+    """
+    if not finding.startswith("FAIL"):
+        return False
+    if is_observation_deadline_finding(finding):
+        return True
+    if finding.startswith("FAIL external"):
+        return True
+    if "workspace root" in finding:
+        return True
+    line_match = _LINE_OR_HOTFIX_FAIL.match(finding)
+    if line_match is not None:
+        return line_match.group(1) == line.id
+    repo_match = _REPOSITORY_FAIL.match(finding)
+    if repo_match is not None:
+        return repo_match.group(1) in line.repositories
+    return True
+
+
+def blocking_line_doctor_failures(
+    config: Config,
+    line: Line,
+    *,
+    findings: list[str] | None = None,
+) -> list[str]:
+    """FAIL findings that block open/start for ``line`` (missing-origin skipped)."""
+    items = doctor(config) if findings is None else findings
+    return [
+        item
+        for item in items
+        if is_blocking_line_doctor_finding(item, line)
+        and not is_missing_origin_finding(item)
+    ]
 
 def stash_doctor_snapshot(budget, lines, observed, complete):
     if budget is not None:
