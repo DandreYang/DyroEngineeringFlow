@@ -7,7 +7,9 @@ from pathlib import Path
 import time
 
 from .config import Config
+from .errors import DyroError
 from .process import git, run
+from .tasks import _require_local_execution
 from .workspace import get_line, line_repository_path, Line
 
 IGNORE_DIFF_PATTERNS = (
@@ -61,6 +63,7 @@ class GateResult:
     passed: bool
     stdout: str
     elapsed_seconds: float
+    skipped_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -97,7 +100,12 @@ def run_line_verify(
     line: Line,
     *,
     dry_run: bool = False,
+    all_repos: bool = False,
+    base: str | None = None,
 ) -> list[GateResult]:
+    _require_local_execution(config, "门禁", dry_run=dry_run)
+    if dry_run and config.policy.execution_mode == "external":
+        raise DyroError("当前 Profile 要求外部隔离执行器；--dry-run 不会在本机执行 verify argv")
     results: list[GateResult] = []
     for repo_id in line.repositories:
         repo_cfg = config.repositories.get(repo_id)
@@ -105,6 +113,9 @@ def run_line_verify(
             continue
         repo_path = line_repository_path(config, line, repo_id)
         if not repo_path.is_dir():
+            continue
+        if not all_repos and not _repo_has_changes(repo_path, line, repo_id, base):
+            results.append(GateResult(repo_id, (), 0, False, "", 0.0, "相对基线无改动"))
             continue
         for cmd in repo_cfg.verify:
             start_time = time.perf_counter()
@@ -124,6 +135,27 @@ def run_line_verify(
     return results
 
 
+def _repo_has_changes(repo_path: Path, line: Line, repo_id: str, base: str | None) -> bool:
+    """Committed or uncommitted changes vs base; unknown counts as changed so verify still runs."""
+    committed = git(repo_path, "diff", f"{_repo_base(repo_path, line, repo_id, base)}...HEAD", "--name-only")
+    if committed.code != 0 or committed.stdout.strip():
+        return True
+    pending = git(repo_path, "status", "--porcelain")
+    return pending.code != 0 or bool(pending.stdout.strip())
+
+
+def _repo_base(repo_path: Path, line: Line, repo_id: str, base: str | None) -> str:
+    actual_base = base or line.base_for(repo_id)
+
+    verify_base = git(repo_path, "rev-parse", "--verify", "-q", actual_base)
+    if verify_base.code != 0:
+        alt_base = f"origin/{actual_base}"
+        if git(repo_path, "rev-parse", "--verify", "-q", alt_base).code == 0:
+            actual_base = alt_base
+
+    return actual_base
+
+
 def analyze_repo_diff(
     config: Config,
     line: Line,
@@ -137,13 +169,7 @@ def analyze_repo_diff(
     if not repo_path.is_dir():
         return None
 
-    actual_base = base or line.base_for(repo_id)
-
-    verify_base = git(repo_path, "rev-parse", "--verify", "-q", actual_base)
-    if verify_base.code != 0:
-        alt_base = f"origin/{actual_base}"
-        if git(repo_path, "rev-parse", "--verify", "-q", alt_base).code == 0:
-            actual_base = alt_base
+    actual_base = _repo_base(repo_path, line, repo_id, base)
 
     branch_res = git(repo_path, "branch", "--show-current")
     branch = branch_res.stdout.strip() or line.branch
@@ -220,6 +246,7 @@ def build_review_pack(
     base: str | None = None,
     scope: str = "contracts",
     run_verify: bool = True,
+    all_repos: bool = False,
     max_lines_per_file: int = 250,
     dry_run: bool = False,
 ) -> str:
@@ -238,8 +265,11 @@ def build_review_pack(
 
     # 1. Verification Gates
     gates_failed = False
-    if run_verify:
-        gate_results = run_line_verify(config, line, dry_run=dry_run)
+    if run_verify and config.policy.execution_mode == "external":
+        sections.append("## 一、 本地静态门禁验证（Verify Gates）")
+        sections.append("> SKIP：当前 Profile 要求外部隔离执行器；已跳过本地 verify。\n")
+    elif run_verify:
+        gate_results = run_line_verify(config, line, dry_run=dry_run, all_repos=all_repos, base=base)
         sections.append("## 一、 本地静态门禁验证（Verify Gates）")
         if not gate_results:
             sections.append("> ℹ️ 当前开发线仓库未配置或未执行本地 verify 门禁。\n")
@@ -247,10 +277,10 @@ def build_review_pack(
             sections.append("| 仓库 | 门禁指令 | 耗时 | 状态 |")
             sections.append("|:---|:---|:---|:---|")
             for gr in gate_results:
-                status_label = "✅ PASS" if gr.passed else "❌ FAIL"
+                status_label = f"⏭ SKIP：{gr.skipped_reason}" if gr.skipped_reason else "✅ PASS" if gr.passed else "❌ FAIL"
                 cmd_str = " ".join(gr.argv)
                 sections.append(f"| `{gr.repo_id}` | `{cmd_str}` | {gr.elapsed_seconds:.2f}s | {status_label} |")
-                if not gr.passed:
+                if not gr.passed and not gr.skipped_reason:
                     gates_failed = True
 
             sections.append("")
@@ -258,7 +288,7 @@ def build_review_pack(
                 sections.append("> 🚨 **门禁阻断告警**：本地静态门禁未全部通过！请优先解决机器检查报错，避免消耗 AI Token 进行无意义的肉眼语法排查。\n")
                 sections.append("### 门禁失败日志摘录")
                 for gr in gate_results:
-                    if not gr.passed:
+                    if not gr.passed and not gr.skipped_reason:
                         snippet = "\n".join(gr.stdout.splitlines()[-25:])
                         sections.append(f"#### `{gr.repo_id}`: `{' '.join(gr.argv)}`")
                         sections.append(f"```text\n{snippet}\n```\n")
