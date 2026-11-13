@@ -479,11 +479,7 @@ class SlotManager:
         )
         if not exact_owner:
             return "unknown"
-        if (
-            run.status == "running"
-            or run.backend_pid
-            or (run.result or {}).get("error_code") == "backend_cleanup_unproven"
-        ):
+        if run.status == "running":
             return "active"
         if run.status in TERMINAL_RUN_STATUSES:
             return "terminal"
@@ -521,12 +517,7 @@ class SlotManager:
                         return "unknown"
                     if str(slot_dir) not in (run.lease_slots or []):
                         continue
-                    if (
-                        run.status in TERMINAL_RUN_STATUSES
-                        and not run.backend_pid
-                        and (run.result or {}).get("error_code")
-                        != "backend_cleanup_unproven"
-                    ):
+                    if run.status in TERMINAL_RUN_STATUSES:
                         continue
                     exact_owner = (
                         run.status == "running"

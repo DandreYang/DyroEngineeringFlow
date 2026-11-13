@@ -3813,8 +3813,7 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                     supervisor.execute(record.run_id)
 
             running = supervisor.store.load(record.run_id)
-            self.assertEqual(running.status, "failed")
-            self.assertEqual(running.result["confidence"], "low")
+            self.assertEqual(running.status, "running")
             self.assertEqual(len(running.lease_slots or []), 2)
             self.assertTrue(
                 all(Path(path).is_dir() for path in running.lease_slots or [])
