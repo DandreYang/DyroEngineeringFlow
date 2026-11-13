@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.7.17 - 2026-11-14
+
+对使用者的影响：开发线可以退役、可以在兄弟线之间合并、可以合回基线，多仓操作中断后能查明每个仓的状态；`dyro next` 认得当前所在的开发线；`dyro dispatch` 失败不再显示为成功。**兼容性注意**：成功执行带 `--push` 的 `line merge`、`line sync` 或 `task merge` 后，目标线清单升级为 schema 4（新增 `[remote_anchors]`）。0.7.16 及更早版本无法解析 schema 4 清单；由于它会扫描全部清单，同一工作区里其他开发线的 `status`、`next`、`line merge` 等命令也会失败。访问同一工作区的所有客户端须一起升级，不承诺降级兼容。新版读取旧清单不迁移、不改文件。
+
+- 新增 `dyro line retire <LINE>`：逐仓保全 `refs/dyro/retired/<line>/<repo>`、移除工作区（不使用 `--force`）、按所有权条件删除本地分支，全部仓完成后归档为墓碑并写事件。支持 `--dry-run`、`--keep-branch`、`--force`、`--integration-ref`、`--missing-ok`、`--recover`。退役线 ID 永不复用，其家族频道只读，线锁文件保留。
+- 新增 `dyro line merge <TARGET> --from <SOURCE>` 与 `dyro line merge-into-base <LINE>`；`--into` 改走同一套带操作日志的流程。源仓多于目标仓时结果标为 `partial` 并默认非 0 退出（`--from` 可用 `--allow-partial`）；源已包含时记为 `already_included`。
+- 多仓操作写 `.dyro/ops/<op_id>.json` 日志：逐仓先记意图再记结果，冻结原命令选项。中断后：`line retire --recover` 只向前继续；`line merge --recover` 只核对并报告、不改 Git，仍有状态不明的仓时退出码为 2。存在未结束的操作时，同一线上的 merge、sync、task merge、retire 会被拒绝。不承诺跨仓原子。
+- 新增身份锁与按仓库的物理锁，覆盖所有改 Git 的入口，锁内重检。
+- `dyro start` 与打开工作区不再被其他开发线的 doctor 故障挡住；仍阻断目标线、外部、仓库与观察超时类故障。
+- `dyro next` 识别当前所在的开发线，统一推送口径；doctor 报告覆盖层模板漂移。
+- `dyro review verify` 遵守外部执行模式、只核验有改动的仓；本地 dry-run 不再伪造通过。doctor 汇报技能分身异常并显示外部占用目标。
+- 新增 Gemini/agy、Qoder、Factory、Trae、Trae CLI、Kiro 技能宿主。
+- `dyro dispatch`：失败不再显示为成功；补齐超时、多段行号与各工具适配；Cursor 可用 CLI 自带登录，修改任务需同时打开 `allow_user_home_provider` 与 `allow_unconfined_provider`。
+
 ## 0.7.16 - 2026-09-13
 
 对使用者的影响：新增开发线增量审查靶区提取与本地门禁核验（`dyro review verify` 与 `dyro review pack`），大幅降低多仓协同中代码审查与 LLM 交互的 Token 消耗与注意力稀释。
