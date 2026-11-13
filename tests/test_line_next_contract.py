@@ -1,8 +1,6 @@
 """First-wave line observations and push contract regression coverage."""
 from dataclasses import replace
-from pathlib import Path
 from unittest.mock import patch
-import unittest
 
 from dyro.config import load, Policy, push_policy_fields, PUSH_DISABLED_NOTE
 from dyro.instructions import render_workspace_overlay, render_line_persona
