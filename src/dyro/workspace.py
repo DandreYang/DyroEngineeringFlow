@@ -1548,6 +1548,10 @@ _SAFE_FINDING_ID = r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}"
 _MISSING_ORIGIN_FINDING = re.compile(
     rf"^(?:FAIL|WARN) (?:line|hotfix):{_SAFE_FINDING_ID}/{_SAFE_FINDING_ID}: missing origin/\S+$"
 )
+_LINE_OR_HOTFIX_FAIL = re.compile(
+    rf"^FAIL (?:line|hotfix):({_SAFE_FINDING_ID})/"
+)
+_REPOSITORY_FAIL = re.compile(rf"^FAIL repository ({_SAFE_FINDING_ID}):")
 
 
 def is_missing_origin_finding(finding: str) -> bool:
@@ -1561,9 +1565,55 @@ def is_missing_origin_finding(finding: str) -> bool:
     completion, setup post-doctor, home create-and-open, and
     ``existing_line_workspace`` / ``dyro open`` skip this constructed
     shape so SHA-pinned / local-only lines can exist (and be opened)
-    before the remote-tracking ref is published. Every other doctor FAIL
-    — including workspace-level ``FAIL external Profile requires …`` —
-    still blocks open. ``dyro next`` and ``dyro start`` only stop on FAIL,
-    so a missing-origin WARN is ready.
+    before the remote-tracking ref is published. Workspace-level
+    ``FAIL external Profile requires …``, the target line's own FAIL,
+    and repository / observation-deadline FAILs still block open.
+    ``dyro next`` and ``dyro start`` only stop on FAIL, so a
+    missing-origin WARN is ready. Other lines' ``FAIL line:`` /
+    ``FAIL hotfix:`` findings are filtered at those callers (§4).
     """
     return _MISSING_ORIGIN_FINDING.fullmatch(finding) is not None
+
+
+def is_blocking_line_doctor_finding(finding: str, line: Line) -> bool:
+    """True when a doctor FAIL should block open/start for ``line``.
+
+    Filtering is caller-side: ``doctor`` still scans every line. Other
+    lines' ``FAIL line:`` / ``FAIL hotfix:`` findings may be ignored.
+    Still blocks ``FAIL external…``, the target line's own prefix FAIL,
+    workspace-root FAIL, ``FAIL repository`` for repos the target line
+    uses, observation-deadline FAIL, and any unrecognized FAIL shape.
+    Missing-origin remains a separate skip via
+    ``is_missing_origin_finding``.
+    """
+    if not finding.startswith("FAIL"):
+        return False
+    if is_observation_deadline_finding(finding):
+        return True
+    if finding.startswith("FAIL external"):
+        return True
+    if "workspace root" in finding:
+        return True
+    line_match = _LINE_OR_HOTFIX_FAIL.match(finding)
+    if line_match is not None:
+        return line_match.group(1) == line.id
+    repo_match = _REPOSITORY_FAIL.match(finding)
+    if repo_match is not None:
+        return repo_match.group(1) in line.repositories
+    return True
+
+
+def blocking_line_doctor_failures(
+    config: Config,
+    line: Line,
+    *,
+    findings: list[str] | None = None,
+) -> list[str]:
+    """FAIL findings that block open/start for ``line`` (missing-origin skipped)."""
+    items = doctor(config) if findings is None else findings
+    return [
+        item
+        for item in items
+        if is_blocking_line_doctor_finding(item, line)
+        and not is_missing_origin_finding(item)
+    ]

@@ -29,7 +29,9 @@ EVENT_KINDS = frozenset(
     {
         "spawn",
         "merge",
+        "merge_cross",
         "sync",
+        "retire",
         "task_status",
         "objective_wave",
         "dispatch",
@@ -344,6 +346,29 @@ def read_event_records_locked(config: Config) -> list[dict[str, object]]:
     return _read_locked_records(events_path(config))
 
 
+def validate_event_write(
+    *,
+    kind: str,
+    actor: str,
+    subject: str,
+    family: str = "",
+    facts: Mapping[str, object] | None = None,
+) -> dict[str, str | int | bool]:
+    """Validate kind and facts with the same rules as ``append_event``.
+
+    Writes nothing.  Callers use this before Git mutations (M0/R0) so a
+    later append cannot invent a different ``EVENT_WRITE_INVALID`` shape.
+    Raises ``EventLogError("EVENT_WRITE_INVALID")`` on the same inputs
+    ``append_event`` would reject.
+    """
+    if kind not in EVENT_KINDS:
+        raise EventLogError("EVENT_WRITE_INVALID")
+    _safe_token(actor)
+    _safe_token(subject)
+    _safe_token(family, allow_empty=True)
+    return _clean_facts(facts)
+
+
 def append_event_locked(
     config: Config,
     *,
@@ -355,12 +380,16 @@ def append_event_locked(
     clock: Callable[[], datetime] | None = None,
 ) -> dict[str, object]:
     """Append one event.  Caller must already hold ``overlay_lock``."""
-    if kind not in EVENT_KINDS:
-        raise EventLogError("EVENT_WRITE_INVALID")
+    cleaned = validate_event_write(
+        kind=kind,
+        actor=actor,
+        subject=subject,
+        family=family,
+        facts=facts,
+    )
     actor = _safe_token(actor)
     subject = _safe_token(subject)
     family = _safe_token(family, allow_empty=True)
-    cleaned = _clean_facts(facts)
     stamp = _utc(clock).strftime("%Y-%m-%dT%H:%M:%SZ")
     path = events_path(config)
     try:

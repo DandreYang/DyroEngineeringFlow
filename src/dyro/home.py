@@ -43,10 +43,10 @@ from .process import git
 from .terminal import danger, muted, success, title, value, warning
 from .workspace import (
     Line,
+    blocking_line_doctor_failures,
     create_line,
     doctor,
     get_line,
-    is_missing_origin_finding,
     line_root,
     list_lines,
     preflight_line,
@@ -747,16 +747,11 @@ def existing_line_workspace(
     config: Config, line_id: str, kind: str | None
 ) -> tuple[Line, Path]:
     line = get_line(config, line_id, kind)
-    # Same FAIL set as `dyro next` → needs_repair, minus the constructed
-    # missing-origin shape. Workspace-level FAILs (external Profile, …)
-    # and other-line FAILs block open; only missing-origin-only may skip
-    # so a just-created local-only line can be opened. start/next refuse
-    # even that skip.
-    failures = [
-        finding
-        for finding in doctor(config)
-        if finding.startswith("FAIL") and not is_missing_origin_finding(finding)
-    ]
+    # Line-scoped FAIL gate (§4): ignore other lines' FAIL line:/hotfix:,
+    # still block external / target-line / workspace-root / used-repo /
+    # observation-deadline FAIL. Missing-origin shape may still skip so a
+    # just-created local-only line can be opened. doctor() stays global.
+    failures = blocking_line_doctor_failures(config, line)
     if failures:
         raise DyroError(
             f"{line.kind} {line.id} 尚未就绪：{failures[0]}。下一步：dyro doctor"
