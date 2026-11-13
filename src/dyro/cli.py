@@ -627,6 +627,13 @@ def _status_payload(
         "partial": partial,
         "rows": [_status_row_payload(row) for row in rows],
     }
+    push_ready = []
+    for line in getattr(read_budget, "_status_lines", []):
+        linked = [repo for repo in line.repositories if line.storage_for(repo) == "linked-worktree"]
+        upstreams = {row[1]: row[4] for row in rows if row[0].split(" ")[0] == f"{line.kind}:{line.id}"}
+        ready = None if not linked or any(repo not in upstreams for repo in linked) else all(upstreams[repo] == f"origin/{line.branch}" for repo in linked)
+        push_ready.append(dict(id=line.id, kind=line.kind, push_ready=ready))
+    payload["line_push_ready"] = push_ready
     payload.update(_observation_timeout_fields(partial=partial))
     return payload
 
@@ -2812,6 +2819,7 @@ def _print_next_workspace_missing(args: argparse.Namespace) -> None:
             commands=[],
             mutation_available=False,
             required_choice="join_existing_or_setup_new",
+            mutation_unavailable_reason="workspace_missing",
         )
         return
     print("尚未发现 Dyro 工作区。")
@@ -2841,6 +2849,27 @@ def cmd_next(args: argparse.Namespace) -> None:
     budget = _control_plane_budget(args) if args.format == "json" else None
     findings = doctor(config, read_budget=budget)
     stash_observation_findings(budget, findings)
+    from .continuation.resolution import next_directory_location
+    from .workspace import next_line_context
+    location_budget = budget or ReadBudget(ObservationLimits())
+    location, target, lines, location_limit = next_directory_location(
+        config, Path.cwd(), location_budget, line=getattr(args, "line", None),
+        explicit_workspace=bool(getattr(args, "workspace_alias", None) or getattr(args, "root", None)))
+    context = None
+    count_limit = None
+    if target is not None:
+        context, count_limit = next_line_context(config, target, lines, budget)
+    limited = location_limit or count_limit
+    extra = {"location": location}
+    if limited:
+        extra.update(partial=True, code=limited.value)
+    if args.format != "json":
+        if location["disagree"]:
+            print(f"工作目录落在 {', '.join(location['cwd_lines'])} 线，观察目标是 {location['targeted_line']} 线。")
+        if target is not None:
+            print(f"当前线 `{target.id}`")
+            if any(is_missing_origin_finding(x) and f"{target.kind}:{target.id}/" in x for x in findings):
+                print("尚未发布。")
     failures = [finding for finding in findings if finding.startswith("FAIL")]
     if failures:
         alias = getattr(args, "workspace_alias", None) or config.name
@@ -2860,12 +2889,15 @@ def cmd_next(args: argparse.Namespace) -> None:
                 commands=commands,
                 diagnostic_commands=[_briefing_command(args, config, "doctor")],
                 mutation_available=bootstrap_applicable,
-                partial=partial,
                 findings=findings,
-                **_observation_timeout_fields(partial=partial),
+                line_context=context,
+                **({"mutation_unavailable_reason": "repair_not_applicable"} if not bootstrap_applicable else {}),
+                **{**_observation_timeout_fields(partial=partial), **extra, "partial": bool(partial or limited)},
                 **_family_unacked_fields(config),
                 **_next_push_fields(config),
             )
+            if partial or limited:
+                raise SystemExit(2)
             return
         print("工作区还不能开始任务：")
         for finding in findings:
@@ -2879,8 +2911,7 @@ def cmd_next(args: argparse.Namespace) -> None:
         _print_family_unacked_attention(config)
         _print_push_disclosure(config)
         return
-    lines = list_lines(config, read_budget=budget)
-    if not lines:
+    if not lines and (not limited or location["reason"] == "task_scan_incomplete"):
         command = _scoped_command(args, config, "line", "create", "dev", "--yes")
         if args.format == "json":
             _print_control_plane_json(
@@ -2889,9 +2920,12 @@ def cmd_next(args: argparse.Namespace) -> None:
                 summary="Profile 已就绪，但还没有开发线。",
                 commands=[command],
                 mutation_available=True,
+                **extra,
                 **_family_unacked_fields(config),
                 **_next_push_fields(config),
             )
+            if limited:
+                raise SystemExit(2)
             return
         print(f"Profile 已就绪，但还没有开发线。下一步：{command}")
         _print_family_unacked_attention(config)
@@ -2906,13 +2940,17 @@ def cmd_next(args: argparse.Namespace) -> None:
                 commands=[],
                 mutation_available=False,
                 required_inputs=["agent_id", "agent_command"],
+                mutation_unavailable_reason="partial_observation" if limited else "no_launchable_agent",
+                **extra,
                 **_family_unacked_fields(config),
                 **_next_push_fields(config),
             )
+            if limited:
+                raise SystemExit(2)
             return
         print(
             "工作区已就绪，但尚未发现可启动的编码工具。"
-            "安装本机 Agent 后运行 dyro start，或 "
+            + ("安装本机 Agent 后运行 dyro start，或 " if sys.stdin.isatty() and sys.stdout.isatty() else "安装本机 Agent，或 ")
             + _scoped_command(args, config, "agent", "add", "<id>", "--command", "…")
         )
         _print_family_unacked_attention(config)
@@ -2938,21 +2976,25 @@ def cmd_next(args: argparse.Namespace) -> None:
             "summary": _ready_next_summary(briefing),
             "commands": [],
             "mutation_available": False,
+            "mutation_unavailable_reason": "partial_observation" if limited or briefing_deadline else "observation_only",
+            "line_context": context,
+            **extra,
         }
         if briefing is not None:
             payload["briefing"] = briefing
             payload["diagnostic_commands"] = diagnostic_commands
         if briefing_deadline:
             payload["partial"] = True
-            payload.update(_observation_timeout_fields(partial=True))
+            if not limited:
+                payload.update(_observation_timeout_fields(partial=True))
         payload.update(_family_unacked_fields(config))
         payload.update(_next_push_fields(config))
         _print_control_plane_json("next_step", **payload)
-        if briefing_deadline:
+        if briefing_deadline or limited:
             raise SystemExit(2)
         return
     if briefing is None:
-        print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。")
+        print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。" if sys.stdin.isatty() and sys.stdout.isatty() and location["reason"] == "cwd_not_in_line" else "工作区已就绪。")
         _print_family_unacked_attention(config)
         _print_push_disclosure(config)
         return
@@ -5206,6 +5248,7 @@ def build_parser() -> argparse.ArgumentParser:
     next_parser.add_argument(
         "--format", choices=("text", "json"), default="text"
     )
+    next_parser.add_argument("--line")
     next_parser.set_defaults(func=cmd_next)
 
     line = sub.add_parser("line", help="功能开发线")

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import DyroError
+from .config import PUSH_DISABLED_NOTE
 from .process import git_read
 from .state import atomic_write_text
 
@@ -20,7 +21,7 @@ SEED_COMMAND = "dyro host seed"
 
 
 def render_workspace_overlay() -> str:
-    return """# Dyro overlay
+    return f"""# Dyro overlay
 
 这是 Dyro 工作区 overlay（与 `dyro.toml` 同级），不是产品 Git 仓库。
 
@@ -28,7 +29,7 @@ def render_workspace_overlay() -> str:
 - 宿主编译的 SKILL.md（`dyro host compile`）
 - `dyro next`
 
-不要绕过门禁做 `git merge` / `git push`。合入与推送只走 `dyro`（例如 `dyro task merge`、`dyro line merge`；push 还需 `--push` 且 `policy.allow_push`）。
+{PUSH_DISABLED_NOTE}
 
 下一步：运行 `dyro next`。
 """
@@ -43,7 +44,9 @@ def render_line_persona(*, line_id: str, branch: str) -> str:
 当前线：
 - id：{line_id}
 - 分支：{branch}
-- 必须跟踪 `{remote}`
+- 期望上游：`{remote}`
+
+{PUSH_DISABLED_NOTE}
 
 下一步：运行 `dyro next`。
 """
@@ -56,7 +59,10 @@ class SeedOutcome:
 
 
 def missing_workspace_overlay_files(root: Path) -> tuple[str, ...]:
-    return tuple(name for name in INSTRUCTION_NAMES if not (root / name).is_file())
+    return tuple(
+        name for name in INSTRUCTION_NAMES
+        if not (root / name).exists() and not (root / name).is_symlink()
+    )
 
 
 def overlay_instruction_warning(root: Path) -> str | None:

@@ -30,7 +30,7 @@ When the request already supplies a workspace alias, skip global discovery and u
 - Objective next-wave preview: `dyro --workspace <alias> objective tick <id> --format json`. Treat `peer_wave.executor_bindings` as the intended peer executors for that wave, and `peer_wave.warnings` as missing `conflict_group` or harness-capacity notes. A wave member is an executor, not a live supervisor.
 - Objective plan: `dyro --workspace <alias> objective plan <id> --format json`
 
-Use only an existing Objective or Change Set ID returned by Dyro or supplied by the user. A non-zero exit, unavailable workspace, pending transaction, failed finding, missing field, or partial observation is unknown or blocked—not ready. JSON `doctor` / `status` / `next` use a 45s read ceiling (not the 5s Bridge default). A multi-worktree Mac workspace that crosses 5s on every JSON `status` sample (locked five-run, ~5.35–5.41s) must succeed or return this structured partial — never a bare `kind=error` `DEADLINE_EXCEEDED`. If the 45s ceiling is hit, `kind` stays `doctor` / `workspace_status` / `next_step` with `partial: true` and `code: DEADLINE_EXCEEDED`. Leftover doctor / status / next keep completed FAIL findings or rows and a non-empty `doctor` repair command on `next`. A post-doctor briefing-only ceiling stays `next_step` with unread `briefing` (not leftover doctor repair) and exits 2 — that is blocked evidence, not a complete ready observation. JSON `status` with `partial: true` is incomplete and exits 2, same as `doctor`. That is blocked evidence, not a bare `kind=error`, and not ready. Isolated Console overview does not attach this 45s budget.
+Use only an existing Objective or Change Set ID returned by Dyro or supplied by the user. A non-zero exit, unavailable workspace, pending transaction, failed finding, missing field, or partial observation is unknown or blocked—not ready. JSON `doctor` / `status` / `next` use a 45s read ceiling (not the 5s Bridge default). If the 45s ceiling is hit, `kind` stays `doctor` / `workspace_status` / `next_step` with `partial: true` and `code: DEADLINE_EXCEEDED`. A post-doctor briefing-only ceiling stays `next_step` with unread `briefing` (not leftover doctor repair) and exits 2 — that is blocked evidence, not a complete ready observation. JSON `status` with `partial: true` is incomplete and exits 2, same as `doctor`. That is blocked evidence, not a bare `kind=error`, and not ready. Isolated Console overview does not attach this 45s budget.
 
 Treat local paths and workspace inventory as sensitive metadata. Never add `--include-paths` to any command, request paths only to enrich a summary, or repeat a local path in the response unless the user supplied that exact path and it is necessary to identify the requested workspace. Keep Task IDs, branch names, and commit identifiers to the minimum needed for the requested observation.
 
@@ -49,6 +49,12 @@ Keep the handoff short and separate evidence from judgment:
 Only hand off a workspace-scoped mutation when the returned command retains an explicit `--workspace <alias>` or absolute `--root <path>` selector. Never reconstruct, shorten, retarget, or strip that selector. When `next.commands` is empty or `mutation_available` is false, do not manufacture a mutation from `diagnostic_commands`, findings, or prose.
 
 If the user asks for 会审, 对抗, or Go/No-Go, follow the `dyro-board` protocol (human command `/dyro-review-board`) instead of inventing P0 here. A CLI summary alone is never final runtime or production acceptance.
+
+Dyro 默认不执行 push。只有命令显式带 `--push` 且 `policy.allow_push = true` 时，Dyro 才会在本地合并成功之后逐仓执行 `git push origin <分支>`；多仓 push 不是原子操作。
+开发线的期望上游是 `origin/<line.branch>`。本地还没有这条远端分支时，doctor 给出 WARN，工作区仍可打开；这不表示可以推送。
+普通 `git push` 仍然能改远端，但不会写入 Dyro 的远端锚点，也不算通过门禁。
+
+控制面座位不执行 merge 或 push。
 
 ## Hard safety boundary
 
