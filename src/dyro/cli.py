@@ -190,7 +190,7 @@ from .profile import (
     set_config_value,
     test_adapter,
 )
-from .state import atomic_write_text, exclusive_lock
+from .state import atomic_write_text
 from .terminal import danger, muted, success, title, value as terminal_value, warning
 from .graph import (
     build_task_graph,
@@ -211,6 +211,7 @@ from .tasks import (
     answer_task,
     board,
     claim_task,
+    create_task,
     decisions,
     import_execution_evidence,
     import_review_evidence,
@@ -220,7 +221,6 @@ from .tasks import (
     loop_tasks,
     merge_task,
     plan_tasks,
-    profile_task_gates,
     review_task,
     run_gates,
     run_task,
@@ -229,7 +229,6 @@ from .tasks import (
     signoff_task,
     stats,
     status as task_status,
-    task_template,
 )
 from .terminology import load_terminology_policy, scan_terminology
 from .tooling import (
@@ -3278,46 +3277,14 @@ def cmd_review_pack(args: argparse.Namespace) -> None:
 
 def cmd_task_create(args: argparse.Namespace) -> None:
     config = _config(args)
-    validate_id(args.id, "任务 ID")
-    get_line(config, args.line)
-    repository_ids: list[str] = []
-    for repo_id in args.repository:
-        if repo_id not in config.repositories:
-            raise DyroError(f"未配置仓库：{repo_id}")
-        if repo_id not in repository_ids:
-            repository_ids.append(repo_id)
-    path = config.task_specs_dir / args.id
-    if not config.adapters:
-        raise DyroError("未配置任何 Agent adapter，无法创建任务")
+    path = create_task(
+        config, args.id, title=args.title, line_id=args.line,
+        repositories=args.repository, dry_run=args.dry_run,
+    )
     if args.dry_run:
         print(f"DRY RUN: 将创建 {path}")
-        return
-    executor = next(iter(config.adapters))
-    primary = repository_ids[0]
-    extra = tuple(repository_ids[1:])
-    gates = profile_task_gates(config, repository_ids)
-    with exclusive_lock(config.task_specs_dir / ".tasks.lock"):
-        if path.exists():
-            raise DyroError(f"任务目录已存在：{path}")
-        path.mkdir(parents=True)
-        mount = config.repositories[primary].mount
-        atomic_write_text(
-            path / "task.toml",
-            task_template(
-                args.id,
-                args.title,
-                args.line,
-                primary,
-                mount,
-                executor=executor,
-                extra_repositories=extra,
-                gates=gates,
-            ),
-        )
-        atomic_write_text(
-            path / "handoff.md", f"# {args.title}\n\n- 目标：\n- 范围：\n- 验收：\n"
-        )
-    print(f"已创建任务：{path}")
+    else:
+        print(f"已创建任务：{path}")
 
 
 def cmd_task_graph(args: argparse.Namespace) -> None:

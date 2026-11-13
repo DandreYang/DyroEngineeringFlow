@@ -11,6 +11,7 @@ from typing import Iterable, Mapping
 
 from .config import Config, external_security_errors, validate_id
 from .errors import DyroError, ValidationError
+from .line_ops import anchor_locks, line_identity_lock
 from .process import git, git_read, require_ok
 from .read_limits import (
     ReadBudget,
@@ -473,6 +474,8 @@ def _build_line(
         raise ValidationError("branch 与 base 都必须明确指定")
     if kind not in ("line", "hotfix"):
         raise ValidationError("kind 只能是 line 或 hotfix")
+    if (config.lines_state_dir / "retired" / f"{line_id}.toml").exists():
+        raise DyroError(f"开发线 ID 已退役，不可复用：{line_id}")
     if _state_path(config, kind, line_id).exists():
         raise DyroError(f"开发线已登记：{line_id}")
     selected = tuple(repositories or config.repositories.keys())
@@ -588,17 +591,24 @@ def create_line(
     dry_run: bool = False,
 ) -> Line:
     """Create isolated linked worktrees from configured repository anchors."""
-    line = _build_line(
-        config,
-        line_id=line_id,
-        branch=branch,
-        base=base,
-        repositories=repositories,
-        repository_bases=repository_bases,
-        storage_modes=storage_modes,
-        kind=kind,
-        parent=parent,
-    )
+    with line_identity_lock(config):
+        line = _build_line(
+            config,
+            line_id=line_id,
+            branch=branch,
+            base=base,
+            repositories=repositories,
+            repository_bases=repository_bases,
+            storage_modes=storage_modes,
+            kind=kind,
+            parent=parent,
+        )
+        with anchor_locks(config, line.repositories):
+            return _create_line_worktrees(config, line, dry_run=dry_run)
+
+
+def _create_line_worktrees(config: Config, line: Line, *, dry_run: bool) -> Line:
+    """Create and roll back only while the caller holds L0 and every L2."""
     planned = _plan_line_creation(config, line)
 
     created: list[str] = []
@@ -688,41 +698,43 @@ def spawn_line(
     dry_run: bool = False,
 ) -> Line:
     """Create a child line from an existing parent line. No fetch, no push."""
-    parent = get_line(config, parent_id)
-    child_id = resolve_spawn_child_id(parent.id, child)
-    if repositories is None:
-        selected = parent.repositories
-    else:
-        selected = tuple(repositories)
-        if not selected:
-            raise ValidationError("至少选择一个仓库")
-        extra = [repo_id for repo_id in selected if repo_id not in parent.repositories]
-        if extra:
-            raise ValidationError(
-                f"子线仓库必须是父线 {parent.id} 仓库的子集：{', '.join(extra)}"
+    with line_identity_lock(config):
+        parent = get_line(config, parent_id)
+        child_id = resolve_spawn_child_id(parent.id, child)
+        if repositories is None:
+            selected = parent.repositories
+        else:
+            selected = tuple(repositories)
+            if not selected:
+                raise ValidationError("至少选择一个仓库")
+            extra = [repo_id for repo_id in selected if repo_id not in parent.repositories]
+            if extra:
+                raise ValidationError(
+                    f"子线仓库必须是父线 {parent.id} 仓库的子集：{', '.join(extra)}"
+                )
+        with anchor_locks(config, selected):
+            bases = {repo_id: _spawn_base_for(config, parent, repo_id) for repo_id in selected}
+            default_base = bases[selected[0]]
+            repository_bases = {
+                repo_id: base for repo_id, base in bases.items() if base != default_base
+            }
+            storage_modes = {
+                repo_id: parent.storage_for(repo_id)
+                for repo_id in selected
+                if parent.storage_for(repo_id) != "linked-worktree"
+            }
+            line = _build_line(
+                config,
+                line_id=child_id,
+                branch=f"feat/{child_id}",
+                base=default_base,
+                repositories=selected,
+                repository_bases=repository_bases,
+                storage_modes=storage_modes,
+                kind="line",
+                parent=parent.id,
             )
-    bases = {repo_id: _spawn_base_for(config, parent, repo_id) for repo_id in selected}
-    default_base = bases[selected[0]]
-    repository_bases = {
-        repo_id: base for repo_id, base in bases.items() if base != default_base
-    }
-    storage_modes = {
-        repo_id: parent.storage_for(repo_id)
-        for repo_id in selected
-        if parent.storage_for(repo_id) != "linked-worktree"
-    }
-    line = create_line(
-        config,
-        line_id=child_id,
-        branch=f"feat/{child_id}",
-        base=default_base,
-        repositories=selected,
-        repository_bases=repository_bases,
-        storage_modes=storage_modes,
-        kind="line",
-        parent=parent.id,
-        dry_run=dry_run,
-    )
+            line = _create_line_worktrees(config, line, dry_run=dry_run)
     if not dry_run:
         from .events import append_event
 
@@ -910,17 +922,24 @@ def _merge_line_repositories(
         merge_lock_path(config, lock_line_id),
         timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS,
     ):
-        _merge_line_repositories_locked(
-            config,
-            target=target,
-            source=source,
-            repositories=repositories,
-            message=message,
-            phase=phase,
-            push=push,
-            dry_run=dry_run,
-            extra_ledger=extra_ledger,
-        )
+        with anchor_locks(
+            config, repositories, timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS
+        ):
+            if get_line(config, target.id) != target or get_line(config, source.id) != source:
+                raise DyroError("开发线清单已变化，请重新运行合并或同步")
+            _require_line_worktrees(config, target, clean=True, label="目标开发线")
+            _require_line_worktrees(config, source, clean=False, label="源开发线")
+            _merge_line_repositories_locked(
+                config,
+                target=target,
+                source=source,
+                repositories=repositories,
+                message=message,
+                phase=phase,
+                push=push,
+                dry_run=dry_run,
+                extra_ledger=extra_ledger,
+            )
 
 
 def _merge_line_repositories_locked(

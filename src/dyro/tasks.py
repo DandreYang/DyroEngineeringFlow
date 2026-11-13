@@ -32,6 +32,7 @@ from .evidence_store import (
     resolve_evidence_path,
 )
 from .errors import DyroError, ValidationError
+from .line_ops import anchor_locks, line_identity_lock
 from .process import git, git_read, require_ok, run
 from .read_limits import (
     ReadBudget,
@@ -278,6 +279,69 @@ def load_task(config: Config, task_id: str) -> Task:
         raise ValidationError(f"任务 {task.id} 引用了未配置仓库：{', '.join(unknown)}")
     get_line(config, task.line)
     return task
+
+
+def create_task(
+    config: Config, task_id: str, *, title: str, line_id: str,
+    repositories: Iterable[str], dry_run: bool = False,
+) -> Path:
+    """Keep line validation and task publication inside the L0 identity lock."""
+    with line_identity_lock(config):
+        validate_id(task_id, "任务 ID")
+        get_line(config, line_id)
+        selected = tuple(dict.fromkeys(repositories))
+        if not selected:
+            raise ValidationError("至少选择一个仓库")
+        for repo_id in selected:
+            if repo_id not in config.repositories:
+                raise DyroError(f"未配置仓库：{repo_id}")
+        if not config.adapters:
+            raise DyroError("未配置任何 Agent adapter，无法创建任务")
+        path = config.task_specs_dir / task_id
+        if dry_run:
+            return path
+        executor = next(iter(config.adapters))
+        primary = selected[0]
+        gates = profile_task_gates(config, selected)
+        with exclusive_lock(config.task_specs_dir / ".tasks.lock"):
+            if path.exists():
+                raise DyroError(f"任务目录已存在：{path}")
+            path.mkdir(parents=True)
+            atomic_write_text(
+                path / "task.toml",
+                task_template(
+                    task_id, title, line_id, primary, config.repositories[primary].mount,
+                    executor=executor, extra_repositories=selected[1:], gates=gates,
+                ),
+            )
+            atomic_write_text(path / "handoff.md", f"# {title}\n\n- 目标：\n- 范围：\n- 验收：\n")
+        return path
+
+
+def rebind_task_line(
+    config: Config, task: Task, line_id: str, *, dry_run: bool = False,
+) -> Task:
+    """Change only the top-level task.line, preserving the rest of its contract."""
+    with line_identity_lock(config):
+        with exclusive_lock(_state_lock_path(task)):
+            current = load_task(config, task.id)
+            get_line(config, line_id)
+            path = current.directory / "task.toml"
+            content = path.read_text(encoding="utf-8")
+            # Only the TOML root contains the binding; leave table fields intact.
+            table = re.search(r"(?m)^\s*\[", content)
+            boundary = table.start() if table else len(content)
+            root, count = re.subn(
+                r"(?m)^line\s*=.*$", lambda _: f"line = {json.dumps(line_id)}",
+                content[:boundary],
+            )
+            if count != 1:
+                raise ValidationError(f"任务 {task.id} 缺少唯一的顶层 line 字段")
+            updated = root + content[boundary:]
+            rebound = _parse_task_content(current.directory, updated.encode("utf-8"))
+            if not dry_run:
+                atomic_write_text(path, updated)
+            return rebound
 
 
 def load_task_bounded(
@@ -3003,7 +3067,13 @@ def _merge_task_repositories(
     with exclusive_lock(
         merge_lock_path(config, task.line), timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS
     ):
-        _merge_task_repositories_locked(config, task, push=push, dry_run=dry_run)
+        with anchor_locks(
+            config, task.repositories, timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS
+        ):
+            current = load_task(config, task.id)
+            if current != task:
+                raise DyroError(f"任务清单已变化，请重新运行合并：{task.id}")
+            _merge_task_repositories_locked(config, task, push=push, dry_run=dry_run)
 
 
 def _merge_task_repositories_locked(
