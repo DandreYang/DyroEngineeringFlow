@@ -3254,7 +3254,8 @@ def cmd_review_verify(args: argparse.Namespace) -> None:
         if not r.passed and r.stdout:
             print("  --- 失败日志摘录 ---\n  " + "\n  ".join(r.stdout.splitlines()[-15:]))
     if failures:
-        raise DyroError(f"开发线 {line.id} 本地静态门禁未通过（{len(failures)}/{len(results)} 失败）")
+        executed = sum(not r.skipped_reason for r in results)
+        raise DyroError(f"开发线 {line.id} 本地静态门禁未通过（{len(failures)}/{executed} 失败）")
     executed = sum(not r.skipped_reason for r in results)
     print(f"\n门禁验证完成（通过 {executed} 项，跳过 {len(results) - executed} 个仓库）。")
 

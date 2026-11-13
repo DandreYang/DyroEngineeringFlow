@@ -119,7 +119,8 @@ def run_line_verify(
             continue
         for cmd in repo_cfg.verify:
             start_time = time.perf_counter()
-            exec_res = run(cmd, cwd=repo_path, dry_run=dry_run)
+            # Like run_gates: --dry-run still executes local gates; never fake exit 0.
+            exec_res = run(cmd, cwd=repo_path)
             elapsed = time.perf_counter() - start_time
             passed = exec_res.code == 0
             results.append(
@@ -278,8 +279,9 @@ def build_review_pack(
             sections.append("|:---|:---|:---|:---|")
             for gr in gate_results:
                 status_label = f"⏭ SKIP：{gr.skipped_reason}" if gr.skipped_reason else "✅ PASS" if gr.passed else "❌ FAIL"
-                cmd_str = " ".join(gr.argv)
-                sections.append(f"| `{gr.repo_id}` | `{cmd_str}` | {gr.elapsed_seconds:.2f}s | {status_label} |")
+                cmd_cell = f"`{' '.join(gr.argv)}`" if gr.argv else "-"
+                time_cell = "-" if gr.skipped_reason else f"{gr.elapsed_seconds:.2f}s"
+                sections.append(f"| `{gr.repo_id}` | {cmd_cell} | {time_cell} | {status_label} |")
                 if not gr.passed and not gr.skipped_reason:
                     gates_failed = True
 

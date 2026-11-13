@@ -169,3 +169,20 @@ class ReviewPackTests(WorkspaceCase):
         results = run_line_verify(config, line)
         self.assertTrue(results[0].passed)
         self.assertFalse(results[0].skipped_reason)
+
+    def test_local_dry_run_executes_gate_instead_of_faking_pass(self) -> None:
+        config = load(self.root)
+        line = create_line(config, line_id="dryrun", branch="feat/dryrun", base="main")
+        with patch("dyro.review_pack.run") as run:
+            run.return_value.code = 1
+            run.return_value.stdout = "boom"
+            results = run_line_verify(config, line, dry_run=True, all_repos=True)
+        self.assertTrue(run.called)
+        self.assertNotIn("dry_run", run.call_args.kwargs)
+        self.assertFalse(results[0].passed)
+
+    def test_skipped_repo_row_has_no_empty_code_span(self) -> None:
+        config = load(self.root)
+        create_line(config, line_id="skiprow", branch="feat/skiprow", base="main")
+        pack = build_review_pack(config, "skiprow")
+        self.assertNotIn("``", pack)
