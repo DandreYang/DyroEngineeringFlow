@@ -792,6 +792,56 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertEqual(repaired.status.state, IntegrationState.CURRENT)
         self.assertTrue(self.avatar.is_symlink())
 
+    def test_default_host_missing_avatar_is_repaired(self) -> None:
+        install_integration("line-family", yes=True)
+        home = self.fake_home / ".claude"
+        home.mkdir()
+        avatar = home / "skills" / "dyro-line-family"
+        self.assertEqual(integration_status("line-family").state, IntegrationState.OUTDATED)
+        preview = install_integration("line-family", yes=False, dry_run=True)
+        self.assertIn(f"修复分身 {avatar}", preview.changes)
+        self.assertFalse(avatar.exists())
+        self.assertEqual(install_integration("line-family", yes=True).status.state,
+                         IntegrationState.CURRENT)
+        self.assertEqual(avatar.resolve(), (self.dyro_home / "skills" / "dyro-line-family").resolve())
+
+    def test_default_host_unowned_avatar_is_visible_and_preserved(self) -> None:
+        install_integration("task-merge", yes=True)
+        home = self.fake_home / ".claude"
+        avatar = home / "skills" / "dyro-task-merge"
+        avatar.parent.mkdir(parents=True)
+        foreign = self.root / "older-task-merge"
+        foreign.mkdir()
+        (foreign / "SKILL.md").write_text("foreign", encoding="utf-8")
+        avatar.symlink_to(foreign, target_is_directory=True)
+        before = self._tree_snapshot()
+        # Implicit-host unowned avatars must not block setup/update repairs.
+        status = integration_status("task-merge")
+        self.assertEqual(status.state, IntegrationState.CURRENT)
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["integration", "status", "task-merge", "--format", "json"])
+        payload = json.loads(output.getvalue())
+        row = next(row for row in payload["avatars"] if row["host"] == "claude")
+        self.assertEqual(row["state"], "unowned")
+        self.assertEqual(row["path"], str(avatar))
+        self.assertEqual(row["link_target"], str(foreign))
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["integration", "status", "task-merge"])
+        for text in ("claude", str(avatar), str(foreign)):
+            self.assertIn(text, output.getvalue())
+        from dyro.host.doctor import integration_avatar_warnings
+
+        warning = next(w for w in integration_avatar_warnings() if "task-merge" in w)
+        for text in ("claude=unowned", str(foreign), "手动移除", "重新链接"):
+            self.assertIn(text, warning)
+        self.assertFalse(any("dispatch" in w for w in integration_avatar_warnings()))
+        install_integration("task-merge", yes=True)
+        self.assertEqual(avatar.readlink(), foreign)
+        self.assertEqual((foreign / "SKILL.md").read_text(), "foreign")
+        self.assertEqual(self._tree_snapshot(), before)
+
     def test_legacy_codex_copy_migrates_to_mirror_and_avatar(self) -> None:
         self.avatar.mkdir(parents=True)
         files = manager._asset_inventory()

@@ -2568,8 +2568,9 @@ def cmd_integration_status(args: argparse.Namespace) -> None:
                 "host": avatar.host,
                 "state": avatar.state,
             }
-            if args.include_paths:
+            if args.include_paths or avatar.state == "unowned":
                 row.update(path=str(avatar.path), detail=avatar.detail)
+                row["link_target"] = avatar.link_target
             avatars.append(row)
         payload: dict[str, object] = {
             "integration": status.integration,
@@ -2585,6 +2586,7 @@ def cmd_integration_status(args: argparse.Namespace) -> None:
     for avatar in status.avatars:
         print(
             f"avatar\t{avatar.host}\t{avatar.state}\t{avatar.path}\t{avatar.detail}"
+            + (f"\t当前目标：{avatar.link_target}" if avatar.link_target else "")
         )
 
 
@@ -3238,19 +3240,24 @@ def cmd_review_verify(args: argparse.Namespace) -> None:
 
     config = _config(args)
     line = get_line(config, args.line)
-    results = run_line_verify(config, line, dry_run=args.dry_run)
+    results = run_line_verify(config, line, dry_run=args.dry_run, all_repos=args.all_repos)
     if not results:
         print(f"开发线 {line.id} 无已配置门禁指令。")
         return
-    failures = [r for r in results if not r.passed]
+    failures = [r for r in results if not r.passed and not r.skipped_reason]
     for r in results:
+        if r.skipped_reason:
+            print(f"[SKIP] {r.repo_id}: {r.skipped_reason}")
+            continue
         status_str = "PASS" if r.passed else "FAIL"
         print(f"[{status_str}] {r.repo_id}: {' '.join(r.argv)} ({r.elapsed_seconds:.2f}s)")
         if not r.passed and r.stdout:
             print("  --- 失败日志摘录 ---\n  " + "\n  ".join(r.stdout.splitlines()[-15:]))
     if failures:
-        raise DyroError(f"开发线 {line.id} 本地静态门禁未通过（{len(failures)}/{len(results)} 失败）")
-    print(f"\n全部门禁通过（共 {len(results)} 项）。")
+        executed = sum(not r.skipped_reason for r in results)
+        raise DyroError(f"开发线 {line.id} 本地静态门禁未通过（{len(failures)}/{executed} 失败）")
+    executed = sum(not r.skipped_reason for r in results)
+    print(f"\n门禁验证完成（通过 {executed} 项，跳过 {len(results) - executed} 个仓库）。")
 
 
 def cmd_review_pack(args: argparse.Namespace) -> None:
@@ -3264,6 +3271,7 @@ def cmd_review_pack(args: argparse.Namespace) -> None:
         base=args.base,
         scope=args.scope,
         run_verify=not args.no_verify,
+        all_repos=args.all_repos,
         max_lines_per_file=args.max_lines,
         dry_run=args.dry_run,
     )
@@ -5401,6 +5409,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_sub = review.add_subparsers(dest="review_command", required=True)
     review_verify = review_sub.add_parser("verify", help="运行开发线各仓本地 verify 静态门禁")
     review_verify.add_argument("--line", required=True, help="开发线 ID")
+    review_verify.add_argument("--all-repos", action="store_true", help="验证全部仓库，包括相对基线无改动的仓库")
     review_verify.set_defaults(func=cmd_review_verify)
 
     review_pack = review_sub.add_parser("pack", help="提取开发线跨仓精简 Diff 与审查上下文")
@@ -5415,6 +5424,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_pack.add_argument("--no-verify", action="store_true", help="跳过本地 verify 门禁检查")
     review_pack.add_argument("--max-lines", type=int, default=250, help="单文件 Diff 最大保留行数（防 Token 膨胀）")
     review_pack.add_argument("--out", help="输出 Markdown 审查包文件路径；默认标准输出")
+    review_pack.add_argument("--all-repos", action="store_true", help="验证全部仓库，包括相对基线无改动的仓库")
     review_pack.set_defaults(func=cmd_review_pack)
 
     objective = sub.add_parser(
