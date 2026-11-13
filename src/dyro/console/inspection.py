@@ -19,8 +19,10 @@ from typing import Any
 
 from ..canonical import canonical_json_bytes
 from ..hub import registry_home
+from .events import is_safe_event_fact
 from .overview import ConsoleOverviewError
-from .redaction import REDACTED, safe_id, safe_sha256, safe_title
+from .redaction import REDACTED, safe_branch, safe_id, safe_sha256, safe_title
+from .twin import DISPATCH_STATES, MILESTONES, TASK_STATUSES
 
 
 _CURSOR_SECRET_ENV = "DYRO_CONSOLE_CURSOR_SECRET"
@@ -31,6 +33,44 @@ _WARNING_CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,79}$")
 _ATTENTION_KINDS = frozenset(
     {"repair_required", "needs_user", "ready", "paused", "waiting"}
 )
+_LINE_KEYS = frozenset({"id", "kind", "branch", "base", "repository_count", "parent"})
+_TASK_KEYS = frozenset(
+    {
+        "id",
+        "title",
+        "line",
+        "status",
+        "risk",
+        "depends_on",
+        "blocked_on",
+        "conflict_group",
+        "executor",
+        "reviewer",
+        "integration_state",
+        "external_claim_active",
+    }
+)
+_OBJECTIVE_KEYS = frozenset(
+    {
+        "id",
+        "title",
+        "line",
+        "revision",
+        "operator_state",
+        "derived_result",
+        "requested_mode",
+        "operations",
+        "scope_count",
+        "budget",
+        "selected_actions",
+        "blocked_actions",
+        "attention",
+        "contract_sha256",
+        "scope_sha256",
+        "event_sha256",
+    }
+)
+_ACTION_KEYS = frozenset({"kind", "subject_id", "reason"})
 _SUMMARY_KEYS = frozenset(
     {
         "alias",
@@ -47,7 +87,27 @@ _SUMMARY_KEYS = frozenset(
         "task_status_counts",
         "attention_counts",
         "recommendation",
+        "findings",
         "snapshot_sha256",
+        "proof_inspection",
+        "unavailable_reason",
+    }
+)
+_UNAVAILABLE_REASONS = frozenset(
+    {"", "missing_root", "read_timeout", "other"}
+)
+_FINDING_KEYS = frozenset({"status", "reason", "line"})
+_FINDING_REASONS = frozenset(
+    {
+        "MISSING_ORIGIN",
+        "MISSING_WORKTREE",
+        "BRANCH_MISMATCH",
+        "REPOSITORY_UNAVAILABLE",
+        "UPSTREAM_MISMATCH",
+        "COMMON_DIR",
+        "SYMLINK",
+        "EXTERNAL_POLICY",
+        "DOCTOR_FAIL",
     }
 )
 
@@ -98,8 +158,96 @@ class IsolatedOverviewService:
     def workspace(self, alias: str) -> dict[str, object]:
         return self._request({"op": "workspace", "alias": alias})
 
+    def inspect_proofs(self, alias: str) -> dict[str, object]:
+        return self._request({"op": "inspect_proofs", "alias": alias})
+
+    def events(
+        self, alias: str, *, after: str | None = None, limit: int = 50
+    ) -> dict[str, object]:
+        request: dict[str, object] = {"op": "events", "alias": alias, "limit": limit}
+        if after:
+            request["after"] = after
+        return self._request(request)
+
+    def families(self, alias: str) -> dict[str, object]:
+        return self._request({"op": "families", "alias": alias})
+
+    def family(self, alias: str, parent: str) -> dict[str, object]:
+        return self._request({"op": "family", "alias": alias, "parent": parent})
+
+    def channel(
+        self,
+        alias: str,
+        parent: str,
+        *,
+        after: str | None = None,
+        filter: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        request: dict[str, object] = {
+            "op": "channel",
+            "alias": alias,
+            "parent": parent,
+            "limit": limit,
+        }
+        if after:
+            request["after"] = after
+        if filter:
+            request["filter"] = filter
+        return self._request(request)
+
+    def post_channel(
+        self, alias: str, parent: str, payload: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Write overlay signals in the listener. Never start the inspection worker."""
+        return self._listener_service().post_channel(alias, parent, payload)
+
+    def artifacts(self, alias: str, parent: str) -> dict[str, object]:
+        """Read overlay artifact metadata in the listener. No worker, no git."""
+        return self._listener_service().artifacts(alias, parent)
+
+    def artifact(self, alias: str, parent: str, artifact_id: str) -> dict[str, object]:
+        """Read one overlay artifact DTO in the listener. No worker, no git."""
+        return self._listener_service().artifact(alias, parent, artifact_id)
+
+    def artifact_bytes(
+        self, alias: str, parent: str, artifact_id: str
+    ) -> tuple[str, bytes] | None:
+        """Read jailed image bytes in the listener. Video never streams."""
+        return self._listener_service().artifact_bytes(alias, parent, artifact_id)
+
+    def _listener_service(self):
+        """Overlay-only Console service in this process. No inspection worker."""
+        from ..config import load
+        from ..hub import WorkspaceRecord, WorkspaceRegistry, load_registry_from_home
+        from .overview import ConsoleOverviewService
+
+        if self._target_root is not None:
+            config = load(self._target_root)
+            registry = WorkspaceRegistry(
+                default=config.name,
+                workspaces=(WorkspaceRecord(name=config.name, root=config.root),),
+            )
+
+            def registry_loader() -> WorkspaceRegistry:
+                return registry
+
+        else:
+            home = self._registry_state_home
+
+            def registry_loader() -> WorkspaceRegistry:
+                return load_registry_from_home(home)
+
+        return ConsoleOverviewService(
+            registry_loader=registry_loader,
+            cursor_secret=self._cursor_secret,
+        )
+
+    def system(self) -> dict[str, object]:
+        return self._request({"op": "system"})
+
     def _request(self, request: Mapping[str, object]) -> dict[str, object]:
-        worker_request = dict(request)
+        worker_request = {key: value for key, value in dict(request).items() if value is not None}
         if self._target_root is not None:
             worker_request["target_root"] = str(self._target_root)
         encoded_request = base64.urlsafe_b64encode(
@@ -267,12 +415,32 @@ class IsolatedOverviewService:
     def _validate_data(
         cls, data: dict[str, object], *, expected_operation: str | None
     ) -> None:
-        if set(data) == {"workspace"}:
-            if expected_operation == "overview":
-                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
-            cls._validate_summary(data["workspace"])
+        if expected_operation == "inspect_proofs":
+            cls._validate_inspect(data)
+            return
+        if expected_operation == "system":
+            cls._validate_system(data)
+            return
+        if expected_operation == "events":
+            cls._validate_events(data)
+            return
+        if expected_operation == "families":
+            cls._validate_families(data)
+            return
+        if expected_operation == "family":
+            cls._validate_family(data)
+            return
+        if expected_operation == "channel":
+            cls._validate_channel(data)
             return
         if expected_operation == "workspace":
+            if set(data) != {"workspace", "lines", "tasks", "objectives", "operator_twin"}:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            cls._validate_summary(data["workspace"])
+            cls._validate_inventory(data)
+            cls._validate_operator_twin(data["operator_twin"], data)
+            return
+        if set(data) == {"workspace"}:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         expected = {
             "default_workspace",
@@ -280,6 +448,7 @@ class IsolatedOverviewService:
             "workspaces",
             "next_cursor",
             "attention_counts",
+            "task_status_counts",
             "highest_priority",
         }
         if set(data) != expected:
@@ -300,6 +469,7 @@ class IsolatedOverviewService:
         ):
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         cls._validate_attention_counts(data["attention_counts"])
+        cls._validate_status_counts(data["task_status_counts"])
         highest = data["highest_priority"]
         if highest is not None:
             if not isinstance(highest, dict) or set(highest) != {"alias", "kind", "reason"}:
@@ -310,6 +480,283 @@ class IsolatedOverviewService:
                 or not cls._safe_code(highest.get("reason"))
             ):
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_events(cls, data: dict[str, object]) -> None:
+        if set(data) != {"events", "next_cursor"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        events = data["events"]
+        if not isinstance(events, list) or len(events) > 100:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in events:
+            if not isinstance(item, dict) or set(item) != {
+                "seq",
+                "id",
+                "kind",
+                "at",
+                "actor",
+                "subject",
+                "family",
+                "facts",
+            }:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if type(item.get("seq")) is not int or item["seq"] < 0:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            event_id = item.get("id")
+            kind = item.get("kind")
+            at = item.get("at")
+            facts = item.get("facts")
+            if (
+                not isinstance(event_id, str)
+                or len(event_id) > 80
+                or not isinstance(kind, str)
+                or not (kind == "EVENT_REDACTED" or cls._safe_code(kind))
+                or not isinstance(at, str)
+                or len(at) > 40
+                or not (item.get("actor") == "" or cls._safe_alias(item.get("actor")))
+                or not (item.get("subject") == "" or cls._safe_alias(item.get("subject")))
+                or not (item.get("family") == "" or cls._safe_alias(item.get("family")))
+                or not isinstance(facts, dict)
+                or len(facts) > 16
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            for key, value in facts.items():
+                if not is_safe_event_fact(key, value):
+                    raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        cursor = data["next_cursor"]
+        if cursor is not None and (not isinstance(cursor, str) or not _CURSOR.fullmatch(cursor)):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_families(cls, data: dict[str, object]) -> None:
+        if set(data) != {"families"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        families = data["families"]
+        if not isinstance(families, list) or len(families) > 1000:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in families:
+            if not isinstance(item, dict) or set(item) != {
+                "parent",
+                "children",
+                "unread",
+                "dirty",
+                "missing_origin",
+                "in_progress",
+            }:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            children = item.get("children")
+            if (
+                not cls._safe_alias(item.get("parent"))
+                or not isinstance(children, list)
+                or not all(cls._safe_alias(child) for child in children)
+                or not cls._count(item.get("unread"))
+                or not cls._count(item.get("dirty"))
+                or not cls._count(item.get("missing_origin"))
+                or not cls._count(item.get("in_progress"))
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_family(cls, data: dict[str, object]) -> None:
+        if set(data) != {"parent", "members", "nodes", "edges"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if not cls._safe_alias(data.get("parent")):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        members = data["members"]
+        nodes = data["nodes"]
+        edges = data["edges"]
+        if (
+            not isinstance(members, list)
+            or not isinstance(nodes, list)
+            or not isinstance(edges, list)
+            or len(members) > 1000
+            or len(nodes) > 1000
+            or len(edges) > 1000
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for member in members:
+            if member != "operator" and not cls._safe_alias(member):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for node in nodes:
+            if not isinstance(node, dict) or set(node) != {
+                "id",
+                "role",
+                "dirty",
+                "missing_origin",
+                "in_progress",
+                "unread",
+            }:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            node_id = node.get("id")
+            if node_id != "operator" and not cls._safe_alias(node_id):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if (
+                node.get("role") not in {"parent", "child", "operator"}
+                or type(node.get("dirty")) is not bool
+                or type(node.get("missing_origin")) is not bool
+                or type(node.get("in_progress")) is not bool
+                or not cls._count(node.get("unread"))
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for edge in edges:
+            if not isinstance(edge, dict) or set(edge) != {"from", "to", "kind"}:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if (
+                not cls._safe_alias(edge.get("from"))
+                or not cls._safe_alias(edge.get("to"))
+                or edge.get("kind") != "parent"
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_channel(cls, data: dict[str, object]) -> None:
+        if set(data) != {"family", "members", "messages", "next_cursor"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if not cls._safe_alias(data.get("family")):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        members = data["members"]
+        messages = data["messages"]
+        if (
+            not isinstance(members, list)
+            or not isinstance(messages, list)
+            or len(members) > 1000
+            or len(messages) > 100
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for member in members:
+            if member != "operator" and not cls._safe_alias(member):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in messages:
+            if not isinstance(item, dict) or set(item) != {
+                "id",
+                "seq",
+                "at",
+                "family",
+                "from",
+                "to",
+                "kind",
+                "body",
+                "retracts",
+                "retracted",
+                "acked",
+                "artifact_id",
+            }:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            sender = item.get("from")
+            recipient = item.get("to")
+            body = item.get("body")
+            retracts = item.get("retracts")
+            at = item.get("at")
+            kind = item.get("kind")
+            artifact_id = item.get("artifact_id")
+            if (
+                type(item.get("seq")) is not int
+                or item["seq"] < 0
+                or not isinstance(item.get("id"), str)
+                or len(str(item.get("id"))) > 80
+                or not isinstance(at, str)
+                or len(at) > 40
+                or not (item.get("family") == "" or cls._safe_alias(item.get("family")))
+                or not (sender == "operator" or cls._safe_alias(sender))
+                or not (recipient == "" or recipient == "operator" or cls._safe_alias(recipient))
+                or not (kind == "EVENT_REDACTED" or cls._safe_code(kind))
+                or not isinstance(body, str)
+                or len(body) > 2048
+                or not isinstance(retracts, str)
+                or len(retracts) > 80
+                or type(item.get("retracted")) is not bool
+                or type(item.get("acked")) is not bool
+                or not (artifact_id == "" or cls._safe_alias(artifact_id))
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        cursor = data["next_cursor"]
+        if cursor is not None and (not isinstance(cursor, str) or not _CURSOR.fullmatch(cursor)):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_system(cls, data: dict[str, object]) -> None:
+        if set(data) != {"tool_inspection", "tools", "update"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if data.get("tool_inspection") != "not_inspected":
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if data.get("tools") != []:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        update = data["update"]
+        if not isinstance(update, dict) or set(update) != {
+            "check_enabled",
+            "last_checked_on",
+            "latest_version",
+            "kind",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if type(update.get("check_enabled")) is not bool:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        checked = update.get("last_checked_on")
+        latest = update.get("latest_version")
+        if checked != "" and not (
+            isinstance(checked, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", checked)
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if latest != "" and not (
+            isinstance(latest, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", latest)
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if update.get("kind") not in {"none", "patch", "minor", "major"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_inspect(cls, data: dict[str, object]) -> None:
+        if set(data) != {"proof_inspection", "proofs", "objectives"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if data.get("proof_inspection") not in {"not_inspected", "inspected"}:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        proofs = data["proofs"]
+        if not isinstance(proofs, list) or len(proofs) > 1000:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in proofs:
+            if not isinstance(item, dict) or set(item) != {
+                "id",
+                "kind",
+                "subject",
+                "status",
+                "decay_reason",
+            }:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if safe_sha256(item.get("id")) != item.get("id"):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if (
+                not cls._safe_code(item.get("kind"))
+                or not cls._safe_code(item.get("subject"))
+                or not cls._safe_code(item.get("status"))
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            reason = item.get("decay_reason")
+            if reason != "" and not cls._safe_code(reason):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        objectives = data["objectives"]
+        if not isinstance(objectives, list) or len(objectives) > 1000:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for objective in objectives:
+            if not isinstance(objective, dict) or set(objective) != {"id", "attention"}:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if not cls._safe_alias(objective.get("id")):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            attention = objective.get("attention")
+            if not isinstance(attention, list) or len(attention) > 1000:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            for item in attention:
+                if not isinstance(item, dict) or set(item) != {
+                    "kind",
+                    "subject_id",
+                    "reason",
+                }:
+                    raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+                if (
+                    item.get("kind") not in _ATTENTION_KINDS
+                    or not cls._safe_code(item.get("subject_id"))
+                    or not cls._safe_code(item.get("reason"))
+                ):
+                    raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
 
     @classmethod
     def _validate_summary(cls, value: object) -> None:
@@ -329,6 +776,13 @@ class IsolatedOverviewService:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         if value.get("freshness") not in {"fresh", "partial"}:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        unavailable_reason = value.get("unavailable_reason")
+        if unavailable_reason not in _UNAVAILABLE_REASONS:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if value.get("availability") == "available" and unavailable_reason != "":
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if value.get("availability") == "unavailable" and unavailable_reason == "":
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         for key in (
             "repository_count",
             "line_count",
@@ -338,12 +792,7 @@ class IsolatedOverviewService:
         ):
             if not cls._count(value.get(key)):
                 raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
-        statuses = value.get("task_status_counts")
-        if not isinstance(statuses, dict):
-            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
-        for status, count in statuses.items():
-            if not cls._safe_code(status) or not cls._count(count):
-                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        cls._validate_status_counts(value.get("task_status_counts"))
         cls._validate_attention_counts(value.get("attention_counts"))
         recommendation = value.get("recommendation")
         if not isinstance(recommendation, dict) or set(recommendation) != {"reason", "command"}:
@@ -355,6 +804,312 @@ class IsolatedOverviewService:
         digest = value.get("snapshot_sha256")
         if digest != "" and safe_sha256(digest) != digest:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if value.get("proof_inspection") != "not_inspected":
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        cls._validate_findings(value.get("findings"))
+
+    @classmethod
+    def _validate_inventory(cls, data: dict[str, object]) -> None:
+        cls._validate_lines(data["lines"])
+        cls._validate_tasks(data["tasks"])
+        cls._validate_objectives(data["objectives"])
+
+    @classmethod
+    def _validate_operator_twin(cls, value: object, inventory: Mapping[str, object]) -> None:
+        if not isinstance(value, dict) or set(value) != {
+            "plan",
+            "phases",
+            "running",
+            "latest_ledger",
+            "projected_seq",
+            "overlay_complete",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        plan = value["plan"]
+        phases = value["phases"]
+        running = value["running"]
+        ledger = value["latest_ledger"]
+        if (
+            not isinstance(plan, list)
+            or not isinstance(phases, list)
+            or not isinstance(running, list)
+            or len(plan) > 1000
+            or len(phases) != len(TASK_STATUSES)
+            or len(running) > 1000
+            or not cls._count(value.get("projected_seq"))
+            or type(value.get("overlay_complete")) is not bool
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        objective_ids = {
+            item.get("id")
+            for item in inventory.get("objectives", [])
+            if isinstance(item, dict)
+        }
+        task_ids = {
+            item.get("id")
+            for item in inventory.get("tasks", [])
+            if isinstance(item, dict)
+        }
+        for item in plan:
+            cls._validate_twin_plan_row(item)
+            if item.get("id") not in objective_ids:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            task_ids_row = item.get("task_ids")
+            if not isinstance(task_ids_row, list) or any(task_id not in task_ids for task_id in task_ids_row):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        in_progress_ids: set[object] = set()
+        for index, item in enumerate(phases):
+            if not isinstance(item, dict) or set(item) != {"status", "tasks"}:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if item.get("status") != TASK_STATUSES[index]:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            tasks = item.get("tasks")
+            if not isinstance(tasks, list) or len(tasks) > 1000:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            for task in tasks:
+                cls._validate_twin_task_card(task, expected_status=TASK_STATUSES[index])
+                if TASK_STATUSES[index] == "in_progress":
+                    in_progress_ids.add(task.get("id"))
+        for item in running:
+            cls._validate_twin_running_row(item)
+            if item.get("id") not in in_progress_ids:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        cls._validate_twin_ledger(ledger)
+
+    @classmethod
+    def _validate_twin_plan_row(cls, item: object) -> None:
+        if not isinstance(item, dict) or set(item) != {
+            "id",
+            "title",
+            "line",
+            "milestone",
+            "wave_present",
+            "wave_id",
+            "wave_at",
+            "wave_mode",
+            "wave_count",
+            "task_ids",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        title = item.get("title")
+        milestone = item.get("milestone")
+        wave_at = item.get("wave_at")
+        task_ids = item.get("task_ids")
+        if title != REDACTED and safe_title(title) != title:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if (
+            not cls._safe_alias(item.get("id"))
+            or not (item.get("line") == "" or cls._safe_alias(item.get("line")))
+            or not (milestone == "" or milestone in MILESTONES)
+            or type(item.get("wave_present")) is not bool
+            or not (item.get("wave_id") == "" or cls._safe_alias(item.get("wave_id")))
+            or not isinstance(wave_at, str)
+            or len(wave_at) > 40
+            or not (item.get("wave_mode") == "" or cls._safe_code(item.get("wave_mode")))
+            or not cls._count(item.get("wave_count"))
+            or not isinstance(task_ids, list)
+            or len(task_ids) > 1000
+            or not all(cls._safe_alias(task_id) for task_id in task_ids)
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_twin_task_card(cls, item: object, *, expected_status: str | None = None) -> None:
+        if not isinstance(item, dict) or set(item) != {
+            "id",
+            "title",
+            "line",
+            "executor",
+            "status",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        title = item.get("title")
+        status = item.get("status")
+        if title != REDACTED and safe_title(title) != title:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if (
+            not cls._safe_alias(item.get("id"))
+            or not (item.get("line") == "" or cls._safe_alias(item.get("line")))
+            or not (item.get("executor") == "" or cls._safe_code(item.get("executor")))
+            or status not in TASK_STATUSES
+            or (expected_status is not None and status != expected_status)
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_twin_running_row(cls, item: object) -> None:
+        if not isinstance(item, dict) or set(item) != {
+            "id",
+            "title",
+            "line",
+            "executor",
+            "dispatch_present",
+            "dispatch_id",
+            "dispatch_at",
+            "dispatch_state",
+            "dispatch_facts",
+            "board_landed",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        title = item.get("title")
+        dispatch_at = item.get("dispatch_at")
+        facts = item.get("dispatch_facts")
+        if title != REDACTED and safe_title(title) != title:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        if (
+            not cls._safe_alias(item.get("id"))
+            or not (item.get("line") == "" or cls._safe_alias(item.get("line")))
+            or not (item.get("executor") == "" or cls._safe_code(item.get("executor")))
+            or type(item.get("dispatch_present")) is not bool
+            or not (item.get("dispatch_id") == "" or cls._safe_alias(item.get("dispatch_id")))
+            or not isinstance(dispatch_at, str)
+            or len(dispatch_at) > 40
+            or item.get("dispatch_state") not in DISPATCH_STATES
+            or type(item.get("board_landed")) is not bool
+            or not isinstance(facts, dict)
+            or len(facts) > 16
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for key, value in facts.items():
+            if not is_safe_event_fact(key, value):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_twin_ledger(cls, item: object) -> None:
+        if not isinstance(item, dict) or set(item) != {
+            "present",
+            "at",
+            "task_id",
+            "phase",
+            "facts",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        at = item.get("at")
+        facts = item.get("facts")
+        if (
+            type(item.get("present")) is not bool
+            or not isinstance(at, str)
+            or len(at) > 40
+            or not (item.get("task_id") == "" or cls._safe_alias(item.get("task_id")))
+            or not (item.get("phase") == "" or cls._safe_code(item.get("phase")))
+            or not isinstance(facts, dict)
+            or len(facts) > 16
+        ):
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for key, value in facts.items():
+            if not is_safe_event_fact(key, value):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_lines(cls, value: object) -> None:
+        if not isinstance(value, list) or len(value) > 1000:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in value:
+            if not isinstance(item, dict) or set(item) != _LINE_KEYS:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            parent = item.get("parent")
+            if (
+                not cls._safe_alias(item.get("id"))
+                or not cls._safe_code(item.get("kind"))
+                or safe_branch(item.get("branch")) != item.get("branch")
+                or safe_branch(item.get("base")) != item.get("base")
+                or not cls._count(item.get("repository_count"))
+                or not (parent == "" or cls._safe_alias(parent))
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_tasks(cls, value: object) -> None:
+        if not isinstance(value, list) or len(value) > 1000:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in value:
+            if not isinstance(item, dict) or set(item) != _TASK_KEYS:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            title = item.get("title")
+            if title != REDACTED and safe_title(title) != title:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if (
+                not cls._safe_alias(item.get("id"))
+                or not cls._safe_code(item.get("line"))
+                or not cls._safe_code(item.get("status"))
+                or not cls._safe_code(item.get("risk"))
+                or not cls._id_list(item.get("depends_on"))
+                or not cls._id_list(item.get("blocked_on"))
+                or not cls._optional_id(item.get("conflict_group"))
+                or not cls._safe_code(item.get("executor"))
+                or not cls._safe_code(item.get("reviewer"))
+                or item.get("integration_state") != "not_inspected"
+                or type(item.get("external_claim_active")) is not bool
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_objectives(cls, value: object) -> None:
+        if not isinstance(value, list) or len(value) > 1000:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in value:
+            if not isinstance(item, dict) or set(item) != _OBJECTIVE_KEYS:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            title = item.get("title")
+            if title != REDACTED and safe_title(title) != title:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if (
+                not cls._safe_alias(item.get("id"))
+                or not cls._safe_code(item.get("line"))
+                or not cls._count(item.get("revision"))
+                or not cls._safe_code(item.get("operator_state"))
+                or not cls._safe_code(item.get("derived_result"))
+                or not cls._safe_code(item.get("requested_mode"))
+                or not cls._id_list(item.get("operations"))
+                or not cls._count(item.get("scope_count"))
+                or not cls._budget(item.get("budget"))
+                or not cls._action_list(item.get("selected_actions"), attention=False)
+                or not cls._action_list(item.get("blocked_actions"), attention=False)
+                or not cls._action_list(item.get("attention"), attention=True)
+                or safe_sha256(item.get("contract_sha256")) != item.get("contract_sha256")
+                or safe_sha256(item.get("scope_sha256")) != item.get("scope_sha256")
+                or safe_sha256(item.get("event_sha256")) != item.get("event_sha256")
+            ):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _action_list(cls, value: object, *, attention: bool) -> bool:
+        if not isinstance(value, list) or len(value) > 1000:
+            return False
+        for item in value:
+            if not isinstance(item, dict) or set(item) != _ACTION_KEYS:
+                return False
+            if item.get("reason") == "PROOF_DECAYED":
+                return False
+            if attention and item.get("kind") not in _ATTENTION_KINDS:
+                return False
+            if (
+                not cls._safe_code(item.get("kind"))
+                or not cls._safe_code(item.get("subject_id"))
+                or not cls._safe_code(item.get("reason"))
+            ):
+                return False
+        return True
+
+    @classmethod
+    def _id_list(cls, value: object) -> bool:
+        if not isinstance(value, list) or len(value) > 1000:
+            return False
+        return all(cls._safe_code(item) for item in value)
+
+    @staticmethod
+    def _optional_id(value: object) -> bool:
+        return value == "" or IsolatedOverviewService._safe_code(value)
+
+    @staticmethod
+    def _budget(value: object) -> bool:
+        if not isinstance(value, dict) or len(value) > 32:
+            return False
+        return all(
+            IsolatedOverviewService._safe_code(key)
+            and IsolatedOverviewService._count(count)
+            for key, count in value.items()
+        )
 
     @staticmethod
     def _count(value: object) -> bool:
@@ -370,15 +1125,32 @@ class IsolatedOverviewService:
 
     @staticmethod
     def _safe_command(command: object, alias: object) -> bool:
+        if command == "":
+            return True
         if not isinstance(command, str) or not isinstance(alias, str):
             return False
         escaped_alias = re.escape(alias)
         return bool(
             re.fullmatch(
-                rf"dyro --workspace {escaped_alias}(?: (?:doctor|task next|objective explain [A-Za-z0-9][A-Za-z0-9._-]{{0,79}}))?",
+                rf"dyro --workspace {escaped_alias} (?:doctor|objective (?:explain|tick|attention) [A-Za-z0-9][A-Za-z0-9._-]{{0,79}})",
                 command,
             )
         )
+
+    @classmethod
+    def _validate_findings(cls, value: object) -> None:
+        if not isinstance(value, list) or len(value) > 32:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for item in value:
+            if not isinstance(item, dict) or set(item) != _FINDING_KEYS:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if item.get("status") != "FAIL":
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            if item.get("reason") not in _FINDING_REASONS:
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+            line = item.get("line")
+            if line != "" and not cls._safe_alias(line):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
 
     @staticmethod
     def _validate_attention_counts(value: object) -> None:
@@ -386,3 +1158,11 @@ class IsolatedOverviewService:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         if not all(IsolatedOverviewService._count(item) for item in value.values()):
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+
+    @classmethod
+    def _validate_status_counts(cls, value: object) -> None:
+        if not isinstance(value, dict) or len(value) > 32:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
+        for status, count in value.items():
+            if not cls._safe_code(status) or not cls._count(count):
+                raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")

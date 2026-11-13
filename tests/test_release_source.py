@@ -95,6 +95,11 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
         self.assertNotIn("bridge-gate-run.tsv", workflow)
         self.assertIn("dyro-dispatch','SKILL.md", workflow)
         self.assertIn("dyro-dispatch','agents','openai.yaml", workflow)
+        self.assertIn("dyro-executor','SKILL.md", workflow)
+        self.assertIn("dyro-board','SKILL.md", workflow)
+        self.assertIn("dyro-review-board','SKILL.md", workflow)
+        self.assertIn("dyro-task-merge','SKILL.md", workflow)
+        self.assertIn("dyro-line-family','SKILL.md", workflow)
 
     def test_ci_no_longer_ships_agent_bridge_zero_effect_gate(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
@@ -107,3 +112,21 @@ class ReleaseSourceVerificationTests(unittest.TestCase):
         self.assertNotIn("Agent Bridge source/wheel/sdist gate", workflow)
         self.assertIn("dyro-dispatch','SKILL.md", workflow)
         self.assertIn("dyro-dispatch','agents','openai.yaml", workflow)
+        self.assertIn("dyro-executor','SKILL.md", workflow)
+        self.assertIn("dyro-board','SKILL.md", workflow)
+        self.assertIn("dyro-review-board','SKILL.md", workflow)
+        self.assertIn("dyro-task-merge','SKILL.md", workflow)
+        self.assertIn("dyro-line-family','SKILL.md", workflow)
+        self.assertGreaterEqual(workflow.count("verify_bundle_stranger.py"), 2)
+        self.assertGreaterEqual(
+            workflow.count("find_spec('dyro.bridge') is None"), 2
+        )
+
+    def test_default_wheel_stays_bridge_free(self) -> None:
+        metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertNotIn("dyro-bridge", metadata)
+        self.assertNotIn("dyro-mcp", metadata)
+        self.assertNotIn('"dyro.bridge"', metadata)
+        self.assertNotIn("[project.optional-dependencies.mcp]", metadata)
+        self.assertNotIn("[mcp]", metadata)
+        self.assertIn('dyro = "dyro.cli:main"', metadata)

@@ -5,7 +5,14 @@ from dataclasses import dataclass
 
 from .config import Config
 from .errors import DyroError
-from .tasks import Task, decisions, external_claim_active, list_tasks, status
+from .tasks import (
+    Task,
+    _assert_dependency_integrated,
+    decisions,
+    external_claim_active,
+    list_tasks,
+    status,
+)
 
 
 @dataclass(frozen=True)
@@ -184,6 +191,11 @@ def _explain_with_config(config: Config, graph: TaskGraph, task: Task) -> dict[s
         dependencies.append({"id": dependency, "status": dependency_status})
         if dependency_status != "done":
             reasons.append(f"依赖 {dependency} 尚未完成，当前状态为 {dependency_status}")
+        elif dependency_task is not None:
+            try:
+                _assert_dependency_integrated(config, dependency_task)
+            except DyroError as exc:
+                reasons.append(str(exc))
 
     for decision_id in task.blocked_on:
         decision_status = graph.decisions.get(decision_id, "missing")

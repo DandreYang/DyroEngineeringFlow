@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dyro Agent Bridge"
+  short_description: "Source-only inspect and plan through python -m dyro.bridge"
+  default_prompt: "Use $dyro-agent-bridge to inspect Dyro through the public Bridge process and stop if the host surface is unavailable."

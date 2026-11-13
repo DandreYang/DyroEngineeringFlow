@@ -88,6 +88,20 @@ class TerminologyPolicyTests(unittest.TestCase):
 
         self.assertFalse(unexpected_output.exists())
 
+    def test_scan_covers_readme_translation_files(self) -> None:
+        import hashlib
+
+        external_policy = self.base / "policy.txt"
+        external_policy.write_text("marker-i18n\n", encoding="utf-8")
+        policy = load_terminology_policy(self.root, policy_file=external_policy)
+        self.root.joinpath("README.zh-CN.md").write_text("marker-i18n\n", encoding="utf-8")
+        self.root.joinpath("README.es.md").write_text("safe\n", encoding="utf-8")
+        result = scan_terminology(self.root, policy, base_ref="HEAD")
+        translated = hashlib.sha256(b"README.zh-CN.md").hexdigest()[:16]
+        spanish = hashlib.sha256(b"README.es.md").hexdigest()[:16]
+        self.assertTrue(any(translated in item for item in result.violations))
+        self.assertFalse(any(spanish in item for item in result.violations))
+
     def test_policy_requires_one_external_input(self) -> None:
         with self.assertRaisesRegex(ValidationError, "未配置"):
             load_terminology_policy(self.root, environ={})

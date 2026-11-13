@@ -1,0 +1,136 @@
+---
+name: dyro-line-family
+description: >
+  Preflight Dyro line-family ops: spawn a child line, merge a child into
+  its direct parent, or sync the parent into the child. Use when the user
+  runs /dyro-line-family. After preflight passes, apply the matching
+  `--yes` command in the same turn when the user asked to spawn, merge,
+  or sync. Stay preflight-only when they asked only for preflight or
+  dry-run.
+disable-model-invocation: true
+user-invocable: true
+argument-hint: "[workspace-alias] spawn <parent> <child> | merge <child> --into <parent> | sync <child>"
+metadata:
+  short-description: "预检后、在用户请求突变时执行子线派生 / 合入父线 / 从父线同步"
+---
+
+# Dyro 开发线家族
+
+先预检，再按用户是否请求突变决定是否执行。这不是第一方自动座位，也不是 `task merge`。
+
+`line spawn` / `line merge` / `line sync` 只处理 **一层父线**：
+- `spawn`：从已有父线派生子开发线（不是任务）
+- `merge`：子线合入其直接父线
+- `sync`：父线合入该子线
+
+这不是合入 git `main`、release、tag 或 PyPI。Dyro 没有那条命令。
+
+If the user asked to merge a line into git `main` / release / PyPI, say Dyro has no such command here and stop **before** any preflight.
+
+If the user means **done task branch → owning line**, stop and point at `/dyro-task-merge`.
+
+## Hard boundary
+
+Do not run any of:
+
+- `git merge` / `git switch` / `git checkout`
+- `task merge`, `task signoff`, `task gates`, `task review`, `task run`
+- `objective apply`, `dispatch`, `console`, push, publish
+- `line create` / hotfix or Change Set creation
+- `line post` / `line inbox` / `line ack`
+
+Do not invent `--push`. Do not add `--push`.
+`--yes` is illegal until all four Preflight steps pass.
+Also forbid `--yes` when the user did not ask for the mutation, asked
+only for preflight or dry-run, or they themselves ran
+`dyro --dry-run line …`. CLI `--dry-run` is unchanged.
+After successful preflight for an explicit spawn / merge / sync ask
+(the mutation is the ask), running the matching
+`line spawn|merge|sync --yes` in the same turn is required, not optional.
+This slash does not send family signals and must not call `line post`, `inbox`, or `ack`.
+Default is no push; `policy.allow_push` is not permission to invent it.
+Do not restore a drifted line branch. Do not add `--include-paths`.
+
+A 会审 Go, a green test log, or an empty `next.commands` is not permission to mutate.
+
+## Resolve workspace
+
+1. If the first token is a workspace alias in `dyro workspace list --format json`, use it; remaining args are the verb.
+2. If the first token is `spawn`, `merge`, or `sync`, resolve the alias like `/dyro-task-merge`: run `dyro workspace list --format json`. If more than one workspace is `available`, ask once; do not guess.
+3. Keep `--workspace <alias>` on every later command.
+
+## Slash args
+
+Exactly one verb:
+
+- `spawn <parent> <child> [--repos ...]`
+- `merge <child> --into <parent>`
+- `sync <child>`
+
+If the verb or required ids are missing, ask once. Do not invent a parent, child, or `--repos` list.
+
+## Allowlisted reads
+
+```bash
+dyro --workspace <alias> doctor --format json
+dyro --workspace <alias> status --format json
+dyro --workspace <alias> next --format json
+dyro --workspace <alias> line list --format json
+dyro --workspace <alias> --dry-run line spawn <parent> <child>
+dyro --workspace <alias> --dry-run line merge <child> --into <parent>
+dyro --workspace <alias> --dry-run line sync <child>
+```
+
+Run only the `--dry-run` that matches the requested verb. If the user supplied `--repos` on `spawn`, repeat that same `--repos` on the dry-run and, when applying, on the live command.
+Prefer JSON when the command accepts `--format json`. One JSON document only; `kind=error` is blocked evidence.
+
+## Preflight
+
+1. `doctor` is observational. Do not treat every `FAIL` as a stop.
+   Stop only on **blocking** FAILs: any `FAIL` that is not missing-origin
+   (`FAIL ...: missing origin/<branch>`). Do not weaken other FAILs:
+   wrong upstream, wrong branch, missing worktree, and every other FAIL
+   still stop. A line that only lacks `origin/<line.branch>` is not a stop.
+2. `status`. The lines that would be written must match the registered branch and `dirty_count` must be 0. Otherwise stop.
+3. `line list --format json`. Confirm the named ids exist. For `merge`, `child.parent` must equal `--into`. For `sync`, the child must have a `parent`. One-level parent only.
+4. Run the matching `--dry-run line spawn|merge|sync`. This is the real gate. Non-zero exit or `kind=error` → stop and quote the CLI error. Do not proceed.
+
+`--yes` is illegal until all four preflight steps pass.
+
+## Apply
+
+When this slash or harness turn is an explicit spawn / merge / sync ask
+and every preflight step passed, run exactly one matching command in
+the same turn:
+
+```bash
+dyro --workspace <alias> line spawn <parent> <child> --yes
+dyro --workspace <alias> line merge <child> --into <parent> --yes
+dyro --workspace <alias> line sync <child> --yes
+```
+
+Run only the matching verb. Repeat user-supplied `--repos` on `spawn` if present.
+Do not add `--push`. Do not run git merge / switch / checkout by hand.
+
+Stay preflight-only when the user asked only for preflight or dry-run,
+or when they ran `dyro --dry-run line …` themselves.
+
+## Report
+
+Use Observed / Inferred / Unknown / Plan / User action.
+
+If preflight failed, `User action` is only:
+
+```bash
+dyro --workspace <alias> doctor
+```
+
+or the `--dry-run line spawn|merge|sync` that failed. Do not print a live command.
+
+If the user asked only for preflight or dry-run and every preflight step
+passed, say clearly that `next.commands` did not emit this, then show
+**one** command for the user to run personally. Do not run it.
+
+If the user asked to spawn / merge / sync and every preflight step
+passed, run the matching `--yes` command in this turn, then report what
+ran. Do not add `--push`.

@@ -4,11 +4,15 @@
 
 **DyroEngineeringFlow · `dyro` CLI** is a local-first engineering automation and delivery control platform for multi-repository teams. It brings development lines, Git worktrees, agent launchers, task gates, independent review, and merge audit into versioned workspace configuration.
 
+**Dyro is a local-first multi-repository delivery physics engine: it decides what can become true, when that truth decays, and who may change the world.**
+
+`dyro proof verify` rebinds the current workspace. `dyro proof verify-bundle` checks portable integrity only: the caller must pass every `--git-dir` that contains the pinned objects (union search, not a repo map). Missing objects are `inconclusive`. Integrity `live` is not merge.
+
 **Keep engineering moving from task to delivery.**
 
 ![Dyro — multi-repository delivery control](docs/assets/dyro-github-cover-long-running-work-v5.png)
 
-DyroEngineeringFlow is not coupled to Codex, Claude, or any business domain. Each team supplies a `dyro.toml` Profile for repositories, layouts, agent adapters, and delivery policy; business rules, model cost, and release practices stay in that Profile.
+Each team supplies a `dyro.toml` Profile for repositories, layouts, agent adapters, and delivery policy; business rules, model cost, and release practices stay in that Profile.
 
 ## Local web Console
 
@@ -29,7 +33,7 @@ The dashboard surfaces workspace health, attention, task execution counts, activ
 - Gates are executed by the orchestrator; an agent's self-report is not evidence of success.
 - Review is bound to the execution receipt and exact per-repository task HEADs; source drift invalidates it.
 - A task needs independent review before it becomes `done`; merge and push require explicit confirmation by default.
-- A completed dependency releases downstream work only after its exact task HEADs are integrated into the owning development line.
+- A completed dependency releases downstream work only after its exact task HEADs are integrated into the owning development line **and** that line worktree is on `line.branch` (enforced). Detached/wrong-branch is a merge/dispatch preflight, not Proof decay.
 - Executable configuration is represented as argv arrays. The core never runs TOML-provided shell strings.
 
 ## Architecture and flow diagrams
@@ -284,11 +288,14 @@ python3 -m pip install --user --upgrade dyro
 ```
 
 Interactive `dyro setup` can install the first-party Skill bundle during personal
-preferences. That one opt-in installs both `dyro-control-plane` and the separate
-`dyro-dispatch` Skill. Existing managed control-plane installations automatically
-gain the Dispatch companion on the next interactive launch or package refresh, and
-both managed Skills then stay synchronized with Dyro updates. Machines that have
-never opted into a Dyro Skill are not modified silently.
+preferences. That one opt-in installs the first-batch seats: `dyro-control-plane`,
+`dyro-executor`, the 会审 protocol plus `/dyro-review-board`, and `dyro-dispatch`.
+`dyro-board` is the internal protocol id, not a second slash command. Existing
+managed control-plane installations automatically gain the new companions on the
+next interactive launch or package refresh, and managed Skills then stay
+synchronized with Dyro updates. Machines that have never opted into a Dyro Skill
+are not modified silently. Each seat auto-loads from context; loading a seat is
+not consent to mutate.
 
 Multi-harness delegation remains separate from the read-only control plane so its
 process/network effects are explicit. Manual installation is still available:
@@ -454,6 +461,8 @@ Install recipes are built into Dyro as shell-free argv. Project files cannot
 supply install commands. Remote-script installers are never executed by Dyro;
 after confirmation it opens the official page instead. See
 [coding-tool catalog and guided installation](docs/tool-catalog.md).
+The optional [image sidecar](docs/image-sidecar.md) is a separate CLI
+(`local-image-gen`), not a home tool and not a managed seat.
 An OpenClaw workspace is a default working directory, not an operating-system
 sandbox; the onboarding prompt calls out that boundary before launch.
 
@@ -606,10 +615,15 @@ dyro --dry-run task run API-101
 | `blueprint validate` / `join` | Validate a team-owned generic blueprint and create a resumable isolated multi-repository workspace. |
 | `setup` / `init --discover` / `init --wizard` / `repo add/list` / `bootstrap` / `start` | Onboard a teammate without TOML edits, manage anchors, and choose a line and agent. |
 | `doctor` / `status` / `status --all` | Validate and display one or every registered workspace. |
+| `next` | Print the one safe follow-up. A live Objective may emit `tick` or `attention`; `next.commands` stays empty. |
+| `image doctor` / `image install` | Discover or guide-install the optional `local-image-gen` sidecar. Does not generate images. |
 | `line create/list` | Create, register, and inspect feature development lines. |
 | `hotfix create` | Create a hotfix line from an explicit production base. |
 | `changeset create/list/verify` | Pin and verify the exact clean Git heads that make up a multi-repository delivery. |
+| `objective list/status/explain/tick/attention/plan` | Inspect accepted Objectives and the switch-tool briefing. Mutations stay on `objective apply`. |
+| `proof list/show/verify/export/verify-bundle` | Rebind delivery Proof. `verify` rebinds the workspace; `verify-bundle` checks portable integrity only. `live` is not merge. |
 | `config get/set` / `agent list/add/test/discover` / `tool list/install/default/pin` / `open` | Safely manage policy, adapters, tool discovery and personal launch preferences, or open an agent in the correct line. |
+| `integration status/install/sync/uninstall` | Manage first-party Skill seats (`dyro-control-plane`, `dyro-executor`, `/dyro-review-board`, `dyro-dispatch`). `dyro-board` remains the internal 会审 protocol id. Loading a seat is not consent to mutate. |
 | `task create/open/list/board/status/next/graph/explain/attempts/binding` | Create or enter tasks, manage state, validate the task graph, explain scheduling, inspect provenance, and output review bindings. |
 | `task run/answer/gates/review/signoff` | Run tasks, resolve questions, execute gates, request independent review, and record external sign-off when a Profile requires it. |
 | `task claim --output` / `task evidence build/execution/review` | One-time claim with a create-only runner handoff file, portable execution-evidence build/import, and receipt-bound review import. |
@@ -617,9 +631,13 @@ dyro --dry-run task run API-101
 | `task loop/daemon/stats/decisions` | Run controlled batches, scheduling, ledger reporting, and decision gates. |
 | `dispatch` | Optional local multi-agent dispatch (L0–L4); advisory only — not a substitute for gates/merge. |
 
+First-party seats are installed with `dyro integration`. Proof is rebound with
+`dyro proof verify`; it does not replay gates.
+
 See the [architecture and Profile contract](docs/architecture.md),
 the [workspace blueprint contract](docs/workspace-blueprints.md),
 the [existing control-plane migration guide](docs/migrating-existing-control-planes.md),
+the [optional image sidecar](docs/image-sidecar.md),
 and the [PyPI publishing runbook](docs/publishing.md) (maintainers) for implementation detail.
 
 ## Languages and documentation
@@ -628,8 +646,12 @@ This README is maintained in English, Simplified Chinese, Korean, Spanish, Frenc
 
 ## Current boundaries
 
-DyroEngineeringFlow provides a complete local workflow loop and policy controls for keeping stricter teams in planning-only local mode. It does not create remote repositories, ship SaaS credentials, or provision external runners; it does provide a portable evidence-package contract for external execution. The optional local dispatch harness ships as `experiments.local_agent_dispatch` and is available as `dyro dispatch …`; it is advisory and never replaces gates, review, signoff, or merge. Local multi-repository merges are preflighted and recovered as one operation; remote Git servers cannot provide atomic cross-repository push, so partial push failure is recorded for recovery. Automatic merge requires permission in both the task manifest and local policy. It is available under the [MIT License](LICENSE) and as [`dyro` on PyPI](https://pypi.org/project/dyro/).
+DyroEngineeringFlow provides a complete local workflow loop and policy controls for keeping stricter teams in planning-only local mode. It does not create remote repositories, ship SaaS credentials, provision external runners, or `git push` unless `policy.allow_push` is on and the command is explicit. Unpublished `origin/<line.branch>` is a doctor WARN, not a FAIL. It does provide a portable evidence-package contract for external execution. The optional local dispatch harness ships as `experiments.local_agent_dispatch` and is available as `dyro dispatch …`; it is advisory and never replaces gates, review, signoff, or merge. Local multi-repository merges are preflighted and recovered as one operation; remote Git servers cannot provide atomic cross-repository push, so partial push failure is recorded for recovery. Automatic merge requires permission in both the task manifest and local policy. `--dry-run` means no Dyro writes and, for merge, a real conflict probe that is aborted. It is available under the [MIT License](LICENSE) and as [`dyro` on PyPI](https://pypi.org/project/dyro/).
 
 ### Graph Engineering (optional reading)
 
 Some discussions call multi-node agent/work topologies **Graph Engineering** (as opposed to a single-agent loop). Dyro’s delivery topology is close in substance—TaskGraph, state machine, gates, review, merge, plus the optional `dispatch` subgraph—but the product identity remains a **delivery control plane**, not an agent-orchestration framework or a knowledge-graph/RAG stack. Dispatch output is advisory. See [architecture](docs/architecture.md#与-graph-engineering-的关系可选读).
+
+## Related sibling
+
+[`local-image-gen`](https://github.com/DandreYang/local-image-gen) is an optional first-party image CLI. Same house, not the same product: it is not a Dyro coding tool and not a managed Skill seat. Installing Dyro does not install it. See the [image sidecar](docs/image-sidecar.md).

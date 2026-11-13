@@ -2,6 +2,514 @@
 
 ## Unreleased
 
+## 0.7.16 - 2026-09-13
+
+对使用者的影响：新增开发线增量审查靶区提取与本地门禁核验（`dyro review verify` 与 `dyro review pack`），大幅降低多仓协同中代码审查与 LLM 交互的 Token 消耗与注意力稀释。
+
+- 新增 `dyro review verify --line <LINE>`：一键自动化运行指定开发线各挂载仓的本地静态门禁，0 Token 拦截编译错误、类型错误与语法测试报错。
+- 新增 `dyro review pack --line <LINE> [--scope contracts|all|summary] [--out <PATH>]`：自动提取跨仓增量 Diff，自动识别高危 Schema/DTO/API 契约文件并建立索引；支持 `--scope contracts`（仅提取核心契约Diff，默认）、`--scope all`（全量Diff带防膨胀截断）与 `--scope summary`（仅改动索引总览），将输入 Token 压缩 90% 以上。
+
+## 0.7.15 - 2026-09-12
+
+对使用者的影响：`dyro dispatch` 的异步运行不再因为并发读取运行状态而
+偶发失败。
+
+- `dyro dispatch` runs no longer fail intermittently with exit code 2 and
+  `run state path changed while opening: run-<id>`. `RunStore.load` opened
+  the run-state file, then re-checked that the path still named the same
+  inode. Updates are published with `os.replace`, and reads are not taken
+  under the write lock, so an async worker publishing a legitimate update
+  between the reader's `open` and its re-check failed that check exactly
+  the way a swapped path does. The read now re-opens a bounded number of
+  times; a path that is still changing after every attempt is refused as
+  before. No safety property was relaxed: `O_NOFOLLOW` applies on every
+  attempt, `fstat` still enforces regular-file and size limits, symlinks
+  are still refused, and reads still come only from the opened descriptor.
+  A file swapped for a symlink now reports the more precise `run state is
+  a symbolic link`.
+- `dyro` no longer imports the console subsystem at startup. `cli.py` pulled
+  in `console.launcher` (and inspection/events/overview behind it) at module
+  scope although only `dyro console` uses it; it is now imported inside that
+  command, as `home.py` already did. Worth about 20ms of a ~250ms import.
+
+## 0.7.14 - 2026-09-11
+
+对使用者的影响：`dyro doctor`、首页菜单、`dyro next` / `dyro status` 以及
+开发线准入检查在多仓库、多开发线的工作区上明显变快，诊断结论不变。
+
+- `doctor` observes each repository in two batched Git reads instead of
+  walking every (line, repository) pair one subprocess at a time.
+  `git worktree list --porcelain` returns the path, HEAD, and branch of
+  every worktree at once — appearing in that list is itself the proof
+  that a worktree shares the anchor's Git common directory, so the
+  paired `rev-parse --git-common-dir` probes are gone. A single
+  `git for-each-ref refs/heads refs/remotes/origin` returns each local
+  branch's upstream and each ref's object id, replacing the per-line
+  `show-ref`, `rev-parse origin/<branch>`, and `rev-parse @{upstream}`
+  calls. A worktree missing from the anchor's list still falls back to
+  the previous single probe, so `missing worktree` and `unexpected Git
+  common-dir` remain distinguishable. Findings, their wording, and their
+  order are unchanged; `ReadBudget` byte accounting and the observation
+  deadline still apply, now charged per repository rather than per line.
+  A five-repository, thirteen-line workspace drops from 399 Git
+  subprocesses and 5.61s to 16 subprocesses and 0.30s.
+
+## 0.7.13 - 2026-09-01
+
+对使用者的影响：未 push 的开发线不再把 `dyro next` / `dyro start`
+卡成 needs_repair；doctor 只 WARN 缺 `origin/<branch>`。`line spawn`
+从父线本地 HEAD 起，不再跟过期远端。`task create` 可多仓、默认本机
+adapter，并把 Profile `verify` 写成门禁。`task review` 拒绝时非零退出。
+`--dry-run host compile` / `proof export` 不再落盘；本地 Profile 的
+`task gates --dry-run` 会真跑门禁，外部 Profile 则拒绝在本机执行。
+`task merge --dry-run` 会探测冲突并 abort。新增 `task close`。
+
+- Missing `origin/<line.branch>` is a doctor WARN, not FAIL. Dyro still
+  does not push; `line create` prints the `git push -u` command to run
+  yourself. `dyro next` / `dyro start` stay ready when that is the only
+  gap. `line spawn` uses the parent line's local branch, not a stale
+  `origin/<parent.branch>`.
+- `task create --repository` may be repeated. New tasks copy Profile
+  `repositories.*.verify` into `[[gates]]`, default executor/reviewer to
+  the first configured adapter, require the line worktree to sit on
+  `line.branch` before releasing a dependency, rotate `events.jsonl`
+  instead of failing at 2 MiB, keep status writes if event append fails,
+  and discard a leftover `receipt.md` at the start of each run.
+- `--dry-run` no longer writes host projections, proof zip files, or a
+  fake merged task. Gate dry-run executes the gate argv on a local
+  Profile; an external Profile refuses to run argv on the operator host.
+  `task review` exits non-zero on reject, including a binding mismatch,
+  without treating that reject as an uncertain supervised action.
+  `task close` removes the task worktree and `task/<id>` branch after
+  done/failed: symlink mounts are refused, done close requires a clean
+  tree already merged into `line.branch`, and failed close force-removes
+  a dirty tree. Empty-`verify` multi-repo tasks get unique
+  `diff-check-<repo>` gate names. Overlay event readers stitch
+  `events.jsonl.<seq>` archives when the current file is missing and
+  ignore non-seq suffixes such as `.bak`. A failed event append still
+  writes task status, and marks overlay events incomplete via
+  `.dyro/events.gap`. `task loop` / `task daemon` exit non-zero when a
+  review or run returns `failed`. Merge `--dry-run --push` actually runs
+  `git push --dry-run` and says so. Dispatch Skill no longer cites a
+  nonexistent `--mode` flag.
+
+## 0.7.12 - 2026-08-23
+
+- Fix `dyro update` for uv-managed installs that were pinned with an exact
+  specifier. `uv tool install dyro==0.7.11 --force` writes
+  `specifier = "==0.7.11"` into the tool receipt, so
+  `uv tool upgrade … dyro==0.7.12` is unsatisfiable. The uv-tool plan now
+  runs `uv tool install --force --default-index https://pypi.org/simple
+  --no-config dyro==<version>` so the pin is replaced. Official PyPI and
+  `--no-config` stay required; pipx, pip, and uv-pip paths are unchanged.
+  If you already installed with `uv tool install dyro==…`, recover with
+  the same planner-safe command as `build_update_plan` (official simple
+  index plus `--no-config`), not bare
+  `uv tool install dyro==0.7.12 --force` alone:
+  `uv tool install --force --default-index https://pypi.org/simple
+  --no-config dyro==0.7.12`. After that, `dyro update` works. If hosted
+  slash mirrors still serve the old line-family text, run
+  `dyro integration sync` (or a skill refresh) so they pick up asset
+  version 2.
+- `/dyro-line-family` still preflights with unchanged doctor blocking-FAIL
+  rules (`status` dirty=0, `line list`, matching `--dry-run`). When the
+  user asked to spawn / merge / sync (slash or harness; the mutation is
+  the ask) and preflight passes, the agent must run the matching
+  `line spawn|merge|sync --yes` in the same turn. It still never invents
+  `--push` and must not git merge / switch by hand. Preflight-only
+  remains when the user asked only for preflight or dry-run, or ran
+  `dyro --dry-run line …` themselves. CLI `--dry-run` is unchanged. On
+  apply success, report what ran. On preflight fail, `User action` is
+  still only `doctor` or the failed dry-run. Preflight appears before
+  Apply, and `--yes` is illegal until all four preflight steps pass.
+  If `/dyro-line-family` already completed that preflight this turn for
+  an explicit mutation ask, `dyro-control-plane` / `dyro-executor` must
+  not block the matching `line … --yes`; line-family is the writer.
+  Default forbid stays when line-family is not the active ask.
+
+## 0.7.11 - 2026-08-23
+
+- Resolve `--workspace` aliases case-insensitively when exactly one
+  registered name folds to the same key, and keep that canonical spelling
+  in outputs. Two registered aliases that differ only by case fail closed
+  with the colliding names listed; a total miss still suggests nearby
+  names. Implicit JSON resolve does not stamp a `--workspace` selector.
+  `workspace default` / `workspace remove` plan and apply share that
+  policy; remove can still target each exact registered name when twins
+  collide. Bridge workspace list loads each row by stored root so a
+  fold-twin does not mark the other stale. Implicit `next` and ready
+  briefing never advertise a `--workspace` selector that would
+  fail-close; they use `--root` instead. Implicit and `--root` next /
+  briefing / repair also refuse a unique fold of the current profile
+  name when that selector would resolve to a different registered root;
+  those ads use `--root` for the current workspace. `console` plan and
+  apply share that resolve (canonical on a unique fold; fail-closed on
+  twins). Console overview recommendations omit a colliding or
+  cross-root `--workspace` ad. The operator copy path does not invent
+  `--workspace … doctor` when that field is blank.
+- JSON `doctor` / `status` / `next` no longer share a flat 5s observation
+  deadline with Bridge. Those commands start at the documented 45s ceiling
+  (not 5s) so a ~50+ worktree workspace that the text path finishes in ~7s
+  cannot bare-`DEADLINE_EXCEEDED` at ~5.3s. Locked Mac baseline: five
+  consecutive JSON `status` walls at 5.35–5.41s are 0/5 on the 5s
+  protocol budget and must be 5/5 success (or structured partial that
+  still returns completed FAILs), never a bare `DEADLINE_EXCEEDED`. A
+  default 5s `ReadBudget` passed into `doctor()` / `status_rows()` still
+  grows by 0.4s per extra git scope, capped at 45s. Isolated Console
+  overview still calls unbounded `doctor()`; inspect workers still use
+  3s/6s process kills and do not attach this budget. If the ceiling is
+  hit, the JSON `kind` stays `doctor` / `workspace_status` / `next_step`
+  with `partial: true`, `code: DEADLINE_EXCEEDED`, and completed FAIL
+  findings or rows; leftover timeout reuses that stash and keeps a
+  non-empty `doctor` repair command. JSON `status` deadline partial
+  exits 2, same as `doctor`. It is not a bare `kind=error` with
+  `command`. `next` stays `needs_repair` (never ready on FAIL).
+  A post-doctor briefing-only ceiling still keeps `kind: next_step`
+  with `partial: true` and `code: DEADLINE_EXCEEDED` plus unread
+  `briefing` (not leftover doctor repair) and exits 2; it is not a
+  complete ready observation.
+- `dyro start` no longer prints unscoped `dyro bootstrap --yes` when
+  doctor has FAIL. If bootstrap can clone the missing remotes, the ad
+  uses the same root-safe selector as `next` / briefing (`--workspace`
+  only when it stays on this root; otherwise `--root <current>`). Bare
+  `dyro bootstrap --yes` is never advertised when that command would
+  resolve to a different registry default.
+- Attach first-party Skill avatars to OpenCode and Hermes when those host
+  homes already exist (`~/.config/opencode/skills/<skill>`,
+  `~/.hermes/skills/<skill>`). Detection stays fail-closed: absent default
+  homes stay silent, and Dyro does not create host homes — including when
+  `host_homes` or host env vars (`OPENCODE_CONFIG_DIR`, `HERMES_HOME`,
+  `PI_CODING_AGENT_DIR`, and the other host overrides) point at a path that
+  is not already a real directory. Missing override homes are skipped
+  (isolated-mirror-only if no host remains). Symlink path components stay
+  fail-closed. Pi (`PI_CODING_AGENT_DIR`, `~/.pi/agent`) still uses the
+  same existing-home rule.
+- `dyro start` now refuses the same way `dyro next` does when doctor has
+  any FAIL, including missing-origin-only. The 0.7.10 note that start
+  treated missing-origin as non-blocking is no longer the live contract.
+  Setup, join, and `dyro open` / home create-and-open
+  (`existing_line_workspace`) skip only the constructed missing-origin
+  shape so a just-created SHA-pinned local-only line can be created and
+  opened. Every other doctor FAIL — including workspace-level
+  `FAIL external Profile requires …` — blocks open.
+- `is_missing_origin_finding` parses the doctor FAIL shape
+  (`FAIL <kind>:<id>/<repo>: missing origin/<branch>`) instead of a
+  substring, so a path that embeds `: missing origin/...` is not classified
+  as missing-origin and still blocks start.
+- Redact a non-fictional product-line token from the public 2026-08-19
+  slash-review record. Public docs keep fictional placeholders.
+
+## 0.7.10 - 2026-08-21
+
+- `dyro next` no longer reports `ready` when doctor has FAIL findings,
+  including missing-origin-only. JSON `state` is `needs_repair`,
+  `commands` includes scoped `doctor` (a read; `mutation_available`
+  stays false), and the human path prints the FAILs instead of
+  「工作区已就绪」。`dyro start` still treats missing-origin as
+  non-blocking. Isolated Console uses the same `next.commands` source
+  instead of an empty loader, so a FAIL workspace is not stuck with
+  empty commands while production is not.
+- Console operator surface: treat doctor FAIL findings as something the
+  page must show even when `next` reports ready with empty commands.
+  Overview heading and 现在需要你 surface those FAILs; the primary copy
+  command is `doctor` (or another allowlisted next command), never a
+  bare `dyro --workspace <alias>`.
+- Console tabs `#w/<alias>/family|events|channel` show only that pane.
+  Refresh re-fetches the overview and any open workspace so captured-at
+  moves. Spawn/merge/sync copy no longer invents `<parent>_new`.
+- `dyro console --no-open` flushes the one-time URL. A missing or
+  expired bootstrap paints the door on the command-center heading
+  and primary (not only session-status) and tells the operator to
+  run `dyro console` again. Empty twin/inventory copy is one honest
+  sentence; line badges do not paint 未检查 when a FAIL finding
+  exists for that line.
+- Unscoped `dyro console` no longer lets vanished registry rows
+  (missing roots, including dead `/tmp/dyro-test-*` aliases) win
+  现在需要你 or the primary CTA. Those cards fold under 读不到.
+  Inspection timeout is not painted as “project gone”: missing-root
+  and read-timeout get different copy and sort below a healthy
+  default workspace. Family picker defaults to root parents plus the
+  focused parent. An overlay with lines but no Task/Objective says
+  so in one sentence instead of only “没有目标”.
+
+## 0.7.9 - 2026-08-21
+
+- Console P4: workspace detail now projects a read-only operator twin after
+  the existing inventory and before the family / events / channel panes.
+  Plan swimlanes come from existing Objectives plus `objective_wave` events;
+  milestone badges stay `incomplete | complete | repair_required`; task
+  phases reuse the existing state machine; 谁在跑 shows executor, latest
+  `dispatch` facts, and whether a `board` event landed. The latest ledger
+  line is a single redacted human-visible row. Missing wave / dispatch /
+  board / ledger fail closed. Swimlanes do not invent Objectives. 谁在跑
+  does not claim a board landed unless a matching `board` event exists for
+  that task.   Live ingest does not replay an events prefix over the GET
+  snapshot: `projected_seq` from that GET is the live floor, a
+  truncated overlay sets `overlay_complete` false, and a workspace
+  GET that cannot load overlay config returns an empty twin with
+  `overlay_complete` false so a prefix page cannot invent 谁在跑 or
+  会审已落下. 阶段 / 谁在跑 / 会审 stay with the projection.
+  Hash stays `#w/<alias>` and
+  `#w/<alias>/family|events|channel`. No new mutation API.
+- Console UI: restyle the local page as a one-level family patchbay. The
+  family graph is the signature instrument (parent in camera focus; edges
+  light on merge/sync). Workspace detail is a room: bay first, twin as
+  the now-reading, inventory and proofs recede. Overview stays a strip,
+  not a dump. System fonts only. No third-party script, font, chart, or
+  player.
+
+## 0.7.8 - 2026-08-20
+
+- Tighten the internal `dyro-board` Record protocol: declare a
+  production-line baseline (not `master`/`main`), close prior P0/P1 as
+  `已闭环` / `未闭环` / `须人工核` (or `已检索·无先前会审` when none),
+  re-check seat claims, start the wait window at first dispatch, let a
+  prior-board directory win over a conflicting repo convention, and
+  record the full test command plus whether a pipeline/redirect hid the
+  exit code. Pins lock those polarities. The `/dyro-review-board`
+  wrapper still follows that file only and refuses same-turn delivery.
+- Hide the internal `dyro-board` protocol from slash / `$` skill pickers.
+  `/dyro-review-board` is the only human-facing 会审 command. The protocol
+  asset still installs as a non-invocable companion of `review-board` (and
+  with the board seat). `dyro integration install board` is a legacy id for
+  that same surface plus protocol; `dyro integration status board` still
+  inspects the protocol. The wrapper still refuses same-turn commit, push,
+  merge, or publish.
+- Add design `docs/designs/console-v2-live-family-signals.md` for live
+  events, one-level line families, and overlay family signals. It extends
+  the local Web Console and ADR 0005; it does not replace them.
+- Console P1: append-only `.dyro/events.jsonl`, project line `parent`,
+  one-level family graph, and an SSE event stream with `after=` resume.
+  Hidden tabs pause; SSE failure falls back to the existing 5s poll.
+  Workspace detail shows the family tree and live event panes. Copy
+  buttons emit dry-run CLI only. Family badges do not claim
+  cleanliness or origin binding. Event `facts` stay IDs, enums, counts,
+  short hashes, or reason codes. HMAC `after=` binds a row digest so a
+  replaced same-seq row is `EVENT_CURSOR_INVALID`.
+- Console P2: overlay family channel at
+  `.dyro/families/<parent>/channel.jsonl` plus `acks.json`, dual-written
+  with a `signal` event under the same lock. CLI `line post` / `inbox` /
+  `ack` stay under `dyro line`. `next --format json` adds read-only
+  `family_unacked` and never emits `line post` or `line ack --yes`.
+  Console channel pane shows full family history; the browser POST
+  accepts only `decision` / `contract` / `ack` as `operator`. Artifact
+  bytes stay closed (P3). `/dyro-line-family` still does not post.
+  CLI `--to operator` uses the same default family as a broadcast
+  (`parent` or sender), not `F(sender)`. Channel pairing and ack treat
+  `msg_N` as per-family; HTTP ack is bound to the URL family, and CLI
+  `line ack` fail-closes when the same id exists in more than one family.
+- Console P3: overlay artifact rail on the existing workspace-detail
+  channel/event panes. Authority is
+  `.dyro/families/<parent>/artifacts.jsonl` plus jailed
+  `artifacts/<id>` bytes. Images are same-origin bearer `fetch` then
+  `blob:` URLs (`img-src 'self' blob:`). Video is a card with a
+  copyable `--dry-run` open command; no `<video>` and no `media-src`.
+  Artifact HTTP is GET only. Inspection worker stays read-only and
+  cannot write artifacts. Planted path, URL, or credential titles are
+  blanked on read; artifact ids reject a `..` substring. Unpaired
+  channel logs are no longer hidden as unread 0; `msg_N` page keys
+  stay `(family, id)`.
+- User slash Skill `dyro-line-family` (`/dyro-line-family`) preflights
+  `line spawn` / `line merge` / `line sync` and prints one `--yes` command
+  for the human. It does not execute the mutation, invent `--push`, or
+  merge a line into git `main` / release / PyPI. Install via
+  `dyro integration install line-family`; it does not auto-load.
+  `/dyro-task-merge` stays task → owning line and points line-family
+  ops at this slash. Control-plane, executor, and 会审 refuse those
+  mutations in the same turn. A doctor FAIL that is only missing
+  `origin/<line.branch>` does not stop preflight; other FAILs still
+  do. `--dry-run` remains the real gate.
+- Line manifests may declare an optional `parent` line id (schema 3). Schema 1
+  and 2 files still parse; the writer emits schema 3 only when `parent` is set.
+  `base` remains a Git ref.
+- `dyro line spawn <parent> <child>` creates a durable child line (not a task)
+  from a parent, inheriting repositories (optional `--repos` subset). The child
+  binds like `line create` and does not fetch, push, or track the parent branch.
+- `dyro line merge <child> --into <parent>` merges the child into its direct
+  parent across the child's repos (`--no-ff`, locked, dry-runnable). One repo
+  failure rolls back already-merged repos. `--push` still requires
+  `policy.allow_push`.
+- `dyro line sync <child>` merges the parent into the child the same way.
+  `line list` / `status` show the parent id when set.
+- New `setup` / `join` / `init` workspaces get thin overlay-root `AGENTS.md`
+  and `CLAUDE.md` (same body). They point at host-compiled SKILL.md and
+  `dyro next`; they are not the gate. Installing or upgrading Dyro does not
+  rewrite existing workspaces. `dyro doctor` WARNs when both files are
+  missing; `dyro host seed` creates missing files only (`--force` overwrites).
+- `line spawn` / `create` write overlay personas at `versions/<line>/` (not
+  inside product Git worktrees). Must-track `origin/<line.branch>`.
+- `status` no longer appends a phantom MISSING row after every line; a missing
+  worktree is reported on that repo only. `dyro line spawn|merge|sync` and
+  `dyro host seed` accept `--dry-run` after the verb, not only the global flag.
+
+## 0.7.7 - 2026-08-20
+
+- Linked-worktree lines bind to `origin/<line.branch>` when that remote-tracking
+  ref exists, and never auto-track the parent when starting a local-only line.
+  `doctor` fails a missing `origin/feat/<line>` (not delivery-ready).
+  `setup` / `start` / `next` stay locally ready when every FAIL is that
+  missing-origin finding and disclose it; other FAILs still block.
+- `doctor` fails a line whose `@{upstream}` is not `origin/<line.branch>` even
+  when HEAD still equals that remote SHA. Join completion ignores only
+  missing-origin FAILs so SHA-pinned blueprints can finish before
+  `origin/<line.branch>` exists.
+- `--workspace` path values tell you to use `--root` instead of looking like a
+  missing workspace. Unknown aliases stay case-sensitive and suggest the closest
+  registered name.
+- `status` and `next` disclose when `policy.allow_push` is false: Dyro 不会 push；
+  ordinary `git push` still works.
+- Supervised host apply fails closed until `dyro host compile` has run. Ordinary
+  `dyro doctor` still treats host projections as optional.
+
+## 0.7.6 - 2026-08-19
+
+- First-party slash Skills `dyro-review-board` (会审 / 对抗审查) and
+  `dyro-task-merge` (task → line preflight). They install via
+  `dyro integration` and do not auto-load. Loading either is not merge,
+  push, or publish. `dyro-board` remains the protocol id; the public
+  label is 会审.
+
+## 0.7.5 - 2026-08-18
+
+- Optional `local-image-gen` sidecar discovery: `dyro doctor` reports PATH
+  presence only, and `dyro image doctor` / `dyro image install` stay off the
+  coding-tool catalog and Skill seats. Dyro still does not generate images.
+
+## 0.7.4 - 2026-08-18
+
+- First-party Skill seats now include `dyro-executor` and `dyro-board` beside
+  the existing control-plane and dispatch Skills. Setup and an opted-in
+  control plane install or sync the whole first batch. Each seat auto-loads
+  from context; loading a seat is not consent to mutate. Opening a task
+  prints the executor seat; opening a line prints the navigator seat.
+  `dyro-reviewer` and personal skill directories stay out.
+
+## 0.7.3 - 2026-08-18
+
+- Console home no longer treats empty attention as idle. The overview
+  says unread, workspace cards say "摘要未列出关注项", and zero-count
+  attention chips are not marked success. Ready work still can say
+  there is nothing that needs you on the spot.
+- Bare `dyro` home prints the workspace alias, not the local root.
+  Unhealthy `next` repair findings and commands stay path-free and
+  use `--workspace`. Isolated Console no longer allowlists `task next`.
+- CI wheel/sdist smoke now asserts `dyro.bridge` is absent, matching
+  the publish gate.
+
+## 0.7.2 - 2026-08-17
+
+- `objective explain` and a ready `next` now lead with a three-line
+  switch-tool briefing: human matter plus one path-free read command.
+  A single live Objective makes `next` emit `tick` or `attention`
+  directly. `next.commands` stays empty. Empty attention stays unread,
+  not idle. This is not a cross-harness chat resume.
+- Console home recommendations now match that follow-up: `tick` when
+  ready, `attention` when the user must act. Empty attention still
+  opens the workspace, not `task next`.
+- Bare `dyro` / `dyro home` prints the same briefing above the tool
+  menu so switching harnesses does not start by picking a chat. When
+  that briefing exists, Enter defaults to "做下一步" and does not
+  launch an editor. `dyro start` still opens a tool, but prints the
+  briefing first.
+- `objective tick` and `objective attention` text now open with the
+  same heading and matter, then a closer without another "下一步".
+  Machine SHA lines stay below. JSON envelopes are unchanged.
+- Console workspace detail now projects already-captured lines, tasks, and
+  objectives from the same summary snapshot. Overview polling stays
+  count-only. Summary Proof and task integration stay `not_inspected`;
+  `PROOF_DECAYED` stays on the independent inspect.
+- Console overview now rolls up `task_status_counts` from readable
+  workspaces only. Unreadable workspaces stay unknown and are not counted
+  as zero.
+- Console workspace detail now lists already-captured Objective attention
+  in Chinese. Empty attention stays "摘要未列出关注项"; an unreadable
+  workspace stays unknown. Summary still strips `PROOF_DECAYED`.
+- Console home now leads with a "现在需要你" list and a human why for
+  the next command. Workspace cards show the current matter instead of
+  freshness jargon. Empty tools and empty attention still mean unread,
+  not "nothing to do".
+- Console `GET /api/v1/system` reads the cached update record only.
+  `tools` stays empty and `tool_inspection=not_inspected`. The shell
+  fetches it on start and manual refresh, not on the 5s overview poll.
+  A broken cache is unread and path-free. Empty tools means unprobed,
+  not "no tools".
+- Console meta advertises `proofs`. The shell fetches
+  `GET /api/v1/workspaces/{alias}/proofs` only when that capability is present.
+- Overview summary cards now carry `proof_inspection=not_inspected`. Isolated
+  inspection rejects an `inspected` summary so the two Proof entries cannot
+  collapse.
+- Independent Proof inspect stays in the exec worker so a hung git is reaped
+  by the parent's process-group kill. Nested spawn is withdrawn: a successful
+  worker exit must not leave inspect descendants. Timeout reports unread, not
+  inspected.
+- Console labels Proof kinds and statuses in Chinese. Overview cards no
+  longer treat unread summary as workspace Proof state. `live` is kind-specific
+  and is not merge clearance.
+- `0.7.x` release gates ignore comment-only markers, refuse `0.8` / `0.9`
+  feature numbers, and keep a later `1.0.0` identity tag on the same stranger
+  contract. Wheel smoke now runs the stranger bundle check.
+- Production `BudgetUsage` / `BudgetRequest` read `trusted_usage` from the
+  executor Card. The default is untrusted. Proof still does not feed
+  no-progress exhaustion.
+- `proof list --line` includes `trigger_observation` from Objectives on that
+  line and stays mutually exclusive with `--task` / `--objective`. `--task`
+  still excludes triggers.
+- Console inspection fails closed on Windows without starting a worker.
+- `objective tick` and `objective plan` preview `decide_budget` for the
+  selected wave. Automatic Objectives pass `automatic=True`; supervised
+  apply stays `automatic=False`. Untrusted usage hard-stops only when
+  `workspace.max_provider_usage` is set. Preview never reserves.
+- `run_task_bound_dispatch` now requires the Capability plane on write and
+  refuses a Card without `execute`. No Card remains the 0.6.9 second door.
+- Console meta advertises `surfaces` (and keeps `capabilities` as an alias)
+  so HTTP feature flags are not Capability Cards.
+- Agent Bridge S1 contracts live in source as `dyro.bridge`. The default
+  wheel still omits that package and does not grow `dyro-bridge` /
+  `dyro-mcp` scripts.
+- Agent Bridge S2/S3 source adapters resolve workspaces, emit path-free
+  observations, and return non-executable Objective plans. Catalog marks
+  those IDs `implemented_testable`. Authoritative Git observations stay
+  unavailable. No transport entry point and no default-wheel package.
+- Agent Bridge S4 source transport parses one bounded JSON request and
+  emits one redacted response. Public exposure stays empty: hello and
+  plans are `implemented_testable` only. No `dyro-bridge` script.
+- Agent Bridge S5 source catalog promotes the seven Mandatory operations
+  to `public_available` only on Linux. macOS/Windows public exposure
+  stays empty. In-process zero-effect traps cover hello. Still no
+  console script, wheel package, or CI gate.
+- Agent Bridge S6 adds a source-only Skill and `python -m dyro.bridge`
+  public process. The Skill is not an integration asset and is not
+  installable. Default wheel and `dyro-bridge` / `dyro-mcp` scripts stay
+  absent.
+- Agent Bridge S7 / `dyro-mcp` stays out. Design status lines now match
+  the `0.6.3` removal: published artifacts remain CLI + Skill, not Bridge
+  or MCP.
+
+## 0.7.1 - 2026-08-16
+
+- Console opens an independent Proof inspect at
+  `GET /api/v1/workspaces/{alias}/proofs`. Summary stays
+  `proof_inspection=not_inspected` and does not evaluate Proofs.
+- Derive `trigger_observation` from Objective trigger files using
+  `next_probe_at` only. Expired probes are display-decayed and stay out of
+  `progress_fingerprint` and merge kinds.
+- Every `0.7.x` release gate now requires the inspect and trigger markers and
+  still refuses to narrate the train as `1.0.0`.
+
+## 0.7.0 - 2026-08-16
+
+- First delivery-physics release: Proof objects, Capability Cards, the Host
+  Compiler, and `verify-bundle`. This is not the published `0.6.9` Peer Wave
+  train and is not `1.0.0`.
+- A Card without `execute` refuses write dispatch, Peer Wave binding, and
+  `task run`. PATH discovery is not a Card. A dispatch-ready provider without a
+  Card remains the explicit second write door from 0.6.9.
+- Core bound contracts no longer silently set `allow_unconfined_provider`.
+- `merge_task` still refuses missing review or signoff files, but only a failed
+  complete predicate is labeled `PROOF_DECAYED`.
+- Console summary stays `proof_inspection=not_inspected`; `dyro objective
+  attention` is the Proof-rebinding entry.
+
 ## 0.6.9 - 2026-08-15
 
 - Make multi-harness writes a Core peer wave: each task worktree has one

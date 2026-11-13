@@ -17,7 +17,7 @@ from dyro.blueprint import (
 from dyro.cli import main
 from dyro.config import load
 from dyro.errors import DyroError, ValidationError
-from dyro.workspace import get_line
+from dyro.workspace import doctor, get_line, is_missing_origin_finding
 
 from .support import shell
 
@@ -174,6 +174,12 @@ class BlueprintJoinTests(unittest.TestCase):
         self.assertEqual(line.branch, "feat/feature-a")
         self.assertEqual(line.base_for("api"), self.api_head)
         self.assertEqual(line.base_for("web"), self.web_head)
+        findings = doctor(config)
+        failures = [item for item in findings if item.startswith("FAIL")]
+        self.assertFalse(failures, findings)
+        origin = [item for item in findings if is_missing_origin_finding(item)]
+        self.assertTrue(origin, findings)
+        self.assertTrue(all(item.startswith("WARN ") for item in origin), origin)
         self.assertEqual(
             target.joinpath(".dyro/join.json").read_text(encoding="utf-8").count('"status": "complete"'),
             1,
@@ -197,6 +203,18 @@ class BlueprintJoinTests(unittest.TestCase):
             self.assertEqual(branch, "")
             self.assertEqual(head, expected_head)
             self.assertTrue((target / "versions/feature-a" / config.repositories[repo_id].mount).is_dir())
+            self.assertFalse(
+                (
+                    target
+                    / "versions/feature-a"
+                    / config.repositories[repo_id].mount
+                    / "AGENTS.md"
+                ).exists()
+            )
+        self.assertTrue((target / "AGENTS.md").is_file())
+        self.assertTrue((target / "CLAUDE.md").is_file())
+        self.assertTrue((target / "versions/feature-a/AGENTS.md").is_file())
+        self.assertTrue((target / "versions/feature-a/CLAUDE.md").is_file())
 
     def test_join_dry_run_and_validation_do_not_create_target(self) -> None:
         target = self.parent / "preview"

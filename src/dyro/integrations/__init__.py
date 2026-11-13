@@ -3,6 +3,8 @@
 from .manager import (
     AvatarStatus,
     INTEGRATION_CHOICES,
+    USER_INTEGRATION_CHOICES,
+    USER_INTEGRATION_METAVAR,
     IntegrationPlan,
     IntegrationState,
     IntegrationStatus,
@@ -16,6 +18,8 @@ from .manager import (
 __all__ = [
     "AvatarStatus",
     "INTEGRATION_CHOICES",
+    "USER_INTEGRATION_CHOICES",
+    "USER_INTEGRATION_METAVAR",
     "IntegrationPlan",
     "IntegrationState",
     "IntegrationStatus",

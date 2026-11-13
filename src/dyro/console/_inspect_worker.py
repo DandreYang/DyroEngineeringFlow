@@ -18,9 +18,19 @@ import sys
 import time
 from typing import Any
 
-from ..config import load, validate_id
+from ..config import load
+from ..continuation.next_step import next_commands
 from ..hub import WorkspaceRecord, WorkspaceRegistry
-from .overview import ConsoleOverviewError, ConsoleOverviewService
+from .overview import (
+    ConsoleOverviewError,
+    ConsoleOverviewService,
+    WORKSPACE_MISSING_ROOT,
+    WORKSPACE_TIMEOUT,
+    WORKSPACE_UNAVAILABLE,
+    omit_colliding_workspace_command,
+    unavailable_workspace_summary,
+    workspace_root_missing,
+)
 
 
 _CURSOR_SECRET_ENV = "DYRO_CONSOLE_CURSOR_SECRET"
@@ -30,47 +40,52 @@ _OVERVIEW_TIMEOUT_SECONDS = 6.0
 _WORKER_RESPONSE_LIMIT = 2 * 1024 * 1024
 
 
-def _unavailable_summary(alias: str, code: str) -> dict[str, object]:
-    return {
-        "alias": alias,
-        "display_name": alias,
-        "is_default": False,
-        "availability": "unavailable",
-        "health": "unavailable",
-        "freshness": "partial",
-        "repository_count": 0,
-        "line_count": 0,
-        "objective_count": 0,
-        "active_objective_count": 0,
-        "task_count": 0,
-        "task_status_counts": {},
-        "attention_counts": {
-            "repair_required": 0,
-            "needs_user": 0,
-            "ready": 0,
-            "paused": 0,
-            "waiting": 0,
-        },
-        "recommendation": {
-            "reason": code,
-            "command": f"dyro --workspace {alias} doctor",
-        },
-        "snapshot_sha256": "",
-    }
+def _unavailable_summary(
+    alias: str,
+    code: str,
+    names: tuple[str, ...] = (),
+    *,
+    root: Path | None = None,
+) -> dict[str, object]:
+    return unavailable_workspace_summary(
+        alias, False, reason=code, names=names, root=root
+    )
 
 
 def _capture_workspace_summary(
     result_queue: Any,
     record: WorkspaceRecord,
     is_default: bool,
+    registry: WorkspaceRegistry | None = None,
 ) -> None:
     """Capture one workspace only, returning a JSON-safe value through IPC."""
+    names = (
+        tuple(item.name for item in registry.workspaces)
+        if registry is not None
+        else (record.name,)
+    )
     try:
-        registry = WorkspaceRegistry(
+        if workspace_root_missing(record.root):
+            result_queue.put(
+                {
+                    "summary": _unavailable_summary(
+                        record.name,
+                        WORKSPACE_MISSING_ROOT,
+                        names,
+                        root=record.root,
+                    ),
+                    "warnings": [WORKSPACE_MISSING_ROOT],
+                }
+            )
+            return
+        capture_registry = registry or WorkspaceRegistry(
             default=record.name if is_default else "",
             workspaces=(record,),
         )
-        service = ConsoleOverviewService(registry_loader=lambda: registry)
+        service = ConsoleOverviewService(
+            registry_loader=lambda: capture_registry,
+            commands_loader=next_commands,
+        )
         payload = service.workspace(record.name)
         summary = payload["data"]["workspace"]
         warnings = [item["code"] for item in payload["freshness"]["warnings"]]
@@ -78,19 +93,28 @@ def _capture_workspace_summary(
     except Exception:
         result_queue.put(
             {
-                "summary": _unavailable_summary(record.name, "WORKSPACE_UNAVAILABLE"),
-                "warnings": ["WORKSPACE_UNAVAILABLE"],
+                "summary": _unavailable_summary(
+                    record.name,
+                    WORKSPACE_UNAVAILABLE,
+                    names,
+                    root=record.root,
+                ),
+                "warnings": [WORKSPACE_UNAVAILABLE],
             }
         )
 
 
 def _parse_child_result(
-    value: object, record: WorkspaceRecord, *, is_default: bool
+    value: object,
+    record: WorkspaceRecord,
+    *,
+    is_default: bool,
+    names: tuple[str, ...] = (),
 ) -> tuple[dict[str, object], set[str]]:
     if not isinstance(value, dict):
-        return _unavailable_summary(record.name, "WORKSPACE_UNAVAILABLE"), {
-            "WORKSPACE_UNAVAILABLE"
-        }
+        return _unavailable_summary(
+            record.name, WORKSPACE_UNAVAILABLE, names, root=record.root
+        ), {WORKSPACE_UNAVAILABLE}
     summary = value.get("summary")
     warnings = value.get("warnings")
     if (
@@ -98,13 +122,15 @@ def _parse_child_result(
         or not isinstance(warnings, list)
         or not all(isinstance(item, str) for item in warnings)
     ):
-        return _unavailable_summary(record.name, "WORKSPACE_UNAVAILABLE"), {
-            "WORKSPACE_UNAVAILABLE"
-        }
+        return _unavailable_summary(
+            record.name, WORKSPACE_UNAVAILABLE, names, root=record.root
+        ), {WORKSPACE_UNAVAILABLE}
     copied = dict(summary)
     copied["alias"] = record.name
     copied["is_default"] = is_default
-    return copied, set(warnings)
+    return omit_colliding_workspace_command(
+        copied, names, root=record.root
+    ), set(warnings)
 
 
 def _isolated_summaries(
@@ -120,9 +146,12 @@ def _isolated_summaries(
     summaries: list[dict[str, object]] = []
     warnings: set[str] = set()
     deadline = time.monotonic() + total_timeout
+    names = tuple(item.name for item in registry.workspaces)
 
     def finish(record: WorkspaceRecord, value: object, *, default: bool) -> None:
-        summary, codes = _parse_child_result(value, record, is_default=default)
+        summary, codes = _parse_child_result(
+            value, record, is_default=default, names=names
+        )
         summaries.append(summary)
         warnings.update(codes)
 
@@ -136,8 +165,13 @@ def _isolated_summaries(
                 finish(
                     record,
                     {
-                        "summary": _unavailable_summary(record.name, "WORKSPACE_TIMEOUT"),
-                        "warnings": ["WORKSPACE_TIMEOUT"],
+                        "summary": _unavailable_summary(
+                            record.name,
+                            WORKSPACE_TIMEOUT,
+                            names,
+                            root=record.root,
+                        ),
+                        "warnings": [WORKSPACE_TIMEOUT],
                     },
                     default=record.name == registry.default,
                 )
@@ -146,8 +180,13 @@ def _isolated_summaries(
                 finish(
                     record,
                     {
-                        "summary": _unavailable_summary(record.name, "WORKSPACE_TIMEOUT"),
-                        "warnings": ["WORKSPACE_TIMEOUT"],
+                        "summary": _unavailable_summary(
+                            record.name,
+                            WORKSPACE_TIMEOUT,
+                            names,
+                            root=record.root,
+                        ),
+                        "warnings": [WORKSPACE_TIMEOUT],
                     },
                     default=record.name == registry.default,
                 )
@@ -158,7 +197,12 @@ def _isolated_summaries(
             result_queue = context.Queue(maxsize=1)
             process = context.Process(
                 target=_capture_workspace_summary,
-                args=(result_queue, record, record.name == registry.default),
+                args=(
+                    result_queue,
+                    record,
+                    record.name == registry.default,
+                    registry,
+                ),
                 daemon=True,
             )
             process.start()
@@ -187,11 +231,13 @@ def _isolated_summaries(
                 if has_value:
                     finish(record, value, default=record.name == registry.default)
                 else:
-                    code = "WORKSPACE_TIMEOUT" if timed_out else "WORKSPACE_UNAVAILABLE"
+                    code = WORKSPACE_TIMEOUT if timed_out else WORKSPACE_UNAVAILABLE
                     finish(
                         record,
                         {
-                            "summary": _unavailable_summary(record.name, code),
+                            "summary": _unavailable_summary(
+                                record.name, code, names, root=record.root
+                            ),
                             "warnings": [code],
                         },
                         default=record.name == registry.default,
@@ -207,26 +253,9 @@ def _isolated_summaries(
 def _isolated_workspace(
     service: ConsoleOverviewService, alias: str
 ) -> dict[str, object]:
-    try:
-        alias = validate_id(alias, "工作区别名")
-    except Exception:
-        raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID") from None
-    registry = service._load_registry()
-    try:
-        record = next(item for item in registry.workspaces if item.name == alias)
-    except StopIteration:
-        raise ConsoleOverviewError("WORKSPACE_NOT_FOUND") from None
-    isolated_registry = WorkspaceRegistry(
-        default=record.name if record.name == registry.default else "",
-        workspaces=(record,),
-    )
-    summaries, warnings = _isolated_summaries(
-        isolated_registry,
-        total_timeout=_OVERVIEW_TIMEOUT_SECONDS,
-    )
-    if not summaries:
-        raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
-    return service._envelope({"workspace": summaries[0]}, warnings)
+    # Run in this exec worker so hung git stays in the parent's killpg
+    # group. Nested summary spawn only returns the count card.
+    return service.workspace(alias)
 
 
 def _secret_from_environment() -> bytes:
@@ -255,6 +284,9 @@ def _decode_request(value: str) -> dict[str, object]:
         "cursor",
         "limit",
         "alias",
+        "after",
+        "parent",
+        "filter",
         "target_root",
     }:
         raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
@@ -305,11 +337,19 @@ def main(argv: list[str] | None = None) -> int:
         service_arguments: dict[str, object] = {
             "cursor_secret": _secret_from_environment(),
             "summary_loader": _isolated_summaries,
+            "commands_loader": next_commands,
         }
         if target_registry is not None:
             service_arguments["registry_loader"] = lambda: target_registry
         service = ConsoleOverviewService(**service_arguments)
         operation = request.get("op")
+        if operation in {
+            "post_channel",
+            "artifact_write",
+            "artifacts_write",
+            "put_artifact",
+        }:
+            raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         if operation == "overview":
             payload = service.page(
                 cursor=request.get("cursor"),
@@ -320,6 +360,58 @@ def main(argv: list[str] | None = None) -> int:
             if not isinstance(alias, str):
                 raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID")
             payload = _isolated_workspace(service, alias)
+        elif operation == "inspect_proofs":
+            alias = request.get("alias")
+            if not isinstance(alias, str):
+                raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID")
+            # Inspect is its own exec-worker request. Keep git descendants in
+            # this process group so the parent's 8s killpg can reap them.
+            payload = service.inspect_proofs(alias)
+        elif operation == "system":
+            payload = service.system()
+        elif operation == "events":
+            alias = request.get("alias")
+            if not isinstance(alias, str):
+                raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID")
+            after = request.get("after")
+            if after is not None and not isinstance(after, str):
+                raise ConsoleOverviewError("EVENT_CURSOR_INVALID")
+            limit = request.get("limit", 50)
+            if type(limit) is not int:
+                raise ConsoleOverviewError("EVENT_LIMIT_INVALID")
+            payload = service.events(alias, after=after, limit=limit)
+        elif operation == "families":
+            alias = request.get("alias")
+            if not isinstance(alias, str):
+                raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID")
+            payload = service.families(alias)
+        elif operation == "family":
+            alias = request.get("alias")
+            parent = request.get("parent")
+            if not isinstance(alias, str):
+                raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID")
+            if not isinstance(parent, str):
+                raise ConsoleOverviewError("FAMILY_PARENT_INVALID")
+            payload = service.family(alias, parent)
+        elif operation == "channel":
+            alias = request.get("alias")
+            parent = request.get("parent")
+            if not isinstance(alias, str):
+                raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID")
+            if not isinstance(parent, str):
+                raise ConsoleOverviewError("FAMILY_PARENT_INVALID")
+            after = request.get("after")
+            if after is not None and not isinstance(after, str):
+                raise ConsoleOverviewError("CHANNEL_CURSOR_INVALID")
+            filter_text = request.get("filter")
+            if filter_text is not None and not isinstance(filter_text, str):
+                raise ConsoleOverviewError("CHANNEL_FILTER_INVALID")
+            limit = request.get("limit", 50)
+            if type(limit) is not int:
+                raise ConsoleOverviewError("CHANNEL_LIMIT_INVALID")
+            payload = service.channel(
+                alias, parent, after=after, filter=filter_text, limit=limit
+            )
         else:
             raise ConsoleOverviewError("OVERVIEW_UNAVAILABLE")
         return _response(payload)

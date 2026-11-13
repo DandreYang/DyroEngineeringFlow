@@ -4,9 +4,13 @@
 
 **DyroEngineeringFlow · `dyro` CLI** é uma plataforma local-first de automação de engenharia e controle de entrega para equipes multi-repositório. Une linhas de desenvolvimento, Git worktrees, lançadores de agentes, portões de tarefa, revisão independente e auditoria de merge em uma configuração de workspace versionada.
 
+**Dyro é um motor de física de entrega local-first para vários repositórios: decide o que pode se tornar verdadeiro, quando essa verdade decai e quem pode mudar o mundo.**
+
+`dyro proof verify` religa o workspace atual. `dyro proof verify-bundle` verifica só a integridade portátil: o chamador deve passar cada `--git-dir` que contém os objetos fixados (busca em união, não um mapa de repos). Sem objetos o resultado é `inconclusive`. Integrity `live` não é merge.
+
 **Manter a engenharia em movimento da tarefa à entrega.**
 
-Não está acoplado a Codex, Claude ou a qualquer domínio de negócio. Cada equipe fornece um Profile `dyro.toml` para repositórios, layouts, adaptadores de agente e política de entrega; regras de negócio, custo de modelos e práticas de release ficam nesse Profile.
+Cada equipe fornece um Profile `dyro.toml` para repositórios, layouts, adaptadores de agente e política de entrega; regras de negócio, custo de modelos e práticas de release ficam nesse Profile.
 
 ## O que impõe
 

@@ -22,15 +22,40 @@ from ..read_limits import (
     bounded_directory_names,
 )
 from ..state import atomic_write_text, exclusive_lock, fsync_directory
+from .seats import (
+    BOARD_ID,
+    BOARD_SKILL,
+    CONTROL_PLANE_ID,
+    CONTROL_PLANE_SKILL,
+    DISPATCH_ID,
+    DISPATCH_SKILL,
+    EXECUTOR_ID,
+    EXECUTOR_SKILL,
+)
 
 
-CANONICAL_INTEGRATION_ID = "skill"
+CANONICAL_INTEGRATION_ID = CONTROL_PLANE_ID
 LEGACY_INTEGRATION_ID = "codex"
-SKILL_NAME = "dyro-control-plane"
-ASSET_VERSION = 3
-DISPATCH_INTEGRATION_ID = "dispatch"
-DISPATCH_SKILL_NAME = "dyro-dispatch"
-DISPATCH_ASSET_VERSION = 1
+SKILL_NAME = CONTROL_PLANE_SKILL
+ASSET_VERSION = 5
+DISPATCH_INTEGRATION_ID = DISPATCH_ID
+DISPATCH_SKILL_NAME = DISPATCH_SKILL
+DISPATCH_ASSET_VERSION = 2
+EXECUTOR_INTEGRATION_ID = EXECUTOR_ID
+EXECUTOR_SKILL_NAME = EXECUTOR_SKILL
+EXECUTOR_ASSET_VERSION = 2
+BOARD_INTEGRATION_ID = BOARD_ID
+BOARD_SKILL_NAME = BOARD_SKILL
+BOARD_ASSET_VERSION = 2
+REVIEW_BOARD_INTEGRATION_ID = "review-board"
+REVIEW_BOARD_SKILL_NAME = "dyro-review-board"
+REVIEW_BOARD_ASSET_VERSION = 1
+TASK_MERGE_INTEGRATION_ID = "task-merge"
+TASK_MERGE_SKILL_NAME = "dyro-task-merge"
+TASK_MERGE_ASSET_VERSION = 1
+LINE_FAMILY_INTEGRATION_ID = "line-family"
+LINE_FAMILY_SKILL_NAME = "dyro-line-family"
+LINE_FAMILY_ASSET_VERSION = 2
 MANIFEST_SCHEMA_VERSION = 2
 LEGACY_MANIFEST_SCHEMA_VERSION = 1
 _SHA256_PREFIX = "sha256:"
@@ -43,6 +68,8 @@ class SkillIntegrationSpec:
     asset_version: int
     aliases: tuple[str, ...] = ()
     legacy_manifest_id: str | None = None
+    companions: tuple[str, ...] = ()
+    user_facing: bool = True
 
 
 CONTROL_PLANE_SPEC = SkillIntegrationSpec(
@@ -57,15 +84,55 @@ DISPATCH_SPEC = SkillIntegrationSpec(
     skill_name=DISPATCH_SKILL_NAME,
     asset_version=DISPATCH_ASSET_VERSION,
 )
+EXECUTOR_SPEC = SkillIntegrationSpec(
+    integration_id=EXECUTOR_INTEGRATION_ID,
+    skill_name=EXECUTOR_SKILL_NAME,
+    asset_version=EXECUTOR_ASSET_VERSION,
+)
+BOARD_SPEC = SkillIntegrationSpec(
+    integration_id=BOARD_INTEGRATION_ID,
+    skill_name=BOARD_SKILL_NAME,
+    asset_version=BOARD_ASSET_VERSION,
+    companions=(REVIEW_BOARD_INTEGRATION_ID,),
+    user_facing=False,
+)
+REVIEW_BOARD_SPEC = SkillIntegrationSpec(
+    integration_id=REVIEW_BOARD_INTEGRATION_ID,
+    skill_name=REVIEW_BOARD_SKILL_NAME,
+    asset_version=REVIEW_BOARD_ASSET_VERSION,
+    companions=(BOARD_INTEGRATION_ID,),
+)
+TASK_MERGE_SPEC = SkillIntegrationSpec(
+    integration_id=TASK_MERGE_INTEGRATION_ID,
+    skill_name=TASK_MERGE_SKILL_NAME,
+    asset_version=TASK_MERGE_ASSET_VERSION,
+)
+LINE_FAMILY_SPEC = SkillIntegrationSpec(
+    integration_id=LINE_FAMILY_INTEGRATION_ID,
+    skill_name=LINE_FAMILY_SKILL_NAME,
+    asset_version=LINE_FAMILY_ASSET_VERSION,
+)
 SKILL_INTEGRATIONS: tuple[SkillIntegrationSpec, ...] = (
     CONTROL_PLANE_SPEC,
     DISPATCH_SPEC,
+    EXECUTOR_SPEC,
+    BOARD_SPEC,
+    REVIEW_BOARD_SPEC,
+    TASK_MERGE_SPEC,
+    LINE_FAMILY_SPEC,
 )
 INTEGRATION_CHOICES: tuple[str, ...] = tuple(
     choice
     for spec in SKILL_INTEGRATIONS
     for choice in (spec.integration_id, *spec.aliases)
 )
+USER_INTEGRATION_CHOICES: tuple[str, ...] = tuple(
+    choice
+    for spec in SKILL_INTEGRATIONS
+    if spec.user_facing
+    for choice in (spec.integration_id, *spec.aliases)
+)
+USER_INTEGRATION_METAVAR = "{" + ",".join(USER_INTEGRATION_CHOICES) + "}"
 
 
 class IntegrationState(str, Enum):
@@ -93,6 +160,8 @@ HOSTS: tuple[HostSpec, ...] = (
     HostSpec("grok", "GROK_HOME", ".grok"),
     HostSpec("pi", "PI_CODING_AGENT_DIR", ".pi/agent"),
     HostSpec("dsh", "DSH_HOME", ".dsh"),
+    HostSpec("opencode", "OPENCODE_CONFIG_DIR", ".config/opencode"),
+    HostSpec("hermes", "HERMES_HOME", ".hermes"),
 )
 
 
@@ -181,21 +250,33 @@ def _state_paths(
     )
 
 
+def _usable_existing_host_home(candidate: Path) -> Path | None:
+    """Accept only a real directory that already exists. Never create one."""
+    if candidate.exists() and candidate.is_dir() and not candidate.is_symlink():
+        if _symlink_component(candidate) is None:
+            return candidate
+    return None
+
+
 def _host_home(
     spec: HostSpec, overrides: Mapping[str, Path] | None
 ) -> Path | None:
     if overrides is not None and spec.host_id in overrides:
-        return _absolute_path(overrides[spec.host_id], f"{spec.host_id} home")
+        candidate = _absolute_path(overrides[spec.host_id], f"{spec.host_id} home")
+        # Fail-closed: surface symlink / non-dir path components so install
+        # refuses instead of mkdir-through or silent-skip.
+        if _symlink_component(candidate) is not None:
+            return candidate
+        return _usable_existing_host_home(candidate)
     if spec.env_var:
         raw = os.environ.get(spec.env_var, "").strip()
         if raw:
-            return _absolute_path(Path(raw), spec.env_var)
+            candidate = _absolute_path(Path(raw), spec.env_var)
+            if _symlink_component(candidate) is not None:
+                return candidate
+            return _usable_existing_host_home(candidate)
     candidate = _user_home() / spec.default_dirname
-    if candidate.exists() and candidate.is_dir() and not candidate.is_symlink():
-        unsafe = _symlink_component(candidate)
-        if unsafe is None:
-            return candidate
-    return None
+    return _usable_existing_host_home(candidate)
 
 
 def _avatar_path(host_home: Path, spec: SkillIntegrationSpec) -> Path:
@@ -1166,6 +1247,10 @@ def _install_avatars(
                         f"{host_spec.host_id} skills 目录不安全：{unsafe}"
                     )
                 continue
+            if not home.exists() or not home.is_dir() or home.is_symlink():
+                # Never mkdir host homes. Missing env / host_homes overrides
+                # stay silent, matching absent default homes.
+                continue
             if _is_link(avatar) and _resolves_to(avatar, mirror):
                 avatars[host_spec.host_id] = {
                     "path": str(avatar),
@@ -1231,7 +1316,7 @@ def sync_managed_skill(
 ) -> IntegrationPlan | None:
     """Install or upgrade the Skill when the local state allows mutation.
 
-    - ``CURRENT``: no-op (``None``)
+    - ``CURRENT``: no-op (``None``), unless a companion still needs install
     - ``OUTDATED``: upgrade / repair the managed install
     - ``ABSENT``: first install only when ``allow_first_install`` is true
     - conflict / recovery states: raise ``DyroError`` (callers may soft-fail)
@@ -1243,7 +1328,20 @@ def sync_managed_skill(
         codex_home=codex_home,
     )
     if status.state is IntegrationState.CURRENT:
-        return None
+        spec = _integration_spec(integration)
+        if not spec.companions:
+            return None
+        plan = install_integration(
+            integration,
+            yes=yes,
+            dry_run=dry_run,
+            dyro_home=dyro_home,
+            host_homes=host_homes,
+            codex_home=codex_home,
+        )
+        if not any(change.startswith("同时安装") for change in plan.changes):
+            return None
+        return plan
     if status.state is IntegrationState.ABSENT and not allow_first_install:
         return None
     return install_integration(
@@ -1256,7 +1354,78 @@ def sync_managed_skill(
     )
 
 
+def _companion_install_label(companion_id: str) -> str:
+    if companion_id == BOARD_INTEGRATION_ID:
+        return "同时安装 board（`/dyro-review-board` 的内部协议，不是斜杠命令）"
+    if companion_id == REVIEW_BOARD_INTEGRATION_ID:
+        return "同时安装 review-board（人类斜杠 `/dyro-review-board`）"
+    return f"同时安装 {companion_id}"
+
+
+def _companion_plan_is_interesting(plan: IntegrationPlan) -> bool:
+    if not plan.changes:
+        return False
+    return plan.changes != ("无需写入；Integration 已是当前版本",)
+
+
+def _merge_companion_plans(
+    plan: IntegrationPlan, companion_plans: tuple[IntegrationPlan, ...]
+) -> IntegrationPlan:
+    extras: list[str] = []
+    for companion_plan in companion_plans:
+        if not _companion_plan_is_interesting(companion_plan):
+            continue
+        extras.append(_companion_install_label(companion_plan.status.integration))
+        extras.extend(companion_plan.changes)
+    if not extras:
+        return plan
+    return IntegrationPlan(plan.action, plan.status, plan.changes + tuple(extras))
+
+
 def install_integration(
+    integration: str,
+    *,
+    yes: bool,
+    dry_run: bool = False,
+    dyro_home: Path | None = None,
+    host_homes: Mapping[str, Path] | None = None,
+    codex_home: Path | None = None,
+    _seen: frozenset[str] | None = None,
+) -> IntegrationPlan:
+    spec = _integration_spec(integration)
+    seen = frozenset(_seen or ())
+    if spec.integration_id in seen:
+        status = integration_status(
+            integration,
+            dyro_home=dyro_home,
+            host_homes=host_homes,
+            codex_home=codex_home,
+        )
+        return IntegrationPlan("install", status, ())
+    plan = _install_one(
+        integration,
+        yes=yes,
+        dry_run=dry_run,
+        dyro_home=dyro_home,
+        host_homes=host_homes,
+        codex_home=codex_home,
+    )
+    companion_plans = tuple(
+        install_integration(
+            companion_id,
+            yes=yes,
+            dry_run=dry_run,
+            dyro_home=dyro_home,
+            host_homes=host_homes,
+            codex_home=codex_home,
+            _seen=seen | {spec.integration_id},
+        )
+        for companion_id in spec.companions
+    )
+    return _merge_companion_plans(plan, companion_plans)
+
+
+def _install_one(
     integration: str,
     *,
     yes: bool,

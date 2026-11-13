@@ -1,8 +1,12 @@
-# ADR 0006: Agent Bridge Phase 0
+# ADR 0007: Agent Bridge Phase 0
 
 ## Status
 
-Proposed
+Proposed. Source contracts through S6 live under `src/dyro/bridge/`. This
+`0.7.x` Core tree keeps the published surface bridge-free: `dyro.bridge` is
+not in `packages =`, and `dyro-bridge` / `dyro-mcp` are not console scripts.
+Decision 10's "ship in the Dyro Python distribution" clause is the later
+extra, not the current wheel. S7 MCP/Plugin is not started.
 
 ## Context
 

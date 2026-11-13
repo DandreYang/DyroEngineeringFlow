@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import re
 import tomllib
@@ -20,6 +20,7 @@ CHANGESETS_DIR = ".dyro/changes"
 OBJECTIVES_DIR = ".dyro/objectives"
 
 SAFE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$")
+PUSH_DISABLED_NOTE = "Dyro 不会 push；普通 `git push` 仍可用。"
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,8 @@ class Config:
     adapters: dict[str, Adapter]
     policy: Policy
     recommended_tool: str = ""
+    capabilities: dict[str, object] = field(default_factory=dict)
+    max_provider_usage: int | None = None
 
     @property
     def task_specs_dir(self) -> Path:
@@ -123,6 +126,21 @@ def external_security_errors(policy: Policy) -> tuple[str, ...]:
     ):
         missing.append("policy.require_signed_signoff = true")
     return tuple(missing)
+
+
+
+
+def push_disclosure(policy: Policy) -> str:
+    """User-facing note when Dyro itself will not push."""
+    if policy.allow_push:
+        return ""
+    return PUSH_DISABLED_NOTE
+
+
+def push_policy_fields(policy: Policy) -> dict[str, object]:
+    if policy.allow_push:
+        return {"allow_push": True}
+    return {"allow_push": False, "push_note": PUSH_DISABLED_NOTE}
 
 
 def validate_id(value: str, label: str = "ID") -> str:
@@ -195,6 +213,17 @@ def _parse_config(workspace: Path, profile_bytes: bytes) -> Config:
     recommended_tool = recommended_tool_raw.strip()
     if recommended_tool:
         validate_id(recommended_tool, "workspace.recommended_tool")
+    max_provider_usage_raw = workspace_raw.get("max_provider_usage")
+    if max_provider_usage_raw is None:
+        max_provider_usage = None
+    elif (
+        isinstance(max_provider_usage_raw, bool)
+        or not isinstance(max_provider_usage_raw, int)
+        or max_provider_usage_raw < 1
+    ):
+        raise ValidationError("workspace.max_provider_usage 必须是正整数")
+    else:
+        max_provider_usage = max_provider_usage_raw
     layout_raw = table("layout")
     layout = Layout(
         anchors=_relative(
@@ -323,6 +352,10 @@ def _parse_config(workspace: Path, profile_bytes: bytes) -> Config:
             f"adapters.{adapter_id}.launch",
         )
         adapters[adapter_id] = Adapter(adapter_id, launch, read, write)
+    from .capability.cards import merge_capability_plane, parse_capability_tables
+
+    cards = parse_capability_tables(raw.get("capabilities"))
+    adapters, cards = merge_capability_plane(adapters, cards)
     return Config(
         workspace,
         name,
@@ -331,6 +364,8 @@ def _parse_config(workspace: Path, profile_bytes: bytes) -> Config:
         adapters,
         policy,
         recommended_tool,
+        cards,
+        max_provider_usage,
     )
 
 

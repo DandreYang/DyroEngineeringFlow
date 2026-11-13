@@ -40,6 +40,9 @@ ASYNC_RESERVATION_GRACE_SECONDS = 10.0
 MAX_CANCEL_REASON_CHARS = 500
 MAX_ORCHESTRATION_ID_CHARS = 256
 MAX_RUN_STATE_BYTES = 2 * 1024 * 1024
+# Bounded re-opens for a run-state file that an atomic writer replaced
+# between our open and the inode re-check.
+RUN_STATE_REOPEN_ATTEMPTS = 5
 _POSIX_PROCESS_GROUPS = (
     os.name == "posix"
     and hasattr(os, "getpgid")
@@ -309,6 +312,61 @@ class RunRecord:
         )
 
 
+def _read_run_state_bytes(path: Path) -> bytes | None:
+    """Read one run-state file, or None when the path was replaced mid-read.
+
+    ``O_NOFOLLOW`` plus the ``fstat`` checks below keep the symlink and
+    file-type guarantees on every attempt.  Only the "still the same inode we
+    opened" check is retryable: ``atomic_write_json`` publishes updates with
+    ``os.replace``, so a healthy concurrent writer fails that check exactly
+    the way a swapped path does, and refusing it would fail a live run.
+    """
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError as exc:
+        raise DispatchValidationError(
+            f"run not found: {path.stem}"
+        ) from exc
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.EMLINK} or path.is_symlink():
+            raise DispatchValidationError(
+                f"run state is a symbolic link: {path.stem}"
+            ) from exc
+        raise DispatchValidationError(
+            f"run state cannot be opened safely: {path.stem}"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise DispatchValidationError(
+                f"run state is not a regular file: {path.stem}"
+            )
+        if opened.st_size > MAX_RUN_STATE_BYTES:
+            raise DispatchValidationError(
+                f"run state exceeds {MAX_RUN_STATE_BYTES} bytes"
+            )
+        linked = os.stat(path, follow_symlinks=False)
+        if stat.S_ISLNK(linked.st_mode) or not os.path.samestat(opened, linked):
+            return None
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(MAX_RUN_STATE_BYTES + 1)
+        if len(raw) > MAX_RUN_STATE_BYTES:
+            raise DispatchValidationError(
+                f"run state exceeds {MAX_RUN_STATE_BYTES} bytes"
+            )
+    except FileNotFoundError:
+        return None
+    finally:
+        os.close(descriptor)
+    return raw
+
+
 class RunStore:
     def __init__(self, home: Path | None = None, *, create: bool = True) -> None:
         self.home = home
@@ -543,53 +601,16 @@ class RunStore:
         atomic_write_json(self._path(record.run_id), payload)
 
     def _read_payload(self, path: Path) -> dict[str, Any]:
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NONBLOCK", 0)
-        )
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        try:
-            descriptor = os.open(path, flags)
-        except FileNotFoundError as exc:
-            raise DispatchValidationError(
-                f"run not found: {path.stem}"
-            ) from exc
-        except OSError as exc:
-            if exc.errno in {errno.ELOOP, errno.EMLINK} or path.is_symlink():
-                raise DispatchValidationError(
-                    f"run state is a symbolic link: {path.stem}"
-                ) from exc
-            raise DispatchValidationError(
-                f"run state cannot be opened safely: {path.stem}"
-            ) from exc
-        try:
-            opened = os.fstat(descriptor)
-            if not stat.S_ISREG(opened.st_mode):
-                raise DispatchValidationError(
-                    f"run state is not a regular file: {path.stem}"
-                )
-            if opened.st_size > MAX_RUN_STATE_BYTES:
-                raise DispatchValidationError(
-                    f"run state exceeds {MAX_RUN_STATE_BYTES} bytes"
-                )
-            linked = os.stat(path, follow_symlinks=False)
-            if stat.S_ISLNK(linked.st_mode) or not os.path.samestat(opened, linked):
-                raise DispatchValidationError(
-                    f"run state path changed while opening: {path.stem}"
-                )
-            with os.fdopen(descriptor, "rb", closefd=False) as handle:
-                raw = handle.read(MAX_RUN_STATE_BYTES + 1)
-            if len(raw) > MAX_RUN_STATE_BYTES:
-                raise DispatchValidationError(
-                    f"run state exceeds {MAX_RUN_STATE_BYTES} bytes"
-                )
-        except FileNotFoundError as exc:
+        for _ in range(RUN_STATE_REOPEN_ATTEMPTS):
+            raw = _read_run_state_bytes(path)
+            if raw is not None:
+                break
+        else:
+            # A path that is still changing after every attempt is not a
+            # writer publishing an update; refuse it as this guard always has.
             raise DispatchValidationError(
                 f"run state path changed while opening: {path.stem}"
-            ) from exc
-        finally:
-            os.close(descriptor)
+            )
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:

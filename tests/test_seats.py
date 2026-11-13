@@ -1,0 +1,204 @@
+from __future__ import annotations
+
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
+import re
+import unittest
+from unittest.mock import Mock, patch
+
+from dyro.home import HomeTool, launch_start_tool
+from dyro.integrations import manager
+from dyro.integrations.seats import (
+    BOARD_ID,
+    COMPANION_IDS,
+    CONTROL_PLANE_ID,
+    EXECUTOR_ID,
+    FIRST_BATCH_IDS,
+    SEATS,
+    managed_skill_bundle,
+    render_seat_notice,
+    select_launch_seat,
+)
+from dyro.tooling import ToolState
+
+
+class FirstBatchSeatTests(unittest.TestCase):
+    def test_first_batch_is_four_seats_and_omits_reviewer(self) -> None:
+        self.assertEqual(
+            FIRST_BATCH_IDS,
+            ("skill", "dispatch", "executor", "board"),
+        )
+        self.assertEqual(COMPANION_IDS, ("dispatch", "executor", "board"))
+        self.assertEqual(
+            managed_skill_bundle(),
+            (
+                ("skill", "控制面"),
+                ("dispatch", "Dispatch"),
+                ("executor", "执行"),
+                ("board", "会审"),
+            ),
+        )
+        names = {seat.skill_name for seat in SEATS}
+        self.assertNotIn("dyro-reviewer", names)
+
+    def test_launch_seat_follows_task_then_navigator(self) -> None:
+        self.assertEqual(select_launch_seat(task="API-101", line="dev"), EXECUTOR_ID)
+        self.assertEqual(select_launch_seat(task="", line="dev"), CONTROL_PLANE_ID)
+        notice = render_seat_notice(EXECUTOR_ID)
+        self.assertIn("dyro-executor", notice)
+        self.assertIn("不要 merge", notice)
+        self.assertNotIn(BOARD_ID, notice)
+
+    def test_launch_start_tool_prints_seat_for_desktop_launcher(self) -> None:
+        tool = HomeTool(
+            "cursor",
+            "Cursor Desktop",
+            "launcher",
+            ("open", "-a", "Cursor"),
+            (),
+            ToolState.READY,
+        )
+        output = StringIO()
+        with (
+            patch("dyro.home.launch_home_tool") as launch,
+            redirect_stdout(output),
+        ):
+            launch_start_tool(
+                Mock(),
+                workspace=Path("/tmp/ws"),
+                tool=tool,
+                line="dev",
+                task="API-101",
+                dry_run=True,
+            )
+        launch.assert_called_once()
+        self.assertIn("座位  执行 · dyro-executor", output.getvalue())
+
+    def test_packaged_first_batch_skills_auto_trigger_and_stay_bounded(self) -> None:
+        for seat in SEATS:
+            root = manager._asset_root(seat.integration_id)
+            skill = root / "SKILL.md"
+            metadata = root / "agents" / "openai.yaml"
+            content = skill.read_text(encoding="utf-8")
+            self.assertLessEqual(
+                len(content.encode("utf-8")), 8 * 1024, msg=seat.skill_name
+            )
+            self.assertNotIn("TODO", content)
+            frontmatter = content.split("---", 2)[1]
+            keys = {
+                line.split(":", 1)[0]
+                for line in frontmatter.splitlines()
+                if line.strip()
+            }
+            expected_keys = {"name", "description"}
+            if seat.integration_id == BOARD_ID:
+                expected_keys = {"name", "description", "user-invocable"}
+                self.assertIn("user-invocable: false", frontmatter)
+                self.assertNotIn("user-invocable: true", frontmatter)
+                self.assertNotIn("/dyro-board", content)
+                self.assertIn("/dyro-review-board", content)
+                self.assertIn("production line", content)
+                self.assertIn("Must not default to `master`/`main`", content)
+                collapsed = re.sub(r"\s+", " ", re.sub(r"[*_]", "", content))
+                self.assertIn("existing review-directory convention", collapsed)
+                self.assertIn("0b.", content)
+                self.assertIn("same development line / same topic", content)
+                self.assertIn("已闭环", content)
+                self.assertIn("未闭环", content)
+                self.assertIn("已检索·无先前会审", content)
+                self.assertIn("is not enough to declare a seat dead", collapsed)
+                self.assertNotIn("is enough to declare a seat dead", collapsed)
+                self.assertIn("first dispatch", collapsed)
+                self.assertIn("prior-board directory wins", collapsed)
+                self.assertIn("re-check every seat claim", content)
+                self.assertIn("wait window", content)
+                self.assertIn("逾期未交", content)
+                self.assertIn("revised record", collapsed)
+                self.assertIn("the full command", content)
+                self.assertIn("raw output", content)
+                self.assertIn("pipeline/redirect hid the exit code", content)
+                self.assertIn("must not assert pass", content)
+                self.assertNotIn("must assert pass", collapsed)
+                self.assertIn("须人工核", content)
+                self.assertIn("未复核·转述", content)
+                self.assertIn("P0/P1/P2", content)
+            self.assertEqual(keys, expected_keys, msg=seat.skill_name)
+            self.assertIn(f"name: {seat.skill_name}", frontmatter)
+            lowered = content.lower()
+            for term in seat.trigger_terms:
+                self.assertIn(term.lower(), lowered, msg=f"{seat.skill_name}: {term}")
+            metadata_text = metadata.read_text(encoding="utf-8")
+            if seat.integration_id == BOARD_ID:
+                self.assertNotIn("$dyro-board", metadata_text)
+                self.assertIn("/dyro-review-board", metadata_text)
+            else:
+                self.assertIn(f"${seat.skill_name}", metadata_text)
+            description = frontmatter.split("description:", 1)[1].strip()
+            self.assertLessEqual(len(description), 1024, msg=seat.skill_name)
+            self.assertNotIn("~/", content)
+            for pattern in (
+                r"/Users/[^<\s]",
+                r"/home/[^<\s]",
+                r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+            ):
+                self.assertIsNone(
+                    re.search(pattern, content),
+                    msg=f"{seat.skill_name}: {pattern}",
+                )
+
+    def test_slash_skills_are_packaged_but_not_auto_load_seats(self) -> None:
+        names = {seat.skill_name for seat in SEATS}
+        self.assertNotIn("dyro-review-board", names)
+        self.assertNotIn("dyro-task-merge", names)
+        self.assertNotIn("dyro-line-family", names)
+        metadata = Path(__file__).resolve().parents[1].joinpath("pyproject.toml")
+        text = metadata.read_text(encoding="utf-8")
+        for skill_name in (
+            "dyro-review-board",
+            "dyro-task-merge",
+            "dyro-line-family",
+        ):
+            self.assertIn(f"assets/{skill_name}/SKILL.md", text)
+            self.assertIn(f"assets/{skill_name}/agents/openai.yaml", text)
+            content = (
+                Path(__file__).resolve().parents[1]
+                / "src"
+                / "dyro"
+                / "integrations"
+                / "assets"
+                / skill_name
+                / "SKILL.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn("disable-model-invocation: true", content)
+            self.assertIn("user-invocable: true", content)
+            self.assertNotIn("TODO", content)
+        board = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "dyro"
+            / "integrations"
+            / "assets"
+            / "dyro-board"
+            / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("user-invocable: false", board)
+        self.assertNotIn("user-invocable: true", board)
+        self.assertNotIn("/dyro-board", board)
+        self.assertIn("Must not default to `master`/`main`", board)
+        self.assertIn("逾期未交", board)
+        collapsed = re.sub(r"\s+", " ", re.sub(r"[*_]", "", board))
+        self.assertIn("existing review-directory convention", collapsed)
+        self.assertIn("0b.", board)
+        self.assertIn("已闭环", board)
+        self.assertIn("未闭环", board)
+        self.assertIn("is not enough to declare a seat dead", collapsed)
+        self.assertIn("must not assert pass", board)
+        self.assertIn("pipeline/redirect hid the exit code", board)
+
+    def test_wheel_package_data_lists_every_first_batch_skill(self) -> None:
+        metadata = Path(__file__).resolve().parents[1].joinpath("pyproject.toml")
+        text = metadata.read_text(encoding="utf-8")
+        for seat in SEATS:
+            self.assertIn(f"assets/{seat.skill_name}/SKILL.md", text)
+            self.assertIn(f"assets/{seat.skill_name}/agents/openai.yaml", text)

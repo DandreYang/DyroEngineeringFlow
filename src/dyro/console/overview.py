@@ -9,23 +9,38 @@ projects an explicitly whitelisted summary for the Console.
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 import hashlib
 import hmac
 import json
 from pathlib import Path
+import re
 import secrets
 from typing import Any
 
+from .. import __version__
 from ..canonical import canonical_json_bytes
 from ..config import Config, load, validate_id
 from ..errors import DyroError, ValidationError
-from ..hub import WorkspaceRegistry, load_registry
-from ..observations import WorkspaceReadSnapshot, capture_workspace_read_snapshot
+from ..hub import (
+    WorkspaceRegistry,
+    alias_fold_collides,
+    load_registry,
+    workspace_alias_retargets_root,
+)
+from ..continuation.briefing import follow_up_from_kind
+from ..updates import UpdateState, classify_update, load_update_state
+from ..observations import (
+    WorkspaceReadSnapshot,
+    capture_workspace_read_snapshot,
+    inspect_workspace_read_snapshot,
+)
+from ..workspace import doctor as load_doctor_findings, is_missing_origin_finding
 from .models import ConsoleEnvelope
-from .read_model import workspace_envelope
+from .read_model import proof_inspect_data, workspace_envelope
 from .redaction import REDACTED, safe_id, safe_title
+from .twin import empty_operator_twin, project_operator_twin
 
 
 _PAGE_SCHEMA_VERSION = 1
@@ -39,6 +54,22 @@ _ATTENTION_PRIORITY = {
     "paused": 3,
     "waiting": 4,
 }
+WORKSPACE_MISSING_ROOT = "WORKSPACE_MISSING_ROOT"
+WORKSPACE_TIMEOUT = "WORKSPACE_TIMEOUT"
+WORKSPACE_UNAVAILABLE = "WORKSPACE_UNAVAILABLE"
+UNAVAILABLE_REASON_NONE = ""
+UNAVAILABLE_REASON_MISSING_ROOT = "missing_root"
+UNAVAILABLE_REASON_READ_TIMEOUT = "read_timeout"
+UNAVAILABLE_REASON_OTHER = "other"
+_FINDING_LIMIT = 32
+_LINE_FINDING = re.compile(
+    r"^FAIL (?:line|hotfix):([A-Za-z0-9][A-Za-z0-9._-]{0,79})/"
+)
+_CONSOLE_COMMAND = re.compile(
+    r"^dyro --workspace ([A-Za-z0-9][A-Za-z0-9._-]{0,79}) "
+    r"(?:doctor|objective (?:explain|tick|attention) "
+    r"[A-Za-z0-9][A-Za-z0-9._-]{0,79})$"
+)
 
 
 class ConsoleOverviewError(Exception):
@@ -76,6 +107,249 @@ def _safe_list(value: object) -> list[dict[str, object]]:
     return [dict(item) for item in value if isinstance(item, dict)]
 
 
+def _empty_inventory() -> dict[str, list[dict[str, object]]]:
+    return {"lines": [], "tasks": [], "objectives": []}
+
+
+def _empty_attention_counts() -> dict[str, int]:
+    return {kind: 0 for kind in _ATTENTION_PRIORITY}
+
+
+def unavailable_reason_for(code: object) -> str:
+    if code == WORKSPACE_MISSING_ROOT:
+        return UNAVAILABLE_REASON_MISSING_ROOT
+    if code == WORKSPACE_TIMEOUT:
+        return UNAVAILABLE_REASON_READ_TIMEOUT
+    return UNAVAILABLE_REASON_OTHER
+
+
+def unavailable_reason_of(summary: object) -> str:
+    if not isinstance(summary, dict):
+        return UNAVAILABLE_REASON_NONE
+    raw = summary.get("unavailable_reason")
+    if raw in {
+        UNAVAILABLE_REASON_MISSING_ROOT,
+        UNAVAILABLE_REASON_READ_TIMEOUT,
+        UNAVAILABLE_REASON_OTHER,
+    }:
+        return raw
+    if summary.get("availability") != "unavailable":
+        return UNAVAILABLE_REASON_NONE
+    recommendation = summary.get("recommendation")
+    reason = recommendation.get("reason") if isinstance(recommendation, dict) else ""
+    return unavailable_reason_for(reason)
+
+
+def workspace_root_missing(root: Path) -> bool:
+    try:
+        return not root.is_dir()
+    except OSError:
+        return False
+
+
+def _workspace_ad(
+    alias: str,
+    *parts: str,
+    names: tuple[str, ...],
+    root: Path | None = None,
+) -> str:
+    """Return a ``--workspace`` command only when that selector stays here."""
+    if not isinstance(alias, str) or alias_fold_collides(alias, names):
+        return ""
+    if root is not None and workspace_alias_retargets_root(alias, root):
+        return ""
+    return " ".join(("dyro", "--workspace", alias, *parts))
+
+
+def omit_colliding_workspace_command(
+    summary: dict[str, object],
+    names: tuple[str, ...],
+    root: Path | None = None,
+) -> dict[str, object]:
+    """Blank a fail-closed or cross-root ``--workspace`` ad after capture."""
+    alias = summary.get("alias")
+    recommendation = summary.get("recommendation")
+    if not isinstance(alias, str) or not isinstance(recommendation, dict):
+        return summary
+    retargets = root is not None and workspace_alias_retargets_root(alias, root)
+    if not alias_fold_collides(alias, names) and not retargets:
+        return summary
+    command = recommendation.get("command")
+    if not isinstance(command, str) or "--workspace" not in command:
+        return summary
+    copied = dict(summary)
+    copied["recommendation"] = {**recommendation, "command": ""}
+    return copied
+
+
+def unavailable_workspace_summary(
+    alias: str,
+    is_default: bool,
+    *,
+    reason: str,
+    names: tuple[str, ...] = (),
+    root: Path | None = None,
+) -> dict[str, object]:
+    """Path-free unread card. Isolated still requires an allowlisted command."""
+    safe_alias = _safe_code(alias)
+    code = (
+        reason
+        if reason
+        in {WORKSPACE_MISSING_ROOT, WORKSPACE_TIMEOUT, WORKSPACE_UNAVAILABLE}
+        else WORKSPACE_UNAVAILABLE
+    )
+    return {
+        "alias": safe_alias,
+        "display_name": safe_alias,
+        "is_default": is_default,
+        "availability": "unavailable",
+        "health": "unavailable",
+        "freshness": "partial",
+        "repository_count": 0,
+        "line_count": 0,
+        "objective_count": 0,
+        "active_objective_count": 0,
+        "task_count": 0,
+        "task_status_counts": {},
+        "attention_counts": _empty_attention_counts(),
+        "recommendation": {
+            "reason": code,
+            "command": _workspace_ad(safe_alias, "doctor", names=names, root=root),
+        },
+        "findings": [],
+        "snapshot_sha256": "",
+        "proof_inspection": "not_inspected",
+        "unavailable_reason": unavailable_reason_for(code),
+    }
+
+
+def _fail_findings(summary: object) -> list[dict[str, str]]:
+    if not isinstance(summary, dict):
+        return []
+    raw = summary.get("findings")
+    if not isinstance(raw, list):
+        return []
+    return [
+        {
+            "status": _safe_code(item.get("status")),
+            "reason": _safe_code(item.get("reason")),
+            "line": _safe_code(item.get("line")) if item.get("line") else "",
+        }
+        for item in raw
+        if isinstance(item, dict) and _safe_code(item.get("status")) == "FAIL"
+    ]
+
+
+def _console_command(command: object, alias: str) -> str:
+    """Allowlisted read command. Never a bare workspace invocation or --yes."""
+    if not isinstance(command, str) or not isinstance(alias, str):
+        return ""
+    if "--yes" in command or "--push" in command:
+        return ""
+    if not _CONSOLE_COMMAND.fullmatch(command):
+        return ""
+    expected = f"dyro --workspace {alias} "
+    return command if command.startswith(expected) else ""
+
+
+def _project_doctor_findings(raw: object) -> list[dict[str, str]]:
+    """Path-free FAIL rows. PASS/WARN stay out; messages never carry paths."""
+    if not isinstance(raw, list):
+        return []
+    projected: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in raw:
+        if not isinstance(item, str) or not item.startswith("FAIL"):
+            continue
+        if is_missing_origin_finding(item):
+            reason = "MISSING_ORIGIN"
+        elif ": missing worktree" in item:
+            reason = "MISSING_WORKTREE"
+        elif ": missing or not Git:" in item:
+            reason = "REPOSITORY_UNAVAILABLE"
+        elif "expected upstream" in item:
+            reason = "UPSTREAM_MISMATCH"
+        elif ": expected " in item and ", found " in item:
+            reason = "BRANCH_MISMATCH"
+        elif "common-dir" in item:
+            reason = "COMMON_DIR"
+        elif "symlink" in item or "anchor-reference" in item:
+            reason = "SYMLINK"
+        elif "external Profile" in item:
+            reason = "EXTERNAL_POLICY"
+        else:
+            reason = "DOCTOR_FAIL"
+        match = _LINE_FINDING.search(item)
+        line = _safe_code(match.group(1)) if match else ""
+        if line == "REDACTED":
+            line = ""
+        key = ("FAIL", reason, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        projected.append({"status": "FAIL", "reason": reason, "line": line})
+        if len(projected) >= _FINDING_LIMIT:
+            break
+    return projected
+
+
+def _without_proof_decay(items: object) -> list[dict[str, object]]:
+    return [
+        dict(item)
+        for item in _safe_list(items)
+        if _safe_code(item.get("reason")) != "PROOF_DECAYED"
+    ]
+
+
+def _inventory_from_envelope(data: dict[str, object]) -> dict[str, list[dict[str, object]]]:
+    """Project already-captured lists. Never add Proofs or rebind integration."""
+    tasks: list[dict[str, object]] = []
+    for item in _safe_list(data.get("tasks")):
+        task = dict(item)
+        task["integration_state"] = "not_inspected"
+        tasks.append(task)
+    objectives: list[dict[str, object]] = []
+    for item in _safe_list(data.get("objectives")):
+        objective = dict(item)
+        objective["attention"] = _without_proof_decay(item.get("attention"))
+        objective["selected_actions"] = _without_proof_decay(item.get("selected_actions"))
+        objective["blocked_actions"] = _without_proof_decay(item.get("blocked_actions"))
+        objectives.append(objective)
+    return {
+        "lines": [dict(item) for item in _safe_list(data.get("lines"))],
+        "tasks": tasks,
+        "objectives": objectives,
+    }
+
+
+def _empty_update() -> dict[str, object]:
+    return {
+        "check_enabled": False,
+        "last_checked_on": "",
+        "latest_version": "",
+        "kind": "none",
+    }
+
+
+def _update_payload(state: UpdateState, *, current: str) -> dict[str, object]:
+    latest = state.latest_version if isinstance(state.latest_version, str) else ""
+    checked = state.last_checked_on if isinstance(state.last_checked_on, str) else ""
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", latest):
+        latest = ""
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", checked):
+        checked = ""
+    try:
+        kind = classify_update(current, latest).value if latest else "none"
+    except ValidationError:
+        kind = "none"
+    return {
+        "check_enabled": bool(state.check_enabled),
+        "last_checked_on": checked,
+        "latest_version": latest,
+        "kind": kind,
+    }
+
+
 class ConsoleOverviewService:
     """Read and project registered workspaces without changing their state."""
 
@@ -85,12 +359,17 @@ class ConsoleOverviewService:
         registry_loader: Callable[[], WorkspaceRegistry] = load_registry,
         config_loader: Callable[[Path], Config] = load,
         snapshot_loader: Callable[[Config], WorkspaceReadSnapshot] = capture_workspace_read_snapshot,
+        inspect_loader: Callable[[Config], WorkspaceReadSnapshot] = inspect_workspace_read_snapshot,
         clock: Callable[[], datetime] = _utc_now,
         cursor_secret: bytes | None = None,
         summary_loader: Callable[
             [WorkspaceRegistry], tuple[list[dict[str, object]], set[str]]
         ]
         | None = None,
+        update_loader: Callable[[], UpdateState] = load_update_state,
+        version_loader: Callable[[], str] = lambda: __version__,
+        doctor_loader: Callable[[Config], list[str]] = load_doctor_findings,
+        commands_loader: Callable[[Config], object] | None = None,
     ) -> None:
         if cursor_secret is not None and (
             not isinstance(cursor_secret, bytes) or len(cursor_secret) < 32
@@ -99,9 +378,14 @@ class ConsoleOverviewService:
         self._registry_loader = registry_loader
         self._config_loader = config_loader
         self._snapshot_loader = snapshot_loader
+        self._inspect_loader = inspect_loader
         self._clock = clock
         self._cursor_secret = cursor_secret or secrets.token_bytes(32)
         self._summary_loader = summary_loader
+        self._update_loader = update_loader
+        self._version_loader = version_loader
+        self._doctor_loader = doctor_loader
+        self._commands_loader = commands_loader if commands_loader is not None else (lambda config: [])
 
     def page(
         self,
@@ -143,12 +427,17 @@ class ConsoleOverviewService:
             "workspaces": items,
             "next_cursor": next_cursor,
             "attention_counts": attention_counts,
+            "task_status_counts": self._task_status_counts(summaries),
             "highest_priority": self._highest_priority(summaries),
         }
         return self._envelope(data, warning_codes)
 
     def workspace(self, alias: str) -> dict[str, object]:
-        """Return one registered workspace summary from the shared projection."""
+        """Return one summary card plus already-captured inventory.
+
+        Inventory comes from the same summary snapshot. It is not an inspect,
+        so Proofs stay out and task integration stays unread.
+        """
         try:
             alias = validate_id(alias, "工作区别名")
         except ValidationError:
@@ -158,10 +447,229 @@ class ConsoleOverviewService:
             record = next(item for item in registry.workspaces if item.name == alias)
         except StopIteration:
             raise ConsoleOverviewError("WORKSPACE_NOT_FOUND") from None
-        summary, warning_codes = self._summary(
+        summary, warning_codes, inventory = self._capture(
             record.name, record.root, record.name == registry.default
         )
-        return self._envelope({"workspace": summary}, warning_codes)
+        twin = self._operator_twin(alias, inventory)
+        return self._envelope(
+            {"workspace": summary, **inventory, "operator_twin": twin},
+            warning_codes,
+        )
+
+    def _operator_twin(
+        self, alias: str, inventory: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Fail-closed overlay projection. Missing events or ledger stay empty."""
+        try:
+            config, extra = self._workspace_config(alias)
+        except ConsoleOverviewError:
+            return empty_operator_twin()
+        del extra
+        return project_operator_twin(config, inventory)
+
+    def events(
+        self,
+        alias: str,
+        *,
+        after: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        """Return a cursor page of overlay live events. Overview polling never calls this."""
+        from .events import event_page
+
+        config, _warning_codes = self._workspace_config(alias)
+        try:
+            data = event_page(
+                config, secret=self._cursor_secret, after=after, limit=limit
+            )
+        except ConsoleOverviewError:
+            raise
+        return self._envelope(data, set())
+
+    def families(self, alias: str) -> dict[str, object]:
+        """Return one-level family cards. Unread is operator-unacked overlay."""
+        from .families import family_cards, family_unread_maps
+
+        config, warning_from_config = self._workspace_config(alias)
+        _summary, warning_codes, inventory = self._workspace_inventory(alias)
+        warning_codes = set(warning_codes) | warning_from_config
+        card_unread, _members = family_unread_maps(config, inventory["lines"])
+        data = {
+            "families": family_cards(
+                inventory["lines"], inventory["tasks"], unread=card_unread
+            )
+        }
+        return self._envelope(data, warning_codes)
+
+    def family(self, alias: str, parent: str) -> dict[str, object]:
+        """Return ``F(parent)``. Grandchildren are excluded."""
+        from .families import family_payload, family_unread_maps
+
+        try:
+            parent_id = validate_id(parent, "父开发线 ID")
+        except ValidationError:
+            raise ConsoleOverviewError("FAMILY_PARENT_INVALID") from None
+        config, warning_from_config = self._workspace_config(alias)
+        _summary, warning_codes, inventory = self._workspace_inventory(alias)
+        warning_codes = set(warning_codes) | warning_from_config
+        _cards, members = family_unread_maps(config, inventory["lines"])
+        payload = family_payload(
+            inventory["lines"],
+            parent_id,
+            inventory["tasks"],
+            unread=members.get(parent_id, {}),
+        )
+        if not payload:
+            raise ConsoleOverviewError("FAMILY_NOT_FOUND")
+        return self._envelope(payload, warning_codes)
+
+    def channel(
+        self,
+        alias: str,
+        parent: str,
+        *,
+        after: str | None = None,
+        filter: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        """Return a cursor page of the family channel. Overview polling never calls this."""
+        from .families import channel_page
+
+        try:
+            parent_id = validate_id(parent, "父开发线 ID")
+        except ValidationError:
+            raise ConsoleOverviewError("FAMILY_PARENT_INVALID") from None
+        config, warning_codes = self._workspace_config(alias)
+        try:
+            data = channel_page(
+                config,
+                parent_id,
+                secret=self._cursor_secret,
+                after=after,
+                filter_text=filter,
+                limit=limit,
+            )
+        except ConsoleOverviewError:
+            raise
+        return self._envelope(data, warning_codes)
+
+    def post_channel(
+        self,
+        alias: str,
+        parent: str,
+        payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Write one operator overlay signal in the listener process. No git."""
+        from .families import apply_human_channel_post
+
+        try:
+            parent_id = validate_id(parent, "父开发线 ID")
+        except ValidationError:
+            raise ConsoleOverviewError("FAMILY_PARENT_INVALID") from None
+        config, warning_codes = self._workspace_config(alias)
+        data = apply_human_channel_post(config, parent_id, payload)
+        return self._envelope(data, warning_codes)
+
+    def artifacts(self, alias: str, parent: str) -> dict[str, object]:
+        """Overlay artifact list. Listener or worker may call this; no git."""
+        from .families import artifacts_payload
+
+        try:
+            parent_id = validate_id(parent, "父开发线 ID")
+        except ValidationError:
+            raise ConsoleOverviewError("FAMILY_PARENT_INVALID") from None
+        config, warning_codes = self._workspace_config(alias)
+        try:
+            data = artifacts_payload(config, parent_id, alias=alias)
+        except ConsoleOverviewError:
+            raise
+        return self._envelope(data, warning_codes)
+
+    def artifact(self, alias: str, parent: str, artifact_id: str) -> dict[str, object]:
+        """Overlay artifact metadata. Image bytes use ``artifact_bytes``."""
+        from .families import artifact_payload
+
+        try:
+            parent_id = validate_id(parent, "父开发线 ID")
+            token = validate_id(artifact_id, "产物 ID")
+        except ValidationError:
+            raise ConsoleOverviewError("ARTIFACT_ID_INVALID") from None
+        config, warning_codes = self._workspace_config(alias)
+        try:
+            data = artifact_payload(config, parent_id, token, alias=alias)
+        except ConsoleOverviewError:
+            raise
+        return self._envelope(data, warning_codes)
+
+    def artifact_bytes(
+        self, alias: str, parent: str, artifact_id: str
+    ) -> tuple[str, bytes] | None:
+        """Same-origin image bytes.  Video and review return ``None``."""
+        from .families import artifact_bytes_payload, artifact_payload
+
+        try:
+            parent_id = validate_id(parent, "父开发线 ID")
+            token = validate_id(artifact_id, "产物 ID")
+        except ValidationError:
+            raise ConsoleOverviewError("ARTIFACT_ID_INVALID") from None
+        config, _warning_codes = self._workspace_config(alias)
+        try:
+            meta = artifact_payload(config, parent_id, token, alias=alias)
+            media_type = meta.get("media_type")
+            if meta.get("type") == "video" or media_type not in {
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/webp",
+            }:
+                return None
+            return artifact_bytes_payload(config, parent_id, token)
+        except ConsoleOverviewError:
+            raise
+
+    def system(self) -> dict[str, object]:
+        """Return cached update facts. Do not probe PATH or start a network check."""
+        warnings: set[str] = set()
+        try:
+            update = _update_payload(self._update_loader(), current=self._version_loader())
+        except (DyroError, ValidationError, OSError, UnicodeError):
+            update = _empty_update()
+            warnings.add("UPDATE_STATE_UNAVAILABLE")
+        return self._envelope(
+            {
+                "tool_inspection": "not_inspected",
+                "tools": [],
+                "update": update,
+            },
+            warnings,
+        )
+
+    def inspect_proofs(self, alias: str) -> dict[str, object]:
+        """Independent Proof inspect. Must not use the summary snapshot_loader."""
+        try:
+            alias = validate_id(alias, "工作区别名")
+        except ValidationError:
+            raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID") from None
+        registry = self._load_registry()
+        try:
+            record = next(item for item in registry.workspaces if item.name == alias)
+        except StopIteration:
+            raise ConsoleOverviewError("WORKSPACE_NOT_FOUND") from None
+        try:
+            config = self._config_loader(record.root)
+            snapshot = self._inspect_loader(config)
+            warning_codes = {_safe_code(failure.code) for failure in snapshot.failures}
+            warning_codes.discard("REDACTED")
+            return self._envelope(proof_inspect_data(snapshot), warning_codes)
+        except (DyroError, ValidationError, OSError, UnicodeError):
+            return self._envelope(
+                {
+                    "proof_inspection": "not_inspected",
+                    "proofs": [],
+                    "objectives": [],
+                },
+                {"WORKSPACE_UNAVAILABLE"},
+            )
 
     def _envelope(
         self, data: dict[str, object], warning_codes: set[str]
@@ -192,6 +700,35 @@ class ConsoleOverviewService:
             data=data,
         ).to_payload()
 
+    def _workspace_config(self, alias: str) -> tuple[Config, set[str]]:
+        try:
+            alias = validate_id(alias, "工作区别名")
+        except ValidationError:
+            raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID") from None
+        registry = self._load_registry()
+        try:
+            record = next(item for item in registry.workspaces if item.name == alias)
+        except StopIteration:
+            raise ConsoleOverviewError("WORKSPACE_NOT_FOUND") from None
+        try:
+            return self._config_loader(record.root), set()
+        except (DyroError, ValidationError, OSError, UnicodeError):
+            raise ConsoleOverviewError("WORKSPACE_UNAVAILABLE") from None
+
+    def _workspace_inventory(
+        self, alias: str
+    ) -> tuple[dict[str, object], set[str], dict[str, list[dict[str, object]]]]:
+        try:
+            alias = validate_id(alias, "工作区别名")
+        except ValidationError:
+            raise ConsoleOverviewError("WORKSPACE_ALIAS_INVALID") from None
+        registry = self._load_registry()
+        try:
+            record = next(item for item in registry.workspaces if item.name == alias)
+        except StopIteration:
+            raise ConsoleOverviewError("WORKSPACE_NOT_FOUND") from None
+        return self._capture(record.name, record.root, record.name == registry.default)
+
     def _load_registry(self) -> WorkspaceRegistry:
         try:
             registry = self._registry_loader()
@@ -213,7 +750,9 @@ class ConsoleOverviewService:
         summaries: list[dict[str, object]] = []
         warnings: set[str] = set()
         for record in registry.workspaces:
-            summary, codes = self._summary(record.name, record.root, record.name == registry.default)
+            summary, codes = self._summary(
+                record.name, record.root, record.name == registry.default
+            )
             summaries.append(summary)
             warnings.update(codes)
         summaries.sort(key=self._summary_sort_key)
@@ -236,34 +775,33 @@ class ConsoleOverviewService:
     def _summary(
         self, alias: str, root: Path, is_default: bool
     ) -> tuple[dict[str, object], set[str]]:
+        summary, warnings, _inventory = self._capture(alias, root, is_default)
+        return summary, warnings
+
+    def _capture(
+        self, alias: str, root: Path, is_default: bool
+    ) -> tuple[dict[str, object], set[str], dict[str, list[dict[str, object]]]]:
         safe_alias = _safe_code(alias)
         try:
             config = self._config_loader(root)
             snapshot = self._snapshot_loader(config)
             envelope = workspace_envelope(snapshot)
         except (DyroError, ValidationError, OSError, UnicodeError):
+            reason = (
+                WORKSPACE_MISSING_ROOT
+                if workspace_root_missing(root)
+                else WORKSPACE_UNAVAILABLE
+            )
             return (
-                {
-                    "alias": safe_alias,
-                    "display_name": safe_alias,
-                    "is_default": is_default,
-                    "availability": "unavailable",
-                    "health": "unavailable",
-                    "freshness": "partial",
-                    "repository_count": 0,
-                    "line_count": 0,
-                    "objective_count": 0,
-                    "active_objective_count": 0,
-                    "task_count": 0,
-                    "task_status_counts": {},
-                    "attention_counts": self._empty_attention_counts(),
-                    "recommendation": {
-                        "reason": "WORKSPACE_UNAVAILABLE",
-                        "command": f"dyro --workspace {safe_alias} doctor",
-                    },
-                    "snapshot_sha256": "",
-                },
-                {"WORKSPACE_UNAVAILABLE"},
+                unavailable_workspace_summary(
+                    safe_alias,
+                    is_default,
+                    reason=reason,
+                    names=self._registry_names(),
+                    root=root,
+                ),
+                {reason},
+                _empty_inventory(),
             )
 
         data = _safe_mapping(envelope.get("data"))
@@ -282,8 +820,21 @@ class ConsoleOverviewService:
             status = _safe_code(task.get("status"))
             task_status_counts[status] = task_status_counts.get(status, 0) + 1
         attention = self._workspace_attention(objectives)
-        partial = freshness.get("state") != "fresh"
-        health = "degraded" if partial else "healthy"
+        findings: list[dict[str, str]] = []
+        try:
+            findings = _project_doctor_findings(self._doctor_loader(config))
+        except (DyroError, ValidationError, OSError, UnicodeError, TypeError, AttributeError):
+            warning_codes.add("DOCTOR_UNAVAILABLE")
+        commands: list[object] = []
+        try:
+            loaded = self._invoke_commands_loader(config, alias)
+            if isinstance(loaded, list):
+                commands = loaded
+        except (DyroError, ValidationError, OSError, UnicodeError, TypeError, AttributeError):
+            commands = []
+        partial = freshness.get("state") != "fresh" or bool(warning_codes)
+        fails = [item for item in findings if item.get("status") == "FAIL"]
+        health = "degraded" if partial or fails else "healthy"
         summary = {
             "alias": safe_alias,
             "display_name": safe_title(getattr(config, "name", workspace.get("name"))),
@@ -300,14 +851,23 @@ class ConsoleOverviewService:
             "task_count": len(tasks),
             "task_status_counts": dict(sorted(task_status_counts.items())),
             "attention_counts": attention["counts"],
-            "recommendation": self._recommendation(safe_alias, attention["items"]),
+            "recommendation": self._recommendation(
+                safe_alias,
+                attention["items"],
+                findings=findings,
+                commands=commands,
+                root=getattr(config, "root", None) or root,
+            ),
+            "findings": findings,
             "snapshot_sha256": str(envelope.get("snapshot_sha256", "")),
+            "proof_inspection": "not_inspected",
+            "unavailable_reason": UNAVAILABLE_REASON_NONE,
         }
-        return summary, warning_codes
+        return summary, warning_codes, _inventory_from_envelope(data)
 
     @staticmethod
     def _empty_attention_counts() -> dict[str, int]:
-        return {kind: 0 for kind in _ATTENTION_PRIORITY}
+        return _empty_attention_counts()
 
     def _workspace_attention(
         self, objectives: list[dict[str, object]]
@@ -318,7 +878,8 @@ class ConsoleOverviewService:
             objective_id = _safe_code(objective.get("id"))
             for raw in _safe_list(objective.get("attention")):
                 kind = _safe_code(raw.get("kind"))
-                if kind not in _ATTENTION_PRIORITY:
+                reason = _safe_code(raw.get("reason"))
+                if kind not in _ATTENTION_PRIORITY or reason == "PROOF_DECAYED":
                     continue
                 counts[kind] += 1
                 items.append(
@@ -326,7 +887,7 @@ class ConsoleOverviewService:
                         "objective_id": objective_id,
                         "kind": kind,
                         "subject_id": _safe_code(raw.get("subject_id")),
-                        "reason": _safe_code(raw.get("reason")),
+                        "reason": reason,
                     }
                 )
         items.sort(
@@ -339,21 +900,66 @@ class ConsoleOverviewService:
         )
         return {"counts": counts, "items": items}
 
+    def _invoke_commands_loader(self, config: Config, alias: str) -> object:
+        """Prefer ``(config, alias)`` so Isolated next.commands match the card."""
+        loader = self._commands_loader
+        try:
+            return loader(config, alias)
+        except TypeError:
+            return loader(config)
+
+    def _registry_names(self) -> tuple[str, ...]:
+        try:
+            return tuple(item.name for item in self._load_registry().workspaces)
+        except ConsoleOverviewError:
+            return ()
+
     def _recommendation(
-        self, alias: str, attention: object
+        self,
+        alias: str,
+        attention: object,
+        findings: object = None,
+        commands: object = None,
+        root: Path | None = None,
     ) -> dict[str, str] | None:
+        names = self._registry_names()
+        collide = alias_fold_collides(alias, names)
+        doctor = _workspace_ad(alias, "doctor", names=names, root=root)
+        next_command = ""
+        if isinstance(commands, list) and not collide:
+            for raw in commands:
+                next_command = _console_command(raw, alias)
+                if next_command:
+                    break
+        fails = [
+            item
+            for item in findings
+            if isinstance(item, dict) and _safe_code(item.get("status")) == "FAIL"
+        ] if isinstance(findings, list) else []
+        if fails:
+            reason = _safe_code(fails[0].get("reason"))
+            if reason in {"", "REDACTED"}:
+                reason = "DOCTOR_FAIL"
+            return {"reason": reason, "command": next_command or doctor}
         if not isinstance(attention, list) or not attention:
             return {
                 "reason": "HOME_GUIDANCE",
-                "command": f"dyro --workspace {alias}",
+                "command": next_command or doctor,
             }
         item = attention[0]
         if not isinstance(item, dict):
-            return None
+            return {"reason": "HOME_GUIDANCE", "command": next_command or doctor}
         objective_id = _safe_code(item.get("objective_id"))
+        follow_up = _workspace_ad(
+            alias,
+            *follow_up_from_kind(_safe_code(item.get("kind")), objective_id),
+            names=names,
+            root=root,
+        )
+        command = _console_command(follow_up, alias) or next_command or doctor
         return {
             "reason": _safe_code(item.get("reason")),
-            "command": f"dyro --workspace {alias} objective explain {objective_id}",
+            "command": command,
         }
 
     def _attention_counts(self, summaries: list[dict[str, object]]) -> dict[str, int]:
@@ -364,12 +970,48 @@ class ConsoleOverviewService:
                     counts[kind] += value
         return counts
 
+    def _task_status_counts(self, summaries: list[dict[str, object]]) -> dict[str, int]:
+        """Sum task statuses from readable workspaces only.
+
+        Unavailable cards keep empty maps. Counting them as 0 would pretend
+        unread workspaces have no work.
+        """
+        counts: dict[str, int] = {}
+        for summary in summaries:
+            if summary.get("availability") != "available":
+                continue
+            for status, value in _safe_mapping(summary.get("task_status_counts")).items():
+                code = _safe_code(status)
+                if code == "REDACTED" or type(value) is not int or value < 0:
+                    continue
+                counts[code] = counts.get(code, 0) + value
+        return dict(sorted(counts.items()))
+
     def _highest_priority(self, summaries: list[dict[str, object]]) -> dict[str, str] | None:
         candidates: list[tuple[int, str, dict[str, str]]] = []
         for summary in summaries:
+            if summary.get("availability") != "available":
+                continue
             recommendation = summary.get("recommendation")
             counts = _safe_mapping(summary.get("attention_counts"))
             if not isinstance(recommendation, dict):
+                continue
+            fails = _fail_findings(summary)
+            if fails:
+                reason = _safe_code(fails[0].get("reason"))
+                if reason in {"", "REDACTED"}:
+                    reason = "DOCTOR_FAIL"
+                candidates.append(
+                    (
+                        0,
+                        str(summary.get("alias", "")),
+                        {
+                            "alias": _safe_code(summary.get("alias")),
+                            "kind": "repair_required",
+                            "reason": reason,
+                        },
+                    )
+                )
                 continue
             for kind, priority in _ATTENTION_PRIORITY.items():
                 if counts.get(kind, 0):
@@ -392,7 +1034,14 @@ class ConsoleOverviewService:
     @staticmethod
     def _summary_sort_key(summary: dict[str, object]) -> tuple[int, str]:
         counts = _safe_mapping(summary.get("attention_counts"))
-        if summary.get("availability") == "unavailable" or counts.get("repair_required", 0):
+        unread = unavailable_reason_of(summary)
+        if unread == UNAVAILABLE_REASON_MISSING_ROOT:
+            priority = 8
+        elif unread == UNAVAILABLE_REASON_READ_TIMEOUT:
+            priority = 7
+        elif unread == UNAVAILABLE_REASON_OTHER:
+            priority = 6
+        elif counts.get("repair_required", 0) or _fail_findings(summary):
             priority = 0
         elif counts.get("needs_user", 0):
             priority = 1

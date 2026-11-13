@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dyro Executor"
+  short_description: "Stay on the claimed task write seat"
+  default_prompt: "Use $dyro-executor. You are already the writer in this Dyro task worktree. Stay in seat; do not merge or resume another chat."

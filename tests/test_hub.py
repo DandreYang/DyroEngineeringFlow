@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -9,9 +11,16 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from dyro.cli import _route_experiment_surface, build_parser, main
+from dyro.cli import (
+    _print_json_observation_timeout,
+    _route_experiment_surface,
+    _timeout_repair_commands,
+    build_parser,
+    main,
+)
 from dyro.config import load
 from dyro.home import (
+    HomeTarget,
     HomeTool,
     _choose_action,
     _choose_tool,
@@ -23,12 +32,15 @@ from dyro.home import (
 )
 from dyro.hub import (
     add_workspace,
+    alias_fold_collides,
     get_workspace,
     load_registry,
     mark_workspace_used,
     registry_home,
     remove_workspace,
     set_default_workspace,
+    unique_registered_alias,
+    workspace_alias_retargets_root,
 )
 from dyro.tooling import (
     ToolPreferences,
@@ -39,7 +51,7 @@ from dyro.tooling import (
 from dyro.tasks import task_template
 from dyro.workspace import create_line, get_line
 
-from .support import WorkspaceCase, shell
+from .support import WorkspaceCase, publish_origin_branch, shell
 
 
 class RepositorySelectionParsingTests(unittest.TestCase):
@@ -136,6 +148,116 @@ mount = "api"
         with self.assertRaisesRegex(Exception, "工作区记录"):
             load_registry()
 
+    def _second_workspace(self, name: str) -> Path:
+        other = self.base / name
+        other.mkdir()
+        other.joinpath("dyro.toml").write_text(
+            self.workspace.joinpath("dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "demo"', f'name = "{name}"'),
+            encoding="utf-8",
+        )
+        return other
+
+    def test_get_workspace_exact_alias_match(self) -> None:
+        add_workspace(self.workspace, name="Acme")
+        record = get_workspace("Acme")
+        self.assertEqual(record.name, "Acme")
+        self.assertEqual(record.root, self.workspace.resolve())
+        self.assertEqual(load_registry().workspaces[0].name, "Acme")
+
+    def test_get_workspace_matches_alias_case_insensitively(self) -> None:
+        add_workspace(self.workspace, name="Acme")
+        record = get_workspace("acme")
+        self.assertEqual(record.name, "Acme")
+        self.assertEqual(record.root, self.workspace.resolve())
+        self.assertEqual(load_registry().workspaces[0].name, "Acme")
+
+    def test_alias_fold_helpers_distinguish_unique_and_collision(self) -> None:
+        names = ("Demo", "other")
+        self.assertFalse(alias_fold_collides("demo", names))
+        self.assertEqual(unique_registered_alias("demo", names), "Demo")
+        colliding = ("Demo", "demo")
+        self.assertTrue(alias_fold_collides("Demo", colliding))
+        self.assertIsNone(unique_registered_alias("demo", colliding))
+        self.assertIsNone(unique_registered_alias("missing", names))
+
+    def test_unique_fold_of_profile_name_retargets_when_root_differs(self) -> None:
+        other = self._second_workspace("other")
+        add_workspace(self.workspace, name="current", make_default=True)
+        add_workspace(other, name="demo")
+        self.assertTrue(
+            workspace_alias_retargets_root("Demo", self.workspace.resolve())
+        )
+        self.assertFalse(
+            workspace_alias_retargets_root("demo", other.resolve())
+        )
+        self.assertFalse(
+            workspace_alias_retargets_root("current", self.workspace.resolve())
+        )
+        self.assertFalse(workspace_alias_retargets_root("missing", self.workspace))
+
+    def test_registry_read_failure_cannot_prove_workspace_stays_on_root(self) -> None:
+        add_workspace(self.workspace, name="current", make_default=True)
+        with patch("dyro.hub.load_registry", side_effect=OSError("registry unread")):
+            self.assertTrue(
+                workspace_alias_retargets_root("Demo", self.workspace.resolve())
+            )
+
+    def test_get_workspace_fails_closed_on_case_fold_collision(self) -> None:
+        from dyro.errors import DyroError
+
+        other = self._second_workspace("other")
+        add_workspace(self.workspace, name="Acme")
+        add_workspace(other, name="acme")
+        with self.assertRaises(DyroError) as ctx:
+            get_workspace("Acme")
+        message = str(ctx.exception)
+        self.assertIn("Acme", message)
+        self.assertIn("acme", message)
+        self.assertNotIn("你是不是指", message)
+
+    def test_get_workspace_unrelated_miss_stays_unregistered(self) -> None:
+        from dyro.errors import DyroError
+
+        add_workspace(self.workspace, name="Acme")
+        with self.assertRaisesRegex(DyroError, "未登记工作区：missing"):
+            get_workspace("missing")
+
+    def test_set_default_unique_fold_writes_canonical_name(self) -> None:
+        other = self._second_workspace("other")
+        add_workspace(other, name="other", make_default=True)
+        add_workspace(self.workspace, name="Acme")
+        set_default_workspace("acme")
+        self.assertEqual(load_registry().default, "Acme")
+
+    def test_set_default_collision_fails_closed(self) -> None:
+        from dyro.errors import DyroError
+
+        other = self._second_workspace("other")
+        add_workspace(self.workspace, name="Acme", make_default=True)
+        add_workspace(other, name="acme")
+        with self.assertRaises(DyroError) as ctx:
+            set_default_workspace("acme")
+        self.assertIn("Acme", str(ctx.exception))
+        self.assertIn("acme", str(ctx.exception))
+        self.assertEqual(load_registry().default, "Acme")
+
+    def test_remove_unique_fold_deletes_canonical_row(self) -> None:
+        add_workspace(self.workspace, name="Acme")
+        remove_workspace("acme")
+        self.assertEqual(load_registry().workspaces, ())
+
+    def test_remove_exact_registered_name_works_under_collision(self) -> None:
+        other = self._second_workspace("other")
+        add_workspace(self.workspace, name="Acme")
+        add_workspace(other, name="acme")
+        remove_workspace("Acme")
+        remaining = tuple(item.name for item in load_registry().workspaces)
+        self.assertEqual(remaining, ("acme",))
+        remove_workspace("acme")
+        self.assertEqual(load_registry().workspaces, ())
+
     def test_malformed_registry_rejects_non_string_alias(self) -> None:
         self.state.mkdir(parents=True)
         registry_home().joinpath("workspaces.json").write_text(
@@ -171,6 +293,7 @@ class HubCliTests(WorkspaceCase):
         super().tearDown()
 
     def _create_line(self) -> None:
+        publish_origin_branch(self.anchor, "feat/alpha")
         create_line(load(self.root), line_id="alpha", branch="feat/alpha", base="main")
 
     def _create_task_worktree(self, task_id: str = "TASK-OPEN") -> None:
@@ -245,6 +368,30 @@ class HubCliTests(WorkspaceCase):
 
         self.assertIn("DRY RUN: 将启动只读本地 Console", output.getvalue())
         server_factory.assert_not_called()
+
+    def test_home_enter_defaults_to_briefing_instead_of_opening_a_tool(self) -> None:
+        briefing = {
+            "command": "dyro --workspace demo objective tick release",
+            "available": True,
+        }
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=True),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(output),
+        ):
+            action = _choose_action(
+                [HomeTarget("line", "alpha", "进入开发线：alpha")],
+                can_switch=False,
+                briefing=briefing,
+            )
+
+        self.assertEqual(
+            action, ("briefing", "dyro --workspace demo objective tick release")
+        )
+        rendered = output.getvalue()
+        self.assertIn("做下一步，不打开编码工具", rendered)
+        self.assertIn("进入开发线：alpha", rendered)
 
     def test_home_lists_safe_new_work_entrypoints(self) -> None:
         output = StringIO()
@@ -1181,7 +1328,7 @@ mount = "web"
         self.assertNotIn("openclaw", load(self.root).adapters)
         self.assertEqual(self.root.joinpath("dyro.toml").read_bytes(), before)
 
-    def test_unhealthy_line_does_not_block_opening_a_healthy_line(self) -> None:
+    def test_unhealthy_sibling_fail_blocks_opening_a_healthy_line(self) -> None:
         self._create_line()
         create_line(load(self.root), line_id="beta", branch="feat/beta", base="main")
         shell(
@@ -1194,18 +1341,22 @@ mount = "web"
         add_workspace(self.root, name="demo", make_default=True)
 
         output = StringIO()
+        stderr = StringIO()
         with (
             patch("dyro.home.Path.cwd", return_value=self.root.parent),
             patch("dyro.home.interactive_terminal", return_value=True),
             patch("builtins.input", return_value=""),
             redirect_stdout(output),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
         ):
             main(["--dry-run"])
 
-        rendered = output.getvalue()
+        self.assertEqual(raised.exception.code, 2)
+        rendered = output.getvalue() + stderr.getvalue()
         self.assertIn("检测到 1 个结构问题", rendered)
-        self.assertIn(str(self.root / "versions/alpha"), rendered)
-        self.assertIn("/usr/bin/true", rendered)
+        self.assertIn("尚未就绪", rendered)
+        self.assertNotIn("/usr/bin/true", output.getvalue())
 
     def test_task_open_uses_existing_worktree_without_changing_status(self) -> None:
         self._create_task_worktree()
@@ -1314,7 +1465,9 @@ mount = "web"
             main(
                 ["--workspace", "demo", "--dry-run", "open", "alpha", "--agent", "noop"]
             )
-        self.assertIn(str(self.root / "versions/alpha"), output.getvalue())
+        rendered = output.getvalue()
+        self.assertIn(str(self.root / "versions/alpha"), rendered)
+        self.assertIn("座位  控制面 · dyro-control-plane", rendered)
 
     def test_runner_workspace_option_does_not_collide_with_global_alias(self) -> None:
         arguments = [
@@ -1432,3 +1585,480 @@ write = ["codex"]
         self.assertIn("dyro setup", rendered)
         self.assertIn("dyro workspace add", rendered)
         self.assertFalse(self.hub_home.exists())
+
+
+    def test_workspace_path_as_alias_is_not_missing_workspace(self) -> None:
+        from dyro.errors import ValidationError
+        from dyro.hub import get_workspace
+
+        with self.assertRaisesRegex(ValidationError, "--root"):
+            get_workspace("/tmp/some/workspace")
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            main(["--workspace", str(self.root), "next"])
+        self.assertEqual(raised.exception.code, 2)
+        rendered = stderr.getvalue()
+        self.assertIn("--root", rendered)
+        self.assertNotIn("尚未发现 Dyro 工作区", rendered)
+
+    def test_unknown_alias_suggests_close_registered_name(self) -> None:
+        from dyro.errors import DyroError
+        from dyro.hub import get_workspace
+
+        add_workspace(self.root, name="AcmeLab", make_default=True)
+        with self.assertRaisesRegex(DyroError, "你是不是指 AcmeLab"):
+            get_workspace("acme-labs")
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            main(["--workspace", "acme-labs", "next"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("你是不是指 AcmeLab", stderr.getvalue())
+
+    def _second_registered_workspace(self, alias: str) -> Path:
+        other = self.root.parent / f"{self.root.name}-{alias}"
+        other.mkdir()
+        other.joinpath("dyro.toml").write_text(
+            (self.root / "dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "test-workspace"', f'name = "{alias}"'),
+            encoding="utf-8",
+        )
+        return other
+
+    def test_workspace_default_unique_fold_plan_and_apply(self) -> None:
+        other = self._second_registered_workspace("other")
+        add_workspace(other, name="other", make_default=True)
+        add_workspace(self.root, name="Acme")
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--dry-run", "workspace", "default", "acme"])
+        self.assertIn("Acme", output.getvalue())
+        self.assertEqual(load_registry().default, "other")
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["workspace", "default", "acme"])
+        self.assertEqual(load_registry().default, "Acme")
+        self.assertIn("Acme", output.getvalue())
+
+    def test_workspace_remove_unique_fold_plan_and_apply(self) -> None:
+        add_workspace(self.root, name="Acme")
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--dry-run", "workspace", "remove", "acme"])
+        self.assertEqual(load_registry().workspaces[0].name, "Acme")
+        self.assertIn("Acme", output.getvalue())
+        main(["workspace", "remove", "acme", "--yes"])
+        self.assertEqual(load_registry().workspaces, ())
+
+    def test_workspace_default_collision_refuses_plan_and_apply(self) -> None:
+        other = self._second_registered_workspace("other")
+        add_workspace(self.root, name="Acme", make_default=True)
+        add_workspace(other, name="acme")
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as planned:
+            main(["--dry-run", "workspace", "default", "acme"])
+        self.assertEqual(planned.exception.code, 2)
+        self.assertIn("acme", stderr.getvalue())
+        self.assertEqual(load_registry().default, "Acme")
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as applied:
+            main(["workspace", "default", "acme"])
+        self.assertEqual(applied.exception.code, 2)
+        self.assertEqual(load_registry().default, "Acme")
+
+    def test_workspace_remove_exact_names_work_under_collision(self) -> None:
+        other = self._second_registered_workspace("other")
+        add_workspace(self.root, name="Acme")
+        add_workspace(other, name="acme")
+        main(["workspace", "remove", "Acme", "--yes"])
+        self.assertEqual(
+            tuple(item.name for item in load_registry().workspaces), ("acme",)
+        )
+        main(["workspace", "remove", "acme", "--yes"])
+        self.assertEqual(load_registry().workspaces, ())
+
+    def test_implicit_json_next_does_not_advertise_colliding_alias(self) -> None:
+        create_line(load(self.root), line_id="alpha", branch="feat/alpha", base="main")
+        (self.root / "dyro.toml").write_text(
+            (self.root / "dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "test-workspace"', 'name = "Demo"'),
+            encoding="utf-8",
+        )
+        other = self.root.parent / f"{self.root.name}-twin"
+        other.mkdir()
+        other.joinpath("dyro.toml").write_text(
+            (self.root / "dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "Demo"', 'name = "demo"'),
+            encoding="utf-8",
+        )
+        add_workspace(self.root, name="Demo", make_default=True)
+        add_workspace(other, name="demo")
+        unrelated = self.root.parent / f"{self.root.name}-unrelated"
+        unrelated.mkdir()
+        output = StringIO()
+        previous = Path.cwd()
+        try:
+            os.chdir(unrelated)
+            with redirect_stdout(output):
+                main(["next", "--format", "json"])
+        finally:
+            os.chdir(previous)
+        rendered = output.getvalue()
+        payload = json.loads(rendered)
+        self.assertEqual(payload["kind"], "next_step")
+        self.assertEqual(payload["state"], "ready")
+        commands = payload.get("commands") or []
+        diagnostic = payload.get("diagnostic_commands") or []
+        briefing = payload.get("briefing") or {}
+        briefing_command = (
+            briefing.get("command") if isinstance(briefing, dict) else None
+        )
+        advertised = [
+            item
+            for item in (*commands, *diagnostic, briefing_command)
+            if isinstance(item, str)
+        ]
+        for command in advertised:
+            self.assertNotIn("--workspace Demo", command)
+            self.assertNotIn("--workspace demo", command)
+        if advertised:
+            self.assertTrue(any("--root" in item for item in advertised))
+
+    def _profile_named(self, root: Path, name: str, *, remote: bool = False) -> None:
+        text = root.joinpath("dyro.toml").read_text(encoding="utf-8")
+        text = text.replace('name = "test-workspace"', f'name = "{name}"')
+        if remote and 'remote = "' not in text:
+            text = text.replace(
+                'mount = "services/api"',
+                'mount = "services/api"\nremote = "https://example.invalid/api.git"',
+            )
+        root.joinpath("dyro.toml").write_text(text, encoding="utf-8")
+
+    def _fold_retarget_registry(self) -> Path:
+        """Default A named Demo; unique fold of Demo is registered at another root."""
+        self._profile_named(self.root, "Demo", remote=True)
+        other = self.root.parent / f"{self.root.name}-fold-other"
+        other.mkdir()
+        other.joinpath("dyro.toml").write_text(
+            (self.root / "dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "Demo"', 'name = "other"'),
+            encoding="utf-8",
+        )
+        (other / "repositories/api").mkdir(parents=True)
+        add_workspace(self.root, name="current", make_default=True)
+        add_workspace(other, name="demo")
+        self.anchor.rename(self.root / "api-missing")
+        return other
+
+    def _advertised_next(self, argv: list[str]) -> tuple[dict[str, object], list[str]]:
+        output = StringIO()
+        with redirect_stdout(output):
+            main(argv)
+        payload = json.loads(output.getvalue())
+        briefing = payload.get("briefing") or {}
+        briefing_command = (
+            briefing.get("command") if isinstance(briefing, dict) else None
+        )
+        advertised = [
+            item
+            for item in (
+                *(payload.get("commands") or []),
+                *(payload.get("diagnostic_commands") or []),
+                briefing_command,
+            )
+            if isinstance(item, str)
+        ]
+        return payload, advertised
+
+    def _default_a_bootstrap_fail_b(self) -> Path:
+        """A is registry default; B (self.root) is Demo with a bootstrap-able FAIL.
+
+        Unique fold of Demo is registered at A, so next/briefing must advertise
+        ``--root <B> bootstrap --yes``. Unscoped ``dyro bootstrap --yes`` from a
+        non-workspace cwd resolves to A, not B.
+        """
+        self._profile_named(self.root, "Demo", remote=True)
+        default_a = self.root.parent / f"{self.root.name}-default-a"
+        default_a.mkdir()
+        default_a.joinpath("dyro.toml").write_text(
+            (self.root / "dyro.toml")
+            .read_text(encoding="utf-8")
+            .replace('name = "Demo"', 'name = "alpha"'),
+            encoding="utf-8",
+        )
+        (default_a / "repositories/api").mkdir(parents=True)
+        add_workspace(default_a, name="demo", make_default=True)
+        self.anchor.rename(self.root / "api-missing")
+        return default_a
+
+    def test_root_start_does_not_advertise_unscoped_bootstrap_that_resolves_to_a(
+        self,
+    ) -> None:
+        default_a = self._default_a_bootstrap_fail_b()
+        current_root = str(self.root.resolve())
+        default_root = str(default_a.resolve())
+        unrelated = self.root.parent / f"{self.root.name}-unrelated"
+        unrelated.mkdir()
+        previous = Path.cwd()
+        try:
+            os.chdir(unrelated)
+            next_payload, next_ads = self._advertised_next(
+                ["--root", str(self.root), "next", "--format", "json"]
+            )
+            start_out = StringIO()
+            start_err = StringIO()
+            with (
+                redirect_stdout(start_out),
+                redirect_stderr(start_err),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main(["--root", str(self.root), "--dry-run", "start"])
+        finally:
+            os.chdir(previous)
+        self.assertEqual(next_payload["kind"], "next_step")
+        self.assertEqual(next_payload["state"], "needs_repair")
+        self.assertTrue(
+            any(
+                "bootstrap --yes" in item and "--root" in item and current_root in item
+                for item in next_ads
+            ),
+            next_ads,
+        )
+        self.assertEqual(raised.exception.code, 2)
+        advertised = start_out.getvalue() + start_err.getvalue()
+        self.assertIn("尚未就绪", advertised)
+        self.assertNotIn("dyro bootstrap --yes", advertised)
+        self.assertNotIn(default_root, advertised)
+        bootstrap_lines = [
+            line
+            for line in advertised.splitlines()
+            if "bootstrap" in line
+        ]
+        self.assertTrue(bootstrap_lines, advertised)
+        for line in bootstrap_lines:
+            self.assertIn("--root", line)
+            self.assertIn(current_root, line)
+            self.assertNotIn("--workspace demo", line)
+            self.assertNotIn("--workspace Demo", line)
+
+    def test_implicit_and_root_next_do_not_advertise_other_root_fold_match(
+        self,
+    ) -> None:
+        other = self._fold_retarget_registry()
+        unrelated = self.root.parent / f"{self.root.name}-unrelated"
+        unrelated.mkdir()
+        previous = Path.cwd()
+        try:
+            os.chdir(unrelated)
+            implicit, implicit_ads = self._advertised_next(["next", "--format", "json"])
+        finally:
+            os.chdir(previous)
+        rooted, root_ads = self._advertised_next(
+            ["--root", str(self.root), "next", "--format", "json"]
+        )
+        current_root = str(self.root.resolve())
+        other_root = str(other.resolve())
+        for payload, advertised in (
+            (implicit, implicit_ads),
+            (rooted, root_ads),
+        ):
+            self.assertEqual(payload["kind"], "next_step")
+            self.assertEqual(payload["state"], "needs_repair")
+            self.assertTrue(advertised, payload)
+            joined = "\n".join(advertised)
+            self.assertNotIn("--workspace demo", joined)
+            self.assertNotIn("--workspace Demo", joined)
+            self.assertNotIn(other_root, joined)
+            self.assertNotIn("dyro --workspace demo bootstrap --yes", advertised)
+            self.assertNotIn("dyro --workspace Demo bootstrap --yes", advertised)
+            self.assertNotIn("dyro --workspace demo doctor", advertised)
+            self.assertNotIn("dyro --workspace Demo doctor", advertised)
+            self.assertTrue(
+                any("--root" in item and current_root in item for item in advertised),
+                advertised,
+            )
+            for command in advertised:
+                if "bootstrap" in command or "doctor" in command:
+                    self.assertIn("--root", command)
+                    self.assertIn(current_root, command)
+
+    def _timeout_args(self, **overrides: object) -> argparse.Namespace:
+        values = {
+            "workspace_alias": "Demo",
+            "root": None,
+            "format": "json",
+            "command": "next",
+            "all": False,
+            "_control_plane_read_budget": None,
+            "_stashed_findings": None,
+        }
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def _assert_no_other_root_fold_ad(
+        self, advertised: list[str], other: Path
+    ) -> None:
+        joined = "\n".join(advertised)
+        self.assertNotIn("--workspace demo", joined)
+        self.assertNotIn("--workspace Demo", joined)
+        self.assertNotIn(str(other.resolve()), joined)
+        self.assertNotIn("dyro --workspace demo bootstrap --yes", advertised)
+        self.assertNotIn("dyro --workspace Demo bootstrap --yes", advertised)
+        self.assertNotIn("dyro --workspace demo doctor", advertised)
+        self.assertNotIn("dyro --workspace Demo doctor", advertised)
+
+    def test_timeout_fallback_after_config_fail_does_not_advertise_other_root_fold(
+        self,
+    ) -> None:
+        other = self._fold_retarget_registry()
+        args = self._timeout_args()
+        with patch("dyro.cli._config", side_effect=OSError("profile unread")):
+            commands = _timeout_repair_commands(args, ["FAIL observation deadline"])
+            output = StringIO()
+            with redirect_stdout(output):
+                _print_json_observation_timeout(args)
+        payload = json.loads(output.getvalue())
+        advertised = [
+            item
+            for item in (
+                *commands,
+                *(payload.get("commands") or []),
+                *(payload.get("diagnostic_commands") or []),
+            )
+            if isinstance(item, str)
+        ]
+        self._assert_no_other_root_fold_ad(advertised, other)
+        self.assertTrue(advertised)
+        self.assertTrue(all("doctor" in item for item in advertised), advertised)
+        self.assertTrue(
+            all("--workspace" not in item for item in advertised), advertised
+        )
+        rooted = self._timeout_args(root=str(self.root))
+        with patch("dyro.cli._config", side_effect=OSError("profile unread")):
+            rooted_commands = _timeout_repair_commands(
+                rooted, ["FAIL observation deadline"]
+            )
+        self._assert_no_other_root_fold_ad(rooted_commands, other)
+        if rooted_commands:
+            self.assertTrue(
+                any(
+                    "--root" in item and str(self.root) in item
+                    for item in rooted_commands
+                ),
+                rooted_commands,
+            )
+
+    def test_registry_read_failure_uses_root_not_other_workspace_fold(self) -> None:
+        other = self._fold_retarget_registry()
+        from dyro.continuation.ready_briefing import scoped_briefing_command
+
+        config = load(self.root)
+        with (
+            patch(
+                "dyro.continuation.ready_briefing.load_registry",
+                side_effect=OSError("registry unread"),
+            ),
+            patch("dyro.hub.load_registry", side_effect=OSError("registry unread")),
+        ):
+            command = scoped_briefing_command(config, "Demo", "bootstrap", "--yes")
+            rooted, advertised = self._advertised_next(
+                ["--root", str(self.root), "next", "--format", "json"]
+            )
+        self.assertIn("--root", command)
+        self.assertIn(str(config.root), command)
+        self.assertNotIn("--workspace Demo", command)
+        self.assertNotIn("--workspace demo", command)
+        self.assertNotIn(str(other.resolve()), command)
+        self.assertEqual(rooted["kind"], "next_step")
+        self._assert_no_other_root_fold_ad(advertised, other)
+        self.assertTrue(
+            any("--root" in item and str(self.root) in item for item in advertised),
+            advertised,
+        )
+
+    def test_unavailable_summary_with_root_omits_other_root_fold_workspace(
+        self,
+    ) -> None:
+        other = self._fold_retarget_registry()
+        from dyro.console._inspect_worker import _unavailable_summary
+        from dyro.console.overview import WORKSPACE_TIMEOUT
+
+        summary = _unavailable_summary(
+            "Demo", WORKSPACE_TIMEOUT, ("Demo",), root=self.root
+        )
+        command = summary["recommendation"]["command"]
+        self.assertIsInstance(command, str)
+        self._assert_no_other_root_fold_ad([command], other)
+        self.assertNotIn(str(self.root), command)
+
+    def test_console_unique_fold_plan_and_apply_share_canonical_alias(self) -> None:
+        add_workspace(self.root, name="Demo")
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--dry-run", "--workspace", "demo", "console"])
+        self.assertIn("初始焦点：Demo", output.getvalue())
+        self.assertNotIn("初始焦点：demo", output.getvalue())
+        with patch("dyro.console.launcher.launch_console") as launch:
+            main(["--workspace", "demo", "console"])
+        launch.assert_called_once()
+        self.assertEqual(launch.call_args.kwargs["initial_workspace"], "Demo")
+
+    def test_console_collision_refuses_plan_and_apply(self) -> None:
+        other = self._second_registered_workspace("other")
+        add_workspace(self.root, name="Demo")
+        add_workspace(other, name="demo")
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as planned:
+            main(["--dry-run", "--workspace", "Demo", "console"])
+        self.assertEqual(planned.exception.code, 2)
+        self.assertIn("Demo", stderr.getvalue())
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as applied:
+            main(["--workspace", "Demo", "console"])
+        self.assertEqual(applied.exception.code, 2)
+
+    def test_status_and_next_disclose_disabled_push(self) -> None:
+        self._create_line()
+        status_out = StringIO()
+        with redirect_stdout(status_out):
+            main(["--root", str(self.root), "status"])
+        status_text = status_out.getvalue()
+        self.assertIn("Dyro 不会 push", status_text)
+        self.assertIn("git push", status_text)
+        self.assertNotIn("hook", status_text.lower())
+        next_out = StringIO()
+        with redirect_stdout(next_out):
+            main(["--root", str(self.root), "next"])
+        next_text = next_out.getvalue()
+        self.assertIn("Dyro 不会 push", next_text)
+        json_out = StringIO()
+        with redirect_stdout(json_out):
+            main(["--root", str(self.root), "status", "--format", "json"])
+        import json
+        payload = json.loads(json_out.getvalue())
+        self.assertFalse(payload["allow_push"])
+        self.assertIn("Dyro 不会 push", payload["push_note"])
+
+    def test_allow_push_true_omits_scare_text(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                "allow_push = false", "allow_push = true"
+            ),
+            encoding="utf-8",
+        )
+        self._create_line()
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", str(self.root), "status"])
+        self.assertNotIn("Dyro 不会 push", output.getvalue())
+        json_out = StringIO()
+        with redirect_stdout(json_out):
+            main(["--root", str(self.root), "status", "--format", "json"])
+        import json
+        payload = json.loads(json_out.getvalue())
+        self.assertTrue(payload["allow_push"])
+        self.assertNotIn("push_note", payload)

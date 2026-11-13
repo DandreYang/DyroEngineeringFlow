@@ -12,6 +12,7 @@ import tomllib
 import uuid
 from typing import Any, Iterable
 
+from .capability.cards import assert_capability_allows_write
 from .config import (
     Config,
     expand_argv,
@@ -49,7 +50,7 @@ from .provenance import (
     validate_review_binding,
 )
 from .state import append_text, atomic_write_bytes, atomic_write_text, exclusive_lock
-from .workspace import Line, get_line, line_repository_path, repository_path
+from .workspace import Line, get_line, line_repository_path, merge_lock_path, repository_path
 
 
 STATUSES = (
@@ -566,8 +567,7 @@ def _review_lock_path(task: Task) -> Path:
 
 
 def _merge_lock_path(config: Config, line_id: str) -> Path:
-    validate_id(line_id, "开发线 ID")
-    return config.root / ".dyro" / "lines" / f"{line_id}.merge.lock"
+    return merge_lock_path(config, line_id)
 
 
 def _claim(task: Task) -> dict[str, object] | None:
@@ -877,6 +877,27 @@ def set_status(
             ledger(
                 config, task.id, "status", from_status=current, to_status=next_status
             )
+            from .events import EventLogError, append_event, record_event_gap
+
+            try:
+                append_event(
+                    config,
+                    kind="task_status",
+                    actor=task.line,
+                    subject=task.id,
+                    family=task.line,
+                    facts={"from_status": current, "to_status": next_status},
+                )
+            except EventLogError as exc:
+                ledger(
+                    config,
+                    task.id,
+                    "event_append_failed",
+                    from_status=current,
+                    to_status=next_status,
+                    error_code=exc.code,
+                )
+                record_event_gap(config, code=exc.code)
 
 
 def _set_quality_gate_status(
@@ -959,6 +980,7 @@ def check_dispatchable(
                 f"任务 {task.id} 依赖 {dependency}，当前状态为 {status(config, dependency_task)}"
             )
         _assert_dependency_integrated(config, dependency_task)
+        _assert_line_worktree_on_branch(config, dependency_task)
     if task.conflict_group:
         active = [
             other.id
@@ -1036,6 +1058,8 @@ def _schedule_block_reason(reason: str, facts: dict[str, str]) -> str:
         return f"任务与活跃任务 {facts.get('active_task_ids', '')} 共用冲突组 {facts.get('conflict_group', '')}"
     if reason == "EXTERNAL_CLAIM_ACTIVE":
         return "任务已有有效的外部执行 claim"
+    if reason == "PROOF_DECAYED":
+        return "任务的 merge 绑定已衰减（PROOF_DECAYED），当前工作区无法按原复核合并"
     return reason
 
 
@@ -1261,9 +1285,32 @@ def _resolved_git_common_dir(path: Path) -> Path:
     )
 
 
+def _assert_task_worktree_path(config: Config, task: Task, destination: Path) -> None:
+    root = worktree_root(config, task)
+    current = destination
+    for _ in range(256):
+        if current.is_symlink():
+            raise DyroError(f"任务 worktree 路径不能是符号链接：{current}")
+        if current == root:
+            break
+        parent = current.parent
+        if parent == current:
+            raise DyroError(f"任务 worktree 越界：{destination}")
+        current = parent
+    else:
+        raise DyroError(f"任务 worktree 路径过深：{destination}")
+    if root.is_symlink():
+        raise DyroError(f"任务工作区根不能是符号链接：{root}")
+    resolved = destination.resolve()
+    root_resolved = root.resolve()
+    if resolved == root_resolved or not resolved.is_relative_to(root_resolved):
+        raise DyroError(f"任务 worktree 越界：{destination}")
+
+
 def _validate_task_worktree(
     config: Config, task: Task, repo_id: str, destination: Path, branch: str
 ) -> None:
+    _assert_task_worktree_path(config, task, destination)
     if git(destination, "rev-parse", "--is-inside-work-tree").stdout.strip() != "true":
         raise DyroError(f"不是有效的任务 Git worktree：{destination}")
     top_level = require_ok(
@@ -1547,14 +1594,42 @@ def dependency_integration_state_bounded(
     return "integrated"
 
 
+def _assert_line_worktree_on_branch(config: Config, task: Task) -> None:
+    line = get_line(config, task.line)
+    for repository_id in task.repositories:
+        destination = line_repository_path(config, line, repository_id)
+        if destination.is_symlink():
+            raise DyroError(
+                f"任务 {task.id} 的开发线 {task.line} 仓库 {repository_id} "
+                f"路径不能是符号链接：{destination}"
+            )
+        top = git_read(destination, "rev-parse", "--show-toplevel")
+        if top.code != 0:
+            raise DyroError(
+                f"任务 {task.id} 的开发线 {task.line} 仓库 {repository_id} "
+                f"不是 Git 工作树：{destination}"
+            )
+        if Path(top.stdout.strip()).resolve() != destination.resolve():
+            raise DyroError(
+                f"任务 {task.id} 的开发线 {task.line} 仓库 {repository_id} "
+                f"根目录错误：{destination} 实际为 {top.stdout.strip()}"
+            )
+        current = git_read(destination, "branch", "--show-current")
+        branch = current.stdout.strip() if current.code == 0 else ""
+        if branch != line.branch:
+            raise DyroError(
+                f"任务 {task.id} 的开发线 {task.line} 仓库 {repository_id} "
+                f"当前 {branch or 'DETACHED'}，期望 {line.branch}"
+            )
+
+
 def _assert_dependency_integrated(config: Config, task: Task) -> None:
     line = get_line(config, task.line)
     heads = _load_task_heads(config, task)
     for repository_id, task_head in heads.items():
         destination = line_repository_path(config, line, repository_id)
-        result = run(
-            ("git", "merge-base", "--is-ancestor", task_head, "HEAD"),
-            cwd=destination,
+        result = git_read(
+            destination, "merge-base", "--is-ancestor", task_head, "HEAD"
         )
         if result.code != 0:
             raise DyroError(
@@ -1580,7 +1655,7 @@ def _assert_task_heads_current(config: Config, task: Task) -> dict[str, str]:
 
 def _receipt_result(task: Task) -> str:
     receipt = resolve_evidence_path(task.directory, "receipt.md")
-    if not receipt.exists():
+    if receipt.is_symlink() or not receipt.is_file():
         return ""
     first = receipt.read_text(encoding="utf-8").splitlines()
     match = RESULT_RE.match(first[0]) if first else None
@@ -1784,6 +1859,8 @@ def _adapter_argv(
         raise ValidationError(
             f"任务 {task.id} 使用的 Agent adapter 未配置：{agent}"
         ) from exc
+    if mode == "write":
+        assert_capability_allows_write(config, agent)
     template = adapter.write if mode == "write" else adapter.read
     return expand_argv(
         template,
@@ -1960,6 +2037,10 @@ def _require_external_claim(config: Config, task: Task) -> dict[str, object]:
 
 def run_gates(config: Config, task: Task, *, dry_run: bool = False) -> bool:
     _require_local_execution(config, "门禁", dry_run=dry_run)
+    if dry_run and config.policy.execution_mode == "external":
+        raise DyroError(
+            "当前 Profile 要求外部隔离执行器；--dry-run 不会在本机执行门禁 argv"
+        )
     root = worktree_root(config, task)
     all_passed = True
     for index, gate in enumerate(task.gates, start=1):
@@ -1967,7 +2048,7 @@ def run_gates(config: Config, task: Task, *, dry_run: bool = False) -> bool:
         argv = expand_argv(
             gate.argv, workspace=root, root=config.root, task=task.id, line=task.line
         )
-        result = run(argv, cwd=cwd, timeout=gate.timeout_seconds, dry_run=dry_run)
+        result = run(argv, cwd=cwd, timeout=gate.timeout_seconds)
         _capture(task, f"gate-{index}.log", result.stdout, dry_run=dry_run)
         passed = result.code == 0
         all_passed = all_passed and passed
@@ -1984,7 +2065,9 @@ def run_gates(config: Config, task: Task, *, dry_run: bool = False) -> bool:
     return all_passed
 
 
-def _resolve_run_executor(task: Task, executor_override: str | None) -> str:
+def _resolve_run_executor(
+    config: Config, task: Task, executor_override: str | None
+) -> str:
     from .peer_wave import (
         AUTO_EXECUTOR,
         bind_wave_executors,
@@ -1995,7 +2078,11 @@ def _resolve_run_executor(task: Task, executor_override: str | None) -> str:
         return executor_override
     if task.executor != AUTO_EXECUTOR:
         return task.executor
-    decision = bind_wave_executors((task,), discover_available_write_providers())
+    decision = bind_wave_executors(
+        (task,),
+        discover_available_write_providers(),
+        capabilities=getattr(config, "capabilities", None),
+    )
     chosen = decision.executor_for(task.id)
     if chosen is None:
         reason = (
@@ -2020,18 +2107,60 @@ def _execute_task_agent(
     from .peer_wave import assert_write_executor_allowed
     from .task_dispatch import is_dispatch_write_ready, run_task_bound_dispatch
 
-    executor = _resolve_run_executor(task, executor_override)
+    executor = _resolve_run_executor(config, task, executor_override)
     if task.risk == "write":
         assert_write_executor_allowed(executor, risk=task.risk)
+        assert_capability_allows_write(config, executor)
     if is_dispatch_write_ready(executor):
-        result = run_task_bound_dispatch(
-            task,
-            executor=executor,
-            workspace=workspace,
-            prompt=prompt,
-            timeout_seconds=float(task.timeout_minutes * 60),
-            dry_run=dry_run,
-        )
+        if not dry_run:
+            from .events import append_event
+
+            append_event(
+                config,
+                kind="dispatch",
+                actor=task.line,
+                subject=task.id,
+                family=task.line,
+                facts={"executor": executor, "phase": "start"},
+            )
+        try:
+            result = run_task_bound_dispatch(
+                task,
+                executor=executor,
+                workspace=workspace,
+                prompt=prompt,
+                timeout_seconds=float(task.timeout_minutes * 60),
+                dry_run=dry_run,
+                capabilities=getattr(config, "capabilities", None) or {},
+            )
+        except Exception:
+            if not dry_run:
+                from .events import append_event
+
+                append_event(
+                    config,
+                    kind="dispatch",
+                    actor=task.line,
+                    subject=task.id,
+                    family=task.line,
+                    facts={"executor": executor, "phase": "end", "status": "failed"},
+                )
+            raise
+        if not dry_run:
+            from .events import append_event
+
+            append_event(
+                config,
+                kind="dispatch",
+                actor=task.line,
+                subject=task.id,
+                family=task.line,
+                facts={
+                    "executor": executor,
+                    "phase": "end",
+                    "status": "idle" if getattr(result, "code", 1) == 0 else "failed",
+                },
+            )
     elif executor in config.adapters:
         argv = _adapter_argv(
             config,
@@ -2122,6 +2251,12 @@ def _run_task(
         if not dry_run:
             set_status(config, task, "failed")
         raise
+    if not dry_run:
+        leftover = task.directory / "receipt.md"
+        if leftover.is_symlink() or leftover.is_file():
+            leftover.unlink()
+        elif leftover.exists():
+            raise DyroError(f"任务回执路径不是普通文件：{leftover}")
     result = _execute_task_agent(
         config,
         task,
@@ -2465,7 +2600,7 @@ def _apply_review_decision(config: Config, task: Task, *, dry_run: bool = False)
                 expected_plan_sha256=expected_binding[1] if expected_binding else "",
                 reviewed_plan_sha256=reviewed_binding[1],
             )
-        return "review"
+        return "failed"
     if verdict == "PASS":
         if (
             reviewed_receipt_hash != receipt_hash
@@ -2482,7 +2617,7 @@ def _apply_review_decision(config: Config, task: Task, *, dry_run: bool = False)
                     expected_task_heads_sha256=task_heads_hash,
                     reviewed_task_heads_sha256=reviewed_task_heads_hash,
                 )
-            return "review"
+            return "failed"
         next_status = (
             "review_pending_signoff"
             if config.policy.require_external_signoff
@@ -2826,7 +2961,6 @@ def _prepare_merge(
                     "--dry-run",
                     "origin",
                     line.branch,
-                    dry_run=dry_run,
                 ),
                 f"预检推送 {plan.repository}",
             )
@@ -2867,7 +3001,7 @@ def _merge_task_repositories(
 ) -> None:
     # Serialize merges into the same delivery line across concurrent dyro processes.
     with exclusive_lock(
-        _merge_lock_path(config, task.line), timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS
+        merge_lock_path(config, task.line), timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS
     ):
         _merge_task_repositories_locked(config, task, push=push, dry_run=dry_run)
 
@@ -2878,19 +3012,27 @@ def _merge_task_repositories_locked(
     line, plans = _prepare_merge(config, task, push=push, dry_run=dry_run)
     message = f"merge(task): {task.id} {task.title}"
     if dry_run:
-        for plan in plans:
-            require_ok(
-                git(
+        probed: list[MergePlan] = []
+        try:
+            for plan in plans:
+                probed.append(plan)
+                result = git(
                     plan.target,
                     "merge",
                     "--no-ff",
                     "--no-commit",
                     plan.source_head,
-                    dry_run=True,
                     timeout=300,
-                ),
-                f"合并 {plan.repository}",
-            )
+                )
+                if result.code != 0:
+                    raise DyroError(
+                        f"预检合并 {plan.repository} 存在冲突，拒绝合并"
+                        + (f"\n{result.stdout.strip()}" if result.stdout.strip() else "")
+                    )
+        finally:
+            recovery = _rollback_merges(probed, {})
+            if recovery:
+                raise DyroError("预检合并后清理未完全成功：" + "; ".join(recovery))
         return
 
     committed_heads: dict[str, str] = {}
@@ -2967,6 +3109,71 @@ def _merge_task_repositories_locked(
         )
 
 
+def _review_evidence_present(task: Task) -> bool:
+    if not (task.directory / "review.md").is_file():
+        return False
+    try:
+        resolve_evidence_path(task.directory, "receipt.md")
+        resolve_evidence_path(task.directory, TASK_HEADS_FILE)
+    except DyroError:
+        return False
+    return True
+
+
+def _signoff_evidence_present(task: Task) -> bool:
+    return (task.directory / "signoff.json").is_file()
+
+
+def close_task(config: Config, task: Task, *, dry_run: bool = False) -> None:
+    current = status(config, task)
+    if current not in {"done", "failed"}:
+        raise DyroError(f"只能关闭 done 或 failed 任务，当前 {current}")
+    line = get_line(config, task.line)
+    branch = f"{config.policy.task_branch_prefix}{task.id}"
+    root = worktree_root(config, task)
+    for repo_id in task.repositories:
+        destination = root / config.repositories[repo_id].mount
+        anchor = repository_path(config, repo_id)
+        if destination.is_symlink() or worktree_root(config, task).is_symlink():
+            raise DyroError(f"任务 worktree 路径不能是符号链接：{destination}")
+        if destination.exists():
+            _validate_task_worktree(config, task, repo_id, destination, branch)
+            dirty = require_ok(
+                git(destination, "status", "--porcelain=v1", "-uall"),
+                f"读取 {repo_id} 任务 worktree 状态",
+            ).stdout.strip()
+            if dirty and current == "done":
+                raise DyroError(f"任务 worktree 不干净，拒绝关闭：{destination}")
+        if current == "done" and git(
+            anchor, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"
+        ).code == 0:
+            ancestor = git(anchor, "merge-base", "--is-ancestor", branch, line.branch)
+            if ancestor.code != 0:
+                raise DyroError(
+                    f"任务分支 {branch} 尚未合入开发线 {line.branch}，拒绝删除"
+                )
+    for repo_id in task.repositories:
+        destination = root / config.repositories[repo_id].mount
+        anchor = repository_path(config, repo_id)
+        if destination.is_symlink() or destination.exists():
+            _assert_task_worktree_path(config, task, destination)
+            _validate_task_worktree(config, task, repo_id, destination, branch)
+            remove_args: tuple[str, ...] = ("worktree", "remove")
+            if current == "failed":
+                remove_args += ("--force",)
+            require_ok(
+                git(anchor, *remove_args, str(destination), dry_run=dry_run),
+                f"移除 {repo_id} 任务 worktree",
+            )
+        if git(anchor, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}").code == 0:
+            require_ok(
+                git(anchor, "branch", "-D", branch, dry_run=dry_run),
+                f"删除 {repo_id} 任务分支 {branch}",
+            )
+    if not dry_run:
+        ledger(config, task.id, "closed", line=line.id, branch=branch)
+
+
 def merge_task(
     config: Config, task: Task, *, push: bool = False, dry_run: bool = False
 ) -> None:
@@ -2974,13 +3181,16 @@ def merge_task(
     if status(config, task) != "done":
         raise DyroError(f"仅 done 任务可合并：{task.id}")
     if not _valid_review_acceptance(config, task):
+        suffix = "" if not _review_evidence_present(task) else "（PROOF_DECAYED）"
         raise DyroError(
             "仅具有有效的独立复核、当前回执与任务 HEAD 绑定的 done 任务可合并"
+            + suffix
         )
     if config.policy.require_external_signoff and not _valid_external_signoff(
         config, task
     ):
-        raise DyroError("当前 Profile 要求有效的外部签收后才能合并")
+        suffix = "" if not _signoff_evidence_present(task) else "（PROOF_DECAYED）"
+        raise DyroError("当前 Profile 要求有效的外部签收后才能合并" + suffix)
     _merge_task_repositories(config, task, push=push, dry_run=dry_run)
 
 
@@ -3092,11 +3302,60 @@ def loop_tasks(config: Config, *, dry_run: bool = False) -> list[tuple[str, str]
     return outcomes
 
 
+def profile_task_gates(
+    config: Config, repository_ids: Iterable[str]
+) -> tuple[tuple[str, tuple[str, ...], str], ...]:
+    gates: list[tuple[str, tuple[str, ...], str]] = []
+    for repo_id in repository_ids:
+        repo = config.repositories[repo_id]
+        if repo.verify:
+            for index, argv in enumerate(repo.verify, start=1):
+                gates.append((f"verify-{repo_id}-{index}", argv, repo.mount))
+        else:
+            gates.append(
+                (f"diff-check-{repo_id}", ("git", "diff", "--check"), repo.mount)
+            )
+    return tuple(gates)
+
+
 def task_template(
-    task_id: str, title: str, line: str, repository: str, mount: str
+    task_id: str,
+    title: str,
+    line: str,
+    repository: str,
+    mount: str,
+    *,
+    executor: str = "codex",
+    reviewer: str | None = None,
+    extra_repositories: tuple[str, ...] = (),
+    gates: tuple[tuple[str, tuple[str, ...], str], ...] | None = None,
 ) -> str:
     quoted_title = json.dumps(title, ensure_ascii=False)
     quoted_mount = json.dumps(mount, ensure_ascii=False)
+    quoted_executor = json.dumps(executor, ensure_ascii=False)
+    quoted_reviewer = json.dumps(reviewer or executor, ensure_ascii=False)
+    repo_blocks = [f'[[repositories]]\nid = "{repository}"\n']
+    repo_blocks.extend(
+        f'[[repositories]]\nid = "{repo_id}"\n' for repo_id in extra_repositories
+    )
+    if gates is None:
+        gate_blocks = [
+            "[[gates]]\n"
+            'name = "diff-check"\n'
+            'argv = ["git", "diff", "--check"]\n'
+            f"cwd = {quoted_mount}\n"
+            "timeout_seconds = 120\n"
+        ]
+    else:
+        gate_blocks = []
+        for name, argv, cwd in gates:
+            gate_blocks.append(
+                "[[gates]]\n"
+                f"name = {json.dumps(name, ensure_ascii=False)}\n"
+                f"argv = {json.dumps(list(argv), ensure_ascii=False)}\n"
+                f"cwd = {json.dumps(cwd, ensure_ascii=False)}\n"
+                "timeout_seconds = 120\n"
+            )
     return f'''schema_version = 1
 id = "{task_id}"
 title = {quoted_title}
@@ -3110,20 +3369,13 @@ blocked_on = []
 conflict_group = ""
 
 [executor]
-agent = "codex"
+agent = {quoted_executor}
 
 [reviewer]
-agent = "codex"
+agent = {quoted_reviewer}
 
-[[repositories]]
-id = "{repository}"
-
-[[gates]]
-name = "diff-check"
-argv = ["git", "diff", "--check"]
-cwd = {quoted_mount}
-timeout_seconds = 120
-
+{"".join(repo_blocks)}
+{"".join(gate_blocks)}
 [merge]
 auto = false
 push = false

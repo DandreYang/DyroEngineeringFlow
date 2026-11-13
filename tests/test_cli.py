@@ -14,6 +14,7 @@ from dyro.cli import (
     _route_experiment_surface,
     _setup_default_tool,
     _setup_provider_preset,
+    build_parser,
     main,
 )
 from dyro.changesets import get_changeset
@@ -25,9 +26,16 @@ from dyro.hub import load_registry
 from dyro.tasks import load_task, status, task_template
 from dyro.tooling import ToolState, load_tool_preferences
 from dyro.updates import load_update_state
-from dyro.workspace import create_line, get_line, line_repository_path
+from dyro.workspace import (
+    create_line,
+    doctor,
+    get_line,
+    is_missing_origin_finding,
+    line_repository_path,
+    spawn_line,
+)
 
-from .support import WorkspaceCase
+from .support import WorkspaceCase, executor_writes_receipt, publish_origin_branch
 
 
 class CliTests(unittest.TestCase):
@@ -41,6 +49,29 @@ class CliTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.registry_environment.stop()
         self.registry_tmp.cleanup()
+
+    def test_line_family_and_host_seed_accept_trailing_dry_run(self) -> None:
+        parser = build_parser()
+        merge = parser.parse_args(
+            ["line", "merge", "child", "--into", "parent", "--dry-run"]
+        )
+        self.assertTrue(merge.dry_run)
+        spawn = parser.parse_args(["line", "spawn", "parent", "child", "--dry-run"])
+        self.assertTrue(spawn.dry_run)
+        sync = parser.parse_args(["line", "sync", "child", "--dry-run"])
+        self.assertTrue(sync.dry_run)
+        post = parser.parse_args(
+            ["line", "post", "core", "--kind", "ask_sync", "--body", "hi", "--dry-run"]
+        )
+        self.assertTrue(post.dry_run)
+        ack = parser.parse_args(["line", "ack", "msg_1", "--dry-run"])
+        self.assertTrue(ack.dry_run)
+        seed = parser.parse_args(["host", "seed", "--dry-run"])
+        self.assertTrue(seed.dry_run)
+        global_merge = parser.parse_args(
+            ["--dry-run", "line", "merge", "child", "--into", "parent"]
+        )
+        self.assertTrue(global_merge.dry_run)
 
     def test_runtime_is_not_an_experiment_surface(self) -> None:
         routed = _route_experiment_surface(
@@ -110,6 +141,8 @@ class CliTests(unittest.TestCase):
             main(["init", str(root), "--name", "demo"])
             self.assertTrue((root / "dyro.toml").exists())
             self.assertTrue((root / ".dyro/tasks").is_dir())
+            self.assertTrue((root / "AGENTS.md").is_file())
+            self.assertTrue((root / "CLAUDE.md").is_file())
             self.assertEqual(load(root).name, "demo")
 
     def test_workspace_list_json_is_structured_and_identifies_the_default(self) -> None:
@@ -210,6 +243,12 @@ class CliTests(unittest.TestCase):
             self.assertTrue((root / ".dyro/tasks").is_dir())
             self.assertEqual(get_line(config, "dev").branch, "feat/dev")
             self.assertTrue((root / "versions/dev/api").is_dir())
+            self.assertTrue((root / "AGENTS.md").is_file())
+            self.assertTrue((root / "CLAUDE.md").is_file())
+            self.assertTrue((root / "versions/dev/AGENTS.md").is_file())
+            self.assertTrue((root / "versions/dev/CLAUDE.md").is_file())
+            self.assertFalse((root / "versions/dev/api/AGENTS.md").exists())
+            self.assertFalse((repository / "AGENTS.md").exists())
 
             registry = load_registry()
             self.assertEqual(registry.default, "demo")
@@ -684,6 +723,8 @@ class CliTests(unittest.TestCase):
             [
                 call("skill", yes=True, allow_first_install=True),
                 call("dispatch", yes=True, allow_first_install=True),
+                call("executor", yes=True, allow_first_install=True),
+                call("board", yes=True, allow_first_install=True),
             ],
         )
         self.assertEqual(outcome, "success")
@@ -708,6 +749,26 @@ class CliTests(unittest.TestCase):
                 IntegrationState.ABSENT,
                 Path("/tmp/dispatch"),
                 Path("/tmp/dispatch.json"),
+                "absent",
+                avatars=(
+                    AvatarStatus("codex", Path("/tmp/codex"), "missing", "missing"),
+                ),
+            ),
+            "executor": IntegrationStatus(
+                "executor",
+                IntegrationState.ABSENT,
+                Path("/tmp/executor"),
+                Path("/tmp/executor.json"),
+                "absent",
+                avatars=(
+                    AvatarStatus("codex", Path("/tmp/codex"), "missing", "missing"),
+                ),
+            ),
+            "board": IntegrationStatus(
+                "board",
+                IntegrationState.ABSENT,
+                Path("/tmp/board"),
+                Path("/tmp/board.json"),
                 "absent",
                 avatars=(
                     AvatarStatus("codex", Path("/tmp/codex"), "missing", "missing"),
@@ -747,20 +808,92 @@ class CliTests(unittest.TestCase):
 
 class StartTests(WorkspaceCase):
     def test_start_dry_run_uses_selected_line_and_adapter(self) -> None:
+        publish_origin_branch(self.anchor, "feat/alpha")
         config = load(self.root)
         create_line(config, line_id="alpha", branch="feat/alpha", base="main")
-        main(
-            [
-                "--root",
-                str(self.root),
-                "--dry-run",
-                "start",
-                "--line",
-                "alpha",
-                "--agent",
-                "noop",
-            ]
+        output = StringIO()
+        with redirect_stdout(output):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "--dry-run",
+                    "start",
+                    "--line",
+                    "alpha",
+                    "--agent",
+                    "noop",
+                ]
+            )
+        rendered = output.getvalue()
+        self.assertIn("座位  控制面 · dyro-control-plane", rendered)
+        self.assertIn("先观察 next / attention", rendered)
+
+    def test_start_proceeds_when_doctor_has_missing_origin_only(self) -> None:
+        config = load(self.root)
+        create_line(config, line_id="local-only", branch="feat/local-only", base="main")
+        stdout = StringIO()
+        stderr = StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "--dry-run",
+                    "start",
+                    "--line",
+                    "local-only",
+                    "--agent",
+                    "noop",
+                ]
+            )
+        combined = stdout.getvalue() + stderr.getvalue()
+        self.assertNotIn("尚未就绪", combined)
+        self.assertNotIn("missing origin/feat/local-only", combined)
+
+    def test_start_refuses_fail_whose_path_embeds_missing_origin_token(self) -> None:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8")
+            + "\n[repositories.evil]\n"
+            + 'path = "repositories/api: missing origin/evil"\n'
+            + 'mount = "evil"\n',
+            encoding="utf-8",
         )
+        findings = doctor(load(self.root))
+        embedded = [
+            item
+            for item in findings
+            if item.startswith("FAIL") and ": missing origin/evil" in item
+        ]
+        self.assertTrue(embedded, findings)
+        for item in embedded:
+            self.assertFalse(is_missing_origin_finding(item), item)
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "--dry-run",
+                    "start",
+                    "--agent",
+                    "noop",
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
+        combined = stdout.getvalue() + stderr.getvalue()
+        self.assertIn("尚未就绪", combined)
+        self.assertTrue(
+            any(": missing origin/evil" in item for item in embedded),
+            embedded,
+        )
+        self.assertNotIn("座位", stdout.getvalue())
 
     def test_next_without_a_profile_explains_how_to_begin(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-cli-") as tmp:
@@ -868,6 +1001,7 @@ class ProfileCommandsTests(WorkspaceCase):
         )
 
     def test_start_can_launch_an_installed_tool_without_a_profile_adapter(self) -> None:
+        publish_origin_branch(self.anchor, "feat/alpha")
         create_line(load(self.root), line_id="alpha", branch="feat/alpha", base="main")
         launched: list[object] = []
 
@@ -1003,6 +1137,7 @@ class ObjectiveCliTests(WorkspaceCase):
         )
 
     def test_control_plane_workspace_views_have_stable_json_shapes(self) -> None:
+        publish_origin_branch(self.anchor, "feat/alpha")
         doctor_payload = self._read_json("doctor")
         self.assertEqual(doctor_payload["kind"], "doctor")
         self.assertTrue(doctor_payload["passed"])
@@ -1030,6 +1165,7 @@ class ObjectiveCliTests(WorkspaceCase):
         self.assertEqual(next_payload["state"], "ready")
         self.assertEqual(next_payload["commands"], [])
         self.assertFalse(next_payload["mutation_available"])
+        self.assertNotIn("briefing", next_payload)
 
         lines_payload = self._read_json("line", "list")
         self.assertEqual(lines_payload["kind"], "line_list")
@@ -1066,8 +1202,68 @@ class ObjectiveCliTests(WorkspaceCase):
 
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["state"], "ready")
+        self.assertNotEqual(payload["state"], "needs_repair")
+        advertised = [
+            item
+            for item in (
+                *(payload.get("commands") or []),
+                *(payload.get("diagnostic_commands") or []),
+                ((payload.get("briefing") or {}) or {}).get("command")
+                if isinstance(payload.get("briefing"), dict)
+                else None,
+            )
+            if isinstance(item, str)
+        ]
+        for command in advertised:
+            self.assertNotIn("--workspace test-workspace", command)
+            if "--workspace" in command:
+                self.assertIn("--workspace selected", command)
+
+    def test_control_plane_next_uses_canonical_alias_spelling(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-registry-") as registry_home:
+            with patch.dict(os.environ, {"DYRO_HOME": registry_home}, clear=False):
+                main(
+                    [
+                        "workspace",
+                        "add",
+                        str(self.root),
+                        "--name",
+                        "Acme",
+                        "--default",
+                    ]
+                )
+                output = StringIO()
+                with redirect_stdout(output):
+                    main(
+                        [
+                            "--workspace",
+                            "acme",
+                            "next",
+                            "--format",
+                            "json",
+                        ]
+                    )
+                self.assertEqual(load_registry().workspaces[0].name, "Acme")
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["state"], "ready")
+        self.assertNotEqual(payload["state"], "needs_repair")
         self.assertEqual(payload["commands"], [])
-        self.assertFalse(payload["mutation_available"])
+        advertised = [
+            item
+            for item in (
+                *(payload.get("commands") or []),
+                *(payload.get("diagnostic_commands") or []),
+                ((payload.get("briefing") or {}) or {}).get("command")
+                if isinstance(payload.get("briefing"), dict)
+                else None,
+            )
+            if isinstance(item, str)
+        ]
+        for command in advertised:
+            if "--workspace" in command:
+                self.assertIn("--workspace Acme", command)
+                self.assertNotIn("--workspace acme", command)
 
     def test_control_plane_json_runtime_errors_use_one_stable_envelope(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dyro-registry-") as registry_home:
@@ -1198,11 +1394,15 @@ class ObjectiveCliTests(WorkspaceCase):
         self.anchor.rename(self.root / "api-missing")
         unavailable = self._read_json("next")
         self.assertFalse(unavailable["mutation_available"])
-        self.assertEqual(unavailable["commands"], [])
+        self.assertEqual(
+            unavailable["commands"],
+            ["dyro --workspace test-workspace doctor"],
+        )
         self.assertEqual(
             unavailable["diagnostic_commands"],
-            [f"dyro --root {self.root.resolve()} doctor"],
+            ["dyro --workspace test-workspace doctor"],
         )
+        self.assertNotIn(str(self.root.resolve()), json.dumps(unavailable))
 
         config_path = self.root / "dyro.toml"
         config_path.write_text(
@@ -1216,8 +1416,9 @@ class ObjectiveCliTests(WorkspaceCase):
         self.assertTrue(applicable["mutation_available"])
         self.assertEqual(
             applicable["commands"],
-            [f"dyro --root {self.root.resolve()} bootstrap --yes"],
+            ["dyro --workspace test-workspace bootstrap --yes"],
         )
+        self.assertNotIn(str(self.root.resolve()), json.dumps(applicable))
 
     def test_control_plane_next_never_offers_bootstrap_through_symlink_parent(
         self,
@@ -1242,7 +1443,10 @@ class ObjectiveCliTests(WorkspaceCase):
         payload = self._read_json("next")
 
         self.assertFalse(payload["mutation_available"])
-        self.assertEqual(payload["commands"], [])
+        self.assertEqual(
+            payload["commands"],
+            ["dyro --workspace test-workspace doctor"],
+        )
         self.assertFalse((outside / "api").exists())
 
     def test_control_plane_rejects_symlinked_line_and_changeset_manifests(self) -> None:
@@ -1584,7 +1788,10 @@ class ObjectiveCliTests(WorkspaceCase):
         explain_output = StringIO()
         with redirect_stdout(explain_output):
             main(["--root", root, "objective", "explain", "release"])
-        self.assertIn("Objective: release", explain_output.getvalue())
+        explain_text = explain_output.getvalue()
+        self.assertIn("Objective: release", explain_text)
+        self.assertIn("下一步：", explain_text)
+        self.assertNotIn(str(self.root.resolve()), explain_text)
         graph_output = StringIO()
         with redirect_stdout(graph_output):
             main(
@@ -1617,6 +1824,131 @@ class ObjectiveCliTests(WorkspaceCase):
             if path.is_file()
         }
         self.assertEqual(before, after)
+
+    def test_objective_explain_json_includes_path_free_briefing(self) -> None:
+        self._start_release_objective()
+        payload = self._read_json("objective", "explain", "release")
+        briefing = payload["briefing"]
+        blob = json.dumps(payload)
+        self.assertTrue(briefing["available"])
+        self.assertEqual(briefing["objective_id"], "release")
+        self.assertIn("--workspace test-workspace", briefing["command"])
+        self.assertNotIn("--root", briefing["command"])
+        self.assertNotIn(str(self.root.resolve()), blob)
+        self.assertNotIn("session", blob.lower())
+        self.assertIn("plan_sha256", payload)
+        self.assertIn("下一步：", "\n".join(briefing["lines"]))
+
+    def test_next_with_one_live_objective_points_to_follow_up(self) -> None:
+        publish_origin_branch(self.anchor, "feat/alpha")
+        self._start_release_objective()
+        explain = self._read_json("objective", "explain", "release")
+        payload = self._read_json("next")
+        briefing = payload["briefing"]
+        self.assertEqual(payload["kind"], "next_step")
+        self.assertEqual(payload["state"], "ready")
+        self.assertEqual(payload["commands"], [])
+        self.assertFalse(payload["mutation_available"])
+        self.assertEqual(
+            briefing["command"],
+            "dyro --workspace test-workspace objective tick release",
+        )
+        self.assertEqual(briefing["command"], explain["briefing"]["command"])
+        self.assertEqual(payload["diagnostic_commands"], [briefing["command"]])
+        self.assertNotIn("objective apply", json.dumps(payload))
+        self.assertNotIn(str(self.root.resolve()), json.dumps(payload))
+
+    def test_bare_dyro_prints_the_same_follow_up_before_the_home_menu(self) -> None:
+        self._start_release_objective()
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=False),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+        text = output.getvalue()
+        self.assertRegex(text, r"dyro --workspace \S+ objective tick release")
+        self.assertIn("今天做什么", text)
+        self.assertIn("做下一步，不打开编码工具", text)
+        self.assertNotIn("objective apply", text)
+        self.assertNotIn(str(self.root.resolve()), text)
+
+    def test_bare_dyro_without_objectives_does_not_invent_a_briefing(self) -> None:
+        output = StringIO()
+        with (
+            patch("dyro.home.interactive_terminal", return_value=False),
+            redirect_stdout(output),
+        ):
+            main(["--root", str(self.root)])
+        text = output.getvalue()
+        self.assertIn("今天做什么", text)
+        self.assertNotIn("objective tick", text)
+        self.assertNotIn("objective attention", text)
+
+    def test_next_with_two_live_objectives_does_not_pick_one(self) -> None:
+        publish_origin_branch(self.anchor, "feat/alpha")
+        self._start_release_objective()
+        directory = self.config.task_specs_dir / "TASK-B"
+        directory.mkdir(parents=True)
+        directory.joinpath("task.toml").write_text(
+            task_template("TASK-B", "Task B", "alpha", "api", "services/api").replace(
+                'agent = "codex"', 'agent = "noop"'
+            ),
+            encoding="utf-8",
+        )
+        directory.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
+        main(
+            [
+                "--root",
+                str(self.root),
+                "objective",
+                "start",
+                "--id",
+                "hotfix",
+                "--title",
+                "Hotfix",
+                "--line",
+                "alpha",
+                "--targets",
+                "TASK-B",
+                "--yes",
+            ]
+        )
+        payload = self._read_json("next")
+        self.assertEqual(payload["commands"], [])
+        self.assertFalse(payload["mutation_available"])
+        self.assertEqual(payload["briefing"]["objective_id"], "")
+        self.assertIn("objective list", payload["briefing"]["command"])
+        self.assertIn("多个未停止的目标", payload["briefing"]["matter"])
+
+    def test_objective_tick_text_leads_with_human_arrival(self) -> None:
+        self._start_release_objective()
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", str(self.root), "objective", "tick", "release"])
+        text = output.getvalue()
+        self.assertIn("Release · 未完成", text)
+        self.assertIn("这是预览，还没有执行。当前窗口可以接着做。", text)
+        self.assertIn("本轮可以推进：", text)
+        self.assertIn("执行 · 有任务可以继续做（TASK-A）", text)
+        self.assertIn("Tick SHA-256", text)
+        self.assertNotIn("objective apply", text)
+        payload = self._read_json("objective", "tick", "release")
+        self.assertNotIn("briefing", payload)
+        self.assertIn("tick_sha256", payload)
+
+    def test_objective_attention_text_leads_with_human_arrival(self) -> None:
+        self._start_release_objective()
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", str(self.root), "objective", "attention", "release"])
+        text = output.getvalue()
+        self.assertIn("Release · 未完成", text)
+        self.assertIn("这些事项需要你处理。当前窗口可以接着做。", text)
+        self.assertIn("Attention SHA-256", text)
+        payload = self._read_json("objective", "attention", "release")
+        self.assertNotIn("briefing", payload)
+        self.assertIn("attention_sha256", payload)
 
     def test_objective_apply_dry_run_shows_the_exact_wave_without_writing(self) -> None:
         root = str(self.root)
@@ -1789,10 +2121,145 @@ class DaemonSelectionTests(WorkspaceCase):
             encoding="utf-8",
         )
         task_path.joinpath("handoff.md").write_text("# handoff\n", encoding="utf-8")
-        task_path.joinpath("receipt.md").write_text("result: DONE\n", encoding="utf-8")
 
-        main(["--root", str(self.root), "task", "daemon", "--once", "--parallel", "1"])
+        with executor_writes_receipt(task_path):
+            main(["--root", str(self.root), "task", "daemon", "--once", "--parallel", "1"])
         self.assertEqual(status(config, load_task(config, "TASK-ONCE")), "review")
+
+
+class FamilyChannelCliTests(WorkspaceCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.config = load(self.root)
+        create_line(self.config, line_id="core", branch="feat/core", base="main")
+        spawn_line(self.config, "core", "pay")
+
+    def _read_json(self, *argv: str) -> dict[str, object]:
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["--root", str(self.root), *argv, "--format", "json"])
+        return json.loads(output.getvalue())
+
+    def test_dry_run_post_and_ack_write_nothing(self) -> None:
+        from dyro.families import channel_path
+
+        planned = self._read_json(
+            "--dry-run",
+            "line",
+            "post",
+            "core",
+            "--kind",
+            "ask_sync",
+            "--body",
+            "请同步",
+        )
+        self.assertTrue(planned["dry_run"])
+        self.assertEqual(planned["kind"], "line_post")
+        self.assertEqual(planned["channel_kind"], "ask_sync")
+        self.assertFalse(channel_path(self.config, "core").exists())
+        with self.assertRaises(SystemExit):
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "line",
+                    "post",
+                    "core",
+                    "--kind",
+                    "ask_sync",
+                    "--body",
+                    "请同步",
+                ]
+            )
+        self.assertFalse(channel_path(self.config, "core").exists())
+        written = self._read_json(
+            "line",
+            "post",
+            "core",
+            "--kind",
+            "ask_sync",
+            "--body",
+            "请同步",
+            "--yes",
+        )
+        ack = self._read_json("line", "ack", written["id"], "--dry-run")
+        self.assertTrue(ack["dry_run"])
+        inbox = self._read_json("line", "inbox", "--family", "core", "--unacked")
+        self.assertEqual(inbox["unacked"], 1)
+        self.assertEqual(inbox["messages"][0]["id"], written["id"])
+
+    def test_next_json_reports_unacked_without_post_or_ack_commands(self) -> None:
+        self._read_json(
+            "line",
+            "post",
+            "core",
+            "--kind",
+            "blocked",
+            "--body",
+            "家族未读",
+            "--yes",
+        )
+        payload = self._read_json("next")
+        commands = json.dumps(payload.get("commands", []))
+        self.assertNotIn("line post", commands)
+        self.assertNotIn("line ack --yes", commands)
+        self.assertNotIn("line ack", commands)
+        unacked = payload["family_unacked"]
+        self.assertEqual(unacked["count"], 1)
+        self.assertEqual(unacked["kind"], "blocked")
+        self.assertEqual(unacked["family"], "core")
+        self.assertNotEqual(payload.get("state"), "repair_required")
+
+    def test_ack_without_family_fails_closed_on_colliding_msg_ids(self) -> None:
+        first = self._read_json(
+            "line",
+            "post",
+            "core",
+            "--kind",
+            "blocked",
+            "--body",
+            "父族",
+            "--yes",
+        )
+        second = self._read_json(
+            "line",
+            "post",
+            "core_pay",
+            "--kind",
+            "blocked",
+            "--to",
+            "core_pay",
+            "--body",
+            "子族",
+            "--yes",
+        )
+        self.assertEqual(first["id"], "msg_1")
+        self.assertEqual(second["id"], "msg_1")
+        self.assertEqual(first["family"], "core")
+        self.assertEqual(second["family"], "core_pay")
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            main(
+                [
+                    "--root",
+                    str(self.root),
+                    "line",
+                    "ack",
+                    "msg_1",
+                    "--yes",
+                    "--format",
+                    "json",
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(json.loads(stderr.getvalue())["code"], "CHANNEL_MESSAGE_AMBIGUOUS")
+        scoped = self._read_json("line", "ack", "msg_1", "--family", "core_pay", "--yes")
+        self.assertEqual(scoped["family"], "core_pay")
+        self.assertEqual(scoped["id"], "msg_1")
+        inbox_pay = self._read_json("line", "inbox", "--family", "core_pay")
+        inbox_core = self._read_json("line", "inbox", "--family", "core")
+        self.assertEqual(inbox_pay["unacked"], 0)
+        self.assertEqual(inbox_core["unacked"], 1)
 
 
 class VersionTests(unittest.TestCase):
@@ -1803,4 +2270,6 @@ class VersionTests(unittest.TestCase):
         from dyro import __version__
 
         metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["project"]["version"], "0.7.16")
+        self.assertEqual(__version__, "0.7.16")
         self.assertEqual(__version__, metadata["project"]["version"])

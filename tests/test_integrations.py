@@ -14,6 +14,8 @@ from unittest.mock import patch
 from dyro.cli import main
 from dyro.errors import DyroError
 from dyro.integrations import (
+    INTEGRATION_CHOICES,
+    USER_INTEGRATION_CHOICES,
     IntegrationState,
     install_integration,
     integration_status,
@@ -21,6 +23,37 @@ from dyro.integrations import (
     uninstall_integration,
 )
 from dyro.integrations import manager
+
+
+def _record_protocol_section(skill: str) -> str:
+    start = skill.index("## Record protocol")
+    rest = skill[start:]
+    match = re.search(r"\n## ", rest[1:])
+    return rest if match is None else rest[: match.start() + 1]
+
+
+def _plain_record(skill: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[*_]", "", _record_protocol_section(skill)))
+
+
+def _has_prior_closeout(plain: str) -> bool:
+    return (
+        re.search(r"(?:^|\s)0b\.", plain) is not None
+        and "same development line / same topic" in plain
+        and "已闭环" in plain
+        and "未闭环" in plain
+    )
+
+
+def _has_empty_api_polarity(plain: str) -> bool:
+    return "is not enough to declare a seat dead" in plain
+
+
+def _has_test_verdict_polarity(plain: str) -> bool:
+    return (
+        "pipeline/redirect hid the exit code" in plain
+        and "must not assert pass" in plain
+    )
 
 
 class IntegrationManagerTests(unittest.TestCase):
@@ -32,6 +65,7 @@ class IntegrationManagerTests(unittest.TestCase):
         self.dyro_home = self.root / "dyro"
         self.fake_home = self.root / "home"
         self.fake_home.mkdir()
+        self.codex_home.mkdir()
         isolated_hosts = {
             spec.env_var: "" for spec in manager.HOSTS if spec.env_var
         }
@@ -120,16 +154,33 @@ class IntegrationManagerTests(unittest.TestCase):
             "workspace list --format json",
             "status --format json",
             "doctor --format json",
+            "integration status executor --format json",
+            "integration status board --format json",
             "integration status dispatch --format json",
             "objective attention <id> --format json",
             "objective explain <id> --format json",
             "objective plan <id> --format json",
+            "line inbox --unacked --format json",
         ):
             self.assertIn(command, content)
-        for forbidden_action in ("`console`", "`dispatch`", "`task gates`"):
+        for forbidden_action in (
+            "`console`",
+            "`dispatch`",
+            "`task gates`",
+            "`line spawn`",
+            "`line merge`",
+            "`line sync`",
+            "`line post`",
+            "`line ack`",
+        ):
             self.assertIn(forbidden_action, content)
+        self.assertNotIn("`image`", content)
+        self.assertNotIn("dyro image", content)
         self.assertIn("skip global discovery", content)
         self.assertIn("Never add `--include-paths`", content)
+        self.assertIn("already completed preflight this turn", content)
+        self.assertIn("line-family is the writer", content)
+        self.assertIn("Default forbid when line-family is not the active ask", content)
         for private_pattern in (
             r"/Users/[^<\s]",
             r"/home/[^<\s]",
@@ -177,6 +228,84 @@ class IntegrationManagerTests(unittest.TestCase):
             if ": " in line:
                 self.assertTrue(line.split(": ", 1)[1].startswith('"'))
 
+    def test_packaged_line_family_skill_applies_when_user_asked(self) -> None:
+        root = manager._asset_root("line-family")
+        skill = root / "SKILL.md"
+        metadata = root / "agents" / "openai.yaml"
+
+        content = skill.read_text(encoding="utf-8")
+        self.assertLessEqual(len(content.encode("utf-8")), 8 * 1024)
+        self.assertNotIn("TODO", content)
+        self.assertIn("name: dyro-line-family", content)
+        self.assertIn("disable-model-invocation: true", content)
+        self.assertIn("user-invocable: true", content)
+        self.assertNotIn("不要执行", content)
+        self.assertNotIn("Never execute the mutation", content)
+        self.assertNotIn("Print only the matching verb", content)
+        self.assertNotIn("Do not run that command", content)
+        self.assertIn("Run only the matching verb", content)
+        self.assertIn("illegal until all four preflight", content)
+        self.assertLess(
+            content.index("## Preflight"),
+            content.index("## Apply"),
+        )
+        self.assertIn("required, not optional", content)
+        self.assertIn("same turn", content)
+        self.assertIn("Stay preflight-only", content)
+        self.assertIn("Do not invent `--push`", content)
+        self.assertIn("Do not add `--push`", content)
+        self.assertIn("line spawn <parent> <child> --yes", content)
+        self.assertIn("line merge <child> --into <parent> --yes", content)
+        self.assertIn("line sync <child> --yes", content)
+        self.assertIn("--dry-run line spawn", content)
+        self.assertIn("--dry-run line merge", content)
+        self.assertIn("--dry-run line sync", content)
+        self.assertIn("report what", content)
+        self.assertIn("git `main`", content)
+        self.assertIn("/dyro-task-merge", content)
+        self.assertNotIn("Any `FAIL` → stop", content)
+        self.assertIn("observational", content)
+        self.assertIn("missing origin/<branch>", content)
+        self.assertIn("wrong upstream", content)
+        self.assertIn("missing worktree", content)
+        self.assertIn("the real gate", content)
+        self.assertNotIn("line post <", content)
+        self.assertNotIn("line ack --yes", content)
+        self.assertIn("`line post`", content)
+        self.assertIn("`line inbox`", content)
+        self.assertIn("`line ack`", content)
+        self.assertIn("must not call `line post`", content)
+        yaml_text = metadata.read_text(encoding="utf-8")
+        self.assertIn("$dyro-line-family", yaml_text)
+        self.assertNotIn("不要执行", yaml_text)
+        self.assertNotIn("Print only the matching verb", yaml_text)
+        self.assertNotIn("Do not run that command", yaml_text)
+        self.assertNotIn("Never execute the mutation", yaml_text)
+        self.assertIn("Preflight before Apply", yaml_text)
+        self.assertIn("illegal until all four preflight", yaml_text)
+        self.assertIn("matching --yes", yaml_text)
+        for line in yaml_text.splitlines():
+            if ": " in line:
+                self.assertTrue(line.split(": ", 1)[1].startswith('"'))
+
+        task_merge = (manager._asset_root("task-merge") / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("/dyro-line-family", task_merge)
+        executor = (manager._asset_root("executor") / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        executor_plain = " ".join(executor.split())
+        self.assertIn("`line spawn`", executor)
+        self.assertIn("`line merge`", executor)
+        self.assertIn("`line sync`", executor)
+        self.assertIn("already completed preflight this turn", executor)
+        self.assertIn("line-family is the writer", executor)
+        self.assertIn(
+            "Default forbid when line-family is not the active ask",
+            executor_plain,
+        )
+
     def test_dispatch_skill_installs_independently_from_control_plane(self) -> None:
         self.assertEqual(
             integration_status("dispatch").state,
@@ -209,6 +338,235 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertFalse(
             self.dispatch_avatar.exists() or self.dispatch_avatar.is_symlink()
         )
+
+    def test_review_board_is_the_only_invocable_board_slash(self) -> None:
+        board = (manager._asset_root("board") / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        review = (manager._asset_root("review-board") / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        board_meta = (
+            manager._asset_root("board") / "agents" / "openai.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("user-invocable: false", board)
+        self.assertNotIn("user-invocable: true", board)
+        self.assertNotIn("/dyro-board", board)
+        self.assertNotIn("$dyro-board", board)
+        self.assertNotIn("$dyro-board", board_meta)
+        self.assertIn("/dyro-review-board", board)
+        self.assertIn("/dyro-review-board", board_meta)
+        self.assertIn("user-invocable: true", review)
+        self.assertIn("disable-model-invocation: true", review)
+        self.assertIn("dyro-board/SKILL.md", review)
+        self.assertIn("Follow `dyro-board` exactly", review)
+        self.assertIn("do not invent a second protocol", review.lower())
+        self.assertIn("baseline + seat lifecycle", review)
+        self.assertIn("Refuse those delivery actions", review)
+        self.assertNotIn("--yes", review)
+        self.assertNotIn("board", USER_INTEGRATION_CHOICES)
+        self.assertIn("review-board", USER_INTEGRATION_CHOICES)
+        self.assertIn("board", INTEGRATION_CHOICES)
+
+    def test_board_record_protocol_requires_baseline_and_seat_lifecycle(
+        self,
+    ) -> None:
+        board = (manager._asset_root("board") / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        review = (manager._asset_root("review-board") / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        collapsed = re.sub(r"\s+", " ", board)
+        record = _record_protocol_section(board)
+        plain = _plain_record(board)
+        self.assertIn("## Record protocol", board)
+        self.assertIn("<repo> <ref> <sha> <date>", board)
+        self.assertIn("production line", collapsed)
+        self.assertIn("origin/release", board)
+        self.assertIn("Must not default to `master`/`main`", collapsed)
+        self.assertIn("existing review-directory convention", plain)
+        self.assertIn("docs/reviews/YYYY-MM-DD-<topic>-adversarial-board.md", board)
+        self.assertIn("prior-board directory wins", plain)
+        self.assertIn("signed section", collapsed)
+        self.assertIn("same-batch seat opinions", collapsed)
+        self.assertIn("re-check every seat claim", collapsed)
+        self.assertIn("未复核·转述", board)
+        self.assertIn("须人工核", board)
+        self.assertTrue(_has_prior_closeout(plain), msg=plain)
+        self.assertIn("已检索·无先前会审", record)
+        self.assertFalse(
+            _has_prior_closeout(plain.replace("0b.", "1b.", 1)),
+            msg="dropping 0b must fail the close-out pin",
+        )
+        self.assertFalse(
+            _has_prior_closeout(
+                plain.replace("已闭环", "", 1).replace("未闭环", "", 1)
+            ),
+            msg="deleting 已闭环 / 未闭环 must fail the close-out pin",
+        )
+        self.assertIn("ListAgents", board)
+        self.assertIn("TaskOutput", board)
+        self.assertTrue(_has_empty_api_polarity(plain), msg=plain)
+        self.assertNotIn("is enough to declare a seat dead", plain)
+        self.assertFalse(
+            _has_empty_api_polarity(
+                plain.replace(
+                    "is not enough to declare a seat dead",
+                    "is enough to declare a seat dead",
+                    1,
+                )
+            ),
+            msg="flipping empty-API polarity to 'is enough' must fail",
+        )
+        self.assertIn("wait window", collapsed)
+        self.assertIn("10 minutes", collapsed)
+        self.assertIn("first dispatch", plain)
+        self.assertIn("must not publish arbitration", collapsed)
+        self.assertIn("逾期未交", board)
+        self.assertIn("revised record", plain)
+        self.assertIn("the full command", collapsed)
+        self.assertIn("raw output", collapsed)
+        self.assertTrue(_has_test_verdict_polarity(plain), msg=plain)
+        self.assertNotIn("must assert pass", plain)
+        self.assertFalse(
+            _has_test_verdict_polarity(
+                plain.replace("must not assert pass", "must assert pass", 1)
+            ),
+            msg="inverting 'must not assert pass' must fail",
+        )
+        self.assertFalse(
+            _has_test_verdict_polarity(
+                plain.replace("pipeline/redirect hid the exit code", "", 1)
+            ),
+            msg="deleting pipeline/redirect hid-exit-code must fail",
+        )
+        self.assertIn("未执行", board)
+        self.assertIn("P0/P1/P2", board)
+        self.assertIn("Go/No-Go", board)
+        self.assertIn("not a Proof", collapsed)
+        self.assertIn("task review` PASS", board)
+        self.assertIn("Do not merge, push, signoff", collapsed)
+        self.assertNotIn("--yes", board)
+        self.assertIn("user-invocable: false", board)
+        self.assertNotIn("/dyro-board", board)
+        self.assertNotIn("$dyro-board", board)
+        self.assertIn("Follow `dyro-board` exactly", review)
+        self.assertIn("do not invent a second protocol", review.lower())
+        self.assertNotIn("## Record protocol", review)
+        self.assertNotIn("逾期未交", review)
+        self.assertNotIn("<repo> <ref> <sha> <date>", review)
+        self.assertNotIn("已检索·无先前会审", review)
+        discipline = Path(__file__).resolve().parents[1].joinpath(
+            "docs", "agent-orchestration-discipline.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("dyro-board/SKILL.md", discipline)
+        self.assertNotIn("完整模板见", discipline)
+        self.assertNotIn("1. 单一共享评审文件", discipline)
+
+    def test_review_board_install_also_installs_protocol(self) -> None:
+        installed = install_integration("review-board", yes=True)
+        self.assertEqual(installed.status.state, IntegrationState.CURRENT)
+        self.assertEqual(
+            integration_status("board").state, IntegrationState.CURRENT
+        )
+        review_avatar = self.codex_home / "skills" / "dyro-review-board"
+        protocol = review_avatar.parent / "dyro-board" / "SKILL.md"
+        self.assertTrue(review_avatar.is_symlink())
+        self.assertTrue(protocol.is_file())
+        self.assertIn("user-invocable: false", protocol.read_text(encoding="utf-8"))
+        self.assertTrue(
+            any("同时安装 board" in change for change in installed.changes),
+            msg=installed.changes,
+        )
+
+    def test_legacy_board_install_installs_review_board_surface(self) -> None:
+        installed = install_integration("board", yes=True)
+        self.assertEqual(installed.status.state, IntegrationState.CURRENT)
+        self.assertEqual(
+            integration_status("review-board").state, IntegrationState.CURRENT
+        )
+        self.assertTrue(
+            (self.codex_home / "skills" / "dyro-review-board" / "SKILL.md").is_file()
+        )
+        self.assertTrue(
+            any("同时安装 review-board" in change for change in installed.changes),
+            msg=installed.changes,
+        )
+
+    def test_sync_current_review_board_installs_missing_protocol(self) -> None:
+        install_integration("review-board", yes=True)
+        uninstall_integration("board", yes=True)
+        self.assertEqual(
+            integration_status("review-board").state, IntegrationState.CURRENT
+        )
+        self.assertEqual(integration_status("board").state, IntegrationState.ABSENT)
+
+        plan = sync_managed_skill("review-board", yes=True, allow_first_install=False)
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(integration_status("board").state, IntegrationState.CURRENT)
+        self.assertTrue(
+            any("同时安装 board" in change for change in plan.changes),
+            msg=plan.changes,
+        )
+
+    def test_legacy_board_status_stays_on_protocol_id(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["integration", "status", "board", "--format", "json"])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["integration"], "board")
+        self.assertEqual(payload["state"], "absent")
+
+        install_integration("board", yes=True)
+        current = StringIO()
+        with redirect_stdout(current):
+            main(["integration", "status", "board", "--format", "json"])
+        installed = json.loads(current.getvalue())
+        self.assertEqual(installed["integration"], "board")
+        self.assertEqual(installed["state"], "current")
+
+    def test_integration_install_help_hides_board_slash_sibling(self) -> None:
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            redirect_stdout(stdout),
+            patch("sys.stderr", stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(["integration", "install", "--help"])
+        self.assertEqual(raised.exception.code, 0)
+        text = stdout.getvalue() + stderr.getvalue()
+        collapsed = re.sub(r"\s+", "", text)
+        self.assertNotIn("/dyro-board", collapsed)
+        self.assertNotIn("$dyro-board", text)
+        self.assertIn("/dyro-review-board", collapsed)
+        self.assertIn("review-board", text)
+        self.assertNotIn(
+            "{skill,codex,dispatch,executor,board,review-board",
+            text,
+        )
+
+    def test_executor_and_board_skills_install_independently(self) -> None:
+        for integration, skill_name in (
+            ("executor", "dyro-executor"),
+            ("board", "dyro-board"),
+            ("review-board", "dyro-review-board"),
+            ("task-merge", "dyro-task-merge"),
+            ("line-family", "dyro-line-family"),
+        ):
+            with self.subTest(integration=integration):
+                installed = install_integration(integration, yes=True)
+                self.assertEqual(installed.status.state, IntegrationState.CURRENT)
+                mirror = self.dyro_home / "skills" / skill_name
+                avatar = self.codex_home / "skills" / skill_name
+                self.assertTrue(mirror.joinpath("SKILL.md").is_file())
+                self.assertTrue(avatar.is_symlink())
+                self.assertEqual(avatar.resolve(), mirror.resolve())
+                removed = uninstall_integration(integration, yes=True)
+                self.assertEqual(removed.status.state, IntegrationState.ABSENT)
+                self.assertFalse(mirror.exists())
 
     def test_dispatch_skill_status_and_dry_run_are_zero_write(self) -> None:
         before = self._tree_snapshot()
@@ -929,10 +1287,13 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertEqual(spec.default_dirname, ".pi/agent")
 
         pi_home = self.root / "pi-agent"
+        pi_home.mkdir()
         install_integration("skill", yes=True, host_homes={"pi": pi_home})
         avatar = pi_home / "skills" / "dyro-control-plane"
         self.assertTrue(avatar.is_symlink() or avatar.is_dir())
         self.assertTrue((avatar / "SKILL.md").is_file())
+        pi_status = integration_status("skill", host_homes={"pi": pi_home})
+        self.assertIn("pi", {row.host for row in pi_status.avatars})
 
     def test_dsh_skill_host_uses_dsh_home(self) -> None:
         spec = next(host for host in manager.HOSTS if host.host_id == "dsh")
@@ -940,10 +1301,173 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertEqual(spec.default_dirname, ".dsh")
 
         dsh_home = self.root / "dsh-home"
+        dsh_home.mkdir()
         install_integration("skill", yes=True, host_homes={"dsh": dsh_home})
         avatar = dsh_home / "skills" / "dyro-control-plane"
         self.assertTrue(avatar.is_symlink() or avatar.is_dir())
         self.assertTrue((avatar / "SKILL.md").is_file())
+
+    def test_opencode_and_hermes_host_specs_use_existing_homes(self) -> None:
+        opencode = next(host for host in manager.HOSTS if host.host_id == "opencode")
+        hermes = next(host for host in manager.HOSTS if host.host_id == "hermes")
+        self.assertEqual(opencode.env_var, "OPENCODE_CONFIG_DIR")
+        self.assertEqual(opencode.default_dirname, ".config/opencode")
+        self.assertEqual(hermes.env_var, "HERMES_HOME")
+        self.assertEqual(hermes.default_dirname, ".hermes")
+
+        opencode_home = self.root / "opencode-home"
+        hermes_home = self.root / "hermes-home"
+        opencode_home.mkdir()
+        hermes_home.mkdir()
+        homes = {"opencode": opencode_home, "hermes": hermes_home}
+        preview = integration_status("skill", host_homes=homes)
+        self.assertEqual(
+            {row.host: row.state for row in preview.avatars if row.host in homes},
+            {"opencode": "missing", "hermes": "missing"},
+        )
+        self.assertEqual(
+            manager._avatar_path(opencode_home, manager.CONTROL_PLANE_SPEC),
+            opencode_home / "skills" / "dyro-control-plane",
+        )
+        self.assertEqual(
+            manager._avatar_path(hermes_home, manager.CONTROL_PLANE_SPEC),
+            hermes_home / "skills" / "dyro-control-plane",
+        )
+
+        installed = install_integration("skill", yes=True, host_homes=homes)
+        self.assertEqual(installed.status.state, IntegrationState.CURRENT)
+        opencode_avatar = opencode_home / "skills" / "dyro-control-plane"
+        hermes_avatar = hermes_home / "skills" / "dyro-control-plane"
+        self.assertTrue(opencode_avatar.is_symlink())
+        self.assertTrue(hermes_avatar.is_symlink())
+        self.assertEqual(opencode_avatar.resolve(), self.mirror.resolve())
+        self.assertEqual(hermes_avatar.resolve(), self.mirror.resolve())
+        self.assertTrue((opencode_avatar / "SKILL.md").is_file())
+        self.assertTrue((hermes_avatar / "SKILL.md").is_file())
+        self.assertEqual(
+            {row.host: row.state for row in installed.status.avatars if row.host in homes},
+            {"opencode": "current", "hermes": "current"},
+        )
+
+        synced = sync_managed_skill(yes=True, host_homes=homes)
+        self.assertIsNone(synced)
+        self.assertEqual(
+            integration_status("skill", host_homes=homes).state,
+            IntegrationState.CURRENT,
+        )
+
+        removed = uninstall_integration("skill", yes=True, host_homes=homes)
+        self.assertEqual(removed.status.state, IntegrationState.ABSENT)
+        self.assertFalse(opencode_avatar.exists() or opencode_avatar.is_symlink())
+        self.assertFalse(hermes_avatar.exists() or hermes_avatar.is_symlink())
+
+    def test_explicit_missing_host_homes_are_not_created(self) -> None:
+        missing_env = self.root / "missing-opencode-env"
+        missing_override = self.root / "missing-hermes-override"
+        opencode = next(host for host in manager.HOSTS if host.host_id == "opencode")
+        hermes = next(host for host in manager.HOSTS if host.host_id == "hermes")
+
+        with patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": str(missing_env)}):
+            self.assertIsNone(manager._host_home(opencode, None))
+            status = integration_status("skill")
+            self.assertNotIn("opencode", {row.host for row in status.avatars})
+            install_integration("skill", yes=True)
+            self.assertFalse(missing_env.exists())
+
+        self.assertIsNone(manager._host_home(hermes, {"hermes": missing_override}))
+        status = integration_status("skill", host_homes={"hermes": missing_override})
+        self.assertNotIn("hermes", {row.host for row in status.avatars})
+        install_integration("skill", yes=True, host_homes={"hermes": missing_override})
+        self.assertFalse(missing_override.exists())
+
+    def test_missing_override_only_refuses_isolated_mirror(self) -> None:
+        missing_only = self.root / "missing-only-host"
+        isolated = {spec.env_var: "" for spec in manager.HOSTS if spec.env_var}
+        with patch.dict(os.environ, isolated, clear=False):
+            with self.assertRaisesRegex(DyroError, "孤立镜像|未检测到宿主|没有可挂接"):
+                install_integration("skill", yes=True, host_homes={"pi": missing_only})
+            self.assertFalse(missing_only.exists())
+            self.assertEqual(integration_status("skill").state, IntegrationState.ABSENT)
+
+    def test_absent_opencode_and_hermes_homes_stay_silent(self) -> None:
+        config_root = self.fake_home / ".config"
+        default_opencode = config_root / "opencode"
+        default_hermes = self.fake_home / ".hermes"
+
+        config_root.mkdir()
+        status = integration_status("skill")
+        hosts = {row.host for row in status.avatars}
+        self.assertIn("codex", hosts)
+        self.assertNotIn("opencode", hosts)
+        self.assertNotIn("hermes", hosts)
+        self.assertIsNone(
+            manager._host_home(
+                next(host for host in manager.HOSTS if host.host_id == "opencode"),
+                None,
+            )
+        )
+        self.assertIsNone(
+            manager._host_home(
+                next(host for host in manager.HOSTS if host.host_id == "hermes"),
+                None,
+            )
+        )
+
+        install_integration("skill", yes=True)
+        self.assertFalse(default_opencode.exists())
+        self.assertFalse(default_hermes.exists())
+        self.assertEqual(
+            {row.host for row in integration_status("skill").avatars},
+            {"codex"},
+        )
+
+    def test_present_opencode_and_hermes_default_homes_receive_avatars(self) -> None:
+        opencode_home = self.fake_home / ".config" / "opencode"
+        hermes_home = self.fake_home / ".hermes"
+        opencode_home.mkdir(parents=True)
+        hermes_home.mkdir()
+
+        status = integration_status("skill")
+        hosts = {row.host: row for row in status.avatars}
+        self.assertIn("opencode", hosts)
+        self.assertIn("hermes", hosts)
+        self.assertIn("codex", hosts)
+        self.assertEqual(hosts["opencode"].state, "missing")
+        self.assertEqual(hosts["hermes"].state, "missing")
+        self.assertEqual(
+            hosts["opencode"].path,
+            opencode_home / "skills" / "dyro-control-plane",
+        )
+        self.assertEqual(
+            hosts["hermes"].path,
+            hermes_home / "skills" / "dyro-control-plane",
+        )
+
+        installed = install_integration("skill", yes=True)
+        self.assertEqual(installed.status.state, IntegrationState.CURRENT)
+        opencode_avatar = opencode_home / "skills" / "dyro-control-plane"
+        hermes_avatar = hermes_home / "skills" / "dyro-control-plane"
+        self.assertTrue(opencode_avatar.is_symlink())
+        self.assertTrue(hermes_avatar.is_symlink())
+        self.assertEqual(
+            {row.host: row.state for row in installed.status.avatars},
+            {"codex": "current", "opencode": "current", "hermes": "current"},
+        )
+
+        output = StringIO()
+        with redirect_stdout(output):
+            main(["integration", "status", "skill"])
+            main(["integration", "sync", "skill", "--yes"])
+        text = output.getvalue()
+        self.assertIn("avatar\topencode\tcurrent", text)
+        self.assertIn("avatar\thermes\tcurrent", text)
+        self.assertIn("无需同步", text)
+
+        uninstall_integration("skill", yes=True)
+        self.assertTrue(opencode_home.is_dir())
+        self.assertTrue(hermes_home.is_dir())
+        self.assertFalse(opencode_avatar.exists() or opencode_avatar.is_symlink())
+        self.assertFalse(hermes_avatar.exists() or hermes_avatar.is_symlink())
 
 
 if __name__ == "__main__":

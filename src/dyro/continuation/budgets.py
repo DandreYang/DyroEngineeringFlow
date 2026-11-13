@@ -139,7 +139,7 @@ class BudgetUsage:
     consecutive_failures: int = 0
     active_parallel: int = 0
     provider_usage: int = 0
-    provider_usage_trusted: bool = True
+    provider_usage_trusted: bool = False
     no_progress_cycles: int = 0
     attempts_by_task: tuple[tuple[str, int], ...] = ()
 

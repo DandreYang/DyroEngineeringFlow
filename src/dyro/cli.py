@@ -27,12 +27,31 @@ from .changesets import (
     list_changesets,
     verify_changeset,
 )
-from .config import CONFIG_NAME, Config, load, load_profile_exact, validate_id
-from .console.launcher import launch_console, render_console_plan
+from .config import CONFIG_NAME, Config, load, load_profile_exact, push_disclosure, push_policy_fields, validate_id
 from .continuation.attention import (
     build_attention_projection,
     render_attention_json,
     render_attention_text,
+)
+from .continuation.briefing import (
+    ATTENTION_CLOSER,
+    TICK_CLOSER,
+    arrival_lines,
+    briefing_payload,
+    follow_up_argv,
+    render_briefing_text,
+    render_human_attention,
+    render_human_wave,
+    unread_briefing,
+)
+from .continuation.next_step import (
+    bootstrap_repair_applicable,
+    deadline_repair_commands,
+    repair_commands,
+)
+from .continuation.ready_briefing import (
+    build_ready_briefing,
+    scoped_briefing_command,
 )
 from .continuation.engine import (
     build_scheduler_tick,
@@ -68,8 +87,10 @@ from .continuation.store import (
     get_objective,
     list_objectives,
     pause_objective,
+    preview_objective_wave_budgets,
     reconcile_objective,
     remove_objective_target,
+    render_budget_preview_text,
     resume_objective,
     stop_objective,
 )
@@ -89,6 +110,7 @@ from .continuation.triggers import (
 )
 from .evidence import build_execution_bundle, unpack_execution_bundle
 from .errors import DyroError, ValidationError
+from .families import ack_channel_message, family_unacked, list_inbox, post_channel_message
 from .home import (
     HomeTool,
     _record_for_root,
@@ -118,14 +140,24 @@ from .hub import (
     remove_workspace,
     set_default_workspace,
 )
+from .image_sidecar import (
+    ABSENT_INFO_LINE,
+    SOURCE_URL,
+    discover_sidecar,
+    install_image_sidecar,
+    probe_sidecar,
+    require_interactive_install,
+)
 from .integrations import (
     INTEGRATION_CHOICES,
+    USER_INTEGRATION_METAVAR,
     IntegrationState,
     install_integration,
     integration_status,
     sync_managed_skill,
     uninstall_integration,
 )
+from .integrations.seats import COMPANION_IDS, managed_skill_bundle
 from .onboarding import (
     SetupPlan,
     append_repository,
@@ -140,9 +172,14 @@ from .onboarding import (
     render_setup_plan,
     repository_input_from_path,
     sibling_workspace_for,
-    validate_bootstrap_destination,
 )
-from .read_limits import ObservationLimits, ReadBudget, ReadLimitCode, ReadLimitError
+from .read_limits import (
+    CONTROL_PLANE_DEADLINE_CEILING_SECONDS,
+    ObservationLimits,
+    ReadBudget,
+    ReadLimitCode,
+    ReadLimitError,
+)
 from .profile import (
     append_adapter,
     command_adapter,
@@ -179,9 +216,11 @@ from .tasks import (
     import_review_evidence,
     list_tasks,
     load_task,
+    close_task,
     loop_tasks,
     merge_task,
     plan_tasks,
+    profile_task_gates,
     review_task,
     run_gates,
     run_task,
@@ -210,7 +249,24 @@ from .updates import (
     set_auto_patch,
     set_update_enabled,
 )
-from .workspace import create_line, doctor, get_line, list_lines, status_rows
+from .workspace import (
+    OBSERVATION_DEADLINE_FINDING,
+    create_line,
+    doctor,
+    get_line,
+    is_missing_origin_finding,
+    is_observation_deadline_finding,
+    is_observation_timeout_row,
+    list_lines,
+    merge_line,
+    observation_timeout_row,
+    spawn_line,
+    stash_observation_findings,
+    stashed_observation_findings,
+    stashed_observation_rows,
+    status_rows,
+    sync_line,
+)
 
 
 CONFIG_TEMPLATE = """schema_version = 1
@@ -252,10 +308,7 @@ verify = [["npm", "test", "--", "--runInBand"]]
 """
 
 
-_MANAGED_SKILL_BUNDLE: tuple[tuple[str, str], ...] = (
-    ("skill", "控制面"),
-    ("dispatch", "Dispatch"),
-)
+_MANAGED_SKILL_BUNDLE: tuple[tuple[str, str], ...] = managed_skill_bundle()
 
 
 def _config(args: argparse.Namespace) -> Config:
@@ -295,12 +348,20 @@ def _config(args: argparse.Namespace) -> Config:
                 cwd=Path.cwd().absolute(),
                 budget=budget,
             )
+            if (
+                workspace_arg
+                and resolved.source is WorkspaceResolutionSource.EXPLICIT
+                and resolved.registry_alias is not None
+            ):
+                setattr(args, "workspace_alias", resolved.registry_alias)
         setattr(args, "_control_plane_resolution", resolved)
         return resolved.profile.config
     if root_arg:
         root = Path(root_arg).expanduser()
     elif workspace_arg:
-        root = get_workspace(workspace_arg).root
+        record = get_workspace(workspace_arg)
+        setattr(args, "workspace_alias", record.name)
+        root = record.root
     else:
         interactive = sys.stdin.isatty() and sys.stdout.isatty()
         return resolve_workspace(
@@ -313,11 +374,53 @@ def _config(args: argparse.Namespace) -> Config:
     return load(root)
 
 
+_CONTROL_PLANE_FANOUT_COMMANDS = frozenset({"doctor", "status", "next"})
+
+
+def _is_json_observation_deadline(
+    args: argparse.Namespace, exc: BaseException
+) -> bool:
+    if not isinstance(exc, ReadLimitError):
+        return False
+    if exc.code != ReadLimitCode.DEADLINE_EXCEEDED:
+        return False
+    return _fanout_command_name(args) in _CONTROL_PLANE_FANOUT_COMMANDS
+
+
+def _uses_fanout_observation_budget(args: argparse.Namespace) -> bool:
+    return _fanout_command_name(args) in _CONTROL_PLANE_FANOUT_COMMANDS
+
+
+def _fanout_command_name(args: argparse.Namespace) -> str:
+    command = getattr(args, "command", None)
+    if command in _CONTROL_PLANE_FANOUT_COMMANDS:
+        return command
+    func = getattr(args, "func", None)
+    if func is cmd_doctor:
+        return "doctor"
+    if func is cmd_status:
+        return "status"
+    if func is cmd_next:
+        return "next"
+    return command if isinstance(command, str) else ""
+
+
 def _control_plane_budget(args: argparse.Namespace) -> ReadBudget:
     existing = getattr(args, "_control_plane_read_budget", None)
     if isinstance(existing, ReadBudget):
         return existing
-    budget = ReadBudget(ObservationLimits())
+    # JSON doctor/status/next must not share Bridge's flat 5s cliff. Mac
+    # multi-worktree workspaces finish the text path in ~7s and cross 5s
+    # every time; start these commands at the documented 45s ceiling.
+    # Match by command or func so a missing dest="command" cannot fall
+    # back to the 5s protocol default.
+    if _uses_fanout_observation_budget(args):
+        limits = ObservationLimits(
+            deadline_seconds=CONTROL_PLANE_DEADLINE_CEILING_SECONDS
+        )
+    else:
+        limits = ObservationLimits()
+    budget = ReadBudget(limits)
     setattr(args, "_control_plane_read_budget", budget)
     return budget
 
@@ -358,6 +461,38 @@ def _require_objective_yes(args: argparse.Namespace, label: str) -> None:
         raise DyroError(
             f"{label} 会修改 Objective 状态；请先使用 --dry-run 检查，再加 --yes 执行"
         )
+
+
+def _require_overlay_yes(args: argparse.Namespace, label: str) -> None:
+    if not args.yes and not args.dry_run:
+        raise DyroError(
+            f"{label} 会写入 overlay 家族信号；请先使用 --dry-run 检查，再加 --yes 执行"
+        )
+
+
+def _family_unacked_fields(config: Config) -> dict[str, object]:
+    try:
+        payload = family_unacked(config)
+    except (DyroError, OSError, UnicodeError):
+        payload = {"count": 0, "kind": "", "family": "", "summary": ""}
+    if not isinstance(payload, dict):
+        payload = {"count": 0, "kind": "", "family": "", "summary": ""}
+    return {"family_unacked": payload}
+
+
+def _print_family_unacked_attention(config: Config) -> None:
+    payload = _family_unacked_fields(config)["family_unacked"]
+    if isinstance(payload, dict) and payload.get("count"):
+        print("家族频道有未读信号")
+    if isinstance(payload, dict) and payload.get("inconsistent_families"):
+        print("家族频道日志不一致")
+
+
+def _inbox_viewer(config: Config) -> str:
+    try:
+        return resolve_line(config, interactive=False).id
+    except (DyroError, ValidationError):
+        return ""
 
 
 def _objective_contract_from_args(args: argparse.Namespace, config: Config) -> str:
@@ -459,25 +594,181 @@ def _doctor_finding_payload(
     return payload
 
 
+def _observation_timeout_fields(*, partial: bool) -> dict[str, object]:
+    if not partial:
+        return {}
+    return {"code": ReadLimitCode.DEADLINE_EXCEEDED.value}
+
+
+def _status_row_payload(row: object) -> dict[str, object]:
+    if isinstance(row, dict):
+        return row
+    if isinstance(row, tuple) and len(row) == 6:
+        scope, repository, branch, head, upstream, dirty = row
+        return {
+            "scope": scope,
+            "repository": repository,
+            "branch": branch,
+            "head": head,
+            "upstream": upstream,
+            "dirty_count": dirty,
+        }
+    return _status_row_payload(observation_timeout_row())
+
+
 def _status_payload(
     config: Config, *, read_budget: ReadBudget | None = None
 ) -> dict[str, object]:
-    return {
+    rows = status_rows(config, read_budget=read_budget)
+    partial = any(is_observation_timeout_row(row) for row in rows)
+    payload: dict[str, object] = {
         "workspace": config.name,
-        "rows": [
-            {
-                "scope": scope,
-                "repository": repository,
-                "branch": branch,
-                "head": head,
-                "upstream": upstream,
-                "dirty_count": dirty,
-            }
-            for scope, repository, branch, head, upstream, dirty in status_rows(
-                config, read_budget=read_budget
-            )
-        ],
+        **push_policy_fields(config.policy),
+        "partial": partial,
+        "rows": [_status_row_payload(row) for row in rows],
     }
+    payload.update(_observation_timeout_fields(partial=partial))
+    return payload
+
+
+def _timeout_workspace_name(args: argparse.Namespace) -> str:
+    alias = getattr(args, "workspace_alias", None)
+    if isinstance(alias, str) and alias:
+        return alias
+    try:
+        return _config(args).name
+    except (DyroError, OSError, ValidationError, TypeError, AttributeError):
+        return "unknown"
+
+
+def _timeout_findings(args: argparse.Namespace) -> list[str]:
+    budget = getattr(args, "_control_plane_read_budget", None)
+    findings = stashed_observation_findings(
+        budget if isinstance(budget, ReadBudget) else None
+    )
+    extra = getattr(args, "_stashed_findings", None)
+    if isinstance(extra, list):
+        findings.extend(item for item in extra if isinstance(item, str))
+    if not any(is_observation_deadline_finding(item) for item in findings):
+        findings.append(OBSERVATION_DEADLINE_FINDING)
+    return findings
+
+
+def _timeout_status_rows(args: argparse.Namespace) -> list[object]:
+    budget = getattr(args, "_control_plane_read_budget", None)
+    rows: list[object] = list(
+        stashed_observation_rows(budget if isinstance(budget, ReadBudget) else None)
+    )
+    if not any(
+        isinstance(row, tuple) and is_observation_timeout_row(row) for row in rows
+    ):
+        rows.append(observation_timeout_row())
+    return rows
+
+
+def _timeout_verified_root(args: argparse.Namespace) -> Path | None:
+    """Return this invocation's root when it is already known, never a fold alias."""
+    resolved = getattr(args, "_control_plane_resolution", None)
+    profile = getattr(resolved, "profile", None)
+    config = getattr(profile, "config", None)
+    root = getattr(config, "root", None)
+    if root is not None:
+        return Path(root)
+    raw = getattr(args, "root", None)
+    if isinstance(raw, str) and raw.strip():
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return path
+    return None
+
+
+def _timeout_unscoped_repair_commands(args: argparse.Namespace) -> list[str]:
+    """Repair ads after config reload fails. Never emit a fold-matching --workspace."""
+    root = _timeout_verified_root(args)
+    if root is None:
+        return [shlex.join(("dyro", "doctor"))]
+    return [shlex.join(("dyro", "--root", str(root), "doctor"))]
+
+
+def _timeout_repair_commands(
+    args: argparse.Namespace, findings: list[str]
+) -> list[str]:
+    alias = _timeout_workspace_name(args)
+    failures = [item for item in findings if item.startswith("FAIL")]
+    try:
+        config = _config(args)
+        commands = deadline_repair_commands(config, alias, failures)
+        return commands or [_briefing_command(args, config, "doctor")]
+    except (DyroError, OSError, ValidationError, TypeError, AttributeError):
+        return _timeout_unscoped_repair_commands(args)
+
+
+def _print_json_observation_timeout(args: argparse.Namespace) -> None:
+    """Emit doctor/status/next JSON after a deadline; never kind=error."""
+
+    workspace = _timeout_workspace_name(args)
+    findings = _timeout_findings(args)
+    extra = _observation_timeout_fields(partial=True)
+    command = _fanout_command_name(args)
+    if command == "doctor":
+        _print_control_plane_json(
+            "doctor",
+            workspace=workspace,
+            passed=False,
+            partial=True,
+            findings=[
+                _doctor_finding_payload(item, include_paths=False) for item in findings
+            ],
+            sidecars={"local_image_gen": {"state": "unknown"}},
+            **extra,
+        )
+        return
+    if command == "status":
+        rows = [_status_row_payload(row) for row in _timeout_status_rows(args)]
+        if getattr(args, "all", False):
+            _print_control_plane_json(
+                "workspace_status_all",
+                partial=True,
+                workspaces=[
+                    {
+                        "workspace": workspace,
+                        "available": True,
+                        "partial": True,
+                        "code": ReadLimitCode.DEADLINE_EXCEEDED.value,
+                        "rows": rows,
+                    }
+                ],
+                **extra,
+            )
+            return
+        _print_control_plane_json(
+            "workspace_status",
+            workspace=workspace,
+            partial=True,
+            rows=rows,
+            **extra,
+        )
+        return
+    commands = _timeout_repair_commands(args, findings)
+    failures = [item for item in findings if item.startswith("FAIL")]
+    try:
+        diagnostic_commands = [_briefing_command(args, _config(args), "doctor")]
+    except (DyroError, OSError, ValidationError, TypeError, AttributeError):
+        diagnostic_commands = _timeout_unscoped_repair_commands(args)
+    _print_control_plane_json(
+        "next_step",
+        state="needs_repair",
+        summary="工作区还不能开始任务。",
+        commands=commands,
+        diagnostic_commands=diagnostic_commands,
+        mutation_available=False,
+        partial=True,
+        findings=[
+            _doctor_finding_payload(item, include_paths=False) for item in failures
+        ],
+        **extra,
+    )
 
 
 def _control_plane_command(args: argparse.Namespace) -> str:
@@ -486,6 +777,7 @@ def _control_plane_command(args: argparse.Namespace) -> str:
         "command",
         "workspace_command",
         "integration_command",
+        "image_command",
         "line_command",
         "changeset_command",
         "objective_command",
@@ -515,6 +807,7 @@ def _control_plane_error_code(
     return {
         "changeset": "CHANGESET_UNAVAILABLE",
         "doctor": "WORKSPACE_UNHEALTHY",
+        "image": "SIDECAR_UNREADABLE",
         "integration": "INTEGRATION_UNAVAILABLE",
         "line": "LINE_UNAVAILABLE",
         "next": "NEXT_STEP_UNAVAILABLE",
@@ -527,6 +820,12 @@ def _control_plane_error_code(
 def _print_control_plane_error(
     args: argparse.Namespace, exc: BaseException
 ) -> None:
+    if (
+        getattr(args, "format", None) == "json"
+        and _is_json_observation_deadline(args, exc)
+    ):
+        _print_json_observation_timeout(args)
+        return
     _print_control_plane_json(
         "error",
         stream=sys.stderr,
@@ -549,6 +848,43 @@ def _scoped_command(
     args: argparse.Namespace, config: Config, *command: str
 ) -> str:
     return shlex.join((*_workspace_selector_argv(args, config), *command))
+
+
+def _briefing_command(
+    args: argparse.Namespace, config: Config, *command: str
+) -> str:
+    """Scope a briefing command without a fail-closed or cross-root selector."""
+    alias = getattr(args, "workspace_alias", None) or config.name
+    return scoped_briefing_command(config, str(alias), *command)
+
+
+def _workspace_ready_briefing(
+    args: argparse.Namespace,
+    config: Config,
+    read_budget: ReadBudget | None,
+) -> tuple[dict[str, object] | None, list[str]]:
+    """Attach a switch-tool opening when live Objectives exist.
+
+    `next.commands` stays empty. The briefing command is a read, not a mutation.
+    """
+    alias = getattr(args, "workspace_alias", None) or config.name
+    return build_ready_briefing(config, alias=str(alias), read_budget=read_budget)
+
+
+def _ready_next_summary(briefing: dict[str, object] | None) -> str:
+    if briefing is None:
+        return "工作区已就绪。"
+    if briefing.get("available") is not True:
+        return "工作区已就绪，但目标简报未读到。"
+    objective_id = briefing.get("objective_id")
+    if isinstance(objective_id, str) and objective_id:
+        lines = briefing.get("lines")
+        if isinstance(lines, list) and lines and isinstance(lines[0], str):
+            return lines[0]
+    matter = briefing.get("matter")
+    if isinstance(matter, str) and matter:
+        return matter
+    return "工作区已就绪。"
 
 
 def _objective_payload(
@@ -611,6 +947,9 @@ def cmd_init(args: argparse.Namespace) -> None:
     atomic_write_text(config_file, content)
     for relative in (".dyro/tasks", ".dyro/lines", ".dyro/hotfixes", ".dyro/changes"):
         (root / relative).mkdir(parents=True, exist_ok=True)
+    from .instructions import seed_workspace_overlay
+
+    seed_workspace_overlay(root)
     print(f"已初始化 {root}")
     if args.discover:
         print(
@@ -841,7 +1180,7 @@ def _setup_skill_preference() -> bool:
     )
     if hosts:
         host_text = "、".join(hosts)
-        prompt = f"Dyro Skills（控制面 + Dispatch；挂接到：{host_text}）"
+        prompt = f"Dyro Skills（控制面 + 执行 + 评审板 + Dispatch；挂接到：{host_text}）"
         option_one = "安装 / 同步到已检测宿主（推荐）"
         default = "1"
     else:
@@ -852,7 +1191,7 @@ def _setup_skill_preference() -> bool:
         prompt,
         (
             ("1", option_one),
-            ("2", "稍后手动安装（dyro integration install skill / dispatch）"),
+            ("2", "稍后手动安装（dyro integration install skill / executor / review-board / dispatch）"),
         ),
         default=default,
     )
@@ -919,7 +1258,7 @@ def _render_setup_personal_preferences(
             print("  - Skills：无法安装：未检测到 Agent 宿主目录")
             print(
                 "      · 确认后会 soft-fail；请安装宿主后运行 "
-                "dyro integration install skill / dispatch"
+                "dyro integration install skill / executor / review-board / dispatch"
             )
             return
         plans = []
@@ -935,7 +1274,7 @@ def _render_setup_personal_preferences(
         if not plans:
             print("  - Skills：" + muted("已是当前版本"))
         else:
-            print("  - Skills：安装 / 同步控制面与 Dispatch（镜像 + 宿主分身）")
+            print("  - Skills：安装 / 同步控制面、执行、评审板与 Dispatch（镜像 + 宿主分身）")
             for label, plan in plans:
                 print(f"      · {label}")
                 for change in plan.changes:
@@ -1099,7 +1438,7 @@ def _print_setup_completion(
             print(
                 "  - Skills："
                 + warning(
-                    "安装未成功；可运行 dyro integration status skill / dispatch 排查"
+                    "安装未成功；可运行 dyro integration status skill / executor / board / dispatch 排查"
                 )
             )
         else:
@@ -1166,6 +1505,9 @@ def _apply_setup_plan(
     registration = _register_setup_workspace(
         config, register=register, make_default=make_default
     )
+    from .instructions import seed_workspace_overlay
+
+    seed_workspace_overlay(config.root)
     if plan.needs_bootstrap:
         for message in bootstrap(config, branch=plan.default_base):
             print(message)
@@ -1185,7 +1527,12 @@ def _apply_setup_plan(
     findings = doctor(config)
     for finding in findings:
         _print_doctor_finding(finding)
-    if any(finding.startswith("FAIL") for finding in findings):
+    # Missing origin/<line.branch> is not delivery-ready, but setup of a
+    # local-only line is still complete. Other FAILs remain fatal.
+    if any(
+        finding.startswith("FAIL") and not is_missing_origin_finding(finding)
+        for finding in findings
+    ):
         raise DyroError("设置已保存，但 doctor 发现问题；请修复后运行 dyro next")
     skill_outcome = _apply_setup_personal_preferences(preferences)
     _print_setup_completion(
@@ -1234,6 +1581,9 @@ def _interactive_setup(args: argparse.Namespace) -> None:
             register=registration is not None,
             make_default=preferences.make_default_workspace,
         )
+        from .instructions import seed_workspace_overlay
+
+        seed_workspace_overlay(config.root)
         skill_outcome = _apply_setup_personal_preferences(preferences)
         _print_setup_completion(
             config, record, preferences, skill_outcome=skill_outcome
@@ -1380,6 +1730,9 @@ def _non_interactive_setup(args: argparse.Namespace) -> None:
         _render_setup_registration_plan(registration)
     if not args.dry_run:
         _ensure_state_directories(config.root)
+        from .instructions import seed_workspace_overlay
+
+        seed_workspace_overlay(config.root)
         registered = _register_setup_workspace(
             config,
             register=not args.no_register,
@@ -1413,7 +1766,10 @@ def _non_interactive_setup(args: argparse.Namespace) -> None:
     findings = doctor(config)
     for finding in findings:
         _print_doctor_finding(finding)
-    if any(finding.startswith("FAIL") for finding in findings):
+    if any(
+        finding.startswith("FAIL") and not is_missing_origin_finding(finding)
+        for finding in findings
+    ):
         raise DyroError("setup 已完成基础配置，但 doctor 仍发现结构错误")
     if created or registered is not None:
         _print_setup_completion(config, registered)
@@ -1499,15 +1855,20 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     budget = _control_plane_budget(args) if args.format == "json" else None
     findings = doctor(config, read_budget=budget)
     failures = [item for item in findings if item.startswith("FAIL")]
+    sidecar = discover_sidecar()
     if args.format == "json":
+        partial = any(is_observation_deadline_finding(item) for item in findings)
         _print_control_plane_json(
             "doctor",
             workspace=config.name,
             passed=not failures,
+            partial=partial,
             findings=[
                 _doctor_finding_payload(item, include_paths=args.include_paths)
                 for item in findings
             ],
+            sidecars={"local_image_gen": sidecar.as_dict()},
+            **_observation_timeout_fields(partial=partial),
         )
         if failures:
             raise SystemExit(2)
@@ -1516,9 +1877,62 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print(muted(f"Profile：{config.name} · 检查仓库、基线与隔离工作区。"))
     for finding in findings:
         _print_doctor_finding(finding)
+    if sidecar.state == "absent":
+        print(ABSENT_INFO_LINE)
     if failures:
         raise DyroError("doctor 发现结构错误")
     print("\n" + success("检查通过。") + " 下一步：" + terminal_value("dyro"))
+
+
+def cmd_image_doctor(args: argparse.Namespace) -> None:
+    if args.dry_run:
+        presence = discover_sidecar()
+        if args.format == "json":
+            _print_control_plane_json("image_doctor", **presence.as_dict())
+            return
+        print("DRY RUN: 未探测 local-image-gen")
+        if presence.state == "absent":
+            print(ABSENT_INFO_LINE)
+        else:
+            print("PATH 上已有 local-image-gen；未查询后端。")
+        return
+    probe = probe_sidecar()
+    if args.format == "json":
+        _print_control_plane_json(
+            "image_doctor",
+            **probe.as_dict(include_paths=args.include_paths),
+        )
+        if probe.state == "unavailable":
+            raise SystemExit(2)
+        return
+    print("\n" + title("━━ local-image-gen ━━"))
+    if probe.state == "absent":
+        print(ABSENT_INFO_LINE)
+        print("下一步：" + terminal_value("dyro image install"))
+        return
+    if probe.state == "ready":
+        backends = "、".join(probe.usable_providers) or "-"
+        print(success("状态：ready") + (f" · {probe.version}" if probe.version else ""))
+        print(f"可用后端：{backends}")
+        print("下一步：直接运行 " + terminal_value("local-image-gen") + "。Dyro 不代跑出图。")
+        return
+    if probe.state == "needs_setup":
+        print(muted("状态：needs_setup"))
+        print(probe.message or "已安装 local-image-gen，但没有可用订阅或 API key。")
+        print(f"来源：{SOURCE_URL}")
+        print("下一步：按上游文档登录或配置密钥后，再运行 " + terminal_value("dyro image doctor"))
+        return
+    print(danger(probe.message or "sidecar 不可读"))
+    raise SystemExit(2)
+
+
+def cmd_image_install(args: argparse.Namespace) -> None:
+    require_interactive_install(
+        yes=args.yes,
+        dry_run=args.dry_run,
+        tty=sys.stdin.isatty() and sys.stdout.isatty(),
+    )
+    install_image_sidecar(yes=args.yes, dry_run=args.dry_run)
 
 
 def cmd_terminology_check(args: argparse.Namespace) -> None:
@@ -1551,11 +1965,24 @@ def cmd_home(args: argparse.Namespace) -> None:
 
 
 def cmd_console(args: argparse.Namespace) -> None:
+    # Imported here, not at module scope: the console subsystem pulls in
+    # inspection/events/overview and costs ~80ms of every `dyro` start that
+    # never opens a console.  `home.py` already imports it this way.
+    from .console.launcher import launch_console, render_console_plan
+
     initial_workspace = getattr(args, "workspace_alias", None)
     root_arg = getattr(args, "root", None)
     target_root: Path | None = None
+    if root_arg:
+        if args.dry_run:
+            target_root = Path(root_arg).expanduser().absolute()
+        else:
+            config = load(Path(root_arg).expanduser())
+            target_root = config.root
+            initial_workspace = config.name
+    elif initial_workspace:
+        initial_workspace = get_workspace(initial_workspace).name
     if args.dry_run:
-        target_root = Path(root_arg).expanduser().absolute() if root_arg else None
         render_console_plan(
             port=args.port,
             no_open=args.no_open,
@@ -1563,12 +1990,6 @@ def cmd_console(args: argparse.Namespace) -> None:
             target_root=target_root,
         )
         return
-    if root_arg:
-        config = load(Path(root_arg).expanduser())
-        target_root = config.root
-        initial_workspace = config.name
-    elif initial_workspace:
-        get_workspace(initial_workspace)
     launch_console(
         port=args.port,
         no_open=args.no_open,
@@ -1650,23 +2071,23 @@ def cmd_workspace_list(args: argparse.Namespace) -> None:
 
 
 def cmd_workspace_default(args: argparse.Namespace) -> None:
+    record = get_workspace(args.name)
     if args.dry_run:
-        get_workspace(args.name)
-        print(f"DRY RUN: 将默认工作区设为 {args.name}")
+        print(f"DRY RUN: 将默认工作区设为 {record.name}")
         return
-    set_default_workspace(args.name)
-    print(f"默认工作区：{args.name}")
+    set_default_workspace(record.name)
+    print(f"默认工作区：{record.name}")
 
 
 def cmd_workspace_remove(args: argparse.Namespace) -> None:
-    get_workspace(args.name)
+    record = get_workspace(args.name, exact_on_collision=True)
     if not args.yes and not args.dry_run:
         raise DyroError("移除只会删除全局首页入口，不会删除项目文件；确认后请加 --yes")
     if args.dry_run:
-        print(f"DRY RUN: 将移除工作区入口 {args.name}；不会删除项目文件")
+        print(f"DRY RUN: 将移除工作区入口 {record.name}；不会删除项目文件")
         return
-    remove_workspace(args.name)
-    print(f"已移除工作区入口：{args.name}；项目文件未改动")
+    remove_workspace(record.name)
+    print(f"已移除工作区入口：{record.name}；项目文件未改动")
 
 
 def _blueprint_document(args: argparse.Namespace):
@@ -1761,16 +2182,38 @@ def cmd_status(args: argparse.Namespace) -> None:
     if args.format == "json":
         budget = _control_plane_budget(args)
         if not args.all:
-            _print_control_plane_json(
-                "workspace_status",
-                **_status_payload(_config(args), read_budget=budget),
-            )
+            payload = _status_payload(_config(args), read_budget=budget)
+            _print_control_plane_json("workspace_status", **payload)
+            if payload.get("partial"):
+                raise SystemExit(2)
             return
         registry = load_registry_bounded(budget)
         workspaces: list[dict[str, object]] = []
+        any_partial = False
         for record in registry.workspaces:
             try:
                 config = load_profile_exact(record.root, budget).config
+            except ReadLimitError as exc:
+                if exc.code != ReadLimitCode.DEADLINE_EXCEEDED:
+                    workspaces.append(
+                        {
+                            "workspace": record.name,
+                            "available": False,
+                            "error_code": _control_plane_error_code(args, exc),
+                            "rows": [],
+                        }
+                    )
+                    continue
+                any_partial = True
+                workspaces.append(
+                    {
+                        "workspace": record.name,
+                        "available": True,
+                        "partial": True,
+                        "code": ReadLimitCode.DEADLINE_EXCEEDED.value,
+                        "rows": [_status_row_payload(observation_timeout_row())],
+                    }
+                )
             except (DyroError, OSError, ValidationError) as exc:
                 workspaces.append(
                     {
@@ -1781,13 +2224,17 @@ def cmd_status(args: argparse.Namespace) -> None:
                     }
                 )
             else:
-                workspaces.append(
-                    {
-                        "available": True,
-                        **_status_payload(config, read_budget=budget),
-                    }
-                )
-        _print_control_plane_json("workspace_status_all", workspaces=workspaces)
+                payload = _status_payload(config, read_budget=budget)
+                workspaces.append({"available": True, **payload})
+                any_partial = any_partial or bool(payload.get("partial"))
+        _print_control_plane_json(
+            "workspace_status_all",
+            workspaces=workspaces,
+            partial=any_partial,
+            **_observation_timeout_fields(partial=any_partial),
+        )
+        if any_partial:
+            raise SystemExit(2)
         return
     if args.all:
         print_all_status()
@@ -1835,6 +2282,187 @@ def cmd_agent_test(args: argparse.Namespace) -> None:
 
 def cmd_agent_discover(args: argparse.Namespace) -> None:
     print_agent_discovery(_config(args))
+
+
+def cmd_capability_list(args: argparse.Namespace) -> None:
+    from .capability import card_payload, discover_unintegrated, runtime_cards
+
+    config = _config(args)
+    cards = []
+    for card in runtime_cards(config).values():
+        payload = card_payload(card)
+        payload["hook_surface_declared"] = payload.get("hook_surface", "")
+        payload["hook_proven"] = False
+        cards.append(payload)
+    discovered = [
+        {"id": item.id, "command": item.command, "state": item.state}
+        for item in discover_unintegrated(config)
+    ]
+    if args.format == "json":
+        print(
+            json.dumps(
+                {"schema_version": 1, "cards": cards, "discovered_unintegrated": discovered},
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+        )
+        return
+    if not cards and not discovered:
+        print("暂无 Capability Card")
+        return
+    for card in cards:
+        print(
+            f"{card['id']:16} {card['kind']:10} {card['source']:14} "
+            f"isolation={card['attested_isolation']} cannot_prove={','.join(card['cannot_prove'])}"
+        )
+    for item in discovered:
+        print(f"{item['id']:16} discovered  {item['state']}  command={item['command']}")
+
+
+def cmd_capability_add(args: argparse.Namespace) -> None:
+    from .capability import append_capability, card_from_command, card_from_preset
+
+    config = _config(args)
+    if args.preset:
+        card = card_from_preset(args.id, args.preset)
+    else:
+        try:
+            command = shlex.split(args.command)
+        except ValueError as exc:
+            raise DyroError(f"Capability command 解析失败：{exc}") from exc
+        card = card_from_command(args.id, command)
+    append_capability(config, card, dry_run=args.dry_run)
+    print(f"{'DRY RUN: 将添加' if args.dry_run else '已添加'} Capability Card：{card.id}")
+
+
+def cmd_capability_test(args: argparse.Namespace) -> None:
+    from .capability import test_capability
+
+    report = test_capability(_config(args), args.id)
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "id": report.id,
+                    "source": report.source,
+                    "executable": report.executable,
+                    "logged_in": report.logged_in,
+                    "hook_surface": report.hook_surface,
+                    "attested_isolation": report.attested_isolation,
+                    "cannot_prove": list(report.cannot_prove),
+                    "checks": [
+                        {"mode": mode, "available": available, "executable": executable}
+                        for mode, available, executable in report.checks
+                    ],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+        )
+    else:
+        print(f"{report.id} source={report.source} executable={report.executable}")
+        print(f"isolation={report.attested_isolation} hook_surface={report.hook_surface or '-'}")
+        for mode, available, executable in report.checks:
+            print(f"{'PASS' if available else 'FAIL'} {report.id}.{mode}: {executable}")
+    if not report.executable:
+        raise DyroError(f"Capability 不可用：{report.id}")
+
+
+def _host_projection_payload(item) -> dict[str, object]:
+    return {
+        "authority_projection": item.authority_projection,
+        "hook_installed_on_surface": False,
+        "hook_note": "deny hook 写在投影树 SKILL.md 旁，未安装到 hook_surface，不是宿主拦截",
+        "hook_relpath": item.hook_relpath,
+        "hook_sha256": item.hook_sha256,
+        "host": item.host,
+        "input_sha256": item.input_sha256,
+        "manifest_relpath": item.manifest_relpath,
+        "scope": item.scope,
+        "skill_relpath": item.skill_relpath,
+        "skill_sha256": item.skill_sha256,
+    }
+
+
+def cmd_host_compile(args: argparse.Namespace) -> None:
+    from .host import compile_hosts
+
+    projections = compile_hosts(_config(args), user=args.user, dry_run=args.dry_run)
+    prefix = "DRY RUN: " if args.dry_run else ""
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "dry_run": args.dry_run,
+                    "projections": [_host_projection_payload(item) for item in projections],
+                    "schema_version": 1,
+                    "scope": "user" if args.user else "workspace",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+        )
+        return
+    print(f"{prefix}已编译宿主投影 scope={'user' if args.user else 'workspace'}")
+    for item in projections:
+        print(f"{item.host} {item.authority_projection}")
+
+
+def cmd_host_status(args: argparse.Namespace) -> None:
+    from .host import doctor_payload, inspect_projections, render_doctor_text
+
+    report = inspect_projections(_config(args), user=args.user)
+    if args.format == "json":
+        print(json.dumps(doctor_payload(report), ensure_ascii=False, sort_keys=True, indent=2))
+        return
+    print(render_doctor_text(report), end="")
+
+
+def cmd_host_doctor(args: argparse.Namespace) -> None:
+    from .host import doctor_payload, inspect_projections, render_doctor_text
+
+    report = inspect_projections(_config(args), user=args.user)
+    if args.format == "json":
+        print(json.dumps(doctor_payload(report), ensure_ascii=False, sort_keys=True, indent=2))
+    else:
+        print(render_doctor_text(report), end="")
+    if not report.ok:
+        raise DyroError("宿主投影过期或被手改")
+
+
+def cmd_host_seed(args: argparse.Namespace) -> None:
+    from .instructions import seed_configured_overlays
+
+    config = _config(args)
+    workspace, lines = seed_configured_overlays(
+        config, force=args.force, dry_run=args.dry_run
+    )
+    if not args.dry_run and (workspace.written or any(item.written for _, item in lines)):
+        from .events import append_event
+
+        append_event(
+            config,
+            kind="host_seed",
+            actor="operator",
+            subject="overlay",
+            family="",
+            facts={"written": len(workspace.written) + sum(len(item.written) for _, item in lines)},
+        )
+    prefix = "DRY RUN: " if args.dry_run else ""
+    if workspace.written:
+        print(f"{prefix}已写入 overlay {', '.join(workspace.written)}")
+    if workspace.skipped:
+        print(f"{prefix}已跳过 overlay {', '.join(workspace.skipped)}（已存在）")
+    if not workspace.written and not workspace.skipped:
+        print(f"{prefix}overlay 未写入说明文件")
+    for line_id, outcome in lines:
+        if outcome.written:
+            print(f"{prefix}已写入开发线 {line_id} {', '.join(outcome.written)}")
+        if outcome.skipped and args.force:
+            print(f"{prefix}已跳过开发线 {line_id} {', '.join(outcome.skipped)}")
 
 
 def cmd_tool_list(args: argparse.Namespace) -> None:
@@ -2126,9 +2754,18 @@ def cmd_start(args: argparse.Namespace) -> None:
     failures = [finding for finding in findings if finding.startswith("FAIL")]
     if failures:
         print("\n".join(failures))
-        raise DyroError(
-            "工作区尚未就绪；先修复 doctor 失败项，或运行 dyro bootstrap --yes"
-        )
+        extra = ""
+        if bootstrap_repair_applicable(config, failures):
+            extra = "，或运行 " + _briefing_command(
+                args, config, "bootstrap", "--yes"
+            )
+        raise DyroError("工作区尚未就绪；先修复 doctor 失败项" + extra)
+    alias = getattr(args, "workspace_alias", None) or config.name
+    briefing, _ = build_ready_briefing(config, alias=str(alias))
+    text = render_briefing_text(briefing) if briefing else ""
+    if text:
+        print(text)
+        print()
     line_id = args.line or _choose("开发线", [line.id for line in list_lines(config)])
     line, workspace = existing_line_workspace(config, line_id, args.kind)
     record = _record_for_root(config.root)
@@ -2154,12 +2791,30 @@ def cmd_start(args: argparse.Namespace) -> None:
     )
 
 
-def _bootstrap_destination_safe(config: Config, relative: str) -> bool:
-    try:
-        validate_bootstrap_destination(config, relative)
-    except (DyroError, OSError):
-        return False
-    return True
+def _next_push_fields(config: Config) -> dict[str, object]:
+    return push_policy_fields(config.policy)
+
+
+def _print_push_disclosure(config: Config) -> None:
+    note = push_disclosure(config.policy)
+    if note:
+        print(note)
+
+
+def _print_next_workspace_missing(args: argparse.Namespace) -> None:
+    if args.format == "json":
+        _print_control_plane_json(
+            "next_step",
+            state="workspace_missing",
+            summary="尚未发现 Dyro 工作区。",
+            commands=[],
+            mutation_available=False,
+            required_choice="join_existing_or_setup_new",
+        )
+        return
+    print("尚未发现 Dyro 工作区。")
+    print("加入团队项目：dyro join <蓝图地址>")
+    print("设置一个新项目：dyro setup")
 
 
 def cmd_next(args: argparse.Namespace) -> None:
@@ -2167,6 +2822,11 @@ def cmd_next(args: argparse.Namespace) -> None:
 
     try:
         config = _config(args)
+    except ValidationError as exc:
+        if "未找到" not in str(exc) or CONFIG_NAME not in str(exc):
+            raise
+        _print_next_workspace_missing(args)
+        return
     except WorkspaceResolutionError as exc:
         if (
             getattr(args, "workspace_alias", None)
@@ -2174,84 +2834,48 @@ def cmd_next(args: argparse.Namespace) -> None:
             or exc.code is not WorkspaceResolutionFailure.WORKSPACE_NOT_FOUND
         ):
             raise
-        if args.format == "json":
-            _print_control_plane_json(
-                "next_step",
-                state="workspace_missing",
-                summary="尚未发现 Dyro 工作区。",
-                commands=[],
-                mutation_available=False,
-                required_choice="join_existing_or_setup_new",
-            )
-            return
-        print("尚未发现 Dyro 工作区。")
-        print("加入团队项目：dyro join <蓝图地址>")
-        print("设置一个新项目：dyro setup")
-        return
-    except ValidationError:
-        if args.format == "json" and (
-            getattr(args, "workspace_alias", None) or getattr(args, "root", None)
-        ):
-            raise
-        if args.format == "json":
-            _print_control_plane_json(
-                "next_step",
-                state="workspace_missing",
-                summary="尚未发现 Dyro 工作区。",
-                commands=[],
-                mutation_available=False,
-                required_choice="join_existing_or_setup_new",
-            )
-            return
-        print("尚未发现 Dyro 工作区。")
-        print("加入团队项目：dyro join <蓝图地址>")
-        print("设置一个新项目：dyro setup")
+        _print_next_workspace_missing(args)
         return
     budget = _control_plane_budget(args) if args.format == "json" else None
     findings = doctor(config, read_budget=budget)
+    stash_observation_findings(budget, findings)
     failures = [finding for finding in findings if finding.startswith("FAIL")]
     if failures:
-        absent_bootstrap_ids = {
-            repo_id
-            for repo_id, repository in config.repositories.items()
-            if repository.remote
-            and not (config.root / repository.path).exists()
-            and not (config.root / repository.path).is_symlink()
-            and _bootstrap_destination_safe(config, repository.path)
-        }
-        expected_bootstrap_failures = {
-            f"FAIL repository {repo_id}: missing or not Git: "
-            f"{config.root / config.repositories[repo_id].path}"
-            for repo_id in absent_bootstrap_ids
-        }
-        bootstrap_applicable = (
-            bool(absent_bootstrap_ids) and set(failures) == expected_bootstrap_failures
-        )
-        repair_commands = (
-            [_scoped_command(args, config, "bootstrap", "--yes")]
-            if bootstrap_applicable
-            else []
-        )
+        alias = getattr(args, "workspace_alias", None) or config.name
+        commands = repair_commands(config, str(alias), failures)
+        bootstrap_applicable = bootstrap_repair_applicable(config, failures)
+        findings = [
+            _doctor_finding_payload(item, include_paths=False) for item in failures
+        ]
         if args.format == "json":
+            partial = any(
+                is_observation_deadline_finding(item) for item in failures
+            )
             _print_control_plane_json(
                 "next_step",
                 state="needs_repair",
                 summary="工作区还不能开始任务。",
-                commands=repair_commands,
-                diagnostic_commands=[_scoped_command(args, config, "doctor")],
+                commands=commands,
+                diagnostic_commands=[_briefing_command(args, config, "doctor")],
                 mutation_available=bootstrap_applicable,
-                findings=[_finding_payload(item) for item in failures],
+                partial=partial,
+                findings=findings,
+                **_observation_timeout_fields(partial=partial),
+                **_family_unacked_fields(config),
+                **_next_push_fields(config),
             )
             return
         print("工作区还不能开始任务：")
-        for finding in failures:
-            print("  " + finding)
-        print(f"修复后运行：{_scoped_command(args, config, 'doctor')}")
+        for finding in findings:
+            print(f"  {finding['status']} {finding['message']}")
+        print(f"修复后运行：{_briefing_command(args, config, 'doctor')}")
         if bootstrap_applicable:
             print(
                 "缺失仓库均已配置 remote，可运行："
-                + _scoped_command(args, config, "bootstrap", "--yes")
+                + _briefing_command(args, config, "bootstrap", "--yes")
             )
+        _print_family_unacked_attention(config)
+        _print_push_disclosure(config)
         return
     lines = list_lines(config, read_budget=budget)
     if not lines:
@@ -2263,9 +2887,13 @@ def cmd_next(args: argparse.Namespace) -> None:
                 summary="Profile 已就绪，但还没有开发线。",
                 commands=[command],
                 mutation_available=True,
+                **_family_unacked_fields(config),
+                **_next_push_fields(config),
             )
             return
         print(f"Profile 已就绪，但还没有开发线。下一步：{command}")
+        _print_family_unacked_attention(config)
+        _print_push_disclosure(config)
         return
     if not config.adapters and not installed_launchable_presets():
         if args.format == "json":
@@ -2276,6 +2904,8 @@ def cmd_next(args: argparse.Namespace) -> None:
                 commands=[],
                 mutation_available=False,
                 required_inputs=["agent_id", "agent_command"],
+                **_family_unacked_fields(config),
+                **_next_push_fields(config),
             )
             return
         print(
@@ -2283,17 +2913,50 @@ def cmd_next(args: argparse.Namespace) -> None:
             "安装本机 Agent 后运行 dyro start，或 "
             + _scoped_command(args, config, "agent", "add", "<id>", "--command", "…")
         )
+        _print_family_unacked_attention(config)
+        _print_push_disclosure(config)
         return
-    if args.format == "json":
-        _print_control_plane_json(
-            "next_step",
-            state="ready",
-            summary="工作区已就绪。",
-            commands=[],
-            mutation_available=False,
+    try:
+        briefing, diagnostic_commands = _workspace_ready_briefing(
+            args, config, budget
         )
+        briefing_deadline = False
+    except ReadLimitError as exc:
+        if exc.code != ReadLimitCode.DEADLINE_EXCEEDED:
+            raise
+        briefing_deadline = True
+        alias = getattr(args, "workspace_alias", None) or config.name
+        command = scoped_briefing_command(
+            config, str(alias), "objective", "list"
+        )
+        briefing, diagnostic_commands = unread_briefing(command), [command]
+    if args.format == "json":
+        payload: dict[str, object] = {
+            "state": "ready",
+            "summary": _ready_next_summary(briefing),
+            "commands": [],
+            "mutation_available": False,
+        }
+        if briefing is not None:
+            payload["briefing"] = briefing
+            payload["diagnostic_commands"] = diagnostic_commands
+        if briefing_deadline:
+            payload["partial"] = True
+            payload.update(_observation_timeout_fields(partial=True))
+        payload.update(_family_unacked_fields(config))
+        payload.update(_next_push_fields(config))
+        _print_control_plane_json("next_step", **payload)
+        if briefing_deadline:
+            raise SystemExit(2)
         return
-    print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。")
+    if briefing is None:
+        print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。")
+        _print_family_unacked_attention(config)
+        _print_push_disclosure(config)
+        return
+    print(render_briefing_text(briefing))
+    _print_family_unacked_attention(config)
+    _print_push_disclosure(config)
 
 
 def cmd_line_list(args: argparse.Namespace) -> None:
@@ -2308,6 +2971,7 @@ def cmd_line_list(args: argparse.Namespace) -> None:
                 {
                     "kind": line.kind,
                     "id": line.id,
+                    "parent": line.parent,
                     "branch": line.branch,
                     "base": line.base,
                     "repositories": [
@@ -2326,14 +2990,14 @@ def cmd_line_list(args: argparse.Namespace) -> None:
     if not lines:
         print("暂无已登记开发线")
         return
-    print(f"{'KIND':8} {'ID':28} {'BRANCH':30} {'BASE':24} REPOSITORIES")
+    print(f"{'KIND':8} {'ID':28} {'PARENT':24} {'BRANCH':30} {'BASE':24} REPOSITORIES")
     for line in lines:
         repositories = ", ".join(
             f"{repo_id}@{line.base_for(repo_id)}[{line.storage_for(repo_id)}]"
             for repo_id in line.repositories
         )
         print(
-            f"{line.kind:8} {line.id:28} {line.branch:30} {line.base:24} {repositories}"
+            f"{line.kind:8} {line.id:28} {(line.parent or '-'):24} {line.branch:30} {line.base:24} {repositories}"
         )
 
 
@@ -2367,10 +3031,128 @@ def _create_line(args: argparse.Namespace, kind: str) -> None:
     print(
         f"{'DRY RUN: ' if args.dry_run else ''}已创建 {line.kind} {line.id}，分支 {line.branch}，仓库基线：{bases}"
     )
+    if not args.dry_run:
+        print(f"发布此线（Dyro 不会代你执行）：git push -u origin {line.branch}")
 
 
 def cmd_line_create(args: argparse.Namespace) -> None:
     _create_line(args, "line")
+
+
+def cmd_line_spawn(args: argparse.Namespace) -> None:
+    config = _config(args)
+    _require_yes(args, "派生子开发线")
+    line = spawn_line(
+        config,
+        args.parent,
+        args.child,
+        repositories=_repositories(args.repos),
+        dry_run=args.dry_run,
+    )
+    bases = ", ".join(
+        f"{repo_id}={line.base_for(repo_id)}" for repo_id in line.repositories
+    )
+    print(
+        f"{'DRY RUN: ' if args.dry_run else ''}已从 {line.parent} 派生 {line.kind} {line.id}，"
+        f"分支 {line.branch}，仓库基线：{bases}"
+    )
+
+
+def cmd_line_merge(args: argparse.Namespace) -> None:
+    _require_yes(args, "合并子开发线")
+    config = _config(args)
+    merge_line(
+        config,
+        args.child,
+        args.parent,
+        push=args.push,
+        dry_run=args.dry_run,
+    )
+    if args.dry_run:
+        extra = "（已预检 push）" if args.push else ""
+        print(f"DRY RUN: 已将 {args.child} 合并入 {args.parent}{extra}")
+    else:
+        print(
+            f"已将 {args.child} 合并入 {args.parent}"
+            + (" 并推送" if args.push else "")
+        )
+
+
+def cmd_line_sync(args: argparse.Namespace) -> None:
+    _require_yes(args, "同步父开发线")
+    config = _config(args)
+    sync_line(config, args.child, push=args.push, dry_run=args.dry_run)
+    if args.dry_run:
+        extra = "（已预检 push）" if args.push else ""
+        print(f"DRY RUN: 已将父线同步到 {args.child}{extra}")
+    else:
+        print(
+            f"已将父线同步到 {args.child}" + (" 并推送" if args.push else "")
+        )
+
+
+def cmd_line_post(args: argparse.Namespace) -> None:
+    config = _config(args)
+    _require_overlay_yes(args, "写入家族频道")
+    result = post_channel_message(
+        config,
+        sender=args.sender,
+        kind=args.kind,
+        body=args.body or "",
+        recipient=args.to or "",
+        family=args.family or "",
+        dry_run=args.dry_run,
+    )
+    if args.format == "json":
+        payload = dict(result)
+        payload["channel_kind"] = payload.pop("kind", "")
+        _print_control_plane_json("line_post", **payload)
+        return
+    target = result["to"] or "家族广播"
+    prefix = "DRY RUN: " if args.dry_run else ""
+    print(
+        f"{prefix}已从 {result['from']} 向 {target} 发送 {result['kind']} "
+        f"{result['id']}（家族 {result['family']}）"
+    )
+
+
+def cmd_line_inbox(args: argparse.Namespace) -> None:
+    config = _config(args)
+    inbox = list_inbox(
+        config,
+        family=args.family or "",
+        viewer=_inbox_viewer(config),
+        unacked=args.unacked,
+    )
+    if args.format == "json":
+        _print_control_plane_json("line_inbox", **inbox)
+        return
+    messages = inbox["messages"]
+    print(
+        f"家族 {inbox['family']} · 查看者 {inbox['viewer']} · 未读 {inbox['unacked']}"
+    )
+    if not messages:
+        print("没有可展示的家族信号")
+        return
+    for item in messages:
+        target = item["to"] or "广播"
+        flag = "未读" if not item["acked"] else "已读"
+        print(
+            f"{item['id']:10} {item['kind']:10} {item['from']} → {target}  {flag}  {item['body']}"
+        )
+
+
+def cmd_line_ack(args: argparse.Namespace) -> None:
+    config = _config(args)
+    _require_overlay_yes(args, "确认已读家族信号")
+    result = ack_channel_message(
+        config, args.id, family=args.family or "", dry_run=args.dry_run
+    )
+    if args.format == "json":
+        _print_control_plane_json("line_ack", **result)
+        return
+    prefix = "DRY RUN: " if args.dry_run else ""
+    print(f"{prefix}已确认已读 {result['id']}（家族 {result['family']}）")
 
 
 def cmd_hotfix_create(args: argparse.Namespace) -> None:
@@ -2450,24 +3232,87 @@ def cmd_changeset_verify(args: argparse.Namespace) -> None:
         raise DyroError(f"Change Set {args.id} 未通过核验")
 
 
+def cmd_review_verify(args: argparse.Namespace) -> None:
+    from .review_pack import run_line_verify
+    from .workspace import get_line
+
+    config = _config(args)
+    line = get_line(config, args.line)
+    results = run_line_verify(config, line, dry_run=args.dry_run)
+    if not results:
+        print(f"开发线 {line.id} 无已配置门禁指令。")
+        return
+    failures = [r for r in results if not r.passed]
+    for r in results:
+        status_str = "PASS" if r.passed else "FAIL"
+        print(f"[{status_str}] {r.repo_id}: {' '.join(r.argv)} ({r.elapsed_seconds:.2f}s)")
+        if not r.passed and r.stdout:
+            print("  --- 失败日志摘录 ---\n  " + "\n  ".join(r.stdout.splitlines()[-15:]))
+    if failures:
+        raise DyroError(f"开发线 {line.id} 本地静态门禁未通过（{len(failures)}/{len(results)} 失败）")
+    print(f"\n全部门禁通过（共 {len(results)} 项）。")
+
+
+def cmd_review_pack(args: argparse.Namespace) -> None:
+    from .review_pack import build_review_pack
+    from pathlib import Path
+
+    config = _config(args)
+    content = build_review_pack(
+        config,
+        args.line,
+        base=args.base,
+        scope=args.scope,
+        run_verify=not args.no_verify,
+        max_lines_per_file=args.max_lines,
+        dry_run=args.dry_run,
+    )
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(content, encoding="utf-8")
+        print(f"已生成审查靶区包：{out_path}")
+    else:
+        print(content)
+
+
 def cmd_task_create(args: argparse.Namespace) -> None:
     config = _config(args)
     validate_id(args.id, "任务 ID")
     get_line(config, args.line)
-    if args.repository not in config.repositories:
-        raise DyroError(f"未配置仓库：{args.repository}")
+    repository_ids: list[str] = []
+    for repo_id in args.repository:
+        if repo_id not in config.repositories:
+            raise DyroError(f"未配置仓库：{repo_id}")
+        if repo_id not in repository_ids:
+            repository_ids.append(repo_id)
     path = config.task_specs_dir / args.id
+    if not config.adapters:
+        raise DyroError("未配置任何 Agent adapter，无法创建任务")
     if args.dry_run:
         print(f"DRY RUN: 将创建 {path}")
         return
+    executor = next(iter(config.adapters))
+    primary = repository_ids[0]
+    extra = tuple(repository_ids[1:])
+    gates = profile_task_gates(config, repository_ids)
     with exclusive_lock(config.task_specs_dir / ".tasks.lock"):
         if path.exists():
             raise DyroError(f"任务目录已存在：{path}")
         path.mkdir(parents=True)
-        mount = config.repositories[args.repository].mount
+        mount = config.repositories[primary].mount
         atomic_write_text(
             path / "task.toml",
-            task_template(args.id, args.title, args.line, args.repository, mount),
+            task_template(
+                args.id,
+                args.title,
+                args.line,
+                primary,
+                mount,
+                executor=executor,
+                extra_repositories=extra,
+                gates=gates,
+            ),
         )
         atomic_write_text(
             path / "handoff.md", f"# {args.title}\n\n- 目标：\n- 范围：\n- 验收：\n"
@@ -2681,7 +3526,8 @@ def cmd_task_gates(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
     passed = run_gates(config, task, dry_run=args.dry_run)
-    print("PASS" if passed else "FAIL")
+    prefix = "DRY RUN: " if args.dry_run else ""
+    print(f"{prefix}{'PASS' if passed else 'FAIL'}")
     if not passed:
         raise DyroError(f"任务 {task.id} 门禁未通过")
 
@@ -2689,7 +3535,10 @@ def cmd_task_gates(args: argparse.Namespace) -> None:
 def cmd_task_review(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
-    print(f"{task.id} -> {review_task(config, task, dry_run=args.dry_run)}")
+    result = review_task(config, task, dry_run=args.dry_run)
+    print(f"{task.id} -> {result}")
+    if result == "failed":
+        raise DyroError(f"任务 {task.id} 复核拒绝")
 
 
 def cmd_task_signoff(args: argparse.Namespace) -> None:
@@ -3008,10 +3857,105 @@ def cmd_task_merge(args: argparse.Namespace) -> None:
     config = _config(args)
     task = load_task(config, args.id)
     merge_task(config, task, push=args.push, dry_run=args.dry_run)
+    if args.dry_run:
+        extra = "（已预检 push）" if args.push else ""
+        print(f"DRY RUN: 可合并 {task.id}{extra}")
+    else:
+        print(f"已合并 {task.id}" + (" 并推送" if args.push else ""))
+
+
+def cmd_task_close(args: argparse.Namespace) -> None:
+    _require_yes(args, "关闭任务")
+    config = _config(args)
+    task = load_task(config, args.id)
+    close_task(config, task, dry_run=args.dry_run)
     print(
-        f"{'DRY RUN: ' if args.dry_run else ''}已合并 {task.id}"
-        + (" 并推送" if args.push else "")
+        f"{'DRY RUN: 将关闭' if args.dry_run else '已关闭'} {task.id} 的任务 worktree"
     )
+
+
+def _proofs_from_args(args: argparse.Namespace, *, proof_id: str | None = None):
+    from .proof import list_proofs
+
+    config = _config(args)
+    proofs = list_proofs(
+        config,
+        task_id=getattr(args, "task", None),
+        objective_id=getattr(args, "objective", None),
+        line_id=getattr(args, "line", None),
+    )
+    if proof_id:
+        matched = tuple(proof for proof in proofs if proof.id == proof_id)
+        if not matched:
+            raise DyroError(f"Proof 不存在：{proof_id}")
+        return matched
+    return proofs
+
+
+def _print_proofs(args: argparse.Namespace, proofs, *, mode: str = "") -> None:
+    from .proof import render_proofs_json, render_proofs_text
+
+    if getattr(args, "format", "text") == "json":
+        print(render_proofs_json(proofs, mode=mode or "rebind"))
+        return
+    print(render_proofs_text(proofs, mode=mode), end="")
+
+
+def cmd_proof_list(args: argparse.Namespace) -> None:
+    _print_proofs(args, _proofs_from_args(args))
+
+
+def cmd_proof_show(args: argparse.Namespace) -> None:
+    _print_proofs(args, _proofs_from_args(args, proof_id=args.proof_id))
+
+
+def cmd_proof_verify(args: argparse.Namespace) -> None:
+    from .proof import verify_exit_code
+
+    if getattr(args, "rerun_procedure", False):
+        raise DyroError(
+            "--rerun-procedure 必须在隔离 runner 中重放；0.7 未提供隔离重跑，"
+            "未 replay 不得声称 procedure_reproduced"
+        )
+    proofs = _proofs_from_args(args, proof_id=getattr(args, "proof_id", None))
+    _print_proofs(args, proofs, mode="rebind")
+    code = verify_exit_code(proofs)
+    if code:
+        raise SystemExit(code)
+
+
+def cmd_proof_export(args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from .proof import export_bundle
+
+    if bool(args.proof_id) == bool(args.task):
+        raise ValidationError("proof export 的位置参数 proof-id 与 --task 互斥，且必须提供其一")
+    if args.dry_run:
+        print(f"DRY RUN: 将导出 Proof 到 {args.bundle}")
+        return
+    proofs = _proofs_from_args(args, proof_id=args.proof_id)
+    if not proofs:
+        raise DyroError("没有可导出的 Proof")
+    path = export_bundle(proofs, Path(args.bundle))
+    print(f"已导出 {len(proofs)} 条 Proof 到 {path}")
+
+
+def cmd_proof_verify_bundle(args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from .proof import load_current_heads, verify_bundle, verify_exit_code
+    from .proof.bundle import INTEGRITY_MODE
+
+    if not args.bundle:
+        raise DyroError("verify-bundle 需要 Proof Bundle 路径")
+    heads = load_current_heads(Path(args.current_heads)) if args.current_heads else None
+    git_dirs = tuple(Path(item) for item in (args.git_dir or ()))
+    proofs = verify_bundle(Path(args.bundle), git_dirs=git_dirs, current_heads=heads)
+    _print_proofs(args, proofs, mode=INTEGRITY_MODE)
+    code = verify_exit_code(proofs)
+    if code:
+        raise SystemExit(code)
 
 
 def cmd_task_decisions(args: argparse.Namespace) -> None:
@@ -3036,8 +3980,13 @@ def cmd_task_stats(args: argparse.Namespace) -> None:
 
 
 def cmd_task_loop(args: argparse.Namespace) -> None:
+    failed: list[str] = []
     for task_id, result in loop_tasks(_config(args), dry_run=args.dry_run):
         print(f"{task_id} -> {result}")
+        if result == "failed":
+            failed.append(task_id)
+    if failed:
+        raise DyroError("任务失败：" + ", ".join(failed))
 
 
 def cmd_objective_start(args: argparse.Namespace) -> None:
@@ -3121,49 +4070,63 @@ def _read_objective_plan(
             config, objective=record, budget=read_budget
         )
     )
-    return snapshot, build_continuation_plan(snapshot)
+    return record, snapshot, build_continuation_plan(snapshot)
 
 
 def cmd_objective_plan(args: argparse.Namespace) -> None:
-    _, plan = _read_objective_plan(
-        _config(args),
+    config = _config(args)
+    record, _, plan = _read_objective_plan(
+        config,
         args.id,
         read_budget=_control_plane_budget(args) if args.format == "json" else None,
     )
+    preview = preview_objective_wave_budgets(
+        config,
+        objective=record.objective,
+        actions=plan.selected_actions,
+        now=datetime.now(timezone.utc),
+    )
     if args.format == "json":
-        print(
-            json.dumps(
-                continuation_plan_payload(plan),
-                ensure_ascii=False,
-                sort_keys=True,
-                indent=2,
-            )
-        )
+        payload = continuation_plan_payload(plan)
+        payload["budget_preview"] = preview
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
         return
     print(render_plan_text(plan))
+    for note in render_budget_preview_text(preview):
+        print(note)
 
 
 def cmd_objective_explain(args: argparse.Namespace) -> None:
-    _, plan = _read_objective_plan(
-        _config(args),
+    config = _config(args)
+    record, _, plan = _read_objective_plan(
+        config,
         args.id,
         read_budget=_control_plane_budget(args) if args.format == "json" else None,
     )
+    briefing = briefing_payload(
+        plan,
+        command=_briefing_command(args, config, *follow_up_argv(plan)),
+        title=record.objective.title,
+    )
     if args.format == "json":
+        payload = continuation_plan_payload(plan)
+        payload["briefing"] = briefing
         print(
             json.dumps(
-                continuation_plan_payload(plan),
+                payload,
                 ensure_ascii=False,
                 sort_keys=True,
                 indent=2,
             )
         )
         return
+    print(render_briefing_text(briefing))
+    print()
     print(render_plan_text(plan))
 
 
 def cmd_objective_graph(args: argparse.Namespace) -> None:
-    snapshot, plan = _read_objective_plan(
+    _, snapshot, plan = _read_objective_plan(
         _config(args),
         args.id,
         read_budget=_control_plane_budget(args) if args.format == "json" else None,
@@ -3206,12 +4169,36 @@ def cmd_objective_tick(args: argparse.Namespace) -> None:
             record.objective.budget.max_parallel, len(available_write)
         ),
     )
-    overlay = annotate_objective_tick(snapshot, plan, tick, available_write)
+    overlay = annotate_objective_tick(
+        snapshot,
+        plan,
+        tick,
+        available_write,
+        capabilities=getattr(config, "capabilities", None),
+    )
+    overlay["budget_preview"] = preview_objective_wave_budgets(
+        config,
+        objective=record.objective,
+        actions=tick.wave,
+        now=datetime.now(timezone.utc),
+    )
     if args.format == "json":
         payload = scheduler_tick_payload(tick)
         payload.update(overlay)
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
         return
+    print(
+        render_briefing_text(
+            {
+                "lines": arrival_lines(
+                    plan, record.objective.title, TICK_CLOSER
+                )
+            }
+        )
+    )
+    print()
+    print("\n".join(render_human_wave(tick.wave)))
+    print()
     print(render_scheduler_tick_text(tick))
     for note in overlay.get("peer_wave", {}).get("warnings", []):
         print(f"Warning: {note}")
@@ -3220,6 +4207,8 @@ def cmd_objective_tick(args: argparse.Namespace) -> None:
             f"Harness: {binding['task_id']} -> {binding['executor']} "
             f"({binding['source']})"
         )
+    for note in render_budget_preview_text(overlay["budget_preview"]):
+        print(note)
 
 
 def cmd_objective_attention(args: argparse.Namespace) -> None:
@@ -3231,13 +4220,9 @@ def cmd_objective_attention(args: argparse.Namespace) -> None:
         recover=False,
         read_budget=_control_plane_budget(args) if args.format == "json" else None,
     )
-    snapshot = (
-        build_scheduler_snapshot(config, objective=record)
-        if args.format != "json"
-        else build_scheduler_snapshot_bounded(
-            config, objective=record, budget=_control_plane_budget(args)
-        )
-    )
+    # Attention must rebind merge proofs.  Bounded JSON snapshots stay
+    # Git-free for plan/tick/graph; this command is the decay surface.
+    snapshot = build_scheduler_snapshot(config, objective=record)
     plan = build_continuation_plan(snapshot)
     scheduler = build_scheduler_projection(snapshot, plan)
     projection = build_attention_projection(
@@ -3249,6 +4234,24 @@ def cmd_objective_attention(args: argparse.Namespace) -> None:
     if args.format == "json":
         print(render_attention_json(projection))
         return
+    print(
+        render_briefing_text(
+            {
+                "lines": arrival_lines(
+                    plan, record.objective.title, ATTENTION_CLOSER
+                )
+            }
+        )
+    )
+    print()
+    print(
+        "\n".join(
+            render_human_attention(
+                tuple((item.reason, item.subject_id) for item in projection.items)
+            )
+        )
+    )
+    print()
     print(render_attention_text(projection))
 
 
@@ -3486,11 +4489,13 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
         bound, decision = apply_harness_bindings(
             ScheduleWave(tasks=tuple(queued), deferred=()),
             available_write,
+            capabilities=getattr(config, "capabilities", None),
         )
         for note in decision.warnings:
             print(f"warning: {note}")
         for item in decision.deferred:
             print(f"defer {item.task.id}: {item.reason}")
+        failed: list[str] = []
         if bound:
             overrides = {item.task_id: item.executor for item in decision.bindings}
             with ThreadPoolExecutor(
@@ -3510,7 +4515,10 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
                 for future in as_completed(futures):
                     task = futures[future]
                     try:
-                        print(f"dispatch {task.id} -> {future.result()}")
+                        result = future.result()
+                        print(f"dispatch {task.id} -> {result}")
+                        if result == "failed":
+                            failed.append(task.id)
                     except DyroError as exc:
                         print(f"skip {task.id}: {exc}")
         review_queue = list(plan_tasks(config).review)
@@ -3525,9 +4533,14 @@ def cmd_task_daemon(args: argparse.Namespace) -> None:
                 for future in as_completed(futures):
                     task = futures[future]
                     try:
-                        print(f"review {task.id} -> {future.result()}")
+                        result = future.result()
+                        print(f"review {task.id} -> {result}")
+                        if result == "failed":
+                            failed.append(task.id)
                     except DyroError as exc:
                         print(f"keep review {task.id}: {exc}")
+        if failed:
+            raise DyroError("任务失败：" + ", ".join(sorted(set(failed))))
         if args.once or args.dry_run:
             return
         time.sleep(max(10, args.interval))
@@ -3546,7 +4559,7 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="仅输出计划，不写文件、不调用 Agent 或 Git 写操作",
+        help="仅输出计划，不写 Dyro overlay；本地门禁会执行 argv；merge 会做可 abort 的冲突探测",
     )
 
 
@@ -3735,6 +4748,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="在 JSON 中显式包含本机诊断路径",
     )
     doctor_parser.set_defaults(func=cmd_doctor)
+    image = sub.add_parser(
+        "image",
+        help="发现并引导安装可选的 local-image-gen sidecar；不代跑计费出图",
+    )
+    image_sub = image.add_subparsers(dest="image_command", required=True)
+    image_doctor = image_sub.add_parser(
+        "doctor",
+        help="探测 local-image-gen 是否在 PATH，以及是否有可用后端",
+    )
+    image_doctor.add_argument(
+        "--format", choices=("text", "json"), default="text"
+    )
+    image_doctor.add_argument(
+        "--include-paths",
+        action="store_true",
+        help="在 JSON 中显式包含本机产出目录与工作区路径",
+    )
+    image_doctor.set_defaults(func=cmd_image_doctor)
+    image_install = image_sub.add_parser(
+        "install",
+        help="展示官方安装来源；不会执行远程安装脚本",
+    )
+    image_install.add_argument(
+        "--yes", action="store_true", help="确认后打开官方仓库页面"
+    )
+    image_install.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="仅展示安装来源，不打开浏览器；也兼容全局 --dry-run",
+    )
+    image_install.set_defaults(func=cmd_image_install)
     terminology = sub.add_parser("terminology", help="使用仓库外策略扫描候选术语")
     terminology_sub = terminology.add_subparsers(
         dest="terminology_command", required=True
@@ -3792,7 +4838,8 @@ def build_parser() -> argparse.ArgumentParser:
         "discover", help="检测本机 Agent，并区分已配置与尚未集成"
     ).set_defaults(func=cmd_agent_discover)
     agent_add = agent_sub.add_parser(
-        "add", help="通过预设或命令登记 Agent，无需编辑 TOML"
+        "add",
+        help="写入 [adapters.*]；运行时升级为 Card，不写 [[capabilities]]",
     )
     agent_add.add_argument("id")
     agent_source = agent_add.add_mutually_exclusive_group(required=True)
@@ -3801,6 +4848,85 @@ def build_parser() -> argparse.ArgumentParser:
         "--command", help="作为 launch/read/write 的 argv 命令行；不会经 shell 执行"
     )
     agent_add.set_defaults(func=cmd_agent_add)
+    capability = sub.add_parser(
+        "capability",
+        help="审计后的 Capability Card；PATH 发现不是 Card；无 Card 的 dispatch 就绪是第二扇门；有 Card 无 execute 一律拒绝",
+    )
+    capability_sub = capability.add_subparsers(dest="capability_command", required=True)
+    capability_list = capability_sub.add_parser("list", help="列出已审计 Card 与 discovered_unintegrated")
+    capability_list.add_argument("--format", choices=("text", "json"), default="text")
+    capability_list.set_defaults(func=cmd_capability_list)
+    capability_add = capability_sub.add_parser("add", help="写入 [[capabilities]]，不写 PATH 发现")
+    capability_add.add_argument("id")
+    capability_source = capability_add.add_mutually_exclusive_group(required=True)
+    capability_source.add_argument("--preset", choices=("codex", "noop"))
+    capability_source.add_argument("--command", help="作为 launch/read/write 的 argv；不会经 shell 执行")
+    capability_add.set_defaults(func=cmd_capability_add)
+    capability_test = capability_sub.add_parser("test", help="探测可执行/登录，不启动交付")
+    capability_test.add_argument("id")
+    capability_test.add_argument("--format", choices=("text", "json"), default="text")
+    capability_test.set_defaults(func=cmd_capability_test)
+
+    host = sub.add_parser(
+        "host",
+        help="编译并核验宿主投影（skill；deny hook 不是沙箱，只挡受监督 apply）",
+    )
+    host_sub = host.add_subparsers(dest="host_command", required=True)
+    host_compile = host_sub.add_parser(
+        "compile",
+        help="把定律与已审计 Card 编译为工作区 skill；deny hook 不是沙箱。--user 才写用户级",
+    )
+    host_compile.add_argument(
+        "--user",
+        action="store_true",
+        help="写入用户级 host-projections；默认只写当前工作区",
+    )
+    host_compile.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只规划宿主投影，不写入 host-projections 或 host.lock（兼容全局 --dry-run）",
+    )
+    host_compile.add_argument("--format", choices=("text", "json"), default="text")
+    host_compile.set_defaults(func=cmd_host_compile)
+    host_status = host_sub.add_parser("status", help="查看已编译投影是否仍与当前 Card 一致")
+    host_status.add_argument(
+        "--user",
+        action="store_true",
+        help="核验用户级投影",
+    )
+    host_status.add_argument("--format", choices=("text", "json"), default="text")
+    host_status.set_defaults(func=cmd_host_status)
+    host_doctor = host_sub.add_parser(
+        "doctor",
+        help="重算投影哈希；手改或过期则失败。只挡受监督 apply，不管 task run / merge。deny hook 不是隔离边界",
+    )
+    host_doctor.add_argument(
+        "--user",
+        action="store_true",
+        help="核验用户级投影",
+    )
+    host_doctor.add_argument("--format", choices=("text", "json"), default="text")
+    host_doctor.set_defaults(func=cmd_host_doctor)
+    host_seed = host_sub.add_parser(
+        "seed",
+        help="在 overlay 根写入缺失的 AGENTS.md 与 CLAUDE.md；已有文件不覆盖",
+    )
+    host_seed.add_argument(
+        "--force",
+        action="store_true",
+        help="覆盖已有 AGENTS.md/CLAUDE.md；必须显式指定",
+    )
+    host_seed.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只打印将写入的路径，不落盘（兼容全局 --dry-run）",
+    )
+    host_seed.set_defaults(func=cmd_host_seed)
+
     agent_test = agent_sub.add_parser(
         "test", help="仅检查 adapter 可执行文件是否可用，不启动 Agent"
     )
@@ -3850,7 +4976,12 @@ def build_parser() -> argparse.ArgumentParser:
     integration_install_parser.add_argument(
         "id",
         choices=INTEGRATION_CHOICES,
-        help="skill 为控制面 Skill；dispatch 为多 Harness 派发 Skill；codex 为兼容别名",
+        metavar=USER_INTEGRATION_METAVAR,
+        help=(
+            "review-board 安装会审斜杠 /dyro-review-board 及内部协议；"
+            "board 为遗留内部 id；skill=控制面；executor=执行；"
+            "dispatch=派发；task-merge/line-family=斜杠；codex=skill 别名"
+        ),
     )
     integration_install_parser.add_argument(
         "--yes", action="store_true", help="确认执行已预览的安装或升级"
@@ -3869,7 +5000,12 @@ def build_parser() -> argparse.ArgumentParser:
     integration_sync_parser.add_argument(
         "id",
         choices=INTEGRATION_CHOICES,
-        help="skill 为控制面 Skill；dispatch 为多 Harness 派发 Skill；codex 为兼容别名",
+        metavar=USER_INTEGRATION_METAVAR,
+        help=(
+            "review-board 安装会审斜杠 /dyro-review-board 及内部协议；"
+            "board 为遗留内部 id；skill=控制面；executor=执行；"
+            "dispatch=派发；task-merge/line-family=斜杠；codex=skill 别名"
+        ),
     )
     integration_sync_parser.add_argument(
         "--yes", action="store_true", help="确认执行已预览的同步或升级"
@@ -3884,7 +5020,12 @@ def build_parser() -> argparse.ArgumentParser:
     integration_uninstall_parser = integration_sub.add_parser(
         "uninstall", help="仅卸载仍匹配 ownership manifest 的资产"
     )
-    integration_uninstall_parser.add_argument("id", choices=INTEGRATION_CHOICES)
+    integration_uninstall_parser.add_argument(
+        "id",
+        choices=INTEGRATION_CHOICES,
+        metavar=USER_INTEGRATION_METAVAR,
+        help="review-board 为会审斜杠；board 为遗留内部协议 id；其余与 install 相同",
+    )
     integration_uninstall_parser.add_argument(
         "--yes", action="store_true", help="确认卸载仍完整的自有资产"
     )
@@ -4050,7 +5191,10 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--agent")
     start.add_argument("--prompt", default="")
     start.set_defaults(func=cmd_start)
-    next_parser = sub.add_parser("next", help="根据当前状态给出新手的唯一安全下一步")
+    next_parser = sub.add_parser(
+        "next",
+        help="给出唯一安全下一步；已有目标时打印换工具开场白，不续另一家会话",
+    )
     next_parser.add_argument(
         "--format", choices=("text", "json"), default="text"
     )
@@ -4083,6 +5227,134 @@ def build_parser() -> argparse.ArgumentParser:
     )
     line_create.add_argument("--yes", action="store_true")
     line_create.set_defaults(func=cmd_line_create)
+    line_spawn = line_sub.add_parser(
+        "spawn", help="从父开发线创建子线（不是任务）；不 fetch、不 push"
+    )
+    line_spawn.add_argument("parent", help="父开发线 ID")
+    line_spawn.add_argument(
+        "child", help="子线短名或完整 ID；短名默认写成 {父ID}_{短名}"
+    )
+    line_spawn.add_argument(
+        "--repos",
+        help="逗号分隔的仓库子集；默认继承父线全部仓库",
+    )
+    line_spawn.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只打印计划，不创建子线或工作树（兼容全局 --dry-run）",
+    )
+    line_spawn.add_argument("--yes", action="store_true")
+    line_spawn.set_defaults(func=cmd_line_spawn)
+    line_merge = line_sub.add_parser(
+        "merge", help="将子线 --no-ff 合并回其直接父开发线；不删除子线"
+    )
+    line_merge.add_argument("child", help="子开发线 ID")
+    line_merge.add_argument(
+        "--into",
+        dest="parent",
+        required=True,
+        help="父开发线 ID；必须是该子线的直接父线",
+    )
+    line_merge.add_argument(
+        "--push",
+        action="store_true",
+        help="合并后推送父线分支；需 policy.allow_push",
+    )
+    line_merge.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="探测合入但不提交（兼容全局 --dry-run）",
+    )
+    line_merge.add_argument("--yes", action="store_true")
+    line_merge.set_defaults(func=cmd_line_merge)
+    line_sync = line_sub.add_parser(
+        "sync", help="将父线提交 --no-ff 合并进子线；无线父线则拒绝"
+    )
+    line_sync.add_argument("child", help="子开发线 ID")
+    line_sync.add_argument(
+        "--push",
+        action="store_true",
+        help="同步后推送子线分支；需 policy.allow_push",
+    )
+    line_sync.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="探测同步但不提交（兼容全局 --dry-run）",
+    )
+    line_sync.add_argument("--yes", action="store_true")
+    line_sync.set_defaults(func=cmd_line_sync)
+    line_post = line_sub.add_parser("post", help="向一层家族频道追加 overlay 信号")
+    line_post.add_argument("sender", metavar="LINE", help="发送者线 id；人类用 operator")
+    line_post.add_argument(
+        "--kind",
+        required=True,
+        choices=(
+            "contract",
+            "blocked",
+            "shipped",
+            "ask_sync",
+            "decision",
+            "artifact",
+            "retract",
+        ),
+        help="频道 kind；operator 只能发 decision 或 contract",
+    )
+    line_post.add_argument("--to", default="", help="定向接收者；省略则为家族广播")
+    line_post.add_argument("--body", default="", help="正文；retract 时填被撤回的 msg id")
+    line_post.add_argument(
+        "--family",
+        default="",
+        help="家族父线；operator 广播时必填",
+    )
+    line_post.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只打印计划，不写频道或事件（兼容全局 --dry-run）",
+    )
+    line_post.add_argument("--yes", action="store_true")
+    line_post.add_argument("--format", choices=("text", "json"), default="text")
+    line_post.set_defaults(func=cmd_line_post)
+    line_inbox = line_sub.add_parser("inbox", help="读取一层家族频道可见行")
+    line_inbox.add_argument("--family", default="", help="家族父线；省略则看当前线")
+    line_inbox.add_argument(
+        "--unacked",
+        action="store_true",
+        help="只列出操作者尚未 ack 的行",
+    )
+    line_inbox.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只读；不写频道（兼容全局 --dry-run）",
+    )
+    line_inbox.add_argument("--format", choices=("text", "json"), default="text")
+    line_inbox.set_defaults(func=cmd_line_inbox)
+    line_ack = line_sub.add_parser("ack", help="将一条家族信号标为人类已读")
+    line_ack.add_argument("id", help="频道行 id，例如 msg_1")
+    line_ack.add_argument(
+        "--family",
+        default="",
+        help="家族父线；同号出现在多个家族时必填",
+    )
+    line_ack.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只打印计划，不写 ack（兼容全局 --dry-run）",
+    )
+    line_ack.add_argument("--yes", action="store_true")
+    line_ack.add_argument("--format", choices=("text", "json"), default="text")
+    line_ack.set_defaults(func=cmd_line_ack)
 
     hotfix = sub.add_parser("hotfix", help="生产 Hotfix 开发线")
     hotfix_sub = hotfix.add_subparsers(dest="hotfix_command", required=True)
@@ -4125,6 +5397,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     changeset_verify.set_defaults(func=cmd_changeset_verify)
 
+    review = sub.add_parser("review", help="开发线增量审查靶区提取与门禁核验")
+    review_sub = review.add_subparsers(dest="review_command", required=True)
+    review_verify = review_sub.add_parser("verify", help="运行开发线各仓本地 verify 静态门禁")
+    review_verify.add_argument("--line", required=True, help="开发线 ID")
+    review_verify.set_defaults(func=cmd_review_verify)
+
+    review_pack = review_sub.add_parser("pack", help="提取开发线跨仓精简 Diff 与审查上下文")
+    review_pack.add_argument("--line", required=True, help="开发线 ID")
+    review_pack.add_argument("--base", help="对比基线；默认开发线 base")
+    review_pack.add_argument(
+        "--scope",
+        choices=("contracts", "all", "summary"),
+        default="contracts",
+        help="审查靶区范围：contracts (仅核心契约/协议Diff，默认), all (全量文件Diff), summary (仅改动索引不含Diff)",
+    )
+    review_pack.add_argument("--no-verify", action="store_true", help="跳过本地 verify 门禁检查")
+    review_pack.add_argument("--max-lines", type=int, default=250, help="单文件 Diff 最大保留行数（防 Token 膨胀）")
+    review_pack.add_argument("--out", help="输出 Markdown 审查包文件路径；默认标准输出")
+    review_pack.set_defaults(func=cmd_review_pack)
+
     objective = sub.add_parser(
         "objective", help="持久化并观察一个跨任务 Objective；此阶段不执行 Task"
     )
@@ -4165,7 +5457,8 @@ def build_parser() -> argparse.ArgumentParser:
     objective_plan.add_argument("--format", choices=("text", "json"), default="text")
     objective_plan.set_defaults(func=cmd_objective_plan)
     objective_explain = objective_sub.add_parser(
-        "explain", help="解释 Objective 当前的可推进项与阻塞原因"
+        "explain",
+        help="用人话解释当前事项，并给出一条只读下一步；不续另一家会话",
     )
     objective_explain.add_argument("id")
     objective_explain.add_argument("--format", choices=("text", "json"), default="text")
@@ -4179,7 +5472,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     objective_graph.set_defaults(func=cmd_objective_graph)
     objective_tick = objective_sub.add_parser(
-        "tick", help="预览下一组有界 Objective Action；不创建 intent 或执行任务"
+        "tick",
+        help="预览下一组有界 Objective Action 与预算；不创建 intent 或执行任务",
     )
     objective_tick.add_argument("id")
     objective_tick.add_argument("--format", choices=("text", "json"), default="text")
@@ -4277,6 +5571,56 @@ def build_parser() -> argparse.ArgumentParser:
     trigger_signal.add_argument("--format", choices=("text", "json"), default="text")
     trigger_signal.set_defaults(func=cmd_trigger_signal)
 
+    proof = sub.add_parser("proof", help="只读派生并核验交付 Proof（rebind，不是 replay）")
+    proof_sub = proof.add_subparsers(dest="proof_command", required=True)
+    proof_list = proof_sub.add_parser(
+        "list",
+        help="从当前工作区全量重派生 Proof（含 trigger_observation；--task 不含；--line 只含该线 Objective 的 trigger）",
+    )
+    proof_list.add_argument("--task")
+    proof_list.add_argument("--objective")
+    proof_list.add_argument("--line")
+    proof_list.add_argument("--format", choices=("text", "json"), default="text")
+    proof_list.set_defaults(func=cmd_proof_list)
+    proof_show = proof_sub.add_parser("show", help="显示一条重派生的 Proof")
+    proof_show.add_argument("proof_id")
+    proof_show.add_argument("--format", choices=("text", "json"), default="text")
+    proof_show.set_defaults(func=cmd_proof_show)
+    proof_verify = proof_sub.add_parser("verify", help="对当前工作区做衰减与绑定重算，不重跑 gate")
+    proof_verify.add_argument("proof_id", nargs="?")
+    proof_verify.add_argument("--task")
+    proof_verify.add_argument("--objective")
+    proof_verify.add_argument("--line")
+    proof_verify.add_argument("--format", choices=("text", "json"), default="text")
+    proof_verify.add_argument(
+        "--rerun-procedure",
+        action="store_true",
+        help="0.7 拒绝：隔离 replay 尚未提供",
+    )
+    proof_verify.set_defaults(func=cmd_proof_verify)
+    proof_export = proof_sub.add_parser("export", help="导出 Proof Bundle（schema_version=1，不含 git 对象）")
+    proof_export.add_argument("proof_id", nargs="?")
+    proof_export.add_argument("--task")
+    proof_export.add_argument("--bundle", required=True, help="输出 .zip 路径")
+    proof_export.set_defaults(func=cmd_proof_export)
+    proof_verify_bundle = proof_sub.add_parser(
+        "verify-bundle",
+        help="核验 bundle 完整性；需要调用方 --git-dir，不是当前工作区 verify，也不是身份证明，不是 merge",
+    )
+    proof_verify_bundle.add_argument("bundle")
+    proof_verify_bundle.add_argument(
+        "--git-dir",
+        action="append",
+        default=[],
+        help="调用方必须传入包含已钉 SHA 的对象库；可重复，按并集查找，不是 repo_id 映射。缺省或无 pin 不得报 live",
+    )
+    proof_verify_bundle.add_argument(
+        "--current-heads",
+        help="可选 JSON：提供后才允许衰减结论，不得与 merge 混称",
+    )
+    proof_verify_bundle.add_argument("--format", choices=("text", "json"), default="text")
+    proof_verify_bundle.set_defaults(func=cmd_proof_verify_bundle)
+
     task = sub.add_parser("task", help="任务编排")
     task_sub = task.add_subparsers(dest="task_command", required=True)
     task_graph = task_sub.add_parser("graph", help="编译、校验或渲染任务图")
@@ -4305,7 +5649,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_create.add_argument("id")
     task_create.add_argument("--title", required=True)
     task_create.add_argument("--line", required=True)
-    task_create.add_argument("--repository", required=True)
+    task_create.add_argument("--repository", action="append", required=True)
     task_create.set_defaults(func=cmd_task_create)
     task_sub.add_parser("list").set_defaults(func=cmd_task_list)
     task_sub.add_parser("board").set_defaults(func=cmd_task_board)
@@ -4460,6 +5804,10 @@ def build_parser() -> argparse.ArgumentParser:
     task_merge.add_argument("--yes", action="store_true")
     task_merge.add_argument("--push", action="store_true")
     task_merge.set_defaults(func=cmd_task_merge)
+    task_close = task_sub.add_parser("close", help="移除已完成或失败任务的 worktree 与任务分支")
+    task_close.add_argument("id")
+    task_close.add_argument("--yes", action="store_true")
+    task_close.set_defaults(func=cmd_task_close)
     task_sub.add_parser("decisions").set_defaults(func=cmd_task_decisions)
     task_sub.add_parser("stats").set_defaults(func=cmd_task_stats)
     task_sub.add_parser("loop").set_defaults(func=cmd_task_loop)
@@ -4588,24 +5936,34 @@ def _fresh_dyro_argv(*cli_args: str) -> list[str]:
 def _refresh_skill_via_new_cli() -> None:
     """Best-effort Skill-bundle sync through the freshly installed CLI."""
     requests = [("sync", "skill")]
-    try:
-        control_status = integration_status("skill")
-        dispatch_status = integration_status("dispatch")
-    except (DyroError, OSError, ValidationError):
-        control_status = None
-        dispatch_status = None
-    if control_status is not None and control_status.state in {
-        IntegrationState.CURRENT,
-        IntegrationState.OUTDATED,
-    }:
+    statuses = {}
+    for integration, _label in _MANAGED_SKILL_BUNDLE:
+        try:
+            statuses[integration] = integration_status(integration)
+        except (DyroError, OSError, ValidationError):
+            continue
+    control_status = statuses.get("skill")
+    control_opted_in = (
+        control_status is not None
+        and control_status.state
+        in {IntegrationState.CURRENT, IntegrationState.OUTDATED}
+    )
+    if control_opted_in:
         # Existing control-plane ownership is the user's one-time opt-in to the
-        # first-party Skill bundle. Install a newly shipped companion safely.
-        requests.append(("install", "dispatch"))
-    elif dispatch_status is not None and dispatch_status.state in {
-        IntegrationState.CURRENT,
-        IntegrationState.OUTDATED,
-    }:
-        requests.append(("sync", "dispatch"))
+        # first-party Skill bundle. Install newly shipped companions safely.
+        for integration in COMPANION_IDS:
+            status = statuses.get(integration)
+            if status is not None and (
+                status.state is IntegrationState.CURRENT
+                or _skill_status_blocks_automatic_change(status.state)
+            ):
+                continue
+            requests.append(("install", integration))
+    else:
+        for integration in COMPANION_IDS:
+            status = statuses.get(integration)
+            if status is not None and status.state is IntegrationState.OUTDATED:
+                requests.append(("sync", integration))
 
     print("正在同步已托管的 Dyro Skills……")
     for action, integration in requests:
@@ -4662,7 +6020,7 @@ def _maybe_sync_managed_skill() -> None:
         if status is None or _skill_status_blocks_automatic_change(status.state):
             continue
         allow_first_install = (
-            integration == "dispatch"
+            integration in COMPANION_IDS
             and status.state is IntegrationState.ABSENT
             and control_opted_in
         )

@@ -8,8 +8,11 @@ import shutil
 import sys
 from urllib.parse import urlencode
 
-from .config import CONFIG_NAME, Config, expand_argv, load, validate_id
+from .config import CONFIG_NAME, Config, expand_argv, load, push_disclosure, validate_id
+from .continuation.briefing import render_briefing_text
+from .continuation.ready_briefing import build_ready_briefing
 from .errors import DyroError, ValidationError
+from .integrations.seats import render_seat_notice, select_launch_seat
 from .hub import (
     WorkspaceRecord,
     add_workspace,
@@ -43,6 +46,7 @@ from .workspace import (
     create_line,
     doctor,
     get_line,
+    is_missing_origin_finding,
     line_root,
     list_lines,
     preflight_line,
@@ -132,6 +136,9 @@ def print_status(config: Config) -> None:
             f"{scope:24} {value(f'{repo_id:14}')} {value(f'{branch:24}')} "
             f"{head:12} {dirty_display} {upstream}"
         )
+    note = push_disclosure(config.policy)
+    if note:
+        print(note)
 
 
 def print_all_status() -> None:
@@ -640,6 +647,9 @@ def launch_start_tool(
     prompt: str = "",
     dry_run: bool,
 ) -> None:
+    print(
+        render_seat_notice(select_launch_seat(task=task, line=line))
+    )
     if tool.kind == "adapter":
         launch_adapter(
             config,
@@ -737,12 +747,15 @@ def existing_line_workspace(
     config: Config, line_id: str, kind: str | None
 ) -> tuple[Line, Path]:
     line = get_line(config, line_id, kind)
-    relevant = {f"FAIL repository {repo_id}:" for repo_id in line.repositories}
-    relevant.add(f"FAIL {line.kind}:{line.id}/")
+    # Same FAIL set as `dyro next` → needs_repair, minus the constructed
+    # missing-origin shape. Workspace-level FAILs (external Profile, …)
+    # and other-line FAILs block open; only missing-origin-only may skip
+    # so a just-created local-only line can be opened. start/next refuse
+    # even that skip.
     failures = [
         finding
         for finding in doctor(config)
-        if any(finding.startswith(prefix) for prefix in relevant)
+        if finding.startswith("FAIL") and not is_missing_origin_finding(finding)
     ]
     if failures:
         raise DyroError(
@@ -962,13 +975,28 @@ def _targets(config: Config, record: WorkspaceRecord | None) -> list[HomeTarget]
     return targets
 
 
+def _follow_up_command(briefing: dict[str, object] | None) -> str:
+    if not isinstance(briefing, dict):
+        return ""
+    command = briefing.get("command")
+    return command.strip() if isinstance(command, str) else ""
+
+
 def _choose_action(
-    targets: list[HomeTarget], *, can_switch: bool
+    targets: list[HomeTarget],
+    *,
+    can_switch: bool,
+    briefing: dict[str, object] | None = None,
 ) -> tuple[str, str] | None:
+    follow_up = _follow_up_command(briefing)
+    offset = 1 if follow_up else 0
     print("\n" + title("━━ 今天做什么 ━━"))
+    if follow_up:
+        print("\n" + muted("现在需要你"))
+        print("  1) 做下一步，不打开编码工具")
     if targets:
         print("\n" + muted("继续工作"))
-    for index, target in enumerate(targets, start=1):
+    for index, target in enumerate(targets, start=1 + offset):
         prefix, delimiter, target_value = target.label.partition("：")
         rendered_target = (
             f"{prefix}{delimiter}{value(target_value)}"
@@ -976,7 +1004,7 @@ def _choose_action(
             else value(target.label)
         )
         print(f"  {index}) {rendered_target}")
-    status_index = len(targets) + 1
+    status_index = len(targets) + 1 + offset
     print("\n" + muted("查看与管理"))
     print(f"  {status_index}) 查看当前项目状态")
     console_index = status_index + 1
@@ -995,7 +1023,7 @@ def _choose_action(
             "\n在交互终端运行 dyro 可选择并直接进入；也可使用 dyro open 或 dyro task open。"
         )
         return None
-    default = "1" if targets else str(new_line_index)
+    default = "1" if (follow_up or targets) else str(new_line_index)
     while True:
         raw = (
             input(f"\n输入编号（回车={default}，q=退出）：").strip().lower() or default
@@ -1006,8 +1034,10 @@ def _choose_action(
             print(warning("请输入菜单编号，或输入 q 退出。"))
             continue
         selected = int(raw)
-        if 1 <= selected <= len(targets):
-            target = targets[selected - 1]
+        if follow_up and selected == 1:
+            return "briefing", follow_up
+        if offset < selected <= len(targets) + offset:
+            target = targets[selected - 1 - offset]
             return target.kind, target.id
         if selected == status_index:
             return "status", ""
@@ -2127,23 +2157,46 @@ def _create_hotfix_from_home(config: Config, dry_run: bool) -> Line | None:
         return line
 
 
+def _print_ready_briefing(
+    config: Config, record: WorkspaceRecord | None
+) -> dict[str, object] | None:
+    """Show the same switch-tool opening as `next`, then the home menu."""
+    alias = record.name if record is not None else config.name
+    briefing, _ = build_ready_briefing(config, alias=alias)
+    if briefing is None:
+        return None
+    text = render_briefing_text(briefing)
+    if text:
+        print()
+        print(text)
+    return briefing
+
+
 def _run_config_home(
     config: Config, record: WorkspaceRecord | None, dry_run: bool
 ) -> None:
     print("\n" + title(f"━━ {config.name} ━━"))
-    print(f"工作区  {value(config.root)}")
+    print(f"工作区  {value(config.name)}")
     failures = [finding for finding in doctor(config) if finding.startswith("FAIL")]
     if failures:
         print(
-            f"\n检测到 {len(failures)} 个结构问题；只会阻止进入受影响的目标。"
+            f"\n检测到 {len(failures)} 个结构问题；除尚未发布的 "
+            "origin/<branch> 外，doctor FAIL 会阻止打开开发线。"
             "运行 dyro doctor 查看详情。"
         )
+    briefing = _print_ready_briefing(config, record)
     action = _choose_action(
-        _targets(config, record), can_switch=len(load_registry().workspaces) > 1
+        _targets(config, record),
+        can_switch=len(load_registry().workspaces) > 1,
+        briefing=briefing,
     )
     if action is None:
         return
     kind, target_id = action
+    if kind == "briefing":
+        if target_id:
+            print(target_id)
+        return
     if kind == "status":
         print_status(config)
         return
@@ -2178,9 +2231,13 @@ def _run_config_home(
         if line is None:
             return
         kind, target_id = line.kind, line.id
+    task_id = ""
+    line_id = target_id
     if kind == "task":
         task = load_task(config, target_id)
         target_workspace = existing_task_workspace(config, task)
+        line_id = task.line
+        task_id = task.id
     else:
         _, target_workspace = existing_line_workspace(config, target_id, kind)
     tool = _choose_tool(config, record, workspace=target_workspace, dry_run=dry_run)
@@ -2190,14 +2247,15 @@ def _run_config_home(
         mark_workspace_used(
             record.name, target_kind=kind, target_id=target_id, agent=tool.id
         )
-    if tool.kind == "launcher":
-        launch_home_tool(workspace=target_workspace, tool=tool, dry_run=dry_run)
-    elif kind == "task":
-        open_task(config, target_id, agent=tool.id, prompt="", dry_run=dry_run)
-    else:
-        open_line(
-            config, target_id, kind=kind, agent=tool.id, prompt="", dry_run=dry_run
-        )
+    launch_start_tool(
+        config,
+        workspace=target_workspace,
+        tool=tool,
+        line=line_id,
+        task=task_id,
+        prompt="",
+        dry_run=dry_run,
+    )
 
 
 def run_home(*, root: str | None, workspace: str | None, dry_run: bool) -> None:

@@ -337,7 +337,8 @@ def build_update_plan(
             (
                 uv,
                 "tool",
-                "upgrade",
+                "install",
+                "--force",
                 "--default-index",
                 PYPI_SIMPLE_URL,
                 "--no-config",

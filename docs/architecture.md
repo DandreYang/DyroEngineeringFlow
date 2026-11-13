@@ -8,6 +8,7 @@
 DyroEngineeringFlow Core（`dyro` CLI）
   ├─ home: 全局工作区入口、最近目标、任意目录导航（无交付权限）
   ├─ workspace: anchors、逐仓基线、开发线、Hotfix、存储模式、doctor
+  ├─ image sidecar: 可选的 `local-image-gen` 发现与安装引导（不是座位，也不是编码工具）
   ├─ launch: Agent adapter 的安全 argv 模板
   ├─ dispatch: 任务 DAG、决策点、冲突组、状态机、回执、复核与外部签收
   ├─ verify: gates、日志、台账和统计
@@ -215,6 +216,13 @@ Ed25519 信任根位于 `.dyro/trust/ed25519/execution/`、`.dyro/trust/ed25519/
 11. Change Set 只记录干净开发线的精确提交组合；`changeset verify` 会拒绝 dirty、分支或 HEAD 漂移。具体发布平台、promotion 与 forward-port 由 Profile 扩展执行并回写其证据。
 12. 下游调度不仅要求依赖任务为 `done`，还要求依赖的逐仓 task HEAD 已进入所属开发线；状态完成不能代替代码集成。
 13. 外部执行的后续 attempt 必须继承同一 run、递增 attempt number，并绑定前一 attempt 与回答摘要；同一编号不可被不同证据重写。
+14. 任何界面或宿主投影不得把 decayed / inconclusive Proof 显示为通过。
+15. Capability Card 缺少 `cannot_prove` 时，默认至少包含 `done` 与 `merge`。
+16. Host Compiler 的输出哈希必须可重算；手改投影在 doctor 中失败，不在运行时「尽量兼容」。
+17. Proof Bundle 不得包含工作区绝对路径、remote URL 中的凭据、adapter 环境、prompt 或 answer。
+18. `verify-bundle` 在缺 procedure、缺 substrate、缺调用方 git 对象、或缺已声明的签名密钥时返回 `inconclusive`，退出码与 `live` 区分。捆内不塞 git 对象。该 `live` 是完整性结论，不是「现在能否 merge」。
+19. 发现到的未审计命令不得写入可执行 Card，也不得被 Objective 自动选中。
+20. 密钥缺席：Card 不得声明看起来像秘密的环境变量名；需要认证的工具使用用户已登录的本机 CLI 会话，或独立的本机经纪，不把 token 写进 Profile。
 
 ## 与 Graph Engineering 的关系（可选读）
 
@@ -233,5 +241,7 @@ Dyro 的交付拓扑与之**实质相近**：TaskGraph（`depends_on` / conflict
 ## 扩展路线
 
 未来的 adapter、通知、签名规则、发布平台与审批系统应使用 Python entry point 或独立 Profile 扩展包接入；不要把某个组织的策略加入 core 默认行为。
+
+`0.7.0` 把已有证据物理学抽成可复验的 Proof，并把 argv adapter 升级为 Capability Card，再把定律编译为只收缩权威的宿主投影。衰减与现有 merge / 下游检查同真值；`proof verify` 看当前工作区，`verify-bundle` 只核完整性，两套结论不得混称。Console summary 与 `dyro objective attention` 不是同一套 Proof 展示。Console 独立 inspect、`trigger_observation` 与可携带核验门禁已在 `0.7.1` 落地。`0.7.2` 把换工具后的开场白收成事项加一条只读下一步，不另开会话层。`0.7.3` 把 Console 空关注收回未读，并不再在首页和下一条修复命令里漏本地路径。`0.7.4` 发出第一方 Skill 首批座位：控制面、执行、评审板与 Dispatch；按情景自动戴上，戴上不等于同意突变；不扫描用户 skill 目录。`0.7.5` 增加可选 `local-image-gen` sidecar 发现：`dyro doctor` 只看 PATH，`dyro image` 不进编码工具目录或座位。`0.7.6` 发出第一方斜杠 Skill：`dyro-review-board`（会审 / 对抗审查）与 `dyro-task-merge`（任务合入开发线预检）；经 `dyro integration` 安装，不自动触发，加载不等于 merge、push 或发布。`0.7.7` 发出开发线远程就绪：绑定 `origin/<line.branch>`，`doctor` 拒绝错误上游，`join` 只忽略 missing-origin。`0.7.8` 发出开发线家族（`parent` schema 3、spawn/merge/sync、`/dyro-line-family`）、隐藏 `dyro-board` 斜杠，以及 Console P1–P3（直播事件与一层家族图、家族频道与人类模块、产物栏）。后续功能继续在 `0.7.x` 开发和上线，不另开 `0.8.0` / `0.9.0` / `1.0.0` 功能号。可携带核验是 Proof Bundle 加调用方提供的 git 对象，核验完整性而不是身份，也不承诺与当前 merge 同一套 `live`。这不另造 TaskGraph 或完成状态机；见 [`交付物理学`](designs/delivery-physics.md) 与 [`ADR-0006`](adr/0006-delivery-physics-and-capability-plane.md)。
 
 开发者侧的可选本地多 Agent 派发（五段式任务契约、注入前机密守卫、locator 核验、隔离 patch）与上述控制面分层并列，随 `dyro` 安装包分发（`dyro dispatch` / `import experiments.local_agent_dispatch`），但**不**替代 gates/合并。同时写多块走 Core Peer Wave（task worktree + `conflict_group`），见 [`peer-wave-execution.md`](designs/peer-wave-execution.md)、[`ADR-0002`](adr/0002-optional-local-agent-dispatch.md)、[`多智能体编排纪律`](agent-orchestration-discipline.md) 与 [`可选本地 Agent 派发设计`](designs/optional-local-agent-dispatch.md)。

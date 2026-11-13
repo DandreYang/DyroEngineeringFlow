@@ -5,13 +5,21 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
-from dyro.console.overview import ConsoleOverviewError, ConsoleOverviewService
+from dyro.console.overview import (
+    ConsoleOverviewError,
+    ConsoleOverviewService,
+    WORKSPACE_MISSING_ROOT,
+    WORKSPACE_TIMEOUT,
+    unavailable_workspace_summary,
+)
 from dyro.errors import ValidationError
+from dyro.updates import UpdateState
 from dyro.hub import WorkspaceRecord, WorkspaceRegistry
 from dyro.observations import (
     ObjectiveAttentionObservation,
     WorkspaceLineObservation,
     WorkspaceObjectiveObservation,
+    WorkspaceProofObservation,
     WorkspaceReadSnapshot,
     WorkspaceTaskObservation,
 )
@@ -25,6 +33,9 @@ def _snapshot(
     reason: str = "TASK_READY",
     partial: bool = False,
     failure_code: str = "OBJECTIVES_UNAVAILABLE",
+    proof_inspection: str = "not_inspected",
+    proofs: tuple[WorkspaceProofObservation, ...] = (),
+    attention: tuple[ObjectiveAttentionObservation, ...] | None = None,
 ) -> WorkspaceReadSnapshot:
     observed_at = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
     failures = ()
@@ -40,6 +51,8 @@ def _snapshot(
         workspace_revision="a" * 64,
         source_digests=(("tasks", "b" * 64),),
         completeness="partial" if partial else "complete",
+        proof_inspection=proof_inspection,
+        proofs=proofs,
         lines=(
             WorkspaceLineObservation(
                 id="alpha",
@@ -80,11 +93,15 @@ def _snapshot(
                 selected_actions=(),
                 blocked_actions=(),
                 attention=(
-                    ObjectiveAttentionObservation(
-                        kind=attention_kind,
-                        subject_id="TASK-A",
-                        reason=reason,
-                    ),
+                    (
+                        ObjectiveAttentionObservation(
+                            kind=attention_kind,
+                            subject_id="TASK-A",
+                            reason=reason,
+                        ),
+                    )
+                    if attention is None
+                    else attention
                 ),
                 contract_sha256="c" * 64,
                 scope_sha256="d" * 64,
@@ -137,6 +154,7 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
             snapshot_loader=lambda config: self.snapshots[config.name],
             clock=lambda: datetime(2026, 8, 4, 12, 5, tzinfo=timezone.utc),
             cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [],
         )
 
     def test_paginates_stably_prioritizes_attention_and_never_exposes_roots(self) -> None:
@@ -149,15 +167,25 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         self.assertEqual(first["data"]["highest_priority"]["kind"], "repair_required")
         self.assertEqual(first["data"]["attention_counts"]["needs_user"], 1)
         self.assertEqual(first["data"]["attention_counts"]["repair_required"], 1)
-        self.assertIn("WORKSPACE_UNAVAILABLE", first["freshness"]["warnings"][1]["code"])
+        self.assertEqual(first["data"]["task_status_counts"], {"backlog": 2})
+        warning_codes = [item["code"] for item in first["freshness"]["warnings"]]
+        self.assertIn(WORKSPACE_MISSING_ROOT, warning_codes)
         self.assertNotIn("/private", repr(first))
         self.assertNotIn("dyro.toml", repr(first))
 
         second = self.service.page(cursor=first["data"]["next_cursor"], limit=1)
-        self.assertEqual(second["data"]["workspaces"][0]["alias"], "broken")
-        self.assertEqual(second["data"]["workspaces"][0]["availability"], "unavailable")
+        self.assertEqual(second["data"]["workspaces"][0]["alias"], "alpha")
+        self.assertEqual(second["data"]["workspaces"][0]["availability"], "available")
+        third = self.service.page(cursor=second["data"]["next_cursor"], limit=1)
+        self.assertEqual(third["data"]["workspaces"][0]["alias"], "broken")
+        self.assertEqual(third["data"]["workspaces"][0]["availability"], "unavailable")
+        self.assertEqual(third["data"]["workspaces"][0]["unavailable_reason"], "missing_root")
         self.assertEqual(
-            second["data"]["workspaces"][0]["recommendation"]["command"],
+            first["data"]["workspaces"][0]["recommendation"]["command"],
+            "dyro --workspace beta objective attention release",
+        )
+        self.assertEqual(
+            third["data"]["workspaces"][0]["recommendation"]["command"],
             "dyro --workspace broken doctor",
         )
         self.assertNotEqual(first["snapshot_sha256"], second["snapshot_sha256"])
@@ -175,12 +203,219 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_CURSOR_INVALID"):
             self.service.page(cursor=cursor, limit=1)
 
-    def test_empty_attention_recommends_the_guided_home_not_task_next(self) -> None:
-        recommendation = self.service._recommendation("alpha", [])
+    def test_fold_twin_cards_do_not_recommend_fail_closed_workspace_selector(self) -> None:
+        demo_root = Path("/private/demo-workspace")
+        twin_root = Path("/private/demo-twin-workspace")
+        registry = WorkspaceRegistry(
+            default="Demo",
+            workspaces=(
+                WorkspaceRecord("Demo", demo_root),
+                WorkspaceRecord("demo", twin_root),
+            ),
+        )
+        configurations = {
+            demo_root: SimpleNamespace(name="Demo", repositories={"api": object()}),
+            twin_root: SimpleNamespace(name="demo", repositories={"web": object()}),
+        }
+        snapshots = {
+            "Demo": _snapshot(name="Demo", attention=()),
+            "demo": _snapshot(name="demo", attention=()),
+        }
+        service = ConsoleOverviewService(
+            registry_loader=lambda: registry,
+            config_loader=lambda root: configurations[root],
+            snapshot_loader=lambda config: snapshots[config.name],
+            clock=lambda: datetime(2026, 8, 4, 12, 5, tzinfo=timezone.utc),
+            cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [
+                "FAIL line:core/api: missing origin/feat/core",
+            ],
+            commands_loader=lambda config, alias=None: [
+                f"dyro --workspace {alias} doctor"
+            ],
+        )
+
+        page = service.page()
+        cards = page["data"]["workspaces"]
+        self.assertEqual({card["alias"] for card in cards}, {"Demo", "demo"})
+        for card in cards:
+            command = card["recommendation"]["command"]
+            self.assertNotIn("--workspace Demo", command)
+            self.assertNotIn("--workspace demo", command)
+            self.assertNotIn("/private", command)
+        unique = self.service._recommendation("core", [])
+        self.assertEqual(unique["command"], "dyro --workspace core doctor")
+
+    def test_empty_attention_recommends_doctor_not_a_bare_workspace_invocation(self) -> None:
+        recommendation = self.service._recommendation("core", [])
 
         self.assertEqual(
             recommendation,
-            {"reason": "HOME_GUIDANCE", "command": "dyro --workspace alpha"},
+            {"reason": "HOME_GUIDANCE", "command": "dyro --workspace core doctor"},
+        )
+        self.assertNotEqual(recommendation["command"], "dyro --workspace core")
+
+    def test_fail_findings_prefer_allowlisted_next_command_over_doctor(self) -> None:
+        self.registry = WorkspaceRegistry(
+            default="core",
+            workspaces=(WorkspaceRecord("core", self.alpha_root),),
+        )
+        self.snapshots["Alpha Project"] = _snapshot(
+            name="Alpha Project",
+            attention=(),
+        )
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            config_loader=self.service._config_loader,
+            snapshot_loader=lambda config: self.snapshots[config.name],
+            clock=self.service._clock,
+            cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [
+                "FAIL line:core/api: missing origin/feat/core",
+            ],
+            commands_loader=lambda config: [
+                "dyro --workspace core objective tick release",
+            ],
+        )
+
+        page = service.page()
+        card = page["data"]["workspaces"][0]
+
+        self.assertEqual(
+            card["recommendation"]["command"],
+            "dyro --workspace core objective tick release",
+        )
+        self.assertNotEqual(card["recommendation"]["command"], "dyro --workspace core doctor")
+        self.assertEqual(card["recommendation"]["reason"], "MISSING_ORIGIN")
+        self.assertNotIn("/private", repr(page))
+
+    def test_fail_findings_and_empty_commands_recommend_doctor_not_bare_home(self) -> None:
+        recommendation = self.service._recommendation(
+            "core",
+            [],
+            findings=[
+                {"status": "FAIL", "reason": "MISSING_ORIGIN", "line": "core"},
+                {"status": "FAIL", "reason": "MISSING_ORIGIN", "line": "release_a"},
+            ],
+            commands=[],
+        )
+
+        self.assertEqual(recommendation["command"], "dyro --workspace core doctor")
+        self.assertNotEqual(recommendation["command"], "dyro --workspace core")
+        self.assertEqual(recommendation["reason"], "MISSING_ORIGIN")
+        self.assertNotEqual(recommendation["reason"], "HOME_GUIDANCE")
+
+    def test_commands_loader_receives_registry_alias_not_empty_default(self) -> None:
+        seen: list[str | None] = []
+
+        def loader(config: object, alias: str | None = None) -> list[str]:
+            seen.append(alias)
+            return [f"dyro --workspace {alias} doctor"]
+
+        self.registry = WorkspaceRegistry(
+            default="core",
+            workspaces=(WorkspaceRecord("core", self.alpha_root),),
+        )
+        self.snapshots["Alpha Project"] = _snapshot(
+            name="Alpha Project",
+            attention=(),
+        )
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            config_loader=self.service._config_loader,
+            snapshot_loader=lambda config: self.snapshots[config.name],
+            clock=self.service._clock,
+            cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [
+                "FAIL line:core/api: missing origin/feat/core",
+            ],
+            commands_loader=loader,
+        )
+
+        card = service.page()["data"]["workspaces"][0]
+
+        self.assertEqual(seen, ["core"])
+        self.assertEqual(card["recommendation"]["command"], "dyro --workspace core doctor")
+        self.assertNotEqual(card["recommendation"]["command"], "dyro --workspace core")
+
+    def test_fail_findings_project_path_free_and_degrade_health(self) -> None:
+        self.registry = WorkspaceRegistry(
+            default="core",
+            workspaces=(WorkspaceRecord("core", self.alpha_root),),
+        )
+        self.snapshots["Alpha Project"] = _snapshot(
+            name="Alpha Project",
+            attention=(),
+        )
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            config_loader=self.service._config_loader,
+            snapshot_loader=lambda config: self.snapshots[config.name],
+            clock=self.service._clock,
+            cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [
+                "FAIL line:core/api: missing origin/feat/core",
+                "FAIL line:core_pay/api: missing origin/feat/core_pay",
+                "FAIL hotfix:release_a/api: missing origin/hotfix/release_a",
+                "FAIL repository api: missing or not Git: /private/secret",
+            ],
+        )
+
+        page = service.page()
+        card = page["data"]["workspaces"][0]
+
+        self.assertEqual(card["alias"], "core")
+        self.assertEqual(card["health"], "degraded")
+        self.assertEqual(
+            {(item["reason"], item["line"]) for item in card["findings"]},
+            {
+                ("MISSING_ORIGIN", "core"),
+                ("MISSING_ORIGIN", "core_pay"),
+                ("MISSING_ORIGIN", "release_a"),
+                ("REPOSITORY_UNAVAILABLE", ""),
+            },
+        )
+        self.assertEqual(card["recommendation"]["command"], "dyro --workspace core doctor")
+        self.assertNotEqual(card["recommendation"]["command"], "dyro --workspace core")
+        self.assertEqual(page["data"]["highest_priority"]["kind"], "repair_required")
+        self.assertEqual(page["data"]["highest_priority"]["reason"], "MISSING_ORIGIN")
+        self.assertNotIn("/private", repr(page))
+        self.assertNotIn("secret", repr(card["findings"]))
+
+    def test_attention_recommends_the_same_follow_up_as_next(self) -> None:
+        self.assertEqual(
+            self.service._recommendation(
+                "alpha",
+                [
+                    {
+                        "objective_id": "release",
+                        "kind": "ready",
+                        "subject_id": "TASK-A",
+                        "reason": "TASK_READY",
+                    }
+                ],
+            ),
+            {
+                "reason": "TASK_READY",
+                "command": "dyro --workspace alpha objective tick release",
+            },
+        )
+        self.assertEqual(
+            self.service._recommendation(
+                "alpha",
+                [
+                    {
+                        "objective_id": "release",
+                        "kind": "needs_user",
+                        "subject_id": "TASK-A",
+                        "reason": "ANSWER_REQUIRED",
+                    }
+                ],
+            ),
+            {
+                "reason": "ANSWER_REQUIRED",
+                "command": "dyro --workspace alpha objective attention release",
+            },
         )
 
     def test_registry_failure_is_stable_and_path_free(self) -> None:
@@ -220,13 +455,248 @@ class ConsoleOverviewServiceTests(unittest.TestCase):
 
     def test_single_workspace_reuses_the_same_summary_and_rejects_unsafe_aliases(self) -> None:
         payload = self.service.workspace("alpha")
+        page = self.service.page(limit=3)
 
         self.assertEqual(payload["data"]["workspace"]["alias"], "alpha")
+        self.assertEqual(payload["data"]["workspace"]["findings"], [])
+        self.assertEqual(payload["data"]["workspace"]["proof_inspection"], "not_inspected")
+        self.assertEqual(payload["data"]["lines"][0]["id"], "alpha")
+        self.assertEqual(payload["data"]["lines"][0]["parent"], "")
+        self.assertEqual(payload["data"]["tasks"][0]["id"], "TASK-A")
+        self.assertEqual(payload["data"]["tasks"][0]["integration_state"], "not_inspected")
+        self.assertEqual(payload["data"]["objectives"][0]["id"], "release")
+        self.assertEqual(payload["data"]["operator_twin"]["plan"][0]["id"], "release")
+        self.assertFalse(payload["data"]["operator_twin"]["plan"][0]["wave_present"])
+        self.assertFalse(payload["data"]["operator_twin"]["latest_ledger"]["present"])
+        self.assertNotIn("proofs", payload["data"])
+        self.assertNotIn("operator_twin", page["data"])
+        self.assertNotIn("lines", page["data"])
+        self.assertNotIn("tasks", page["data"])
+        self.assertNotIn("objectives", page["data"])
         self.assertNotIn("/private", repr(payload))
         with self.assertRaisesRegex(ConsoleOverviewError, "WORKSPACE_ALIAS_INVALID"):
             self.service.workspace("%2fprivate")
         with self.assertRaisesRegex(ConsoleOverviewError, "WORKSPACE_NOT_FOUND"):
             self.service.workspace("missing")
+
+    def test_overview_task_status_counts_ignore_unavailable_workspaces(self) -> None:
+        self.registry = WorkspaceRegistry(
+            default="broken",
+            workspaces=(WorkspaceRecord("broken", self.broken_root),),
+        )
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            config_loader=self.service._config_loader,
+            snapshot_loader=self.service._snapshot_loader,
+            clock=self.service._clock,
+            cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [],
+        )
+
+        payload = service.page()
+
+        self.assertEqual(payload["data"]["workspaces"][0]["availability"], "unavailable")
+        self.assertEqual(payload["data"]["task_status_counts"], {})
+
+    def test_unavailable_workspace_keeps_empty_inventory_keys(self) -> None:
+        payload = self.service.workspace("broken")
+
+        self.assertEqual(payload["data"]["workspace"]["availability"], "unavailable")
+        self.assertEqual(payload["data"]["workspace"]["unavailable_reason"], "missing_root")
+        self.assertEqual(payload["data"]["workspace"]["findings"], [])
+        self.assertEqual(payload["data"]["workspace"]["proof_inspection"], "not_inspected")
+        self.assertEqual(payload["data"]["lines"], [])
+        self.assertEqual(payload["data"]["tasks"], [])
+        self.assertEqual(payload["data"]["objectives"], [])
+        self.assertEqual(payload["data"]["operator_twin"]["plan"], [])
+        self.assertFalse(payload["data"]["operator_twin"]["latest_ledger"]["present"])
+        self.assertNotIn("proofs", payload["data"])
+
+    def test_inspect_proofs_does_not_use_summary_loader_and_can_show_decay(self) -> None:
+        inspected = _snapshot(
+            name="Alpha Project",
+            attention_kind="needs_user",
+            reason="PROOF_DECAYED",
+            proof_inspection="inspected",
+            proofs=(
+                WorkspaceProofObservation(
+                    id="a" * 64,
+                    kind="review_verdict",
+                    subject="TASK-A",
+                    status="decayed",
+                    decay_reason="review_acceptance",
+                ),
+            ),
+        )
+
+        def summary_loader(config: object) -> WorkspaceReadSnapshot:
+            raise AssertionError("summary snapshot_loader must not run during inspect")
+
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            config_loader=self.service._config_loader,
+            snapshot_loader=summary_loader,
+            inspect_loader=lambda config: inspected,
+            clock=lambda: datetime(2026, 8, 4, 12, 5, tzinfo=timezone.utc),
+            cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [],
+        )
+        leaked = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            config_loader=self.service._config_loader,
+            snapshot_loader=lambda config: inspected,
+            inspect_loader=lambda config: inspected,
+            clock=lambda: datetime(2026, 8, 4, 12, 5, tzinfo=timezone.utc),
+            cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [],
+        )
+        summary = leaked.workspace("alpha")
+        self.assertEqual(summary["data"]["workspace"]["proof_inspection"], "not_inspected")
+        self.assertEqual(summary["data"]["tasks"][0]["integration_state"], "not_inspected")
+        self.assertNotIn("proofs", summary["data"])
+        self.assertNotIn("PROOF_DECAYED", repr(summary["data"]["objectives"]))
+        payload = service.inspect_proofs("alpha")
+        self.assertEqual(payload["data"]["proof_inspection"], "inspected")
+        self.assertEqual(payload["data"]["proofs"][0]["status"], "decayed")
+        self.assertEqual(payload["data"]["objectives"][0]["attention"][0]["reason"], "PROOF_DECAYED")
+        self.assertNotIn("procedure", repr(payload))
+        with self.assertRaisesRegex(ConsoleOverviewError, "WORKSPACE_ALIAS_INVALID"):
+            service.inspect_proofs("%2fprivate")
+
+    def test_system_reads_cached_update_without_probing_tools(self) -> None:
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            update_loader=lambda: UpdateState(
+                check_enabled=True,
+                last_checked_on="2026-08-16",
+                latest_version="0.7.2",
+            ),
+            version_loader=lambda: "0.7.1",
+            clock=lambda: datetime(2026, 8, 17, 3, 0, tzinfo=timezone.utc),
+            cursor_secret=b"k" * 32,
+        )
+
+        payload = service.system()
+
+        self.assertEqual(payload["data"]["tool_inspection"], "not_inspected")
+        self.assertEqual(payload["data"]["tools"], [])
+        self.assertEqual(payload["data"]["update"]["kind"], "patch")
+        self.assertEqual(payload["data"]["update"]["latest_version"], "0.7.2")
+        self.assertNotIn("/private", repr(payload))
+
+    def test_invalid_update_state_is_unread_and_path_free(self) -> None:
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            update_loader=lambda: (_ for _ in ()).throw(
+                ValidationError("/private/state/updates.json malformed")
+            ),
+            cursor_secret=b"k" * 32,
+        )
+
+        payload = service.system()
+
+        self.assertEqual(payload["data"]["tool_inspection"], "not_inspected")
+        self.assertEqual(payload["data"]["tools"], [])
+        self.assertEqual(payload["data"]["update"]["kind"], "none")
+        self.assertIn("UPDATE_STATE_UNAVAILABLE", payload["freshness"]["warnings"][0]["code"])
+        self.assertNotIn("/private", repr(payload))
+
+    def test_system_sanitizes_unreadable_update_fields(self) -> None:
+        service = ConsoleOverviewService(
+            registry_loader=lambda: self.registry,
+            update_loader=lambda: UpdateState(
+                check_enabled=True,
+                last_checked_on="Tuesday",
+                latest_version="not-a-version",
+            ),
+            version_loader=lambda: "0.7.1",
+            clock=lambda: datetime(2026, 8, 17, 3, 0, tzinfo=timezone.utc),
+            cursor_secret=b"k" * 32,
+        )
+
+        payload = service.system()
+
+        self.assertEqual(payload["data"]["update"]["last_checked_on"], "")
+        self.assertEqual(payload["data"]["update"]["latest_version"], "")
+        self.assertEqual(payload["data"]["update"]["kind"], "none")
+        self.assertEqual(payload["data"]["tools"], [])
+
+    def test_vanished_test_workspace_does_not_outrank_available_core(self) -> None:
+        ghost_root = Path("/tmp/dyro-test-xyz")
+        self.assertFalse(ghost_root.exists())
+        registry = WorkspaceRegistry(
+            default="core",
+            workspaces=(
+                WorkspaceRecord("core", self.alpha_root),
+                WorkspaceRecord("test-workspace", ghost_root),
+            ),
+        )
+        def config_loader(root: Path) -> SimpleNamespace:
+            try:
+                return self.service._config_loader(root)
+            except KeyError:
+                raise ValidationError("workspace config unavailable") from None
+
+        service = ConsoleOverviewService(
+            registry_loader=lambda: registry,
+            config_loader=config_loader,
+            snapshot_loader=lambda config: self.snapshots[config.name],
+            clock=self.service._clock,
+            cursor_secret=b"k" * 32,
+            doctor_loader=lambda config: [],
+        )
+
+        page = service.page()
+        cards = page["data"]["workspaces"]
+
+        self.assertEqual(cards[0]["alias"], "core")
+        self.assertNotEqual(cards[0]["alias"], "test-workspace")
+        self.assertEqual(cards[0]["availability"], "available")
+        ghost = next(item for item in cards if item["alias"] == "test-workspace")
+        self.assertEqual(ghost["availability"], "unavailable")
+        self.assertEqual(ghost["unavailable_reason"], "missing_root")
+        self.assertEqual(ghost["recommendation"]["reason"], WORKSPACE_MISSING_ROOT)
+        highest = page["data"]["highest_priority"]
+        self.assertIsNotNone(highest)
+        self.assertEqual(highest["alias"], "core")
+        self.assertNotEqual(highest["alias"], "test-workspace")
+        self.assertNotIn("dyro --workspace test-workspace", cards[0]["recommendation"]["command"])
+        self.assertNotIn("/tmp", repr(page))
+        self.assertNotIn("dyro-test-xyz", repr(page))
+
+    def test_timeout_sorts_below_healthy_default_and_differs_from_missing_root(self) -> None:
+        healthy = {
+            "alias": "core",
+            "availability": "available",
+            "attention_counts": {},
+            "findings": [],
+            "unavailable_reason": "",
+        }
+        timeout = unavailable_workspace_summary("slow", False, reason=WORKSPACE_TIMEOUT)
+        ghost = unavailable_workspace_summary(
+            "test-workspace", False, reason=WORKSPACE_MISSING_ROOT
+        )
+
+        ordered = sorted(
+            [timeout, ghost, healthy],
+            key=ConsoleOverviewService._summary_sort_key,
+        )
+
+        self.assertEqual(
+            [item["alias"] for item in ordered],
+            ["core", "slow", "test-workspace"],
+        )
+        self.assertEqual(timeout["unavailable_reason"], "read_timeout")
+        self.assertEqual(ghost["unavailable_reason"], "missing_root")
+        self.assertNotEqual(
+            timeout["recommendation"]["reason"],
+            ghost["recommendation"]["reason"],
+        )
+        service = ConsoleOverviewService(
+            registry_loader=lambda: WorkspaceRegistry(),
+            cursor_secret=b"k" * 32,
+        )
+        self.assertIsNone(service._highest_priority([timeout, ghost, healthy]))
 
 
 if __name__ == "__main__":

@@ -59,7 +59,7 @@ class ConsoleServerTests(unittest.TestCase):
         status, headers, body = self._request("GET", "/")
 
         self.assertEqual(status, 200)
-        self.assertEqual(headers["Content-Security-Policy"], "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+        self.assertEqual(headers["Content-Security-Policy"], "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
         self.assertEqual(headers["Cross-Origin-Opener-Policy"], "same-origin")
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertNotIn("a" * 43, body.decode("utf-8"))
@@ -112,7 +112,8 @@ class ConsoleServerTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
         payload = json.loads(body)
         self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(payload["data"]["capabilities"], ["overview"])
+        self.assertEqual(payload["data"]["surfaces"], ["overview", "proofs", "system", "events", "families", "artifacts"])
+        self.assertEqual(payload["data"]["capabilities"], ["overview", "proofs", "system", "events", "families", "artifacts"])
         self.assertEqual(payload["data"]["initial_workspace"], "")
         self.assertIn("session_expires_at", payload["data"])
 
@@ -244,6 +245,114 @@ class ConsoleOverviewServerTests(unittest.TestCase):
             "freshness": {"state": "partial", "partial": True, "warnings": []},
             "data": {"workspace": {"alias": "alpha", "availability": "available"}},
         }
+        self.overview.system.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "c" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {
+                "tool_inspection": "not_inspected",
+                "tools": [],
+                "update": {
+                    "check_enabled": True,
+                    "last_checked_on": "2026-08-16",
+                    "latest_version": "",
+                    "kind": "none",
+                },
+            },
+        }
+        self.overview.inspect_proofs.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "d" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {"proof_inspection": "inspected", "proofs": [], "objectives": []},
+        }
+        self.overview.events.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "b" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {
+                "events": [
+                    {
+                        "seq": 1,
+                        "id": "evt_1",
+                        "kind": "spawn",
+                        "at": "2026-08-20T12:00:00Z",
+                        "actor": "core",
+                        "subject": "core_pay",
+                        "family": "core",
+                        "facts": {"parent": "core", "child": "core_pay"},
+                    }
+                ],
+                "next_cursor": "after_evt_1",
+            },
+        }
+        self.overview.families.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "a" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {"families": []},
+        }
+        self.overview.family.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "9" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {
+                "parent": "core",
+                "members": ["core", "core_pay", "operator"],
+                "nodes": [],
+                "edges": [],
+            },
+        }
+        self.overview.channel.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "8" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {
+                "family": "core",
+                "members": ["core", "core_pay", "operator"],
+                "messages": [],
+                "next_cursor": None,
+            },
+        }
+        self.overview.post_channel.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "7" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {"id": "msg_1", "seq": 1},
+        }
+        self.overview.artifacts.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "6" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {"family": "core", "artifacts": []},
+        }
+        self.overview.artifact.return_value = {
+            "schema_version": 1,
+            "captured_at": "2026-08-04T12:00:00+00:00",
+            "snapshot_sha256": "5" * 64,
+            "freshness": {"state": "fresh", "partial": False, "warnings": []},
+            "data": {
+                "id": "vid_1",
+                "type": "video",
+                "title": "demo",
+                "conclusion": "",
+                "bound_hash": "",
+                "media_type": "",
+                "size": 12,
+                "duration": "12s",
+                "points": [],
+                "open_command": "dyro --workspace alpha --dry-run line inbox --family core",
+            },
+        }
+        self.overview.artifact_bytes.return_value = ("image/png", b"\x89PNG")
         self.server = create_console_http_server(
             port=0,
             bootstrap_secret="a" * 43,
@@ -325,6 +434,228 @@ class ConsoleOverviewServerTests(unittest.TestCase):
         self.assertEqual(
             json.loads(unsafe_body)["error"]["code"], "WORKSPACE_ALIAS_INVALID"
         )
+
+    def test_proof_inspect_is_authenticated_get_only(self) -> None:
+        unauthorized, _, body = self._request("GET", "/api/v1/workspaces/alpha/proofs")
+        self.assertEqual(unauthorized, 401)
+        self.assertEqual(json.loads(body)["error"]["code"], "UNAUTHORIZED")
+
+        rejected, _, rejected_body = self._request("POST", "/api/v1/workspaces/alpha/proofs")
+        self.assertEqual(rejected, 405)
+        self.assertEqual(json.loads(rejected_body)["error"]["code"], "METHOD_NOT_ALLOWED")
+        self.overview.inspect_proofs.assert_not_called()
+
+        bearer = self._bearer()
+        headers = {"Authorization": f"Bearer {bearer}", "Origin": self.origin}
+        status, response_headers, body = self._request(
+            "GET", "/api/v1/workspaces/alpha/proofs", headers=headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(response_headers["ETag"], '"' + "d" * 64 + '"')
+        self.assertEqual(json.loads(body)["data"]["proof_inspection"], "inspected")
+        self.overview.inspect_proofs.assert_called_once_with("alpha")
+        self.overview.workspace.assert_not_called()
+
+    def test_system_is_authenticated_get_only(self) -> None:
+        unauthorized, _, body = self._request("GET", "/api/v1/system")
+        self.assertEqual(unauthorized, 401)
+        self.assertEqual(json.loads(body)["error"]["code"], "UNAUTHORIZED")
+
+        rejected, _, rejected_body = self._request("POST", "/api/v1/system")
+        self.assertEqual(rejected, 405)
+        self.assertEqual(json.loads(rejected_body)["error"]["code"], "METHOD_NOT_ALLOWED")
+        self.overview.system.assert_not_called()
+
+        bearer = self._bearer()
+        headers = {"Authorization": f"Bearer {bearer}", "Origin": self.origin}
+        status, response_headers, body = self._request("GET", "/api/v1/system", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(response_headers["ETag"], '"' + "c" * 64 + '"')
+        self.assertEqual(json.loads(body)["data"]["tool_inspection"], "not_inspected")
+        self.assertEqual(json.loads(body)["data"]["tools"], [])
+        self.overview.system.assert_called_once_with()
+
+    def test_events_after_query_and_sse_resume_are_authenticated(self) -> None:
+        unauthorized, _, body = self._request("GET", "/api/v1/workspaces/alpha/events")
+        self.assertEqual(unauthorized, 401)
+        self.assertEqual(json.loads(body)["error"]["code"], "UNAUTHORIZED")
+
+        rejected, _, rejected_body = self._request("POST", "/api/v1/workspaces/alpha/events")
+        self.assertEqual(rejected, 405)
+        self.assertEqual(json.loads(rejected_body)["error"]["code"], "METHOD_NOT_ALLOWED")
+
+        bearer = self._bearer()
+        headers = {"Authorization": f"Bearer {bearer}", "Origin": self.origin}
+        status, _, body = self._request(
+            "GET", "/api/v1/workspaces/alpha/events?after=after_evt_1&limit=50", headers=headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["data"]["events"][0]["kind"], "spawn")
+        self.overview.events.assert_called_with("alpha", after="after_evt_1", limit=50)
+
+        stream, stream_headers, stream_body = self._request(
+            "GET", "/api/v1/workspaces/alpha/events/stream?after=after_evt_1", headers=headers
+        )
+        self.assertEqual(stream, 200)
+        self.assertEqual(stream_headers["Content-Type"], "text/event-stream; charset=utf-8")
+        self.assertIn(b"data: ", stream_body)
+        self.assertIn(b'"kind":"spawn"', stream_body)
+        self.assertIn(b"id: after_evt_1", stream_body)
+        self.assertIn(b": keepalive", stream_body)
+
+        localhost, _, _ = self._request(
+            "GET",
+            "/api/v1/workspaces/alpha/events",
+            headers={"Host": "localhost", "Authorization": f"Bearer {bearer}"},
+        )
+        self.assertEqual(localhost, 400)
+
+        channel, _, channel_body = self._request(
+            "POST", "/api/v1/workspaces/alpha/families/core/channel", headers=headers
+        )
+        self.assertEqual(channel, 400)
+        self.assertEqual(json.loads(channel_body)["error"]["code"], "BAD_REQUEST")
+        self.overview.post_channel.assert_not_called()
+
+    def test_family_graph_is_authenticated_get_only(self) -> None:
+        bearer = self._bearer()
+        headers = {"Authorization": f"Bearer {bearer}", "Origin": self.origin}
+        status, _, body = self._request(
+            "GET", "/api/v1/workspaces/alpha/families/core", headers=headers
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["data"]["parent"], "core")
+        self.overview.family.assert_called_once_with("alpha", "core")
+
+    def test_channel_get_and_post_require_host_and_bearer(self) -> None:
+        from dyro.console.overview import ConsoleOverviewError
+
+        unauthorized, _, body = self._request(
+            "GET", "/api/v1/workspaces/alpha/families/core/channel"
+        )
+        self.assertEqual(unauthorized, 401)
+        self.assertEqual(json.loads(body)["error"]["code"], "UNAUTHORIZED")
+
+        bearer = self._bearer()
+        headers = {"Authorization": f"Bearer {bearer}", "Origin": self.origin}
+        status, _, body = self._request(
+            "GET",
+            "/api/v1/workspaces/alpha/families/core/channel?filter=unacked",
+            headers=headers,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["data"]["family"], "core")
+        self.overview.channel.assert_called_once_with(
+            "alpha", "core", after=None, filter="unacked", limit=50
+        )
+
+        localhost, _, _ = self._request(
+            "GET",
+            "/api/v1/workspaces/alpha/families/core/channel",
+            headers={"Host": "localhost", "Authorization": f"Bearer {bearer}"},
+        )
+        self.assertEqual(localhost, 400)
+
+        unauth_post, _, unauth_body = self._request(
+            "POST",
+            "/api/v1/workspaces/alpha/families/core/channel",
+            body=json.dumps({"kind": "decision", "body": "ok"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Origin": self.origin},
+        )
+        self.assertEqual(unauth_post, 401)
+        self.assertEqual(json.loads(unauth_body)["error"]["code"], "UNAUTHORIZED")
+
+        localhost_post, _, _ = self._request(
+            "POST",
+            "/api/v1/workspaces/alpha/families/core/channel",
+            body=json.dumps({"kind": "decision", "body": "ok"}).encode("utf-8"),
+            headers={
+                "Host": "localhost",
+                "Authorization": f"Bearer {bearer}",
+                "Content-Type": "application/json",
+            },
+        )
+        self.assertEqual(localhost_post, 400)
+
+        posted, _, posted_body = self._request(
+            "POST",
+            "/api/v1/workspaces/alpha/families/core/channel",
+            body=json.dumps({"kind": "decision", "body": "ok"}).encode("utf-8"),
+            headers={**headers, "Content-Type": "application/json"},
+        )
+        self.assertEqual(posted, 200)
+        self.assertEqual(json.loads(posted_body)["data"]["id"], "msg_1")
+        self.overview.post_channel.assert_called_once_with(
+            "alpha", "core", {"kind": "decision", "body": "ok"}
+        )
+
+        self.overview.post_channel.side_effect = ConsoleOverviewError(
+            "FAMILY_POST_FORBIDDEN"
+        )
+        forbidden, _, forbidden_body = self._request(
+            "POST",
+            "/api/v1/workspaces/alpha/families/core/channel",
+            body=json.dumps({"kind": "blocked", "body": "no"}).encode("utf-8"),
+            headers={**headers, "Content-Type": "application/json"},
+        )
+        self.assertEqual(forbidden, 403)
+        self.assertEqual(
+            json.loads(forbidden_body)["error"]["code"], "FAMILY_POST_FORBIDDEN"
+        )
+
+    def test_artifact_get_requires_host_and_bearer_and_is_not_a_write(self) -> None:
+        unauthorized, _, body = self._request(
+            "GET", "/api/v1/workspaces/alpha/families/core/artifacts"
+        )
+        self.assertEqual(unauthorized, 401)
+        self.assertEqual(json.loads(body)["error"]["code"], "UNAUTHORIZED")
+
+        bearer = self._bearer()
+        headers = {"Authorization": f"Bearer {bearer}", "Origin": self.origin}
+        listed, _, listed_body = self._request(
+            "GET", "/api/v1/workspaces/alpha/families/core/artifacts", headers=headers
+        )
+        self.assertEqual(listed, 200)
+        self.assertEqual(json.loads(listed_body)["data"]["artifacts"], [])
+        self.overview.artifacts.assert_called_once_with("alpha", "core")
+
+        localhost, _, _ = self._request(
+            "GET",
+            "/api/v1/workspaces/alpha/families/core/artifacts",
+            headers={"Host": "localhost", "Authorization": f"Bearer {bearer}"},
+        )
+        self.assertEqual(localhost, 400)
+
+        posted, _, posted_body = self._request(
+            "POST",
+            "/api/v1/workspaces/alpha/families/core/artifacts",
+            body=b"{}",
+            headers={**headers, "Content-Type": "application/json"},
+        )
+        self.assertEqual(posted, 405)
+        self.assertEqual(json.loads(posted_body)["error"]["code"], "METHOD_NOT_ALLOWED")
+        self.overview.post_channel.assert_not_called()
+
+        image, image_headers, image_body = self._request(
+            "GET",
+            "/api/v1/workspaces/alpha/families/core/artifacts/img_1",
+            headers=headers,
+        )
+        self.assertEqual(image, 200)
+        self.assertEqual(image_headers["Content-Type"], "image/png")
+        self.assertEqual(image_body, b"\x89PNG")
+        self.overview.artifact_bytes.assert_called_once_with("alpha", "core", "img_1")
+
+        self.overview.artifact_bytes.return_value = None
+        video, video_headers, video_body = self._request(
+            "GET",
+            "/api/v1/workspaces/alpha/families/core/artifacts/vid_1",
+            headers=headers,
+        )
+        self.assertEqual(video, 200)
+        self.assertEqual(video_headers["Content-Type"], "application/json; charset=utf-8")
+        self.assertEqual(json.loads(video_body)["data"]["type"], "video")
+        self.assertNotIn(b"<video", video_body)
 
 
 if __name__ == "__main__":

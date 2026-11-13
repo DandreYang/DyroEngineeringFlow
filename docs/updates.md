@@ -61,8 +61,10 @@ After a successful `dyro update` or patch auto-update, Dyro best-effort syncs
 the managed bundle through the fresh `dyro` entry point. Interactive `dyro`,
 `dyro home`, and `dyro start` launches also repair outdated managed Skills.
 The control-plane opt-in covers first-party companions, so an existing managed
-control plane automatically gains `dyro-dispatch`. A machine with no prior Dyro
-Skill ownership remains untouched. Manual control-plane commands are:
+control plane automatically gains `dyro-dispatch`, `dyro-executor`, and
+the 会审 protocol plus `/dyro-review-board`. `dyro-board` stays the internal
+protocol id. A machine with no prior Dyro Skill ownership remains untouched.
+Manual control-plane commands are:
 
 ```bash
 dyro integration install skill --dry-run
@@ -72,18 +74,29 @@ dyro integration sync skill --yes   # upgrade-only; skips absent installs
 
 (`codex` is an alias for `skill`.)
 
-The outbound `dyro-dispatch` Skill keeps independent ownership state from the
-read-only control-plane Skill. One `dyro setup` opt-in installs both. An existing
-managed control-plane installation also gains the Dispatch companion on the next
-interactive launch or post-update refresh; after that, both stay synchronized.
-Hosts with no prior Dyro Skill opt-in remain untouched. Manual lifecycle commands
-are still available:
+Avatars attach only to already-present agent homes. OpenCode uses
+`~/.config/opencode/skills` (`OPENCODE_CONFIG_DIR` when set) and Hermes uses
+`~/.hermes/skills` (`HERMES_HOME` when set). Absent homes stay silent; Dyro
+does not create those directories.
+
+The outbound `dyro-dispatch`, executor, and board Skills keep independent
+ownership state from the read-only control-plane Skill. One `dyro setup` opt-in
+installs the first-batch seat bundle. An existing managed control-plane
+installation also gains those companions on the next interactive launch or
+post-update refresh; after that they stay synchronized. Hosts with no prior
+Dyro Skill opt-in remain untouched. Manual lifecycle commands are still
+available:
 
 ```bash
 dyro integration install dispatch --dry-run
 dyro integration install dispatch --yes
 dyro integration sync dispatch --yes
+dyro integration install executor --yes
+dyro integration install review-board --yes
 ```
+
+`dyro integration install board` is a legacy id for the same 会审 surface plus
+protocol. `dyro integration status board` still inspects the protocol seat.
 
 Editable source installations are deliberately rejected. Update those through
 their Git checkout so a convenience command cannot replace a development

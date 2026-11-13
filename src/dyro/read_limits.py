@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 import math
 import os
@@ -60,7 +60,11 @@ _PROTOCOL_LIMIT_CEILINGS = {
     "response_records": 100,
     "aggregate_bytes": 64 * 1024 * 1024,
 }
-_PROTOCOL_DEADLINE_SECONDS = 5.0
+PROTOCOL_DEADLINE_SECONDS = 5.0
+# 0.7.10 name. Bridge/default only — not the JSON doctor/status/next cap.
+_PROTOCOL_DEADLINE_SECONDS = PROTOCOL_DEADLINE_SECONDS
+CONTROL_PLANE_DEADLINE_CEILING_SECONDS = 45.0
+CONTROL_PLANE_DEADLINE_PER_SCOPE_SECONDS = 0.4
 
 
 @dataclass(frozen=True)
@@ -97,7 +101,7 @@ class ObservationLimits:
     objective_records: int = _PROTOCOL_LIMIT_CEILINGS["objective_records"]
     response_records: int = _PROTOCOL_LIMIT_CEILINGS["response_records"]
     aggregate_bytes: int = _PROTOCOL_LIMIT_CEILINGS["aggregate_bytes"]
-    deadline_seconds: float = _PROTOCOL_DEADLINE_SECONDS
+    deadline_seconds: float = PROTOCOL_DEADLINE_SECONDS
 
     def __post_init__(self) -> None:
         for label, ceiling in _PROTOCOL_LIMIT_CEILINGS.items():
@@ -109,11 +113,56 @@ class ObservationLimits:
             isinstance(self.deadline_seconds, bool)
             or not isinstance(self.deadline_seconds, (int, float))
             or not math.isfinite(self.deadline_seconds)
-            or not 0 < self.deadline_seconds <= _PROTOCOL_DEADLINE_SECONDS
+            or not 0 < self.deadline_seconds <= CONTROL_PLANE_DEADLINE_CEILING_SECONDS
         ):
             raise ValidationError(
-                f"deadline_seconds 必须是不超过 {_PROTOCOL_DEADLINE_SECONDS} 的有限正数"
+                f"deadline_seconds 必须是不超过 "
+                f"{CONTROL_PLANE_DEADLINE_CEILING_SECONDS} 的有限正数"
             )
+
+
+def control_plane_deadline_seconds(git_scope_count: int) -> float:
+    """Wall budget for JSON doctor/status/next git fan-out.
+
+    Bridge and small workspaces keep the 5s protocol default. Each additional
+    git scope (anchor or line/hotfix worktree) adds 0.4s. The documented
+    ceiling is 45s so a ~58-worktree workspace that the text path finishes
+    in ~7s is not cut off by the JSON-only ReadBudget cliff.
+    """
+
+    if (
+        isinstance(git_scope_count, bool)
+        or not isinstance(git_scope_count, int)
+        or git_scope_count < 1
+    ):
+        count = 1
+    else:
+        count = git_scope_count
+    return min(
+        CONTROL_PLANE_DEADLINE_CEILING_SECONDS,
+        PROTOCOL_DEADLINE_SECONDS
+        + CONTROL_PLANE_DEADLINE_PER_SCOPE_SECONDS * (count - 1),
+    )
+
+
+def apply_control_plane_fanout(
+    budget: ReadBudget, git_scope_count: int
+) -> ReadBudget:
+    """Widen a default 5s budget for multi-worktree JSON observations.
+
+    Callers that set a non-default deadline (including tests that force a
+    timeout, and CLI JSON doctor/status/next which start at 45s) keep that
+    deadline. Isolated Console overview does not attach this budget.
+    The start timestamp is unchanged, so remaining time is
+    ``scaled_deadline - elapsed``.
+    """
+
+    if budget.limits.deadline_seconds != PROTOCOL_DEADLINE_SECONDS:
+        return budget
+    seconds = control_plane_deadline_seconds(git_scope_count)
+    if seconds > budget.limits.deadline_seconds:
+        budget.limits = replace(budget.limits, deadline_seconds=seconds)
+    return budget
 
 
 def _directory_flags() -> int:

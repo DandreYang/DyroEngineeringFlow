@@ -105,6 +105,11 @@ jobs:
               raise SystemExit(f"release tag {actual!r} must equal {expected!r}")
           PY
 
+      - name: Refuse a physics-train release without 0.7.x gates
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: uv run python tools/verify_release_gates.py --release-tag "$RELEASE_TAG"
+
       - name: Build distributions
         run: uv run python -m build
 
@@ -144,24 +149,26 @@ jobs:
           "$smoke_root/wheel-venv/bin/pip" install "$GITHUB_WORKSPACE"/dist/dyro-*.whl
           "$smoke_root/wheel-venv/bin/python" -c "import experiments.local_agent_dispatch"
           "$smoke_root/wheel-venv/bin/python" -I -c "from dyro.console.assets import validate_assets; validate_assets()"
-          "$smoke_root/wheel-venv/bin/python" -I -c "from importlib.resources import files; root=files('dyro.integrations').joinpath('assets'); assert root.joinpath('dyro-control-plane','SKILL.md').is_file(); assert root.joinpath('dyro-control-plane','agents','openai.yaml').is_file(); assert root.joinpath('dyro-dispatch','SKILL.md').is_file(); assert root.joinpath('dyro-dispatch','agents','openai.yaml').is_file()"
+          "$smoke_root/wheel-venv/bin/python" -I -c "from importlib.resources import files; root=files('dyro.integrations').joinpath('assets'); assert root.joinpath('dyro-control-plane','SKILL.md').is_file(); assert root.joinpath('dyro-control-plane','agents','openai.yaml').is_file(); assert root.joinpath('dyro-dispatch','SKILL.md').is_file(); assert root.joinpath('dyro-dispatch','agents','openai.yaml').is_file(); assert root.joinpath('dyro-executor','SKILL.md').is_file(); assert root.joinpath('dyro-executor','agents','openai.yaml').is_file(); assert root.joinpath('dyro-board','SKILL.md').is_file(); assert root.joinpath('dyro-board','agents','openai.yaml').is_file(); assert root.joinpath('dyro-review-board','SKILL.md').is_file(); assert root.joinpath('dyro-review-board','agents','openai.yaml').is_file(); assert root.joinpath('dyro-task-merge','SKILL.md').is_file(); assert root.joinpath('dyro-task-merge','agents','openai.yaml').is_file(); assert root.joinpath('dyro-line-family','SKILL.md').is_file(); assert root.joinpath('dyro-line-family','agents','openai.yaml').is_file()"
           "$smoke_root/wheel-venv/bin/python" -I -c "import importlib.util; assert importlib.util.find_spec('dyro.bridge') is None"
           test -x "$smoke_root/wheel-venv/bin/dyro"
           test ! -e "$smoke_root/wheel-venv/bin/dyro-bridge"
           test ! -e "$smoke_root/wheel-venv/bin/dyro-mcp"
           DYRO_LOCAL_AGENT_DISPATCH_HOME="$smoke_root/wheel-dispatch-home" "$smoke_root/wheel-venv/bin/dyro" dispatch doctor >"$smoke_root/wheel-doctor.json"
           uv run python -c "import json; json.load(open('$smoke_root/wheel-doctor.json'))"
+          "$smoke_root/wheel-venv/bin/python" "$GITHUB_WORKSPACE/tools/verify_bundle_stranger.py" "$smoke_root/wheel-venv/bin/dyro"
           uv run python -m venv "$smoke_root/sdist-venv"
           "$smoke_root/sdist-venv/bin/pip" install "$GITHUB_WORKSPACE"/dist/dyro-*.tar.gz
           "$smoke_root/sdist-venv/bin/python" -c "import experiments.local_agent_dispatch"
           "$smoke_root/sdist-venv/bin/python" -I -c "from dyro.console.assets import validate_assets; validate_assets()"
-          "$smoke_root/sdist-venv/bin/python" -I -c "from importlib.resources import files; root=files('dyro.integrations').joinpath('assets'); assert root.joinpath('dyro-control-plane','SKILL.md').is_file(); assert root.joinpath('dyro-control-plane','agents','openai.yaml').is_file(); assert root.joinpath('dyro-dispatch','SKILL.md').is_file(); assert root.joinpath('dyro-dispatch','agents','openai.yaml').is_file()"
+          "$smoke_root/sdist-venv/bin/python" -I -c "from importlib.resources import files; root=files('dyro.integrations').joinpath('assets'); assert root.joinpath('dyro-control-plane','SKILL.md').is_file(); assert root.joinpath('dyro-control-plane','agents','openai.yaml').is_file(); assert root.joinpath('dyro-dispatch','SKILL.md').is_file(); assert root.joinpath('dyro-dispatch','agents','openai.yaml').is_file(); assert root.joinpath('dyro-executor','SKILL.md').is_file(); assert root.joinpath('dyro-executor','agents','openai.yaml').is_file(); assert root.joinpath('dyro-board','SKILL.md').is_file(); assert root.joinpath('dyro-board','agents','openai.yaml').is_file(); assert root.joinpath('dyro-review-board','SKILL.md').is_file(); assert root.joinpath('dyro-review-board','agents','openai.yaml').is_file(); assert root.joinpath('dyro-task-merge','SKILL.md').is_file(); assert root.joinpath('dyro-task-merge','agents','openai.yaml').is_file(); assert root.joinpath('dyro-line-family','SKILL.md').is_file(); assert root.joinpath('dyro-line-family','agents','openai.yaml').is_file()"
           "$smoke_root/sdist-venv/bin/python" -I -c "import importlib.util; assert importlib.util.find_spec('dyro.bridge') is None"
           test -x "$smoke_root/sdist-venv/bin/dyro"
           test ! -e "$smoke_root/sdist-venv/bin/dyro-bridge"
           test ! -e "$smoke_root/sdist-venv/bin/dyro-mcp"
           DYRO_LOCAL_AGENT_DISPATCH_HOME="$smoke_root/sdist-dispatch-home" "$smoke_root/sdist-venv/bin/dyro" dispatch doctor >"$smoke_root/sdist-doctor.json"
           uv run python -c "import json; json.load(open('$smoke_root/sdist-doctor.json'))"
+          "$smoke_root/sdist-venv/bin/python" "$GITHUB_WORKSPACE/tools/verify_bundle_stranger.py" "$smoke_root/sdist-venv/bin/dyro"
 
       - name: Validate distribution metadata
         run: uv run python -m twine check --strict dist/dyro-*.whl dist/dyro-*.tar.gz

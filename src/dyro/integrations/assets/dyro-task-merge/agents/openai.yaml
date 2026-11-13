@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dyro Task Merge"
+  short_description: "Preflight task merge into the owning line; do not merge"
+  default_prompt: "Use $dyro-task-merge. Preflight with doctor/status and --dry-run task merge only. Never run task merge --yes, git merge, or push. A printed command is not next.commands."

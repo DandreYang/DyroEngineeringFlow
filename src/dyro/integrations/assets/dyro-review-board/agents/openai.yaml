@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dyro 会审"
+  short_description: "会审 / 对抗审查记录，不是交付 Proof"
+  default_prompt: "Use $dyro-review-board. Load the installed dyro-board protocol first. Run 会审 / 对抗审查. Findings are a record, not Proof. Refuse same-turn commit, push, merge, or publish. Do not say 座位."
