@@ -251,6 +251,7 @@ from .updates import (
 )
 from .workspace import (
     OBSERVATION_DEADLINE_FINDING,
+    blocking_line_doctor_failures,
     create_line,
     doctor,
     get_line,
@@ -2751,7 +2752,33 @@ def cmd_start(args: argparse.Namespace) -> None:
     """Newcomer-friendly path: validate, select a line, then open an Agent."""
     config = _config(args)
     findings = doctor(config)
-    failures = [finding for finding in findings if finding.startswith("FAIL")]
+    alias = getattr(args, "workspace_alias", None) or config.name
+    briefing, _ = build_ready_briefing(config, alias=str(alias))
+    text = render_briefing_text(briefing) if briefing else ""
+    if text:
+        print(text)
+        print()
+    available = [line.id for line in list_lines(config)]
+    if args.line:
+        line_id = args.line
+    elif available:
+        line_id = _choose("开发线", available)
+    else:
+        # No target line to scope: keep the global FAIL gate so missing
+        # repos / embedded-token FAILs still surface as 尚未就绪.
+        failures = [finding for finding in findings if finding.startswith("FAIL")]
+        if failures:
+            print("\n".join(failures))
+            extra = ""
+            if bootstrap_repair_applicable(config, failures):
+                extra = "，或运行 " + _briefing_command(
+                    args, config, "bootstrap", "--yes"
+                )
+            raise DyroError("工作区尚未就绪；先修复 doctor 失败项" + extra)
+        line_id = _choose("开发线", available)
+    # §4: once a target exists, ignore other-line FAIL line:/hotfix:.
+    line = get_line(config, line_id, args.kind)
+    failures = blocking_line_doctor_failures(config, line, findings=findings)
     if failures:
         print("\n".join(failures))
         extra = ""
@@ -2760,13 +2787,6 @@ def cmd_start(args: argparse.Namespace) -> None:
                 args, config, "bootstrap", "--yes"
             )
         raise DyroError("工作区尚未就绪；先修复 doctor 失败项" + extra)
-    alias = getattr(args, "workspace_alias", None) or config.name
-    briefing, _ = build_ready_briefing(config, alias=str(alias))
-    text = render_briefing_text(briefing) if briefing else ""
-    if text:
-        print(text)
-        print()
-    line_id = args.line or _choose("开发线", [line.id for line in list_lines(config)])
     line, workspace = existing_line_workspace(config, line_id, args.kind)
     record = _record_for_root(config.root)
     last_tool = record.last_agent if record else ""

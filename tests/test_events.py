@@ -11,7 +11,13 @@ from dyro.cli import build_parser, cmd_host_seed
 from dyro.config import load
 from dyro.console.events import decode_event_cursor, event_page, project_event
 from dyro.console.overview import ConsoleOverviewError
-from dyro.events import EventLogError, append_event, read_events
+from dyro.events import (
+    EVENT_KINDS,
+    EventLogError,
+    append_event,
+    read_events,
+    validate_event_write,
+)
 from dyro.process import Result
 from dyro.tasks import _execute_task_agent, load_task, set_status, task_template
 from dyro.workspace import create_line, line_repository_path, merge_line, spawn_line, sync_line
@@ -151,6 +157,82 @@ class WorkspaceEventLogTests(WorkspaceCase):
                 clock=self.clock,
             )
         self.assertEqual(kind_error.exception.code, "EVENT_WRITE_INVALID")
+        self.assertFalse((self.root / ".dyro" / "events.jsonl").exists())
+
+    def test_retire_and_merge_cross_kinds_accept_bounded_lifecycle_facts(self) -> None:
+        self.assertIn("retire", EVENT_KINDS)
+        self.assertIn("merge_cross", EVENT_KINDS)
+        facts = {
+            "op_id": "op_retire_1",
+            "repo_count": 2,
+            "repos_digest": "api+web",
+            "partial": False,
+        }
+        cleaned = validate_event_write(
+            kind="retire",
+            actor="operator",
+            subject="alpha",
+            family="",
+            facts=facts,
+        )
+        self.assertEqual(cleaned, facts)
+        self.assertFalse((self.root / ".dyro" / "events.jsonl").exists())
+        cross = validate_event_write(
+            kind="merge_cross",
+            actor="beta",
+            subject="alpha",
+            family="alpha",
+            facts={**facts, "partial": True, "op_id": "op_merge_9"},
+        )
+        self.assertEqual(cross["partial"], True)
+        self.assertEqual(cross["repo_count"], 2)
+        recorded = append_event(
+            self.config,
+            kind="retire",
+            actor="operator",
+            subject="alpha",
+            family="",
+            facts=facts,
+            clock=self.clock,
+        )
+        self.assertEqual(recorded["kind"], "retire")
+        self.assertEqual(recorded["facts"]["op_id"], "op_retire_1")
+
+    def test_validate_event_write_matches_append_rejection_and_writes_nothing(
+        self,
+    ) -> None:
+        cases = [
+            {"kind": "merge_main", "facts": {"op_id": "op_1"}},
+            {"kind": "retire", "facts": {"op_id": "/bad/path"}},
+            {"kind": "merge_cross", "facts": {"repos_digest": "a/b"}},
+            {"kind": "retire", "facts": {"repo_count": -1}},
+            {
+                "kind": "retire",
+                "facts": {"op_id": "x" * 81},
+            },
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                with self.assertRaises(EventLogError) as validated:
+                    validate_event_write(
+                        kind=case["kind"],
+                        actor="operator",
+                        subject="alpha",
+                        family="",
+                        facts=case["facts"],
+                    )
+                self.assertEqual(validated.exception.code, "EVENT_WRITE_INVALID")
+                with self.assertRaises(EventLogError) as written:
+                    append_event(
+                        self.config,
+                        kind=case["kind"],
+                        actor="operator",
+                        subject="alpha",
+                        family="",
+                        facts=case["facts"],
+                        clock=self.clock,
+                    )
+                self.assertEqual(written.exception.code, "EVENT_WRITE_INVALID")
         self.assertFalse((self.root / ".dyro" / "events.jsonl").exists())
 
     def test_hmac_after_cursor_rejects_tampering(self) -> None:
