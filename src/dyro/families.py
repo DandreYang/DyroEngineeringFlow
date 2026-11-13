@@ -388,11 +388,18 @@ def ack_channel_message(
     dry_run: bool = False,
 ) -> dict[str, object]:
     """Mark one row operator-read.  Ack is inbox state, not a channel kind."""
+    from .line_retire import load_retired_line
+
     message_id = _message_id(message_id)
+    if family and load_retired_line(config, family) is not None:
+        raise FamilyChannelError("FAMILY_RETIRED_READ_ONLY")
     located = find_channel_message(config, message_id, family=family)
     if located is None:
         raise FamilyChannelError("CHANNEL_MESSAGE_NOT_FOUND")
     parent_id, row = located
+    if any(value and value != OPERATOR_ID and load_retired_line(config, value) is not None
+           for value in (parent_id, row["from"], row["to"])):
+        raise FamilyChannelError("FAMILY_RETIRED_READ_ONLY")
     if dry_run:
         return {
             "id": message_id,

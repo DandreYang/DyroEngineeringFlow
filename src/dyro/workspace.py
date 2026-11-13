@@ -487,7 +487,8 @@ def _build_line(
         raise ValidationError("branch 与 base 都必须明确指定")
     if kind not in ("line", "hotfix"):
         raise ValidationError("kind 只能是 line 或 hotfix")
-    if (config.lines_state_dir / "retired" / f"{line_id}.toml").exists():
+    tombstone = config.lines_state_dir / "retired" / f"{line_id}.toml"
+    if tombstone.exists() or tombstone.is_symlink():
         raise DyroError(f"开发线 ID 已退役，不可复用：{line_id}")
     if _state_path(config, kind, line_id).exists():
         raise DyroError(f"开发线已登记：{line_id}")
@@ -941,6 +942,8 @@ def _merge_line_repositories(
             if get_line(config, target.id) != target or get_line(config, source.id) != source:
                 raise DyroError("开发线清单已变化，请重新运行合并或同步")
             require_no_unfinished_op(config, target.id, kinds=MERGE_OP_KINDS)
+            for line in (target, source):
+                require_no_unfinished_op(config, line.id, kinds=["retire"])
             _require_line_worktrees(config, target, clean=True, label="目标开发线")
             _require_line_worktrees(config, source, clean=False, label="源开发线")
             _merge_line_repositories_locked(
@@ -1770,6 +1773,9 @@ def _run_journaled_line_merge(
             config, repos, timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS
         ):
             require_no_unfinished_op(config, lock_line_id, kinds=MERGE_OP_KINDS)
+            for line in (source, target):
+                if line is not None:
+                    require_no_unfinished_op(config, line.id, kinds=["retire"])
             if get_line(config, source.id) != source or (
                 target is not None and get_line(config, target.id) != target
             ):

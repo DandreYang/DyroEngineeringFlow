@@ -149,6 +149,18 @@ class LineOpsTests(WorkspaceCase):
         with self.assertRaisesRegex(DyroError, "已结束"):
             line_ops.update_repo_phase(self.config, op_id, "api", phase="pending", outcome="pending")
 
+    def test_confirmed_result_cannot_be_overwritten(self) -> None:
+        for outcome in ("ok", "committed", "skipped_missing"):
+            with self.subTest(outcome=outcome):
+                op_id = self._create_op()["op_id"]
+                line_ops.record_repo_intent(self.config, op_id, "api", "save", original_head="old", target_sha="pinned")
+                line_ops.record_repo_result(self.config, op_id, "api", "save", outcome=outcome, new_tip="pinned")
+                before = line_ops.op_path(self.config, op_id).read_bytes()
+                for replacement in (outcome, "unknown", "ok"):
+                    with self.assertRaisesRegex(DyroError, "拒绝覆盖已确认"):
+                        line_ops.record_repo_result(self.config, op_id, "api", "save", outcome=replacement, new_tip="changed")
+                    self.assertEqual(line_ops.op_path(self.config, op_id).read_bytes(), before)
+
     def test_unfinished_selection_and_block_include_subject_and_recovery(self) -> None:
         self.assertIsNone(line_ops.find_unfinished_op(self.config, "alpha"))
         first = self._create_op(op_id="first")
@@ -259,13 +271,20 @@ class LineLockWiringTests(WorkspaceCase):
         workspace.create_line(config, line_id="alpha", branch="feat/alpha", base="main")
         retired = config.lines_state_dir / "retired"
         retired.mkdir()
-        for line_id in ("old", "alpha_old"):
-            (retired / f"{line_id}.toml").write_text('id = "archived"\n')
-        for dry_run in (False, True):
-            with self.assertRaisesRegex(DyroError, "已退役.*不可复用"):
-                workspace.create_line(config, line_id="old", branch="feat/old", base="main", dry_run=dry_run)
-            with self.assertRaisesRegex(DyroError, "已退役.*不可复用"):
-                workspace.spawn_line(config, "alpha", "old", dry_run=dry_run)
+        for broken_symlink in (False, True):
+            for line_id in ("old", "alpha_old"):
+                path = retired / f"{line_id}.toml"
+                if broken_symlink:
+                    path.unlink()
+                    path.symlink_to(retired / "missing.toml")
+                else:
+                    path.write_text('id = "archived"\n')
+            for dry_run in (False, True):
+                with self.subTest(broken_symlink=broken_symlink, dry_run=dry_run):
+                    with self.assertRaisesRegex(DyroError, "已退役.*不可复用"):
+                        workspace.create_line(config, line_id="old", branch="feat/old", base="main", dry_run=dry_run)
+                    with self.assertRaisesRegex(DyroError, "已退役.*不可复用"):
+                        workspace.spawn_line(config, "alpha", "old", dry_run=dry_run)
         self.assertFalse((self.root / "versions/old").exists())
         self.assertFalse((self.root / "versions/alpha_old").exists())
 
@@ -361,6 +380,71 @@ class LineLockWiringTests(WorkspaceCase):
             with patch.object(tasks, "_prepare_merge", side_effect=checked_prepare):
                 with self.assertRaisesRegex(DyroError, "preflight reached"):
                     tasks._merge_task_repositories(config, task, push=False, dry_run=True)
+
+    def _assert_retire_blocks_under_lock(self, config, action, target_id, retired_id, *, module=workspace):
+        original = module.git
+        locked = False
+
+        @contextmanager
+        def journal_under_lock(*args, **kwargs):
+            nonlocal locked
+            with line_ops.anchor_locks(*args, **kwargs):
+                self.assertEqual(held, [workspace.merge_lock_path(config, target_id),
+                                        line_ops.anchor_lock_path(config, self.anchor)])
+                op = line_ops.create_op(config, kind="retire", subject_line_ids=[retired_id],
+                                        manifest_snapshot={}, repos_ordered=["api"], effective_options={})
+                locked = True
+                try:
+                    yield
+                finally:
+                    locked = False
+                    line_ops.op_path(config, op["op_id"]).unlink()
+
+        def no_git_after_lock(*args, **kwargs):
+            self.assertFalse(locked, "unfinished retire must be checked before Git")
+            return original(*args, **kwargs)
+
+        with self._traced_locks() as (held, _acquisitions), patch.object(
+            module, "anchor_locks", side_effect=journal_under_lock,
+        ), patch.object(module, "git", side_effect=no_git_after_lock):
+            with self.assertRaisesRegex(DyroError, f"{retired_id} 有未完成操作 .*dyro line retire .*--recover"):
+                action()
+
+    def test_sync_refuses_unfinished_retire_on_either_line_under_lock(self) -> None:
+        config, parent, child = self._parent_child()
+        for retired_id in (parent.id, child.id):
+            for dry_run in (False, True):
+                with self.subTest(retired_id=retired_id, dry_run=dry_run):
+                    self._assert_retire_blocks_under_lock(
+                        config, lambda: workspace.sync_line(config, child.id, dry_run=dry_run), child.id, retired_id,
+                    )
+
+    def test_all_merge_forms_refuse_unfinished_retire_under_lock(self) -> None:
+        config, parent, child = self._parent_child()
+        for dry_run in (False, True):
+            for retired_id in (parent.id, child.id):
+                for form, action in (
+                    ("into", lambda: workspace.merge_line(config, child.id, parent.id, dry_run=dry_run)),
+                    ("from", lambda: workspace.merge_line_from(config, parent.id, child.id, dry_run=dry_run)),
+                ):
+                    with self.subTest(form=form, retired_id=retired_id, dry_run=dry_run):
+                        self._assert_retire_blocks_under_lock(config, action, parent.id, retired_id)
+            with self.subTest(form="into-base", dry_run=dry_run):
+                self._assert_retire_blocks_under_lock(
+                    config, lambda: workspace.merge_line_into_base(config, child.id, dry_run=dry_run), child.id, child.id,
+                )
+
+    def test_task_merge_refuses_unfinished_retire_under_lock(self) -> None:
+        config, parent, _child = self._parent_child()
+        tasks.create_task(config, "T1", title="example", line_id=parent.id, repositories=["api"])
+        task = tasks.load_task(config, "T1")
+        (task.directory / "status").write_text("done\n")
+        with patch.object(tasks, "_valid_review_acceptance", return_value=True):
+            for dry_run in (False, True):
+                with self.subTest(dry_run=dry_run):
+                    self._assert_retire_blocks_under_lock(
+                        config, lambda: tasks.merge_task(config, task, dry_run=dry_run), parent.id, parent.id, module=tasks,
+                    )
 
     def test_task_create_rechecks_line_after_identity_lock(self) -> None:
         config, parent, _child = self._parent_child()

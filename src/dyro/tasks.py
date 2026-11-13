@@ -32,7 +32,7 @@ from .evidence_store import (
     resolve_evidence_path,
 )
 from .errors import DyroError, ValidationError
-from .line_ops import anchor_locks, line_identity_lock
+from .line_ops import anchor_locks, line_identity_lock, require_no_unfinished_op
 from .process import git, git_read, require_ok, run
 from .read_limits import (
     ReadBudget,
@@ -3085,6 +3085,7 @@ def _merge_task_repositories(
         with anchor_locks(
             config, task.repositories, timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS
         ):
+            require_no_unfinished_op(config, task.line, kinds=["retire"])
             current = load_task(config, task.id)
             if current != task:
                 raise DyroError(f"任务清单已变化，请重新运行合并：{task.id}")

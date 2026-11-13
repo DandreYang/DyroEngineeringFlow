@@ -58,6 +58,20 @@ class LineRetireTests(WorkspaceCase):
     def _recover(self, **options) -> dict:
         return line_retire.retire_line(self.config, "alpha", recover="", **options)
 
+    def _add_web(self) -> Path:
+        config_path = self.root / "dyro.toml"
+        config_path.write_text(config_path.read_text() + '\n[repositories.web]\npath = "repositories/web"\nmount = "web"\n')
+        web = self.root / "repositories/web"
+        shell("git", "clone", "--no-hardlinks", str(self.anchor), str(web), cwd=self.root)
+        shell("git", "config", "user.name", "Test User", cwd=web)
+        shell("git", "config", "user.email", "test@example.com", cwd=web)
+        self.config = load(self.root)
+        workspace._write_line(self.config, replace(self.line, repositories=("web", "api")))
+        self.line = workspace.get_line(self.config, "alpha")
+        web_path = workspace.line_repository_path(self.config, self.line, "web")
+        shell("git", "worktree", "add", "-b", "feat/alpha", str(web_path), "main", cwd=web)
+        return web
+
     def test_retires_in_order_and_preserves_lock_and_head(self) -> None:
         append = events.append_event_locked
 
@@ -139,6 +153,29 @@ class LineRetireTests(WorkspaceCase):
         workspace._write_line(self.config, replace(self.line, repository_bases={"api": "included"}))
         op = line_retire.retire_line(self.config, "alpha")
         self.assertEqual(op["effective_options"]["integration_ref"], "included")
+
+    def test_multi_repo_integration_refs_freeze_strings_and_recovery_checks_each_repo(self) -> None:
+        web = self._add_web()
+        shell("git", "branch", "develop", "main", cwd=web)
+        workspace._write_line(self.config, replace(self.line, repository_bases={"web": "develop"}))
+        op = self._crash("r1")
+        self.assertNotIn("integration_ref", op["effective_options"])
+        self.assertEqual({repo: data["snapshot"]["integration_ref"] for repo, data in op["repositories"].items()},
+                         {"api": "main", "web": "develop"})
+        before = line_ops.op_path(self.config, op["op_id"]).read_bytes()
+        with patch.object(line_retire, "git", side_effect=AssertionError("must not mutate")):
+            for conflicting in ("main", "develop", "other"):
+                with self.assertRaisesRegex(DyroError, "恢复选项冲突.*integration_ref.*journal 冻结值"):
+                    self._recover(integration_ref=conflicting)
+                self.assertEqual(line_ops.op_path(self.config, op["op_id"]).read_bytes(), before)
+        self.assertEqual(self._recover()["phase"], "completed")
+
+    def test_multi_repo_recovery_accepts_matching_explicit_integration_ref(self) -> None:
+        self._add_web()
+        op = self._crash("r1", integration_ref="main")
+        self.assertEqual(op["effective_options"]["integration_ref"], "main")
+        self.assertTrue(all(repo["snapshot"]["integration_ref"] == "main" for repo in op["repositories"].values()))
+        self.assertEqual(self._recover(integration_ref="main")["phase"], "completed")
 
     def test_shared_branch_and_anchor_checked_branch_are_never_deleted(self) -> None:
         workspace._write_line(self.config, replace(self.line, id="other", kind="hotfix"))
@@ -331,6 +368,45 @@ class LineRetireTests(WorkspaceCase):
             self._recover()
         self.assertFalse(line_retire.retired_path(self.config, "alpha").exists())
 
+    def test_skipped_no_head_never_removes_existing_path(self) -> None:
+        shell("git", "worktree", "remove", str(self.path), cwd=self.anchor)
+        shell("git", "update-ref", "-d", "refs/heads/feat/alpha", cwd=self.anchor)
+        with patch.object(line_retire, "_remove", side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                line_retire.retire_line(self.config, "alpha", missing_ok=True)
+        op = self._open()
+        snapshot = op["repositories"]["api"]["snapshot"]
+        self.assertEqual(op["repositories"]["api"]["steps"]["r1"]["result"]["outcome"], "skipped_no_head")
+        for storage_mode in ("linked-worktree", "anchor-reference"):
+            with self.subTest(storage_mode=storage_mode):
+                checkpoint = json.loads(json.dumps(op))
+                snapshot = {**snapshot, "storage_mode": storage_mode}
+                for pending_intent in (False, True):
+                    with self.subTest(pending_intent=pending_intent):
+                        line_ops.op_path(self.config, op["op_id"]).write_text(json.dumps(checkpoint))
+                        if pending_intent:
+                            line_retire._intent(self.config, checkpoint, "api", "r2", "", **snapshot)
+                        if storage_mode == "anchor-reference":
+                            self.path.symlink_to(self.root / "missing-anchor", target_is_directory=True)
+                        else:
+                            self.path.mkdir(parents=True)
+                            (self.path / "keep.txt").write_text("keep")
+                        with patch.object(line_retire, "_check_worktree"), patch.object(line_retire, "git") as mutate:
+                            with self.assertRaisesRegex(DyroError, "R2 未保全 HEAD.*拒绝移除"):
+                                line_retire._remove(self.config, checkpoint, "api", snapshot, "")
+                        mutate.assert_not_called()
+                        self.assertTrue(self.path.exists() or self.path.is_symlink())
+                        if self.path.is_symlink():
+                            self.path.unlink()
+                        else:
+                            self.assertEqual((self.path / "keep.txt").read_text(), "keep")
+                            (self.path / "keep.txt").unlink()
+                            self.path.rmdir()
+                        # Only an already missing path may be accepted, even with an R2 intent.
+                        line_retire._remove(self.config, checkpoint, "api", snapshot, "")
+                        result = self._open()["repositories"]["api"]["steps"]["r2"]["result"]
+                        self.assertEqual(result["outcome"], "skipped_missing")
+
     def test_r4_conflicting_tombstone_blocks_before_git(self) -> None:
         self._crash("r1")
         retired = line_retire.retired_path(self.config, "alpha")
@@ -342,17 +418,8 @@ class LineRetireTests(WorkspaceCase):
         self.assertEqual(retired.read_text(), "conflicting manifest\n")
 
     def test_all_repos_before_archive_and_unknown_keeps_manifest_active(self) -> None:
-        config_path = self.root / "dyro.toml"
-        config_path.write_text(config_path.read_text() + '\n[repositories.web]\npath = "repositories/web"\nmount = "web"\n')
-        web = self.root / "repositories/web"
-        shell("git", "clone", "--no-hardlinks", str(self.anchor), str(web), cwd=self.root)
-        shell("git", "config", "user.name", "Test User", cwd=web)
-        shell("git", "config", "user.email", "test@example.com", cwd=web)
-        self.config = load(self.root)
-        workspace._write_line(self.config, replace(self.line, repositories=("web", "api")))
-        self.line = workspace.get_line(self.config, "alpha")
+        self._add_web()
         web_path = workspace.line_repository_path(self.config, self.line, "web")
-        shell("git", "worktree", "add", "-b", "feat/alpha", str(web_path), "main", cwd=web)
         original = line_retire._remove
 
         def failing(config, op, repo_id, snapshot, sha):
@@ -361,7 +428,7 @@ class LineRetireTests(WorkspaceCase):
             return original(config, op, repo_id, snapshot, sha)
 
         with patch.object(line_retire, "_remove", side_effect=failing):
-            with self.assertRaisesRegex(DyroError, "api: done.*\nweb: unknown"):
+            with self.assertRaisesRegex(DyroError, "api: pending.*\nweb: unknown"):
                 line_retire.retire_line(self.config, "alpha")
         op = self._open()
         self.assertEqual(op["repos_ordered"], ["api", "web"])
@@ -370,6 +437,18 @@ class LineRetireTests(WorkspaceCase):
         self.assertTrue(workspace._state_path(self.config, "line", "alpha").exists())
         self.assertFalse(line_retire.retired_path(self.config, "alpha").exists())
         self.assertEqual(self._recover()["phase"], "completed")
+
+    def test_retire_report_marks_done_only_after_real_completion(self) -> None:
+        op = self._crash("r3")
+        self.assertIn("api: pending (r2)", str(line_retire._report(self.config, op, DyroError("interrupted"))))
+        for step in ("_archive", "_publish"):
+            with self.subTest(step=step), patch.object(line_retire, step, side_effect=OSError("failed")):
+                with self.assertRaises(DyroError) as failure:
+                    self._recover()
+                self.assertNotIn("api: done", str(failure.exception))
+                self.assertNotEqual(self._open()["phase"], "completed")
+        op = self._recover()
+        self.assertIn("api: done (completed)", str(line_retire._report(self.config, op, DyroError("report"))))
 
     def test_unfinished_op_blocks_new_retire_before_preflight(self) -> None:
         op = self._crash("r1")
@@ -450,6 +529,30 @@ class LineRetireTests(WorkspaceCase):
                 families.post_channel_message(self.config, sender=sender, recipient=recipient,
                                               family=family, kind="decision", body="refuse")
         self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+    def test_ack_refuses_retired_family_or_message_member_without_writes(self) -> None:
+        child = workspace.spawn_line(self.config, "alpha", "child")
+        messages = [
+            families.post_channel_message(self.config, sender=child.id, kind="shipped", body="ready"),
+            families.post_channel_message(self.config, sender="operator", recipient=child.id,
+                                          family="alpha", kind="decision", body="reviewed"),
+        ]
+        line_retire.retire_line(self.config, child.id)
+
+        def snapshot():
+            paths = [*(self.root / ".dyro/families").rglob("*"), events.events_path(self.config)]
+            return {path: path.read_bytes() for path in paths if path.is_file()}
+
+        for retired_parent in (False, True):
+            if retired_parent:
+                line_retire.retire_line(self.config, "alpha")
+            before = snapshot()
+            for message in messages:
+                for dry_run in (False, True):
+                    with self.subTest(retired_parent=retired_parent, message=message["id"], dry_run=dry_run):
+                        with self.assertRaisesRegex(DyroError, "FAMILY_RETIRED_READ_ONLY"):
+                            families.ack_channel_message(self.config, message["id"], family="alpha", dry_run=dry_run)
+            self.assertEqual(snapshot(), before)
 
     def test_cli_flags_and_dry_run_plan(self) -> None:
         parser = build_parser()

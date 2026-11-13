@@ -205,12 +205,14 @@ def _remove(config: Config, op: dict, repo_id: str, snapshot: dict, sha: str) ->
         step["intent"].get(key) != snapshot[key] for key in ("path", "anchor", "branch", "storage_mode")
     )):
         raise DyroError(f"R2 路径／分支 intent 与快照不一致：{path}")
+    if not sha and _exists(path):
+        raise DyroError(f"R2 未保全 HEAD，拒绝移除现有路径：{path}")
     if not _exists(path):
         if not step and not op["effective_options"]["missing_ok"]:
             raise DyroError(f"R2 未获准的 worktree 缺失：{path}")
         if not step:
             _intent(config, op, repo_id, "r2", sha, **snapshot)
-        _result(config, op, repo_id, "r2", "ok" if step else "skipped_missing", sha)
+        _result(config, op, repo_id, "r2", "ok" if step and sha else "skipped_missing", sha)
         return
     _check_worktree(snapshot, sha)
     if not step:
@@ -329,7 +331,7 @@ def _report(config: Config, op: dict, error: Exception) -> DyroError:
     current = line_ops.load_op(config, op["op_id"])
     rows = [f"retire {op['op_id']} 未完成：{error}"]
     for repo_id, repo in current["repositories"].items():
-        state = "unknown" if repo["phase"] == "unknown" else ("done" if "r3" in repo["steps"] else "pending")
+        state = "unknown" if repo["phase"] == "unknown" else ("done" if repo["phase"] == "completed" else "pending")
         rows.append(f"{repo_id}: {state} ({repo['phase']})")
         if state == "unknown":
             snapshot = repo["snapshot"]
@@ -389,7 +391,15 @@ def retire_line(
                   line_ops.find_unfinished_op(config, line_id, kinds=["retire"]))
             if op is None or op["kind"] != "retire" or op["subject_line_ids"] != [line_id]:
                 raise DyroError(f"未找到该线的 retire 操作：{line_id}")
-            options = line_ops.require_compatible_options(op, supplied)
+            if "integration_ref" in supplied:
+                for repo in op["repositories"].values():
+                    line_ops.require_compatible_options(
+                        {"effective_options": repo["snapshot"]},
+                        {"integration_ref": supplied["integration_ref"]},
+                    )
+            options = line_ops.require_compatible_options(
+                op, {key: value for key, value in supplied.items() if key != "integration_ref"},
+            )
             line = _parse_line_content(retired_path(config, line_id), op["manifest_snapshot"]["content"].encode("utf-8"))
             if line.id != line_id or sorted(line.repositories) != op["repos_ordered"]:
                 raise DyroError("journal 线身份／仓序不一致")
@@ -404,8 +414,10 @@ def retire_line(
                     if checked_line != line:
                         raise DyroError("开发线清单在加锁期间变化；请重新执行 retire")
                     targets = {item["integration_ref"] for item in snapshots.values()}
-                    options["integration_ref"] = (next(iter(targets)) if len(targets) == 1 else
-                                                  {repo: item["integration_ref"] for repo, item in snapshots.items()})
+                    if len(targets) == 1:
+                        options["integration_ref"] = next(iter(targets))
+                    else:
+                        options.pop("integration_ref")
                     op_id = uuid.uuid4().hex
                     facts = dict(repo_count=len(snapshots), op_id=op_id)
                     events.validate_event_write(**_event_payload(line, facts))

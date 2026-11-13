@@ -220,6 +220,9 @@ def record_repo_result(
     op, repo = _repo_for_update(config, op_id, repo_id)
     if action not in repo["steps"]:
         raise DyroError(f"操作结果缺少先行意图：{op_id}/{repo_id}/{action}")
+    previous = repo["steps"][action].get("result")
+    if previous is not None and previous.get("outcome") != "unknown":
+        raise DyroError(f"拒绝覆盖已确认的操作结果：{op_id}/{repo_id}/{action}")
     repo["steps"][action]["result"] = dict(outcome=outcome, new_tip=new_tip, error=error)
     _write_op(config, op)
 
