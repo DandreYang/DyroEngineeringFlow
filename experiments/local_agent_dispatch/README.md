@@ -92,19 +92,20 @@ Integrated Provider IDs are `codex`, `claude`,
 `cursor-agent`, `opencode`, `grok`, `hermes`, `kimi`, `dsh`, and `pi`. A Provider
 is routable only when its backend-specific authentication probe succeeds. Cursor
 uses `--mode ask --output-format json` for read-only dispatch. With
-`CURSOR_API_KEY` it uses an ephemeral home; otherwise explicit
-`allow_unconfined_provider: true` permits the CLI's own login and user home.
-Cursor edit mode remains unsupported.
+`CURSOR_API_KEY` set, it runs with an ephemeral home; without the key Cursor is
+not routable, because browser login would load the user's full Cursor home
+(MCP servers and plugins). Empty output is a failure. Cursor edit mode remains
+unsupported.
 AGY (`agy`) has a read-only print/plan/JSON runner with a print timeout and a
 no-shell prompt, but automatic routing remains disabled: its help exposes no
 non-generating authentication-status command. AGY edit mode is unsupported.
-MCode remains unsupported because local `mcode --help` failed with a filesystem
-permission error before displaying capabilities. Qoder remains unsupported:
-`qodercli --help` documents print and tool disabling, but does not enumerate a
-JSON output format. No flags or protocol values are inferred for either CLI.
-Kimi discovery, batch planning, and readiness share the same local selectable
-provider/model route check; this is local configuration validation, not remote
-authentication verification. Authentication failures are retried once and backend
+MCode remains unsupported: `mcode exec` offers JSON output but no read-only or
+plan mode (its `--permission` is smart/full/off). Qoder remains unsupported: the
+locally installed `qodercli --permission-mode` accepts only bypass_permissions,
+dont_ask and auto, with no plan mode. No flags are inferred for either CLI.
+Kimi availability wording still differs between discovery, batch planning and
+readiness; unifying it without spawning the CLI during passive discovery is open.
+Authentication failures are retried once and backend
 rows include failure reasons. Output-limit errors preserve any validated final
 answer already received and mark `usage.partial=true`; protocol failures retain a
 bounded, secret-filtered stdout tail in warnings.
