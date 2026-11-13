@@ -348,7 +348,7 @@ class CooperativeProcessCancellationTests(unittest.TestCase):
             self.assertEqual(outcomes[0].backend_pid, 0)
             self.assertEqual((outcomes[0].result or {}).get("status"), "cancelled")
 
-    def test_unproven_backend_cleanup_keeps_cancelled_run_running(self) -> None:
+    def test_unproven_backend_cleanup_fails_cancelled_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             project = root / "project"
@@ -384,7 +384,7 @@ class CooperativeProcessCancellationTests(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             self.assertEqual(len(errors), 1)
             self.assertIn("cleanup could not be proven", str(errors[0]))
-            self.assertEqual(supervisor.store.load(record.run_id).status, "running")
+            self.assertEqual(supervisor.store.load(record.run_id).status, "failed")
 
 
 class AsyncWorkerEnvironmentTests(unittest.TestCase):

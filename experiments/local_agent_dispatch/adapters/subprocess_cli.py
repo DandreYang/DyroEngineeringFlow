@@ -988,6 +988,18 @@ def _parse_model_json(text: str) -> dict[str, object]:
         if isinstance(decoded, dict):
             payload = decoded
             break
+    if payload is None:
+        # Some CLIs (Cursor) prefix the JSON answer with a sentence of prose.
+        decoder = json.JSONDecoder()
+        start = raw.find("{")
+        while start != -1 and payload is None:
+            try:
+                decoded, end = decoder.raw_decode(raw, start)
+            except json.JSONDecodeError:
+                decoded, end = None, start
+            if isinstance(decoded, dict) and "summary" in decoded and not raw[end:].strip():
+                payload = decoded
+            start = raw.find("{", start + 1)
     if not isinstance(payload, dict):
         raise DispatchValidationError("backend result is not a JSON object")
 
@@ -1671,17 +1683,24 @@ class CursorAdapter(SubprocessCliAdapter):
             if fallback and not contract.allow_unconfined_provider:
                 return AdapterResult(status="error", summary="",
                                      error_code="unconfined_provider_refused")
+            if fallback and contract.mode == "edit":
+                # Never combine the real HOME (user MCP/plugins) with --force.
+                return AdapterResult(
+                    status="error", summary="",
+                    error_code="cursor_edit_requires_isolated_login",
+                    warnings=["Cursor edit needs CURSOR_API_KEY or a file credential: "
+                              "run `AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login`"],
+                )
             argv = [
                 "cursor-agent",
                 "--print",
                 "--output-format",
                 "json",
-                # Cursor's sandbox helper currently daemonizes after the CLI
-                # exits, which breaks Dyro's prove-before-release process-group
-                # contract. The task still runs only after the caller accepts
-                # unconfined execution in a projection or scratch edit worktree.
+                # Edits auto-approve commands, so they run inside Cursor's sandbox;
+                # its helper daemon is reaped by the run's process-group cleanup.
+                # Read-only ask mode executes no commands and keeps it disabled.
                 "--sandbox",
-                "disabled",
+                "enabled" if contract.mode == "edit" else "disabled",
                 "--workspace",
                 str(cwd),
                 "--model",

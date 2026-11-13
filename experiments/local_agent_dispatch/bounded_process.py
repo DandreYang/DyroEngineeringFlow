@@ -15,6 +15,7 @@ import time
 from typing import Callable, Mapping, Sequence
 
 from .file_lock import open_inherited_lifetime_lock
+from .process_identity import process_group_has_live_members
 
 
 DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024
@@ -59,6 +60,12 @@ def _terminate_process_group(
         pass
     except OSError:
         process.kill()
+    # Wait for descendants too, while the unreaped leader still pins this PGID.
+    deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        if process_group_has_live_members(process.pid) is False:
+            break
+        time.sleep(0.02)
     try:
         process.wait(timeout=TERMINATION_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
@@ -111,7 +118,6 @@ def run_bounded(
     timed_out = False
     output_limited = False
     cancelled = False
-    streaming_complete = False
     process_group_terminated = False
 
     with tempfile.TemporaryFile() as stdin_file:
@@ -229,7 +235,6 @@ def run_bounded(
                     captured += len(chunk)
                 if output_limited:
                     break
-            streaming_complete = not timed_out and not output_limited
         finally:
             if gate_read is not None:
                 os.close(gate_read)
@@ -244,9 +249,7 @@ def run_bounded(
                 # descendant cannot outlive a successful-looking CLI exit.
                 _terminate_process_group(
                     process,
-                    grace_seconds=(
-                        0.0 if streaming_complete else TERMINATION_GRACE_SECONDS
-                    ),
+                    grace_seconds=TERMINATION_GRACE_SECONDS,
                 )
                 process_group_terminated = True
             if selector is not None:

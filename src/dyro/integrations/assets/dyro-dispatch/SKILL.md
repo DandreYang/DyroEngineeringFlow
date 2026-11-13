@@ -39,9 +39,10 @@ Treat `dyro dispatch` as an outbound harness, separate from the read-only
    `supported=true`, `available=true`, and `execution_kind=provider` only as
    planning candidates. Supported Provider IDs are `codex`, `claude`,
    `cursor-agent`, `opencode`, `grok`, `hermes`, `kimi`, `dsh`, and `pi`; an
-   installed command may still be unready. Cursor supports read-only and edit work via its own CLI login or
-   `CURSOR_API_KEY`. File credentials use an isolated home; keychain login
-   requires unconfined acknowledgement and may load user MCP/plugins. Kimi file OAuth is isolated per run; keyring
+   installed command may still be unready. Cursor uses its CLI login or
+   `CURSOR_API_KEY`; keychain login is read-only and may load user MCP/plugins.
+   Cursor edit needs a key or file login
+   (`AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login`). Kimi file OAuth is isolated per run; keyring
    OAuth fails closed. DSH uses `deepseek-official/deepseek-v4-flash`.
 
 2. Choose the smallest useful strategy:

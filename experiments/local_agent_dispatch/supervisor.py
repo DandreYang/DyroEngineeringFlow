@@ -600,7 +600,7 @@ class DispatchSupervisor:
                     backend_cleanup_error = DispatchValidationError(
                         "backend process-group cleanup could not be proven"
                     )
-            except Exception as exc:  # noqa: BLE001 - keep run nonterminal
+            except Exception as exc:  # noqa: BLE001 - persist cleanup failure below
                 backend_cleanup_error = exc
 
         cleanup_errors: list[Exception] = []
@@ -627,6 +627,15 @@ class DispatchSupervisor:
             raise DispatchValidationError("worker exited without claiming run")
 
         if backend_cleanup_error is not None:
+            failure = _failure_outcome(
+                record=record,
+                error="backend process-group cleanup could not be proven: "
+                + safe_error_text(backend_cleanup_error),
+            )
+            self.store.fail_unproven_cleanup(
+                run_id, worker_token=worker_token,
+                result=failure.result, error=failure.error,
+            )
             if operation_error is not None:
                 raise DispatchValidationError(
                     "worker failed and backend cleanup could not be proven: "

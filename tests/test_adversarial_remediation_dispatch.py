@@ -2516,6 +2516,10 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 "experiments.local_agent_dispatch.bounded_process.time.sleep",
                 side_effect=lambda _seconds: events.append("grace"),
             ),
+            patch(
+                "experiments.local_agent_dispatch.bounded_process.process_group_has_live_members",
+                return_value=False,
+            ),
         ):
             _terminate_process_group(process)
 
@@ -2581,6 +2585,41 @@ class ProcessAndLifecycleTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0)
             time.sleep(0.9)
             self.assertFalse(marker.exists())
+
+    def test_tracked_cli_result_with_lingering_group_child(self) -> None:
+        from experiments.local_agent_dispatch.process_identity import process_group_has_live_members
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ready = root / "ready"
+            child = (
+                "import signal,time,pathlib;"
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                f"pathlib.Path({str(ready)!r}).touch();"
+                "time.sleep(30)"
+            )
+            cli = root / "fake_cli.py"
+            cli.write_text(
+                "import subprocess,sys,time,pathlib\n"
+                f"subprocess.Popen([sys.executable,'-c',{child!r}],"
+                "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                f"while not pathlib.Path({str(ready)!r}).exists(): time.sleep(0.01)\n"
+                "print(" + repr('{"summary":"done","confidence":"high","evidence":[]}') + ")\n",
+                encoding="utf-8",
+            )
+            groups = []
+            completed = run_bounded(
+                [sys.executable, str(cli)], cwd=root, timeout_seconds=5,
+                on_spawn=groups.append, lifetime_lock_path=root / "lifetime",
+            )
+            self.assertEqual(completed.returncode, 0)
+            self.assertIn('"summary":"done"', completed.stdout)
+            try:
+                os.killpg(groups[0], 0)
+            except ProcessLookupError:
+                pass
+            else:
+                self.assertIs(process_group_has_live_members(groups[0]), False)
 
     def test_output_limit_terminates_backend(self) -> None:
         completed = run_bounded(
@@ -3774,7 +3813,8 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                     supervisor.execute(record.run_id)
 
             running = supervisor.store.load(record.run_id)
-            self.assertEqual(running.status, "running")
+            self.assertEqual(running.status, "failed")
+            self.assertEqual(running.result["confidence"], "low")
             self.assertEqual(len(running.lease_slots or []), 2)
             self.assertTrue(
                 all(Path(path).is_dir() for path in running.lease_slots or [])

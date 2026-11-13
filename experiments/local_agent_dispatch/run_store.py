@@ -990,7 +990,12 @@ class RunStore:
                 record.status != "running"
                 or record.worker_token != worker_token
             ):
-                return record.status in TERMINAL_RUN_STATUSES
+                return (
+                    record.status in TERMINAL_RUN_STATUSES
+                    and not record.backend_pid
+                    and (record.result or {}).get("error_code")
+                    != "backend_cleanup_unproven"
+                )
             if record.backend_pid <= 0:
                 return True
             if not self._backend_cleanup_proven(record):
@@ -1113,6 +1118,21 @@ class RunStore:
             else:
                 record.status = "failed"
                 record.error = error
+            record.revision += 1
+            self._save_unlocked(record)
+            return record
+
+    def fail_unproven_cleanup(
+        self, run_id: str, *, worker_token: str, result: dict[str, object], error: str,
+    ) -> RunRecord:
+        """Publish failure without clearing unproven backend ownership or leases."""
+        with exclusive_file_lock(self._lock_path(run_id)):
+            record = self.load(run_id)
+            if record.status != "running" or record.worker_token != worker_token:
+                return record
+            record.status = "failed"
+            record.error = error
+            record.result = {**result, "error_code": "backend_cleanup_unproven"}
             record.revision += 1
             self._save_unlocked(record)
             return record

@@ -578,10 +578,25 @@ class AdapterRepairTests(unittest.TestCase):
         from types import SimpleNamespace
         adapter = module.cursor_adapter()
         with tempfile.TemporaryDirectory() as tmp, patch.object(adapter, 'available', return_value=True), patch.object(adapter, '_execution_value', return_value='fake-model'), patch.object(module, '_build_prompt', return_value='task'), patch.object(module, '_cursor_isolated_environment', return_value=None), patch.object(module, 'run_bounded', return_value=self.completed()) as run:
-            result = adapter.run(contract=SimpleNamespace(mode='edit', allow_unconfined_provider=True), cwd=Path(tmp), context_files={}, timeout_seconds=10)
+            result = adapter.run(contract=SimpleNamespace(mode='read-only', allow_unconfined_provider=True), cwd=Path(tmp), context_files={}, timeout_seconds=10)
             self.assertEqual(result.error_code, 'protocol_error')
             self.assertTrue(any('MCP servers and plugins may load' in warning for warning in result.warnings))
             self.assertEqual(run.call_args.kwargs['env']['HOME'], str(Path.home()))
+            run.reset_mock()
+            # Real HOME must never be combined with --force edits.
+            refused = adapter.run(contract=SimpleNamespace(mode='edit', allow_unconfined_provider=True), cwd=Path(tmp), context_files={}, timeout_seconds=10)
+            self.assertEqual(refused.error_code, 'cursor_edit_requires_isolated_login')
+            run.assert_not_called()
+
+    def test_cursor_edit_runs_inside_cursor_sandbox(self):
+        import experiments.local_agent_dispatch.adapters.subprocess_cli as module
+        from types import SimpleNamespace
+        adapter = module.cursor_adapter()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(adapter, 'available', return_value=True), patch.object(adapter, '_execution_value', return_value='fake-model'), patch.object(module, '_build_prompt', return_value='task'), patch.object(module, '_cursor_isolated_environment', return_value={'HOME': tmp}), patch.object(adapter, '_run', return_value='fake') as run:
+            adapter.run(contract=SimpleNamespace(mode='edit', allow_unconfined_provider=True), cwd=Path(tmp), context_files={}, timeout_seconds=10)
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[argv.index('--sandbox') + 1], 'enabled')
+            self.assertIn('--force', argv)
 
     def test_grok_argv_from_help(self):
         import experiments.local_agent_dispatch.adapters.subprocess_cli as module
@@ -671,3 +686,12 @@ class ReviewRegressionTests(unittest.TestCase):
                 start_batch({}, expected_plan_sha256='digest', project_root=Path('.'))
         adapter.authenticated.assert_called_once()
         adapter.readiness_reason.assert_called_once()
+
+
+class ProseWrappedJsonTests(unittest.TestCase):
+    def test_trailing_json_after_prose_is_parsed(self):
+        import experiments.local_agent_dispatch.adapters.subprocess_cli as module
+        text = 'I will read the task first.{"summary": "ok", "confidence": "high", "evidence": []}'
+        self.assertEqual(module._parse_model_json(text)["summary"], "ok")
+        with self.assertRaises(module.DispatchValidationError):
+            module._parse_model_json('prose {"summary": "ok", "confidence": "high", "evidence": []} trailing prose')

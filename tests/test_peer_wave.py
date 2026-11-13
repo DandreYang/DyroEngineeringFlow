@@ -104,9 +104,10 @@ class PeerWaveTests(unittest.TestCase):
             self.assertFalse(any(workspace.rglob("changes.patch")))
             self.assertTrue((workspace / "module.py").is_file())
 
-    def test_write_capable_ids_exclude_cursor(self) -> None:
+    def test_write_capable_ids_include_cursor(self) -> None:
+        # Cursor edits run in its sandbox and refuse the real-HOME fallback.
         self.assertIn("codex", write_capable_dispatch_ids())
-        self.assertNotIn("cursor-agent", write_capable_dispatch_ids())
+        self.assertIn("cursor-agent", write_capable_dispatch_ids())
 
     def test_observe_only_card_is_not_bound_into_write_wave(self) -> None:
         cards = {"codex": SimpleNamespace(intents=("observe",))}
