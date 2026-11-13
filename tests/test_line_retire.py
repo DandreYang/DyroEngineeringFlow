@@ -569,39 +569,76 @@ class LineRetireTests(WorkspaceCase):
         self.assertIn("集成目标 main", out.getvalue())
 
 
-    def test_r3_failed_ancestor_check_skips_delete_and_recovery_can_finish(self) -> None:
+    def test_r3_ancestor_check_errors_stay_unknown_until_recovery(self) -> None:
         # R2 has removed the worktree, while the frozen force option is false.
         checkpoint = self._crash("r2")
         original = line_retire.git_read
-        mutate = line_retire.git
-        for failure in (1, 128, "timeout"):
+        failures = (128, DyroError("ancestor check timed out"),
+                    DyroError("ancestor check unavailable"), OSError("Git unavailable"))
+        for failure in failures:
             with self.subTest(failure=failure):
-                line_ops.op_path(self.config, checkpoint["op_id"]).write_text(json.dumps(checkpoint))
-
                 def failed_check(repo, *args, **kwargs):
                     if args[:2] == ("merge-base", "--is-ancestor"):
-                        if failure == "timeout":
-                            raise DyroError("ancestor check timed out")
+                        if isinstance(failure, Exception):
+                            raise failure
                         return Result(("git", *args), failure, "ancestor check failed")
                     return original(repo, *args, **kwargs)
 
-                def no_delete(repo, *args, **kwargs):
-                    self.assertNotEqual(args[:2], ("update-ref", "-d"))
-                    return mutate(repo, *args, **kwargs)
-
                 with patch.object(line_retire, "git_read", side_effect=failed_check):
-                    with patch.object(line_retire, "git", side_effect=no_delete):
-                        if failure != "timeout":
-                            with patch.object(line_retire, "_archive", side_effect=SystemExit):
-                                with self.assertRaises(SystemExit):
-                                    self._recover()
-                            op = self._open()
-                        else:
-                            op = self._recover()
+                    with patch.object(line_retire, "git", side_effect=AssertionError("must not delete")):
+                        with patch.object(line_retire, "_archive") as archive:
+                            with self.assertRaisesRegex(DyroError, "api: unknown"):
+                                self._recover()
+                            archive.assert_not_called()
+                op = self._open()
+                repo = op["repositories"]["api"]
+                self.assertEqual(op["op_id"], checkpoint["op_id"])
                 self.assertFalse(op["effective_options"]["force"])
-                self.assertEqual(op["repositories"]["api"]["steps"]["r3"]["result"]["outcome"], "skipped_not_included")
+                self.assertEqual((repo["phase"], repo["outcome"]), ("unknown", "unknown"))
+                self.assertNotIn("result", repo["steps"]["r3"])
+                self.assertNotIn("r4", repo["steps"])
+                self.assertNotIn("r5", repo["steps"])
+                self.assertTrue(workspace._state_path(self.config, "line", "alpha").exists())
+                self.assertFalse(line_retire.retired_path(self.config, "alpha").exists())
                 self.assertEqual(self._head(self.anchor, "feat/alpha"), self.sha)
+        op = self._recover()
         self.assertEqual(op["phase"], "completed")
+        self.assertEqual(op["repositories"]["api"]["steps"]["r3"]["result"]["outcome"], "ok")
+        self.assertTrue(line_retire.retired_path(self.config, "alpha").exists())
+
+    def test_r3_not_ancestor_stays_unknown_until_integration_and_recovery(self) -> None:
+        head = self._commit(self.path)
+        shell("git", "branch", "integration", head, cwd=self.anchor)
+        checkpoint = self._crash("r2", integration_ref="integration")
+        # The frozen ref name stays fixed, but its tip can change after R0.
+        shell("git", "update-ref", "refs/heads/integration", self.sha, head, cwd=self.anchor)
+        with patch.object(line_retire, "git", side_effect=AssertionError("must not delete")):
+            with patch.object(line_retire, "_archive") as archive:
+                with self.assertRaisesRegex(
+                    DyroError, "请先将 feat/alpha 集成到 integration，再运行 --recover"
+                ):
+                    self._recover()
+                archive.assert_not_called()
+        op = self._open()
+        repo = op["repositories"]["api"]
+        self.assertEqual(op["op_id"], checkpoint["op_id"])
+        self.assertFalse(op["effective_options"]["force"])
+        self.assertEqual((repo["phase"], repo["outcome"]), ("unknown", "unknown"))
+        self.assertNotIn("result", repo["steps"]["r3"])
+        self.assertNotIn("r4", repo["steps"])
+        self.assertNotIn("r5", repo["steps"])
+        self.assertTrue(workspace._state_path(self.config, "line", "alpha").exists())
+        self.assertFalse(line_retire.retired_path(self.config, "alpha").exists())
+        self.assertEqual(self._head(self.anchor, "feat/alpha"), head)
+        self.assertEqual(self._head(self.anchor, self.saved_ref), head)
+
+        shell("git", "switch", "integration", cwd=self.anchor)
+        shell("git", "merge", "--ff-only", "feat/alpha", cwd=self.anchor)
+        op = self._recover()
+        self.assertEqual(op["phase"], "completed")
+        self.assertEqual(op["effective_options"], checkpoint["effective_options"])
+        self.assertEqual(op["repositories"]["api"]["steps"]["r3"]["result"]["outcome"], "ok")
+        self.assertEqual(git(self.anchor, "show-ref", "--verify", "refs/heads/feat/alpha").code, 128)
         self.assertTrue(line_retire.retired_path(self.config, "alpha").exists())
 
 
