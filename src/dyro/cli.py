@@ -2568,8 +2568,9 @@ def cmd_integration_status(args: argparse.Namespace) -> None:
                 "host": avatar.host,
                 "state": avatar.state,
             }
-            if args.include_paths:
+            if args.include_paths or avatar.state == "unowned":
                 row.update(path=str(avatar.path), detail=avatar.detail)
+                row["link_target"] = avatar.link_target
             avatars.append(row)
         payload: dict[str, object] = {
             "integration": status.integration,
@@ -2585,6 +2586,7 @@ def cmd_integration_status(args: argparse.Namespace) -> None:
     for avatar in status.avatars:
         print(
             f"avatar\t{avatar.host}\t{avatar.state}\t{avatar.path}\t{avatar.detail}"
+            + (f"\t当前目标：{avatar.link_target}" if avatar.link_target else "")
         )
 
 

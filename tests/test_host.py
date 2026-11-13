@@ -74,6 +74,43 @@ max_parallel = 1
 
 
 class HostCompilerTests(WorkspaceCase):
+    def test_doctors_warn_once_per_integration_with_affected_hosts(self) -> None:
+        from dyro.host.doctor import doctor_payload, render_doctor_text
+        from dyro.integrations import install_integration
+        from dyro.integrations.manager import HOSTS
+        from dyro.workspace import doctor
+
+        with tempfile.TemporaryDirectory(prefix="dyro-doctor-avatars-") as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            codex = home / ".codex"
+            claude = home / ".claude"
+            codex.mkdir(parents=True)
+            isolated = {spec.env_var: "" for spec in HOSTS if spec.env_var}
+            with patch.dict(os.environ, {
+                **isolated, "HOME": str(home), "DYRO_HOME": str(root / "dyro"),
+            }):
+                install_integration("line-family", yes=True)
+                claude.mkdir()
+                config = load(self.root)
+                report = inspect_projections(config)
+                payload = doctor_payload(report)
+                warnings = [row for row in payload["findings"]
+                            if row["code"] == "WARN_INTEGRATION_AVATARS"]
+                # Only installed integrations warn; never-installed ones are not drift.
+                self.assertEqual(len(warnings), 1)
+                line = [row for row in warnings if "line-family：" in row["message"]]
+                self.assertEqual(len(line), 1)
+                self.assertIn("claude", line[0]["message"])
+                self.assertNotIn("codex", line[0]["message"])
+                self.assertEqual(line[0]["severity"], "WARN")
+                self.assertTrue(report.ok)
+                self.assertIn(line[0]["message"], render_doctor_text(report))
+                findings = doctor(config)
+                line_warnings = [row for row in findings
+                                 if row.startswith("WARN Integration line-family：")]
+                self.assertEqual(line_warnings, [line[0]["message"]])
+
     def _skill(self, host: str = "cli", *, user: bool = False) -> str:
         root = projection_root(load(self.root), user=user)
         return (root / host / SKILL_NAME).read_text(encoding="utf-8")

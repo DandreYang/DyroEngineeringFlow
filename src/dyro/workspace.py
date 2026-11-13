@@ -1429,6 +1429,9 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
     findings: list[str] = []
     try:
         _scale_control_plane_budget(config, read_budget)
+        from .host.doctor import integration_avatar_warnings
+
+        findings.extend(integration_avatar_warnings(read_budget=read_budget))
         for requirement in external_security_errors(config.policy):
             findings.append(f"FAIL external Profile requires {requirement}")
         root_git = _is_git_repo(config.root, read_budget=read_budget)
