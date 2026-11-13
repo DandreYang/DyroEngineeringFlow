@@ -14,6 +14,7 @@ from ..context_guard import assert_content_allowed
 from .base import BackendAdapter
 from .echo import EchoAdapter
 from .subprocess_cli import (
+    agy_adapter,
     claude_adapter,
     codex_adapter,
     cursor_adapter,
@@ -36,12 +37,14 @@ REAL_PROVIDER_IDS = (
     "kimi",
     "dsh",
     "pi",
+    "agy",
 )
 
 
 def _all() -> dict[str, BackendAdapter]:
     adapters: list[BackendAdapter] = [
         EchoAdapter(),
+        agy_adapter(),
         codex_adapter(),
         claude_adapter(),
         cursor_adapter(),
@@ -69,10 +72,13 @@ def adapter_is_authenticated(adapter: BackendAdapter) -> bool:
         return adapter.id == "echo"
     authenticated = getattr(adapter, "authenticated", None)
     if callable(authenticated):
-        try:
-            return bool(authenticated())
-        except DispatchValidationError:
-            return False
+        for _ in range(2):
+            try:
+                if authenticated():
+                    return True
+            except DispatchValidationError:
+                pass
+        return False
     # Preserve the original adapter-test/extension compatibility contract:
     # adapters predating the explicit auth probe use availability as the probe.
     return adapter.available()
@@ -176,12 +182,17 @@ def probe_backends(*, passive: bool = False) -> list[dict[str, object]]:
             ),
             "authentication_probe": "not_run" if passive else "completed",
         }
-        if passive and available and adapter.id != "echo":
+        if not available and adapter.id != "echo":
+            reason = getattr(adapter, "readiness_reason", None)
+            row["reason"] = reason() if callable(reason) else "command not installed"
+        elif passive and available and adapter.id != "echo":
             row["reason"] = "authentication probe not run in dry-run mode"
         elif available and adapter.id != "echo" and not authenticated:
             reason = getattr(adapter, "readiness_reason", None)
             row["reason"] = (
                 reason() if callable(reason) else "authentication probe failed"
             )
+        if adapter.id == "kimi":
+            row["reason"] = adapter.readiness_reason()
         rows.append(row)
     return rows

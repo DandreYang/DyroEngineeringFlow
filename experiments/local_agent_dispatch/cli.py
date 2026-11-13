@@ -425,7 +425,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow the explicit echo test simulator; it is never a real Provider result",
     )
     p.add_argument("--wait", action="store_true", help="Execute synchronously")
-    p.add_argument("--timeout", type=_positive_finite_float, default=120.0)
+    p.add_argument("--timeout", type=_positive_finite_float, default=None)
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("result", help="Fetch run results")
@@ -443,7 +443,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Comma backends, e.g. codex,claude; use all for every ready Provider",
     )
-    p.add_argument("--timeout", type=_positive_finite_float, default=120.0)
+    p.add_argument("--timeout", type=_positive_finite_float, default=None)
     p.set_defaults(func=cmd_panel)
 
     p = sub.add_parser(
@@ -510,7 +510,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("worker", help=argparse.SUPPRESS)
     p.add_argument("run_id")
     p.add_argument("--worker-token", default="", help=argparse.SUPPRESS)
-    p.add_argument("--timeout", type=_positive_finite_float, default=120.0)
+    p.add_argument("--timeout", type=_positive_finite_float, default=None)
     p.set_defaults(func=cmd_worker)
 
     return parser

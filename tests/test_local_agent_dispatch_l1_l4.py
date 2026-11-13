@@ -102,6 +102,63 @@ class SupervisorEchoTests(unittest.TestCase):
             with self.assertRaises(DispatchValidationError):
                 sup.accept(bad, project_root=project)
 
+    def test_timeout_precedence_and_mode_defaults(self) -> None:
+        from experiments.local_agent_dispatch.cli import build_parser
+        parser = build_parser()
+        self.assertIsNone(parser.parse_args(["run", "--project", "."]).timeout)
+        self.assertEqual(parser.parse_args(["run", "--project", ".", "--timeout", "9"]).timeout, 9)
+        with tempfile.TemporaryDirectory() as tmp:
+            sup = DispatchSupervisor(home=_home(tmp))
+            record = sup.accept(_task(), project_root=_project(tmp))
+            for mode, contract_timeout, explicit, expected in (
+                ("read-only", None, None, 120), ("edit", None, None, 1800),
+                ("edit", 42, None, 42), ("read-only", 42, None, 42),
+                ("edit", 42, 9, 9),
+            ):
+                with self.subTest(mode=mode, contract_timeout=contract_timeout, explicit=explicit):
+                    record.contract["mode"] = mode
+                    if contract_timeout is None:
+                        record.contract.pop("timeout_seconds", None)
+                    else:
+                        record.contract["timeout_seconds"] = contract_timeout
+                    sup.store.save(record)
+                    with patch.object(sup, "spawn_worker", return_value=record) as spawn:
+                        sup.execute(record.run_id, sync=False, timeout_seconds=explicit)
+                    spawn.assert_called_once_with(record.run_id, timeout_seconds=expected)
+
+    def test_adapter_failures_override_high_confidence(self) -> None:
+        from experiments.local_agent_dispatch.adapters.base import AdapterResult
+        echo = get_adapter("echo")
+        with tempfile.TemporaryDirectory() as tmp:
+            sup = DispatchSupervisor(home=_home(tmp))
+            project = _project(tmp)
+            for status, code in (("timeout", "timeout"), ("error", "protocol_error"),
+                                 ("error", "output_limit"), ("cancelled", "cancelled")):
+                with self.subTest(status=status, code=code):
+                    record = sup.accept(_task(), project_root=project)
+                    with patch.object(type(echo), "run", return_value=AdapterResult(
+                        status=status, summary="incomplete", confidence="high", error_code=code
+                    )):
+                        done = sup.execute(record.run_id)
+                    self.assertNotEqual(done.status, "completed")
+                    self.assertEqual(done.result["confidence"], "low")
+                    self.assertEqual(done.result["error_code"], code)
+
+    def test_persisted_failure_envelopes_are_low_confidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sup = DispatchSupervisor(home=_home(tmp))
+            project = _project(tmp)
+            for status in ("failed", "timeout", "cancelled"):
+                record = sup.accept(_task(), project_root=project)
+                done = sup.store.update_status(record.run_id, status)
+                self.assertEqual(done.result["confidence"], "low")
+                self.assertFalse(done.result["patch_partial"])
+            record = sup.accept(_task(), project_root=project)
+            done = sup.store.update_status(record.run_id, "failed", result={
+                "confidence": "high", "patch_ref": "partial.diff", "status": "ok"})
+            self.assertEqual(done.result["confidence"], "low")
+            self.assertTrue(done.result["patch_partial"])
+
     def test_echo_requires_explicit_simulation_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             sup = DispatchSupervisor(home=_home(tmp))
@@ -245,6 +302,7 @@ class CliTests(unittest.TestCase):
                 [
                     "--home",
                     str(home),
+                    "--dry-run",
                     "backends",
                 ]
             )
@@ -330,7 +388,7 @@ class RegistryTests(unittest.TestCase):
         with patch.object(registry_module, "_all", return_value={"echo": echo}):
             with self.assertRaisesRegex(DispatchValidationError, "no available authenticated"):
                 get_adapter("auto")
-        rows = probe_backends()
+        rows = probe_backends(passive=True)
         self.assertTrue(any(r["id"] == "echo" for r in rows))
         for provider_id in (
             "cursor-agent",
@@ -413,3 +471,94 @@ class ContractRejectTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdapterRepairTests(unittest.TestCase):
+    def completed(self, stdout='', **kwargs):
+        from experiments.local_agent_dispatch.bounded_process import BoundedCompletedProcess
+        return BoundedCompletedProcess(args=('fake',), returncode=0, stdout=stdout, stderr=kwargs.pop('stderr', ''), **kwargs)
+
+    def answer(self):
+        return json.dumps({'summary': 'bounded answer', 'confidence': 'high', 'evidence': []})
+
+    def test_grok_structured_wrappers_and_raw_failure_evidence(self):
+        from experiments.local_agent_dispatch.adapters.subprocess_cli import _parse_wrapped_model_json, _completed_to_result
+        for key in ('text', 'result', 'response', 'output'):
+            parsed = _parse_wrapped_model_json(json.dumps({key: self.answer()}), backend='grok')
+            self.assertEqual(parsed['summary'], 'bounded answer')
+        result = _completed_to_result(self.completed('unrecognized provider response'), backend='grok', parser=lambda text: _parse_wrapped_model_json(text, backend='grok'))
+        self.assertEqual(result.error_code, 'protocol_error')
+        self.assertIn('unrecognized provider response', result.warnings)
+
+    def test_output_limit_preserves_received_final(self):
+        from experiments.local_agent_dispatch.adapters.subprocess_cli import _completed_to_result
+        result = _completed_to_result(self.completed(self.answer() + '\ntruncated event', output_limited=True), backend='fake')
+        self.assertEqual(result.summary, 'bounded answer')
+        self.assertTrue(result.usage['partial'])
+        self.assertEqual(result.error_code, 'output_limit')
+
+    def test_empty_stdout_surfaces_stderr(self):
+        from experiments.local_agent_dispatch.adapters.subprocess_cli import _completed_to_result
+        for backend in ('agy', 'cursor-agent'):
+            result = _completed_to_result(self.completed(stderr='Shell command auto-denied'), backend=backend)
+            self.assertIn('Shell command auto-denied', result.warnings)
+            self.assertEqual(result.error_code, 'protocol_error')
+
+    def test_auth_retry_once_and_failed_row_reason(self):
+        from unittest.mock import Mock
+        adapter = Mock(id='grok', command='grok', strict_isolation=False)
+        adapter.available.return_value = True
+        adapter.authenticated.side_effect = [False, True]
+        self.assertTrue(registry_module.adapter_is_authenticated(adapter))
+        self.assertEqual(adapter.authenticated.call_count, 2)
+        adapter.authenticated.side_effect = [False, False]
+        adapter.readiness_reason.return_value = 'local probe failed'
+        with patch.object(registry_module, '_all', return_value={'grok': adapter}):
+            self.assertEqual(probe_backends()[0]['reason'], 'local probe failed')
+
+    def test_agy_argv_no_shell_and_fail_closed_discovery(self):
+        import experiments.local_agent_dispatch.adapters.subprocess_cli as module
+        from types import SimpleNamespace
+        adapter = module.agy_adapter()
+        with patch.object(adapter, 'available', return_value=True), patch.object(module, '_build_prompt', return_value='task'), patch.object(adapter, '_run', return_value='fake') as run:
+            contract = SimpleNamespace(mode='read-only', allow_unconfined_provider=True)
+            adapter.run(contract=contract, cwd=Path('.'), context_files={}, timeout_seconds=12)
+            self.assertEqual(run.call_args.args[0], ['agy', '--print', '--mode', 'plan', '--output-format', 'json', '--print-timeout', '12s', '--disable-slash-commands'])
+            self.assertIn('Do not run shell commands', run.call_args.kwargs['prompt'])
+            self.assertFalse(adapter.authenticated())
+            self.assertNotIn('edit', adapter.supported_modes)
+
+    def test_fake_cli_limit_keeps_answer_before_noisy_suffix(self):
+        import sys
+        from experiments.local_agent_dispatch.bounded_process import run_bounded
+        from experiments.local_agent_dispatch.adapters.subprocess_cli import _completed_to_result
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / 'fake_cli.py'
+            script.write_text('import sys\nsys.stdout.write(' + repr(self.answer()) + ')\nsys.stdout.flush()\nsys.stdout.write("x" * 100000)\nsys.stdout.flush()\n')
+            completed = run_bounded([sys.executable, str(script)], cwd=Path(tmp), timeout_seconds=5, max_output_bytes=4096)
+        self.assertTrue(completed.output_limited)
+        result = _completed_to_result(completed, backend='fake')
+        self.assertEqual(result.summary, 'bounded answer')
+        self.assertTrue(result.usage['partial'])
+
+    def test_grok_argv_from_help(self):
+        import experiments.local_agent_dispatch.adapters.subprocess_cli as module
+        from types import SimpleNamespace
+        adapter = module.grok_adapter()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(adapter, 'available', return_value=True), patch.object(adapter, '_execution_value', return_value='fake-model'), patch.object(module, '_build_prompt', return_value='task'), patch.object(adapter, '_run', return_value='fake') as run:
+            adapter.run(contract=SimpleNamespace(mode='read-only'), cwd=Path(tmp), context_files={}, timeout_seconds=10)
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[argv.index('--output-format') + 1], 'json')
+            self.assertNotIn('--no-memory', argv)
+            self.assertEqual(argv[argv.index('--permission-mode') + 1], 'plan')
+            self.assertEqual(argv[argv.index('--sandbox') + 1], 'read-only')
+
+    def test_probe_failure_records_safe_reason(self):
+        import experiments.local_agent_dispatch.adapters.subprocess_cli as module
+        from experiments.local_agent_dispatch.bounded_process import BoundedCompletedProcess
+        adapter = module.codex_adapter()
+        failed = BoundedCompletedProcess(args=('fake',), returncode=1, stdout='', stderr='login expired')
+        with patch.object(adapter, 'available', return_value=True), patch.object(module, 'run_bounded', return_value=failed) as bounded:
+            self.assertFalse(registry_module.adapter_is_authenticated(adapter))
+            self.assertEqual(bounded.call_count, 2)
+            self.assertEqual(adapter.readiness_reason(), 'login expired')

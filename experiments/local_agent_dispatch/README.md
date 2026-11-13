@@ -13,7 +13,7 @@ Discipline: [`docs/agent-orchestration-discipline.md`](../../docs/agent-orchestr
 | --- | --- |
 | L0 | TaskContract, ContextGuard, LocatorVerify, process identity |
 | L1 | RunStore, dual-scope slot leases, strict shadow integration |
-| L2 | bounded adapters for Codex, Claude, Cursor, OpenCode, Grok, Hermes, Kimi, DSH, and Pi + CLI `run` / `result` |
+| L2 | bounded adapters for Codex, Claude, Cursor, OpenCode, Grok, Hermes, Kimi, DSH, Pi, and AGY (runner only; readiness blocked) + CLI `run` / `result` |
 | L3 | `panel`, skill render, routes, `gc` |
 | L4 | persistent Batch V1 `plan` / `start` / `status` / `result` / `cancel` |
 
@@ -91,10 +91,23 @@ Providers in a deterministic preference order and fails closed when none are rea
 Integrated Provider IDs are `codex`, `claude`,
 `cursor-agent`, `opencode`, `grok`, `hermes`, `kimi`, `dsh`, and `pi`. A Provider
 is routable only when its backend-specific authentication probe succeeds. Cursor
-requires `CURSOR_API_KEY` for dispatch so Dyro can give it an isolated home without
-loading user MCP/plugin processes; an interactive Cursor OAuth login alone is not
-reported as dispatch-ready. Cursor currently supports read-only dispatch only;
-edit mode fails closed until its sandbox process lifecycle can be proven.
+uses `--mode ask --output-format json` for read-only dispatch. With
+`CURSOR_API_KEY` it uses an ephemeral home; otherwise explicit
+`allow_unconfined_provider: true` permits the CLI's own login and user home.
+Cursor edit mode remains unsupported.
+AGY (`agy`) has a read-only print/plan/JSON runner with a print timeout and a
+no-shell prompt, but automatic routing remains disabled: its help exposes no
+non-generating authentication-status command. AGY edit mode is unsupported.
+MCode remains unsupported because local `mcode --help` failed with a filesystem
+permission error before displaying capabilities. Qoder remains unsupported:
+`qodercli --help` documents print and tool disabling, but does not enumerate a
+JSON output format. No flags or protocol values are inferred for either CLI.
+Kimi discovery, batch planning, and readiness share the same local selectable
+provider/model route check; this is local configuration validation, not remote
+authentication verification. Authentication failures are retried once and backend
+rows include failure reasons. Output-limit errors preserve any validated final
+answer already received and mark `usage.partial=true`; protocol failures retain a
+bounded, secret-filtered stdout tail in warnings.
 Kimi binds one selected Provider/model route into the execution-profile digest;
 file-backed OAuth copies only that selected token into a per-run home. Keyring-backed
 Kimi OAuth is discovered but fails closed because Dyro cannot isolate it. DSH runs
@@ -106,6 +119,15 @@ Real non-strict Provider calls require `allow_unconfined_provider: true`; read-o
 calls receive a guarded context projection, which is not OS-level isolation.
 `strict: true` is fail-closed: the selected adapter must declare a verified strict-isolation capability. The shipped external Provider adapters do not; use `echo` only for protocol validation, and reject strict work until an adapter can prove the required isolation.
 Edit runs execute in a detached Git worktree and return a hash-bound patch reference; they do not mutate, commit, or push the source worktree.
+
+Single-run contracts may set finite positive `timeout_seconds`; explicit CLI
+`--timeout` overrides it. Without either, edit runs use 1800 seconds and read-only
+runs use 120 seconds. Batch member timeouts retain their existing behavior.
+Unsuccessful results have low confidence and `patch_partial=true` when they
+include a patch reference. Envelope success remains `status=ok` (run `completed`).
+Evidence `verified` means the file locator is valid, not that its claim is true.
+Line locators support comma-separated ranges, `L` prefixes, and hyphen, en dash,
+or em dash separators; every range must be within the file.
 
 ## Tests
 

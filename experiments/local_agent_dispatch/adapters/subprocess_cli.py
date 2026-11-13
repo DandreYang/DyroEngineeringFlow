@@ -1030,14 +1030,18 @@ def _parse_wrapped_model_json(text: str, *, backend: str) -> dict[str, object]:
 
     candidates: list[str] = []
     for value in decoded:
-        if backend == "cursor-agent":
+        if backend in {"cursor-agent", "agy"}:
             result = value.get("result")
             if isinstance(result, str):
                 candidates.append(result)
         elif backend == "grok":
-            result = value.get("text")
-            if isinstance(result, str):
-                candidates.append(result)
+            for key in ("text", "result", "response", "output"):
+                result = value.get(key)
+                if isinstance(result, str):
+                    candidates.append(result)
+            message = value.get("message")
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                candidates.append(_message_content_text(message.get("content")))
         elif backend == "opencode":
             part = value.get("part")
             if isinstance(part, dict) and part.get("type") == "text":
@@ -1090,11 +1094,29 @@ def _completed_to_result(
             warnings=["backend process group exceeded its deadline and was terminated"],
         )
     if completed.output_limited:
+        parsed = None
+        # Whole JSON may have been followed by truncated protocol events.
+        candidates = [completed.stdout, *reversed(completed.stdout.splitlines())]
+        try:
+            _, end = json.JSONDecoder().raw_decode(completed.stdout.lstrip())
+            candidates.insert(1, completed.stdout.lstrip()[:end])
+        except json.JSONDecodeError:
+            pass
+        for candidate in candidates:
+            try:
+                parsed = parser(candidate)
+                break
+            except DispatchValidationError:
+                continue
         return AdapterResult(
             status="error",
-            summary="",
+            summary=str(parsed["summary"]) if parsed else "",
+            evidence=list(parsed["evidence"]) if parsed else [],
+            confidence="low",
             error_code="output_limit",
-            warnings=["backend output exceeded the byte limit and was terminated"],
+            usage={"partial": True, "backend": backend},
+            raw_preview=safe_error_text(completed.stdout[-2000:]),
+            warnings=["partial result: backend output exceeded the byte limit and was terminated"],
         )
     if completed.returncode != 0:
         return AdapterResult(
@@ -1110,7 +1132,11 @@ def _completed_to_result(
             status="error",
             summary="",
             error_code="protocol_error",
-            warnings=[safe_error_text(exc, fallback="backend result failed validation")],
+            warnings=[safe_error_text(exc, fallback="backend result failed validation"),
+                      safe_error_text(completed.stderr if not completed.stdout.strip()
+                                      else completed.stdout[-2000:],
+                                      fallback="backend returned empty stdout")],
+            raw_preview=safe_error_text(completed.stdout[-2000:]),
         )
     return AdapterResult(
         status="ok",
@@ -1337,7 +1363,7 @@ class SubprocessCliAdapter:
         return self.available()
 
     def readiness_reason(self) -> str:
-        return "authentication probe failed"
+        return getattr(self, "_probe_failure_reason", "authentication probe failed")
 
     def _probe(
         self,
@@ -1359,9 +1385,13 @@ class SubprocessCliAdapter:
                 env=environment,
                 max_output_bytes=64 * 1024,
             )
-        except OSError:
+        except OSError as exc:
+            self._probe_failure_reason = safe_error_text(exc)
             return None
         if completed.returncode != 0 or completed.timed_out or completed.output_limited:
+            self._probe_failure_reason = safe_error_text(
+                completed.stderr or f"{self.id} auth probe exit={completed.returncode}, timeout={completed.timed_out}, output_limit={completed.output_limited}"
+            )
             return None
         return completed
 
@@ -1455,17 +1485,7 @@ class CodexAdapter(SubprocessCliAdapter):
     def authenticated(self) -> bool:
         if not self.available():
             return False
-        try:
-            completed = run_bounded(
-                ["codex", "login", "status"],
-                cwd=Path.cwd(),
-                timeout_seconds=3.0,
-                env=_backend_environment("codex"),
-                max_output_bytes=32 * 1024,
-            )
-        except OSError:
-            return False
-        return completed.returncode == 0 and not completed.timed_out
+        return self._probe(["codex", "login", "status"], timeout_seconds=3.0) is not None
 
     def run(
         self,
@@ -1515,17 +1535,8 @@ class ClaudeAdapter(SubprocessCliAdapter):
     def authenticated(self) -> bool:
         if not self.available():
             return False
-        try:
-            completed = run_bounded(
-                ["claude", "auth", "status", "--json"],
-                cwd=Path.cwd(),
-                timeout_seconds=3.0,
-                env=_backend_environment("claude"),
-                max_output_bytes=32 * 1024,
-            )
-        except OSError:
-            return False
-        if completed.returncode != 0 or completed.timed_out:
+        completed = self._probe(["claude", "auth", "status", "--json"], timeout_seconds=3.0)
+        if completed is None:
             return False
         try:
             payload = json.loads(completed.stdout)
@@ -1579,9 +1590,11 @@ class CursorAdapter(SubprocessCliAdapter):
     supported_modes = frozenset({"read-only"})
 
     def readiness_reason(self) -> str:
-        return (
+        return getattr(
+            self,
+            "_probe_failure_reason",
             "CURSOR_API_KEY is required so dispatch can isolate Cursor from "
-            "user MCP and plugin processes"
+            "user MCP and plugin processes",
         )
 
     def authenticated(self) -> bool:
@@ -1596,7 +1609,10 @@ class CursorAdapter(SubprocessCliAdapter):
         if completed is None:
             return False
         plain = re.sub(r"\x1b\[[0-9;]*m", "", completed.stdout)
-        return "Logged in" in plain
+        ready = "Logged in" in plain
+        if not ready:
+            self._probe_failure_reason = "Cursor status did not confirm a logged-in session"
+        return ready
 
     def run(
         self,
@@ -1818,7 +1834,10 @@ class GrokAdapter(SubprocessCliAdapter):
         if completed is None:
             return False
         plain = re.sub(r"\x1b\[[0-9;]*m", "", completed.stdout)
-        return "You are logged in with" in plain
+        ready = "You are logged in with" in plain
+        if not ready:
+            self._probe_failure_reason = "Grok models did not confirm a logged-in session"
+        return ready
 
     def run(
         self,
@@ -1842,7 +1861,6 @@ class GrokAdapter(SubprocessCliAdapter):
                 "--output-format",
                 "json",
                 "--verbatim",
-                "--no-memory",
                 "--no-subagents",
                 "--disable-web-search",
                 "--cwd",
@@ -2512,3 +2530,40 @@ def dsh_adapter() -> SubprocessCliAdapter:
 
 def pi_adapter() -> SubprocessCliAdapter:
     return PiAdapter(backend_id="pi", command="pi")
+
+
+class AgyAdapter(SubprocessCliAdapter):
+    supported_modes = frozenset({"read-only"})
+
+    def authenticated(self) -> bool:
+        # Help exposes no non-generating authentication-status command.
+        return False
+
+    def readiness_reason(self) -> str:
+        return "AGY help exposes no authentication-status probe; login readiness cannot be verified"
+
+    def run(
+        self,
+        *,
+        contract: TaskContract,
+        cwd: Path,
+        context_files: Mapping[str, str],
+        timeout_seconds: float,
+    ) -> AdapterResult:
+        if not self.available():
+            return _not_installed(self.id, self.command)
+        if contract.mode != "read-only":
+            return AdapterResult(status="error", summary="", error_code="backend_mode_unsupported")
+        if not contract.allow_unconfined_provider:
+            return AdapterResult(status="error", summary="", error_code="unconfined_provider_refused")
+        return self._run(
+            ["agy", "--print", "--mode", "plan", "--output-format", "json",
+             "--print-timeout", f"{timeout_seconds:g}s", "--disable-slash-commands"],
+            cwd=cwd, prompt="Do not run shell commands. Use only supplied context.\n" + _build_prompt(contract, context_files),
+            timeout_seconds=timeout_seconds,
+            parser=lambda text: _parse_wrapped_model_json(text, backend=self.id),
+        )
+
+
+def agy_adapter() -> SubprocessCliAdapter:
+    return AgyAdapter(backend_id="agy", command="agy")
