@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -697,7 +697,7 @@ def _ensure_line(config: Config, plan: JoinPlan) -> Line:
             storage_modes=expected.storage_modes,
             kind="line",
         )
-    if existing != expected:
+    if replace(existing, remote_anchors={}) != expected:
         raise DyroError(f"现有开发线与 join 蓝图不一致：{expected.id}")
     return existing
 
@@ -750,7 +750,7 @@ def preflight_join_plan(plan: JoinPlan) -> None:
         existing_line = get_line(config, plan.line.id, "line")
     except DyroError:
         return
-    if existing_line != _line_from_blueprint(plan):
+    if replace(existing_line, remote_anchors={}) != _line_from_blueprint(plan):
         raise DyroError(f"现有开发线与 join 蓝图不一致：{plan.line.id}")
 
 

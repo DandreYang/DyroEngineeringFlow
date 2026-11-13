@@ -160,6 +160,19 @@ class BlueprintJoinTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+    def test_rejoin_preserves_remote_anchors(self) -> None:
+        from dataclasses import replace
+        from dyro.workspace import _write_line
+        plan = build_join_plan(load_blueprint_source(str(self.blueprint_file)), target=self.parent / 'workspace', line_id=None)
+        config = apply_join_plan(plan)
+        line = replace(get_line(config, 'feature-a'), remote_anchors={'api': self.api_head})
+        _write_line(config, line)
+        manifest = config.lines_state_dir / 'feature-a.toml'
+        before = manifest.read_bytes()
+        apply_join_plan(plan)
+        self.assertEqual(get_line(config, 'feature-a'), line)
+        self.assertEqual(manifest.read_bytes(), before)
+
     def test_join_creates_detached_anchors_and_selected_development_line(self) -> None:
         target = self.parent / "workspace"
         document = load_blueprint_source(str(self.blueprint_file))

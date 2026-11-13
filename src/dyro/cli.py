@@ -2854,7 +2854,7 @@ def cmd_next(args: argparse.Namespace) -> None:
     location_budget = budget or ReadBudget(ObservationLimits())
     location, target, lines, location_limit = next_directory_location(
         config, Path.cwd(), location_budget, line=getattr(args, "line", None),
-        explicit_workspace=bool(getattr(args, "workspace_alias", None) or getattr(args, "root", None)))
+        explicit_workspace=bool(getattr(args, "workspace_alias", None)))
     context = None
     count_limit = None
     if target is not None:

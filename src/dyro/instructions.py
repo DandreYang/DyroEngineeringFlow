@@ -39,7 +39,7 @@ def render_line_persona(*, line_id: str, branch: str) -> str:
     remote = f"origin/{branch}"
     return f"""# Dyro 开发线 {line_id}
 
-继承工作区 overlay 约束：这里仍不是产品仓库。权威是 SKILL.md 与 `dyro next`。不要绕过门禁 merge/push。
+继承工作区 overlay 约束：这里仍不是产品仓库。权威是 SKILL.md 与 `dyro next`。
 
 当前线：
 - id：{line_id}
@@ -61,7 +61,7 @@ class SeedOutcome:
 def missing_workspace_overlay_files(root: Path) -> tuple[str, ...]:
     return tuple(
         name for name in INSTRUCTION_NAMES
-        if not (root / name).exists() and not (root / name).is_symlink()
+        if not (root / name).is_file()
     )
 
 

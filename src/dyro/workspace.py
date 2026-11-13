@@ -1466,6 +1466,8 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
         if overlay_warning:
             findings.append(overlay_warning)
         findings.extend(overlay_template_warnings(config, read_budget=read_budget))
+        overlay_budget = read_budget or ReadBudget(ObservationLimits())
+        line_overlays = _read_line_overlays(config, overlay_budget)
         _scale_control_plane_budget(config, read_budget)
         for repo_id in sorted(config.repositories):
             anchor = repository_path(config, repo_id)
@@ -1475,16 +1477,14 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
                 findings.append(f"FAIL repository {repo_id}: missing or not Git: {anchor}")
         lines = list_lines(config, read_budget=read_budget)
         from .instructions import render_line_persona
-        overlay_budget = read_budget or ReadBudget(ObservationLimits())
         for line in lines:
-            findings.extend(_overlay_warnings(line_root(config, line), render_line_persona(line_id=line.id, branch=line.branch), f'line {line.id}', overlay_budget))
+            findings.extend(_overlay_warnings(line_root(config, line), render_line_persona(line_id=line.id, branch=line.branch), f'line {line.id}', overlay_budget, contents=line_overlays))
         for repo_id in sorted(
             {repo for line in lines for repo in line.repositories}
             & set(config.repositories)
         ):
             anchor = repository_path(config, repo_id)
             worktrees = _worktree_inventory(anchor, read_budget=read_budget)
-            observed[repo_id] = (worktrees, {}, {})
             upstreams, objects = _ref_inventory(anchor, read_budget=read_budget)
             observed[repo_id] = (worktrees, upstreams, objects)
         for line in lines:
@@ -1598,7 +1598,34 @@ def overlay_template_warnings(config, *, read_budget=None):
     return _overlay_warnings(config.root, render_workspace_overlay(), 'workspace', budget)
 
 
-def _overlay_warnings(directory, body, label, budget):
+def _read_line_overlays(config, budget):
+    """Read overlay bytes before manifests; template comparison needs their branches."""
+    from .instructions import INSTRUCTION_NAMES
+    contents = {}
+    for relative in (config.layout.lines, config.layout.hotfixes):
+        parent = config.root / relative
+        with budget.open_safe_directory_chain(config.root, parent, allow_missing=True) as fd:
+            if fd is None:
+                continue
+            names = bounded_directory_names(fd, budget, maximum_records=budget.limits.line_records, label='Line overlay')
+        for name in sorted(names):
+            for instruction in INSTRUCTION_NAMES:
+                path = parent / name / instruction
+                if not path.exists() and not path.is_symlink():
+                    continue
+                try:
+                    contents[path] = budget.read_regular_bytes(path, maximum_bytes=budget.limits.line_manifest_bytes, label='overlay')
+                    contents[path].decode('utf-8')
+                except ReadLimitError as exc:
+                    if exc.code not in (ReadLimitCode.FILE_TOO_LARGE, ReadLimitCode.UNSAFE_FILE):
+                        raise
+                    contents[path] = exc
+                except (OSError, UnicodeError) as exc:
+                    contents[path] = exc
+    return contents
+
+
+def _overlay_warnings(directory, body, label, budget, *, contents=None):
     from .instructions import INSTRUCTION_NAMES
     findings = []
     expected = (body if body.endswith('\n') else body + '\n').encode('utf-8')
@@ -1608,7 +1635,14 @@ def _overlay_warnings(directory, body, label, budget):
             continue
         prefix = f'WARN overlay {label} {name}'
         try:
-            content = budget.read_regular_bytes(path, maximum_bytes=budget.limits.line_manifest_bytes, label='overlay')
+            if contents is None:
+                content = budget.read_regular_bytes(path, maximum_bytes=budget.limits.line_manifest_bytes, label='overlay')
+            else:
+                if path not in contents:
+                    continue
+                content = contents[path]
+                if isinstance(content, Exception):
+                    raise content
             content.decode('utf-8')
         except ReadLimitError as exc:
             if exc.code not in (ReadLimitCode.FILE_TOO_LARGE, ReadLimitCode.UNSAFE_FILE):
@@ -1652,15 +1686,14 @@ def next_line_context(config, line, lines, budget):
                     item.update(ahead=0, behind=0, unpushed_commits=0)
                 elif calls >= 4:
                     item['counts_omitted'] = True
-                elif limited is None and budget is not None:
+                elif budget is not None:
                     try:
-                        if budget.remaining_seconds() < 1:
-                            raise ReadLimitError(ReadLimitCode.DEADLINE_EXCEEDED, 'insufficient count budget')
-                        calls += 1
-                        result = git_read(repository_path(config, repo_id), 'rev-list', '--left-right', '--count', f'{remote}...{head}', read_budget=budget)
-                        if result.code == 0:
-                            behind, ahead = map(int, result.stdout.split())
-                            item.update(ahead=ahead, behind=behind, unpushed_commits=ahead)
+                        if budget.remaining_seconds() >= 1:
+                            calls += 1
+                            result = git_read(repository_path(config, repo_id), 'rev-list', '--left-right', '--count', f'{remote}...{head}', read_budget=budget)
+                            if result.code == 0:
+                                behind, ahead = map(int, result.stdout.split())
+                                item.update(ahead=ahead, behind=behind, unpushed_commits=ahead)
                     except ReadLimitError as exc:
                         limited = exc.code
                     except ValueError:

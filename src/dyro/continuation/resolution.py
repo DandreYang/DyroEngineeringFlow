@@ -396,7 +396,10 @@ def next_directory_location(config, start, budget, *, line=None, explicit_worksp
         phase = 'task'
         known = frozenset(x.id for x in lines)
         for task_id in list_task_ids_bounded(config, budget):
-            task = load_task_bounded(config, task_id, budget, known_line_ids=known)
+            try:
+                task = load_task_bounded(config, task_id, budget, known_line_ids=known)
+            except ValidationError:
+                continue
             try:
                 location.relative_to(worktree_root(config, task).resolve())
             except ValueError:

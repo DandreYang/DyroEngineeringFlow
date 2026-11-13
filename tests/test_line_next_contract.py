@@ -132,7 +132,8 @@ class LineNextContractTests(WorkspaceCase):
         with patch.object(budget, 'remaining_seconds', return_value=0.5), patch('dyro.workspace.git_read') as git:
             context, limited = next_line_context(config, line, [line], budget)
             git.assert_not_called()
-        self.assertEqual(limited, ReadLimitCode.DEADLINE_EXCEEDED)
+        self.assertIsNone(limited)
+        self.assertTrue(all(x["ahead"] is None and x["behind"] is None and x["unpushed_commits"] is None for x in context["repositories"]))
         with patch('dyro.workspace.git_read', return_value=Mock(code=1, stdout='')):
             context, limited = next_line_context(config, line, [line], observed_budget())
         self.assertIsNone(context['repositories'][0]['ahead'])
@@ -305,3 +306,61 @@ class LineNextContractTests(WorkspaceCase):
         self.assertTrue(payload['mutation_available'])
         self.assertNotIn('mutation_unavailable_reason', payload)
         self.assertNotIn('line_context', payload)
+
+    def test_line_overlay_limits_precede_manifest_and_inventory_reads(self):
+        from dyro.workspace import doctor
+        directory = self.root / 'versions/core'
+        directory.mkdir(parents=True)
+        (directory / 'AGENTS.md').write_text('custom')
+        for code in (ReadLimitCode.AGGREGATE_BYTES_EXCEEDED, ReadLimitCode.RECORD_LIMIT_EXCEEDED):
+            budget = self.budget()
+            with patch.object(budget, 'read_regular_bytes', side_effect=ReadLimitError(code, 'limit')), patch('dyro.workspace.list_lines') as manifests, patch('dyro.workspace._worktree_inventory') as inventory:
+                with self.assertRaises(ReadLimitError) as caught:
+                    doctor(self.config, read_budget=budget)
+            self.assertEqual(caught.exception.code, code)
+            manifests.assert_not_called()
+            inventory.assert_not_called()
+            self.assertTrue(budget._control_plane_findings)
+
+    def test_incomplete_ref_inventory_is_unknown(self):
+        from dyro.workspace import doctor, create_line
+        line = create_line(self.config, line_id='core', branch='feat/core', base='main')
+        budget = self.budget()
+        with patch('dyro.workspace._ref_inventory', side_effect=ReadLimitError(ReadLimitCode.DEADLINE_EXCEEDED, 'limit')):
+            doctor(self.config, read_budget=budget)
+        context, limited = next_line_context(self.config, line, [line], budget)
+        self.assertEqual(context['repositories'][0]['upstream_state'], 'unknown')
+        self.assertIsNone(context['push_ready'])
+        self.assertIsNone(limited)
+
+    def test_root_outside_is_not_explicit_workspace(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        import json
+        from dyro.cli import main
+        output = StringIO()
+        with redirect_stdout(output), patch('pathlib.Path.cwd', return_value=self.root.parent):
+            main(['--root', str(self.root), 'next', '--format', 'json'])
+        self.assertEqual(json.loads(output.getvalue())['location']['reason'], 'cwd_not_in_line')
+
+    def test_stale_task_does_not_discard_healthy_line_match(self):
+        from dyro.tasks import task_template
+        from dyro.workspace import _write_line
+        _write_line(self.config, self.line)
+        directory = self.config.task_specs_dir / 'stale'
+        directory.mkdir(parents=True)
+        (directory / 'task.toml').write_text(task_template('stale', 'obsolete', 'deleted', 'api', 'api'))
+        location, target, _, limited = next_directory_location(self.config, self.root / 'versions/core', self.budget())
+        self.assertEqual(location['cwd_lines'], ['core'])
+        self.assertEqual(target, self.line)
+        self.assertIsNone(limited)
+        location, target, _, _ = next_directory_location(self.config, self.root / self.config.layout.tasks / 'deleted/stale', self.budget())
+        self.assertEqual(location['cwd_lines'], [])
+        self.assertIsNone(target)
+
+    def test_line_persona_and_dangling_overlay_missing_predicate(self):
+        from dyro.instructions import missing_workspace_overlay_files
+        self.assertNotIn('不要绕过门禁 merge/push', render_line_persona(line_id='core', branch='feat/core'))
+        (self.root / 'AGENTS.md').symlink_to(self.root / 'absent')
+        (self.root / 'CLAUDE.md').mkdir()
+        self.assertEqual(missing_workspace_overlay_files(self.root), ('AGENTS.md', 'CLAUDE.md'))
