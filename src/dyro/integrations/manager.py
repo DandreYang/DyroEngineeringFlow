@@ -162,6 +162,15 @@ HOSTS: tuple[HostSpec, ...] = (
     HostSpec("dsh", "DSH_HOME", ".dsh"),
     HostSpec("opencode", "OPENCODE_CONFIG_DIR", ".config/opencode"),
     HostSpec("hermes", "HERMES_HOME", ".hermes"),
+    # Hosts below read only their own skills dir, not ~/.agents/skills (docs checked
+    # 2026-11-13). Gemini CLI, Kimi, Qwen, OpenClaw, omp, Copilot, Crush, Goose and
+    # MiniMax Code already read ~/.agents/skills, so the "agents" avatar covers them.
+    HostSpec("gemini", None, ".gemini"),  # also Antigravity CLI (agy)
+    HostSpec("qoder", None, ".qoder"),
+    HostSpec("factory", None, ".factory"),
+    HostSpec("trae", None, ".trae"),  # Trae IDE
+    HostSpec("traecli", None, ".traecli"),  # Trae CLI
+    HostSpec("kiro", None, ".kiro"),
 )
 
 

@@ -805,6 +805,21 @@ class IntegrationManagerTests(unittest.TestCase):
                          IntegrationState.CURRENT)
         self.assertEqual(avatar.resolve(), (self.dyro_home / "skills" / "dyro-line-family").resolve())
 
+    def test_native_skill_dir_hosts_get_avatars_when_home_exists(self) -> None:
+        homes = {host: self.fake_home / name for host, name in (
+            ("gemini", ".gemini"), ("qoder", ".qoder"), ("factory", ".factory"),
+            ("trae", ".trae"), ("traecli", ".traecli"), ("kiro", ".kiro"),
+        )}
+        for home in homes.values():
+            home.mkdir()
+        install_integration("line-family", yes=True)
+        mirror = (self.dyro_home / "skills" / "dyro-line-family").resolve()
+        for host, home in homes.items():
+            with self.subTest(host=host):
+                self.assertEqual((home / "skills" / "dyro-line-family").resolve(), mirror)
+        rows = {row.host: row.state for row in integration_status("line-family").avatars}
+        self.assertTrue(all(rows[host] == "current" for host in homes))
+
     def test_default_host_unowned_avatar_is_visible_and_preserved(self) -> None:
         install_integration("task-merge", yes=True)
         home = self.fake_home / ".claude"
