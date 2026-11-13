@@ -37,10 +37,10 @@ from .seats import (
 CANONICAL_INTEGRATION_ID = CONTROL_PLANE_ID
 LEGACY_INTEGRATION_ID = "codex"
 SKILL_NAME = CONTROL_PLANE_SKILL
-ASSET_VERSION = 5
+ASSET_VERSION = 6
 DISPATCH_INTEGRATION_ID = DISPATCH_ID
 DISPATCH_SKILL_NAME = DISPATCH_SKILL
-DISPATCH_ASSET_VERSION = 2
+DISPATCH_ASSET_VERSION = 5
 EXECUTOR_INTEGRATION_ID = EXECUTOR_ID
 EXECUTOR_SKILL_NAME = EXECUTOR_SKILL
 EXECUTOR_ASSET_VERSION = 2
@@ -162,6 +162,15 @@ HOSTS: tuple[HostSpec, ...] = (
     HostSpec("dsh", "DSH_HOME", ".dsh"),
     HostSpec("opencode", "OPENCODE_CONFIG_DIR", ".config/opencode"),
     HostSpec("hermes", "HERMES_HOME", ".hermes"),
+    # Hosts below read only their own skills dir, not ~/.agents/skills (docs checked
+    # 2026-11-13). Gemini CLI, Kimi, Qwen, OpenClaw, omp, Copilot, Crush, Goose and
+    # MiniMax Code already read ~/.agents/skills, so the "agents" avatar covers them.
+    HostSpec("gemini", None, ".gemini"),  # also Antigravity CLI (agy)
+    HostSpec("qoder", None, ".qoder"),
+    HostSpec("factory", None, ".factory"),
+    HostSpec("trae", None, ".trae"),  # Trae IDE
+    HostSpec("traecli", None, ".traecli"),  # Trae CLI
+    HostSpec("kiro", None, ".kiro"),
 )
 
 
@@ -171,6 +180,7 @@ class AvatarStatus:
     path: Path
     state: str
     detail: str
+    link_target: str | None = None
 
 
 @dataclass(frozen=True)
@@ -676,7 +686,10 @@ def _inspect_avatar(
     if _is_link(avatar):
         if _resolves_to(avatar, mirror):
             return AvatarStatus(host, avatar, "current", "分身指向镜像")
-        return AvatarStatus(host, avatar, "unowned", "分身指向非 Dyro 镜像")
+        return AvatarStatus(
+            host, avatar, "unowned", "分身指向非 Dyro 镜像",
+            str(avatar.readlink()) if avatar.is_symlink() else str(avatar.resolve()),
+        )
     if avatar.is_dir() and not avatar.is_symlink():
         if recorded is not None and str(recorded.get("path")) == str(avatar):
             return AvatarStatus(host, avatar, "drifted", "分身被替换为普通目录")
@@ -736,6 +749,18 @@ def _legacy_owned_copy(
     except ValidationError:
         return None
     return manifest, target
+
+
+def _unowned_avatar_hint(rows: list[AvatarStatus]) -> str:
+    paths = "；".join(
+        f"{row.host}: {row.path}（当前目标：{row.link_target or row.detail}）"
+        for row in rows if row.state == "unowned"
+    )
+    return (
+        f"分身路径不属于 Dyro，拒绝覆盖：{paths}；"
+        "如需接管，请确认后手动移除该路径再运行 integration install，"
+        "或将其重新链接到 Dyro 镜像"
+    )
 
 
 def integration_status(
@@ -806,6 +831,8 @@ def integration_status(
         require_current_assets=True,
         read_budget=read_budget,
     )
+    # Unowned avatars on implicit hosts stay non-blocking so setup/update can still
+    # repair Dyro-owned hosts; doctor surfaces them as WARN instead.
     blocking_avatars: list[AvatarStatus] = []
     for row in avatar_rows:
         if row.state in {"missing", "current"}:
@@ -851,7 +878,7 @@ def integration_status(
                 IntegrationState.UNOWNED_CONFLICT,
                 mirror,
                 manifest_path,
-                "分身路径已存在，但不属于 Dyro Integration Manager",
+                _unowned_avatar_hint(avatar_rows),
                 tuple(avatar_rows),
             )
         return IntegrationStatus(
@@ -959,7 +986,8 @@ def integration_status(
             "已拥有分身状态异常",
             tuple(refreshed),
         )
-    # Unowned host paths are skipped; only managed/missing hosts affect freshness.
+    # Unowned host paths are skipped here (doctor WARNs them); only managed/missing
+    # hosts affect freshness. Missing avatars use the existing upgrade/repair path.
     managed_or_new = [row for row in refreshed if row.state != "unowned"]
     if any(row.state == "missing" for row in managed_or_new):
         return IntegrationStatus(

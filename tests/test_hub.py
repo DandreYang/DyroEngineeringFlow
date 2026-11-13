@@ -2028,23 +2028,23 @@ write = ["codex"]
         with redirect_stdout(status_out):
             main(["--root", str(self.root), "status"])
         status_text = status_out.getvalue()
-        self.assertIn("Dyro 不会 push", status_text)
+        self.assertIn("Dyro 默认不执行 push", status_text)
         self.assertIn("git push", status_text)
         self.assertNotIn("hook", status_text.lower())
         next_out = StringIO()
         with redirect_stdout(next_out):
             main(["--root", str(self.root), "next"])
         next_text = next_out.getvalue()
-        self.assertIn("Dyro 不会 push", next_text)
+        self.assertIn("Dyro 默认不执行 push", next_text)
         json_out = StringIO()
         with redirect_stdout(json_out):
             main(["--root", str(self.root), "status", "--format", "json"])
         import json
         payload = json.loads(json_out.getvalue())
         self.assertFalse(payload["allow_push"])
-        self.assertIn("Dyro 不会 push", payload["push_note"])
+        self.assertIn("Dyro 默认不执行 push", payload["push_note"])
 
-    def test_allow_push_true_omits_scare_text(self) -> None:
+    def test_allow_push_true_keeps_push_contract(self) -> None:
         config_path = self.root / "dyro.toml"
         config_path.write_text(
             config_path.read_text(encoding="utf-8").replace(
@@ -2056,11 +2056,12 @@ write = ["codex"]
         output = StringIO()
         with redirect_stdout(output):
             main(["--root", str(self.root), "status"])
-        self.assertNotIn("Dyro 不会 push", output.getvalue())
+        self.assertIn("Dyro 默认不执行 push", output.getvalue())
         json_out = StringIO()
         with redirect_stdout(json_out):
             main(["--root", str(self.root), "status", "--format", "json"])
         import json
         payload = json.loads(json_out.getvalue())
         self.assertTrue(payload["allow_push"])
-        self.assertNotIn("push_note", payload)
+        self.assertIn("Dyro 默认不执行 push", payload["push_note"])
+        self.assertEqual(payload["push_contract_version"], 1)

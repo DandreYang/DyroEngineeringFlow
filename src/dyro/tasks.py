@@ -3177,6 +3177,8 @@ def _merge_task_repositories_locked(
                     f"\n{result.stdout.strip()}"
                 )
             pushed.append(plan.repository)
+            from .workspace import record_remote_anchor
+            line = record_remote_anchor(config, line, plan.repository, plan.target)
 
     for plan in plans:
         result_head = require_ok(

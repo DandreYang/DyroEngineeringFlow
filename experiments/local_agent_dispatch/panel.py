@@ -117,7 +117,7 @@ def run_panel(
     project_root: Path,
     members: Sequence[str] | None = None,
     home: Path | None = None,
-    timeout_seconds: float = 120.0,
+    timeout_seconds: float | None = None,
 ) -> dict[str, object]:
     """
     Fan out the same task concurrently under the Supervisor's dual slot limits.
@@ -173,7 +173,7 @@ def run_panel(
                 "run_id": run_id,
                 "status": persisted_status,
                 "summary": None,
-                "confidence": None,
+                "confidence": "low",
                 "verified_ratio": None,
                 "evidence": None,
                 "error": error,

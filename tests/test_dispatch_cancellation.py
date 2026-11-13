@@ -411,7 +411,7 @@ class AsyncWorkerEnvironmentTests(unittest.TestCase):
                     self.assertIsInstance(environment, dict)
                     self.assertNotIn("AWS_SECRET_ACCESS_KEY", environment)
 
-        self.assertEqual(cursor_adapter().supported_modes, frozenset({"read-only"}))
+        self.assertEqual(cursor_adapter().supported_modes, frozenset({"read-only", "edit"}))
         self.assertEqual(
             codex_adapter().supported_modes,
             frozenset({"read-only", "edit"}),

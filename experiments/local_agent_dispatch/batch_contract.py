@@ -40,6 +40,7 @@ _CONTRACT_FIELDS = frozenset(
         "strict",
         "allow_unconfined_provider",
         "allow_offline_simulation",
+        "allow_user_home_provider",
         "files",
         "task",
     }
@@ -132,7 +133,9 @@ def _require_sha256(value: object, *, label: str) -> str:
 def _strict_task_contract(payload: object, *, label: str) -> TaskContract:
     if not isinstance(payload, Mapping):
         raise DispatchValidationError(f"{label} must be an object")
-    _require_exact_fields(payload, _CONTRACT_FIELDS, label=label)
+    required = _CONTRACT_FIELDS - {"allow_user_home_provider"}
+    expected = required | ({"allow_user_home_provider"} & payload.keys())
+    _require_exact_fields(payload, expected, label=label)
     if (
         type(payload.get("schema_version")) is not int
         or payload.get("schema_version") != BATCH_SCHEMA_VERSION

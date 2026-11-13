@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..config import Config
 from ..errors import DyroError, ValidationError
+from ..read_limits import ReadBudget
 from .compile import (
     collect_compiler_input,
     hosts_to_compile,
@@ -30,6 +31,31 @@ from .models import (
     HostFinding,
     HostManifest,
 )
+
+
+def integration_avatar_warnings(*, read_budget: ReadBudget | None = None) -> list[str]:
+    """Inspect all seven integrations without changing installation state."""
+    from ..integrations.manager import (
+        SKILL_INTEGRATIONS,
+        IntegrationState,
+        _unowned_avatar_hint,
+        integration_status,
+    )
+
+    warnings: list[str] = []
+    for spec in SKILL_INTEGRATIONS:
+        status = integration_status(spec.integration_id, read_budget=read_budget)
+        if status.state == IntegrationState.ABSENT:
+            continue  # never installed: not drift, avoid doctor noise
+        rows = [row for row in status.avatars if row.state != "current"]
+        if not rows:
+            continue
+        hosts = ", ".join(f"{row.host}={row.state}" for row in rows)
+        message = f"WARN Integration {spec.integration_id}：分身状态异常；宿主：{hosts}"
+        if any(row.state == "unowned" for row in rows):
+            message += f"；{_unowned_avatar_hint(rows)}"
+        warnings.append(message)
+    return warnings
 
 
 def inspect_projections(config: Config, *, user: bool = False) -> HostDoctorReport:
@@ -68,6 +94,13 @@ def inspect_projections(config: Config, *, user: bool = False) -> HostDoctorRepo
                 message="投影产物缺少有效 manifest；请重新 host compile",
             )
         )
+    for message in integration_avatar_warnings():
+        findings.append(
+            HostFinding(
+                host="*", scope=scope, ok=True, code="WARN_INTEGRATION_AVATARS",
+                authority_projection="", message=message,
+            )
+        )
     compiled = bool(manifests) or bool(orphans)
     ok = all(item.ok for item in findings)
     return HostDoctorReport(
@@ -93,6 +126,12 @@ def assert_projections_allow_mutation(config: Config) -> None:
         )
 
 
+def _finding_severity(item: HostFinding) -> str:
+    if item.code == "WARN_INTEGRATION_AVATARS":
+        return "WARN"
+    return "PASS" if item.ok else "FAIL"
+
+
 def doctor_payload(report: HostDoctorReport) -> dict[str, object]:
     return {
         "compiled": report.compiled,
@@ -106,6 +145,7 @@ def doctor_payload(report: HostDoctorReport) -> dict[str, object]:
                 "message": item.message,
                 "ok": item.ok,
                 "scope": item.scope,
+                "severity": _finding_severity(item),
             }
             for item in report.findings
         ],
@@ -118,10 +158,13 @@ def doctor_payload(report: HostDoctorReport) -> dict[str, object]:
 
 def render_doctor_text(report: HostDoctorReport) -> str:
     if not report.compiled:
-        return f"未编译宿主投影 scope={report.scope}\n"
+        return f"未编译宿主投影 scope={report.scope}\n" + "".join(
+            item.message + "\n" for item in report.findings
+            if item.code == "WARN_INTEGRATION_AVATARS"
+        )
     lines = [f"{'PASS' if report.ok else 'FAIL'} scope={report.scope}"]
     for item in report.findings:
-        mark = "PASS" if item.ok else "FAIL"
+        mark = _finding_severity(item)
         lines.append(
             f"{mark} {item.host} {item.code} {item.authority_projection or '-'} {item.message}"
         )

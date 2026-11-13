@@ -522,10 +522,16 @@ class DispatchSupervisor:
         self,
         run_id: str,
         *,
-        timeout_seconds: float = 120.0,
+        timeout_seconds: float | None = None,
         sync: bool = True,
         worker_token: str | None = None,
     ) -> RunRecord:
+        record = self.store.load(run_id)
+        if timeout_seconds is None:
+            contract = parse_task_contract(record.contract)
+            timeout_seconds = contract.timeout_seconds or (
+                1800.0 if contract.mode == "edit" else 120.0
+            )
         _validate_timeout(timeout_seconds)
         if not sync:
             if worker_token is not None:
@@ -790,10 +796,15 @@ class DispatchSupervisor:
         self,
         run_id: str,
         *,
-        timeout_seconds: float = 120.0,
+        timeout_seconds: float | None = None,
     ) -> RunRecord:
-        _validate_timeout(timeout_seconds)
         record = self.store.load(run_id)
+        if timeout_seconds is None:
+            contract = parse_task_contract(record.contract)
+            timeout_seconds = contract.timeout_seconds or (
+                1800.0 if contract.mode == "edit" else 120.0
+            )
+        _validate_timeout(timeout_seconds)
         if record.status != "accepted":
             raise DispatchValidationError(
                 f"run is not available for async spawn: {run_id} status={record.status}"

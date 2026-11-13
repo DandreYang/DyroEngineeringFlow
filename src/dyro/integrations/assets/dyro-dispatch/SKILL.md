@@ -38,14 +38,13 @@ Treat `dyro dispatch` as an outbound harness, separate from the read-only
    CLI and must not be treated as proof of login. Use rows with
    `supported=true`, `available=true`, and `execution_kind=provider` only as
    planning candidates. Supported Provider IDs are `codex`, `claude`,
-   `cursor-agent`, `opencode`, `grok`, `hermes`, `kimi`, `dsh`, and `pi`; a
-   locally installed command may still be not ready. Cursor additionally requires
-   `CURSOR_API_KEY` so dispatch can isolate its home from user MCP processes. If
-   no Provider qualifies, stop and report the missing capability. Cursor is
-   read-only here; do not select it as an edit writer. Kimi binds one selected
-   Provider/model route; file-backed OAuth copies only that selected token into
-   a per-run home, while keyring-backed OAuth fails closed. DSH uses the reviewed
-   `deepseek-official/deepseek-v4-flash` headless route.
+   `cursor-agent`, `opencode`, `grok`, `hermes`, `kimi`, `dsh`, and `pi`; an
+   installed command may still be unready. Cursor uses its CLI login or
+   `CURSOR_API_KEY` or file login. Keychain edit requires both
+   `allow_unconfined_provider=true` and `allow_user_home_provider=true` (default
+   false); user MCP/plugins may load and commands auto-approve inside Cursor’s
+   sandbox. Kimi file OAuth is isolated per run; keyring
+   OAuth fails closed. DSH uses `deepseek-official/deepseek-v4-flash`.
 
 2. Choose the smallest useful strategy:
 
@@ -61,7 +60,6 @@ Treat `dyro dispatch` as an outbound harness, separate from the read-only
    - One delegated scratch task: use one asynchronous `run`.
    - Review of finished work is the Core task `reviewer` phase on frozen HEADs,
      or a later independent `run`. It is not a sibling watching a live writer.
-   - Cursor cannot join a write wave; its edit path stays fail-closed.
    - Keep advisory fan-out at two or three runs and never exceed the dispatch
      global limit.
 
@@ -72,7 +70,22 @@ Treat `dyro dispatch` as an outbound harness, separate from the read-only
    Never use `**/*`, inject conversation history, or include credentials and
    local secret files.
 
-   A single delegated role keeps the existing asynchronous run lifecycle:
+   Minimal single-run contract (use an existing context file):
+
+   ```json
+   {"schema_version":1,"backend":"auto","mode":"read-only","strict":false,
+    "allow_unconfined_provider":true,"files":["src/main.py"],"task":{
+      "briefing":"Review the entry point","locations":"src/main.py",
+      "objective":"Find correctness issues","constraints":"Do not edit",
+      "output_contract":"Return summary and evidence"}}
+   ```
+
+   Limits: at most 50 file globs matching at most 200 paths, 512 KiB per file,
+   2 MiB total context. `strict=true` requires read-only mode. Optional finite
+   positive `timeout_seconds` sets the run timeout; explicit CLI `--timeout`
+   overrides it. Defaults: edit 1800 seconds, read-only 120 seconds.
+
+   Single-run lifecycle:
 
    ```bash
    dyro dispatch run --project <absolute-project-root> --stdin
@@ -109,12 +122,9 @@ Treat `dyro dispatch` as an outbound harness, separate from the read-only
    profile, or edit HEAD drift changes the digest and must be replanned. All
    members are preflighted and persisted before any Provider starts.
 
-   For a same-task comparison, use `dyro dispatch panel` only after recognizing
-   that current panels duplicate one contract across Providers and wait for the
-   whole panel. Do not use `--members all` unless the user explicitly asks for a
-   full-harness run and accepts its Provider usage/cost. Batch V1 is not a DAG or
-   an asynchronous `all` queue; do not claim dependencies, automatic retries, or
-   automatic judging.
+   Panels duplicate one contract and wait for all members. `--members all`
+   requires explicit full-harness intent and accepted Provider cost. Batch V1
+   has no DAG, retries, or automatic judging.
 
 6. Retain the returned `orchestration_id`; use the persistent lifecycle instead
    of manually tracking member run IDs:
@@ -132,17 +142,14 @@ Treat `dyro dispatch` as an outbound harness, separate from the read-only
    `running`/`attention_required`; never report a false cancellation. There is no
    retry or resume command in Batch V1.
 
-   GC retains a small request tombstone. Reusing a garbage-collected
-   `request_id` is rejected so a retry cannot silently start a second billed
-   batch; use a new request ID only for an intentionally new execution.
+   GC tombstones reject reused request IDs. Cancellation and timeout supervise
+   the dedicated POSIX process group; daemonized children escaping it are
+   outside this guarantee. Real Providers require unconfined acknowledgement.
 
-   Cancellation and timeout supervise Dyro's dedicated POSIX process group, not
-   an OS container. A deliberately daemonized child that escapes that group is
-   outside this guarantee; all shipped real Providers therefore remain marked
-   unconfined and require explicit acknowledgement.
-
-7. Verify claims against real artifacts. A verifier must use a different method
-   from the finder where possible. Preserve disagreements and unknowns; never use
+7. Evidence `verified` means the file locator and line ranges are valid, not
+   that the claim is true. Failed runs have low confidence; `patch_partial=true`
+   marks their patch references as partial. Verify claims against real artifacts.
+   A verifier must use a different method from the finder where possible. Preserve disagreements and unknowns; never use
    majority vote as approval.
 
 ## Handoff

@@ -630,6 +630,13 @@ def _status_payload(
         "partial": partial,
         "rows": [_status_row_payload(row) for row in rows],
     }
+    push_ready = []
+    for line in getattr(read_budget, "_status_lines", []):
+        linked = [repo for repo in line.repositories if line.storage_for(repo) == "linked-worktree"]
+        upstreams = {row[1]: row[4] for row in rows if row[0].split(" ")[0] == f"{line.kind}:{line.id}"}
+        ready = None if not linked or any(repo not in upstreams for repo in linked) else all(upstreams[repo] == f"origin/{line.branch}" for repo in linked)
+        push_ready.append(dict(id=line.id, kind=line.kind, push_ready=ready))
+    payload["line_push_ready"] = push_ready
     payload.update(_observation_timeout_fields(partial=partial))
     return payload
 
@@ -2571,8 +2578,9 @@ def cmd_integration_status(args: argparse.Namespace) -> None:
                 "host": avatar.host,
                 "state": avatar.state,
             }
-            if args.include_paths:
+            if args.include_paths or avatar.state == "unowned":
                 row.update(path=str(avatar.path), detail=avatar.detail)
+                row["link_target"] = avatar.link_target
             avatars.append(row)
         payload: dict[str, object] = {
             "integration": status.integration,
@@ -2588,6 +2596,7 @@ def cmd_integration_status(args: argparse.Namespace) -> None:
     for avatar in status.avatars:
         print(
             f"avatar\t{avatar.host}\t{avatar.state}\t{avatar.path}\t{avatar.detail}"
+            + (f"\t当前目标：{avatar.link_target}" if avatar.link_target else "")
         )
 
 
@@ -2832,6 +2841,7 @@ def _print_next_workspace_missing(args: argparse.Namespace) -> None:
             commands=[],
             mutation_available=False,
             required_choice="join_existing_or_setup_new",
+            mutation_unavailable_reason="workspace_missing",
         )
         return
     print("尚未发现 Dyro 工作区。")
@@ -2861,6 +2871,27 @@ def cmd_next(args: argparse.Namespace) -> None:
     budget = _control_plane_budget(args) if args.format == "json" else None
     findings = doctor(config, read_budget=budget)
     stash_observation_findings(budget, findings)
+    from .continuation.resolution import next_directory_location
+    from .workspace import next_line_context
+    location_budget = budget or ReadBudget(ObservationLimits())
+    location, target, lines, location_limit = next_directory_location(
+        config, Path.cwd(), location_budget, line=getattr(args, "line", None),
+        explicit_workspace=bool(getattr(args, "workspace_alias", None)))
+    context = None
+    count_limit = None
+    if target is not None:
+        context, count_limit = next_line_context(config, target, lines, budget)
+    limited = location_limit or count_limit
+    extra = {"location": location}
+    if limited:
+        extra.update(partial=True, code=limited.value)
+    if args.format != "json":
+        if location["disagree"]:
+            print(f"工作目录落在 {', '.join(location['cwd_lines'])} 线，观察目标是 {location['targeted_line']} 线。")
+        if target is not None:
+            print(f"当前线 `{target.id}`")
+            if any(is_missing_origin_finding(x) and f"{target.kind}:{target.id}/" in x for x in findings):
+                print("尚未发布。")
     failures = [finding for finding in findings if finding.startswith("FAIL")]
     if failures:
         alias = getattr(args, "workspace_alias", None) or config.name
@@ -2880,12 +2911,15 @@ def cmd_next(args: argparse.Namespace) -> None:
                 commands=commands,
                 diagnostic_commands=[_briefing_command(args, config, "doctor")],
                 mutation_available=bootstrap_applicable,
-                partial=partial,
                 findings=findings,
-                **_observation_timeout_fields(partial=partial),
+                line_context=context,
+                **({"mutation_unavailable_reason": "repair_not_applicable"} if not bootstrap_applicable else {}),
+                **{**_observation_timeout_fields(partial=partial), **extra, "partial": bool(partial or limited)},
                 **_family_unacked_fields(config),
                 **_next_push_fields(config),
             )
+            if partial or limited:
+                raise SystemExit(2)
             return
         print("工作区还不能开始任务：")
         for finding in findings:
@@ -2899,8 +2933,7 @@ def cmd_next(args: argparse.Namespace) -> None:
         _print_family_unacked_attention(config)
         _print_push_disclosure(config)
         return
-    lines = list_lines(config, read_budget=budget)
-    if not lines:
+    if not lines and (not limited or location["reason"] == "task_scan_incomplete"):
         command = _scoped_command(args, config, "line", "create", "dev", "--yes")
         if args.format == "json":
             _print_control_plane_json(
@@ -2909,9 +2942,12 @@ def cmd_next(args: argparse.Namespace) -> None:
                 summary="Profile 已就绪，但还没有开发线。",
                 commands=[command],
                 mutation_available=True,
+                **extra,
                 **_family_unacked_fields(config),
                 **_next_push_fields(config),
             )
+            if limited:
+                raise SystemExit(2)
             return
         print(f"Profile 已就绪，但还没有开发线。下一步：{command}")
         _print_family_unacked_attention(config)
@@ -2926,13 +2962,17 @@ def cmd_next(args: argparse.Namespace) -> None:
                 commands=[],
                 mutation_available=False,
                 required_inputs=["agent_id", "agent_command"],
+                mutation_unavailable_reason="partial_observation" if limited else "no_launchable_agent",
+                **extra,
                 **_family_unacked_fields(config),
                 **_next_push_fields(config),
             )
+            if limited:
+                raise SystemExit(2)
             return
         print(
             "工作区已就绪，但尚未发现可启动的编码工具。"
-            "安装本机 Agent 后运行 dyro start，或 "
+            + ("安装本机 Agent 后运行 dyro start，或 " if sys.stdin.isatty() and sys.stdout.isatty() else "安装本机 Agent，或 ")
             + _scoped_command(args, config, "agent", "add", "<id>", "--command", "…")
         )
         _print_family_unacked_attention(config)
@@ -2958,21 +2998,25 @@ def cmd_next(args: argparse.Namespace) -> None:
             "summary": _ready_next_summary(briefing),
             "commands": [],
             "mutation_available": False,
+            "mutation_unavailable_reason": "partial_observation" if limited or briefing_deadline else "observation_only",
+            "line_context": context,
+            **extra,
         }
         if briefing is not None:
             payload["briefing"] = briefing
             payload["diagnostic_commands"] = diagnostic_commands
         if briefing_deadline:
             payload["partial"] = True
-            payload.update(_observation_timeout_fields(partial=True))
+            if not limited:
+                payload.update(_observation_timeout_fields(partial=True))
         payload.update(_family_unacked_fields(config))
         payload.update(_next_push_fields(config))
         _print_control_plane_json("next_step", **payload)
-        if briefing_deadline:
+        if briefing_deadline or limited:
             raise SystemExit(2)
         return
     if briefing is None:
-        print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。")
+        print("工作区已就绪。可用 dyro start 打开本机已安装的编码工具。" if sys.stdin.isatty() and sys.stdout.isatty() and location["reason"] == "cwd_not_in_line" else "工作区已就绪。")
         _print_family_unacked_attention(config)
         _print_push_disclosure(config)
         return
@@ -3373,19 +3417,24 @@ def cmd_review_verify(args: argparse.Namespace) -> None:
 
     config = _config(args)
     line = get_line(config, args.line)
-    results = run_line_verify(config, line, dry_run=args.dry_run)
+    results = run_line_verify(config, line, dry_run=args.dry_run, all_repos=args.all_repos)
     if not results:
         print(f"开发线 {line.id} 无已配置门禁指令。")
         return
-    failures = [r for r in results if not r.passed]
+    failures = [r for r in results if not r.passed and not r.skipped_reason]
     for r in results:
+        if r.skipped_reason:
+            print(f"[SKIP] {r.repo_id}: {r.skipped_reason}")
+            continue
         status_str = "PASS" if r.passed else "FAIL"
         print(f"[{status_str}] {r.repo_id}: {' '.join(r.argv)} ({r.elapsed_seconds:.2f}s)")
         if not r.passed and r.stdout:
             print("  --- 失败日志摘录 ---\n  " + "\n  ".join(r.stdout.splitlines()[-15:]))
     if failures:
-        raise DyroError(f"开发线 {line.id} 本地静态门禁未通过（{len(failures)}/{len(results)} 失败）")
-    print(f"\n全部门禁通过（共 {len(results)} 项）。")
+        executed = sum(not r.skipped_reason for r in results)
+        raise DyroError(f"开发线 {line.id} 本地静态门禁未通过（{len(failures)}/{executed} 失败）")
+    executed = sum(not r.skipped_reason for r in results)
+    print(f"\n门禁验证完成（通过 {executed} 项，跳过 {len(results) - executed} 个仓库）。")
 
 
 def cmd_review_pack(args: argparse.Namespace) -> None:
@@ -3399,6 +3448,7 @@ def cmd_review_pack(args: argparse.Namespace) -> None:
         base=args.base,
         scope=args.scope,
         run_verify=not args.no_verify,
+        all_repos=args.all_repos,
         max_lines_per_file=args.max_lines,
         dry_run=args.dry_run,
     )
@@ -5301,6 +5351,7 @@ def build_parser() -> argparse.ArgumentParser:
     next_parser.add_argument(
         "--format", choices=("text", "json"), default="text"
     )
+    next_parser.add_argument("--line")
     next_parser.set_defaults(func=cmd_next)
 
     line = sub.add_parser("line", help="功能开发线")
@@ -5587,6 +5638,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_sub = review.add_subparsers(dest="review_command", required=True)
     review_verify = review_sub.add_parser("verify", help="运行开发线各仓本地 verify 静态门禁")
     review_verify.add_argument("--line", required=True, help="开发线 ID")
+    review_verify.add_argument("--all-repos", action="store_true", help="验证全部仓库，包括相对基线无改动的仓库")
     review_verify.set_defaults(func=cmd_review_verify)
 
     review_pack = review_sub.add_parser("pack", help="提取开发线跨仓精简 Diff 与审查上下文")
@@ -5601,6 +5653,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_pack.add_argument("--no-verify", action="store_true", help="跳过本地 verify 门禁检查")
     review_pack.add_argument("--max-lines", type=int, default=250, help="单文件 Diff 最大保留行数（防 Token 膨胀）")
     review_pack.add_argument("--out", help="输出 Markdown 审查包文件路径；默认标准输出")
+    review_pack.add_argument("--all-repos", action="store_true", help="验证全部仓库，包括相对基线无改动的仓库")
     review_pack.set_defaults(func=cmd_review_pack)
 
     objective = sub.add_parser(

@@ -53,9 +53,10 @@ def _select_backend(
 ) -> str:
     candidates = ready if requested == "auto" else (requested,)
     if requested != "auto" and requested not in ready:
-        raise DispatchValidationError(
-            f"batch backend is not installed: {requested}"
-        )
+        adapter = get_adapter(requested)
+        if not adapter.available():
+            raise DispatchValidationError(f"batch backend is not installed: {requested}")
+        raise DispatchValidationError(f"batch backend unavailable: {requested}")
     for backend in sorted(
         candidates,
         key=lambda item: (counts.get(item, 0), ready.index(item)),
@@ -123,6 +124,12 @@ def plan_batch(
 
     ready = tuple(candidate_provider_ids())
     if not ready:
+        for member in request.members:
+            if member.contract.backend != "auto":
+                _select_backend(
+                    member.contract.backend, ready=ready, counts={},
+                    mode=member.contract.mode, strict=member.contract.strict,
+                )
         raise DispatchValidationError(
             "no installed integrated provider is available for batch dispatch"
         )
@@ -195,9 +202,12 @@ def start_batch(
         member.resolved_backend for member in plan.members
     ):
         adapter = get_adapter(backend)
-        if not adapter.available() or not adapter_is_authenticated(adapter):
+        if not adapter.available():
+            raise DispatchValidationError(f"batch backend is not installed: {backend}")
+        if not adapter_is_authenticated(adapter):
+            reason = getattr(adapter, "readiness_reason", lambda: "authentication probe failed")()
             raise DispatchValidationError(
-                f"batch backend is not ready and authenticated: {backend}"
+                f"batch backend is not ready and authenticated: {backend}: {reason}"
             )
     for member in plan.members:
         adapter = get_adapter(member.resolved_backend)

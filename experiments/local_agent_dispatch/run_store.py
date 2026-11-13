@@ -587,6 +587,23 @@ class RunStore:
     def _save_unlocked(self, record: RunRecord) -> None:
         if record.status not in RUN_STATUSES:
             raise DispatchValidationError(f"invalid run status: {record.status}")
+        if record.status in TERMINAL_RUN_STATUSES and record.status != "completed":
+            if record.result is None:
+                from .result_envelope import build_result
+
+                record.result = build_result(
+                    run_id=record.run_id,
+                    status=record.status if record.status in {"timeout", "cancelled"} else "error",
+                    summary="",
+                    cwd=Path(record.project_root),
+                    backend=record.backend,
+                    warnings=[record.error] if record.error else [],
+                ).to_mapping()
+            record.result = {
+                **record.result,
+                "confidence": "low",
+                "patch_partial": record.result.get("patch_ref") is not None,
+            }
         record.updated_at = time.time()
         payload = record.to_mapping()
         RunRecord.from_mapping(payload)

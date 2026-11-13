@@ -285,7 +285,7 @@ class ControlPlaneTimeoutFindingTests(WorkspaceCase):
                 )
             next_out = StringIO()
             next_err = StringIO()
-            with redirect_stdout(next_out), redirect_stderr(next_err):
+            with redirect_stdout(next_out), redirect_stderr(next_err), self.assertRaises(SystemExit) as next_raised:
                 main(
                     [
                         "--root",
@@ -335,6 +335,7 @@ class ControlPlaneTimeoutFindingTests(WorkspaceCase):
             doctor_payload,
         )
 
+        self.assertEqual(next_raised.exception.code, 2)
         self.assertEqual(next_err.getvalue(), "")
         next_payload = json.loads(next_out.getvalue())
         self.assertEqual(next_payload["kind"], "next_step")
