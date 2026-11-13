@@ -259,7 +259,10 @@ from .workspace import (
     is_observation_timeout_row,
     list_lines,
     merge_line,
+    merge_line_from,
+    merge_line_into_base,
     observation_timeout_row,
+    recover_line_merge,
     spawn_line,
     stash_observation_findings,
     stashed_observation_findings,
@@ -3078,8 +3081,54 @@ def cmd_line_spawn(args: argparse.Namespace) -> None:
 
 
 def cmd_line_merge(args: argparse.Namespace) -> None:
-    _require_yes(args, "合并子开发线")
     config = _config(args)
+    if getattr(args, "recover", None) is not None:
+        if args.source or args.parent:
+            raise DyroError("--recover 不能与 --into / --from 同时使用")
+        result = recover_line_merge(
+            config,
+            args.child,
+            op_id=args.recover or None,
+            allow_partial=True if args.allow_partial else None,
+            kinds=("merge",),
+        )
+        print(
+            f"已对账 merge {result.op_id}："
+            + ", ".join(f"{repo}={outcome}" for repo, outcome in result.outcomes.items())
+        )
+        return
+    if args.source:
+        _require_yes(args, "跨线合并")
+        result = merge_line_from(
+            config,
+            args.child,
+            args.source,
+            allow_partial=args.allow_partial,
+            push=args.push,
+            dry_run=args.dry_run,
+        )
+        prefix = "DRY RUN: " if args.dry_run else ""
+        status = "partial" if result.partial else "已合入"
+        excluded = (
+            f"；排除 {', '.join(result.excluded_repositories)}"
+            if result.excluded_repositories
+            else ""
+        )
+        print(
+            f"{prefix}跨线合并 {args.source} -> {args.child}：{status}"
+            f"（仓 {', '.join(result.repositories) or '-'}{excluded}）"
+        )
+        if result.partial and not args.allow_partial:
+            raise DyroError(
+                "部分合入：源线仓库 "
+                + ", ".join(result.excluded_repositories)
+                + " 不在目标线中；结果为 partial。"
+                "加 --allow-partial 可以退出码 0 接受（输出仍标 partial）"
+            )
+        return
+    if not args.parent:
+        raise DyroError("需要 --into <父线>、--from <源线> 或 --recover")
+    _require_yes(args, "合并子开发线")
     merge_line(
         config,
         args.child,
@@ -3095,6 +3144,40 @@ def cmd_line_merge(args: argparse.Namespace) -> None:
             f"已将 {args.child} 合并入 {args.parent}"
             + (" 并推送" if args.push else "")
         )
+
+
+def cmd_line_merge_into_base(args: argparse.Namespace) -> None:
+    config = _config(args)
+    if getattr(args, "recover", None) is not None:
+        result = recover_line_merge(
+            config,
+            args.line,
+            op_id=args.recover or None,
+            allow_partial=True if args.allow_partial else None,
+            kinds=("merge_into_base",),
+        )
+        print(
+            f"已对账 merge-into-base {result.op_id}："
+            + ", ".join(f"{repo}={outcome}" for repo, outcome in result.outcomes.items())
+        )
+        return
+    _require_yes(args, "合入基线")
+    repos = tuple(args.repo) if args.repo else None
+    result = merge_line_into_base(
+        config,
+        args.line,
+        base_ref=args.base_ref,
+        policy_default=args.policy_default,
+        repositories=repos,
+        allow_partial=args.allow_partial,
+        push=args.push,
+        dry_run=args.dry_run,
+    )
+    prefix = "DRY RUN: " if args.dry_run else ""
+    print(
+        f"{prefix}已将 {args.line} 合入基线"
+        f"（仓 {', '.join(result.repositories) or '-'}）"
+    )
 
 
 def cmd_line_sync(args: argparse.Namespace) -> None:
@@ -5257,19 +5340,42 @@ def build_parser() -> argparse.ArgumentParser:
     line_spawn.add_argument("--yes", action="store_true")
     line_spawn.set_defaults(func=cmd_line_spawn)
     line_merge = line_sub.add_parser(
-        "merge", help="将子线 --no-ff 合并回其直接父开发线；不删除子线"
+        "merge",
+        help="子线合入父线（--into）、跨线合入（--from）或 --recover 对账",
     )
-    line_merge.add_argument("child", help="子开发线 ID")
     line_merge.add_argument(
+        "child", help="子线（--into）或目标线（--from / --recover）"
+    )
+    line_merge_direction = line_merge.add_mutually_exclusive_group(required=False)
+    line_merge_direction.add_argument(
         "--into",
         dest="parent",
-        required=True,
+        default=None,
         help="父开发线 ID；必须是该子线的直接父线",
+    )
+    line_merge_direction.add_argument(
+        "--from",
+        dest="source",
+        default=None,
+        help="源开发线 ID；合入当前目标线，不改 parent",
+    )
+    line_merge.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="源仓超集时仍以退出码 0 接受 partial 结果",
+    )
+    line_merge.add_argument(
+        "--recover",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="OP_ID",
+        help="只读对账未完成 merge op；可选 op_id",
     )
     line_merge.add_argument(
         "--push",
         action="store_true",
-        help="合并后推送父线分支；需 policy.allow_push",
+        help="合并后推送目标分支；需 policy.allow_push（--from 暂不支持）",
     )
     line_merge.add_argument(
         "--dry-run",
@@ -5279,7 +5385,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="探测合入但不提交（兼容全局 --dry-run）",
     )
     line_merge.add_argument("--yes", action="store_true")
-    line_merge.set_defaults(func=cmd_line_merge)
+    line_merge.set_defaults(func=cmd_line_merge, source=None, allow_partial=False)
+    line_merge_into_base = line_sub.add_parser(
+        "merge-into-base",
+        help="将开发线合入 anchor 上当前检出的基线分支；不自动 checkout",
+    )
+    line_merge_into_base.add_argument("line", help="源开发线 ID")
+    line_merge_into_base.add_argument(
+        "--base-ref",
+        default=None,
+        help="覆盖每仓基线分支名；默认 line.base_for(repo)",
+    )
+    line_merge_into_base.add_argument(
+        "--policy-default",
+        action="store_true",
+        help="使用 policy.default_base 作为基线分支名",
+    )
+    line_merge_into_base.add_argument(
+        "--repo",
+        action="append",
+        default=None,
+        metavar="REPO",
+        help="只合入指定仓库；可重复",
+    )
+    line_merge_into_base.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="与 merge --from 相同的 partial 退出码语义",
+    )
+    line_merge_into_base.add_argument(
+        "--recover",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="OP_ID",
+        help="只读对账未完成 merge-into-base op；可选 op_id",
+    )
+    line_merge_into_base.add_argument(
+        "--push",
+        action="store_true",
+        help="合入后推送基线分支；需 policy.allow_push（暂不支持）",
+    )
+    line_merge_into_base.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="探测合入但不提交（兼容全局 --dry-run）",
+    )
+    line_merge_into_base.add_argument("--yes", action="store_true")
+    line_merge_into_base.set_defaults(
+        func=cmd_line_merge_into_base, allow_partial=False, policy_default=False
+    )
     line_sync = line_sub.add_parser(
         "sync", help="将父线提交 --no-ff 合并进子线；无线父线则拒绝"
     )
