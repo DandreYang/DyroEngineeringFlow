@@ -3110,6 +3110,28 @@ def cmd_line_sync(args: argparse.Namespace) -> None:
         )
 
 
+def cmd_line_retire(args: argparse.Namespace) -> None:
+    from .line_retire import retire_line
+
+    _require_yes(args, "退役开发线")
+    result = retire_line(
+        _config(args), args.id, dry_run=args.dry_run,
+        keep_branch=args.keep_branch, force=args.force,
+        integration_ref=args.integration_ref, missing_ok=args.missing_ok,
+        recover=args.recover,
+    )
+    if args.dry_run:
+        options = result["effective_options"]
+        branch_action = "保留分支" if options["keep_branch"] else (
+            "按所有权删支（允许未集成）" if options["force"] else "按所有权及包含关系删支"
+        )
+        print(f"DRY RUN: 退役 {args.id}；只读预检，逐仓保全 → 移除 → {branch_action}")
+        for repo_id, snapshot in result["repositories"].items():
+            print(f"{repo_id}: {snapshot['path']}，集成目标 {snapshot['integration_ref']}")
+    else:
+        print(f"已退役 {args.id}；操作 {result['op_id']} ({result['phase']})")
+
+
 def cmd_line_post(args: argparse.Namespace) -> None:
     config = _config(args)
     _require_overlay_yes(args, "写入家族频道")
@@ -3140,7 +3162,7 @@ def cmd_line_inbox(args: argparse.Namespace) -> None:
     inbox = list_inbox(
         config,
         family=args.family or "",
-        viewer=_inbox_viewer(config),
+        viewer=getattr(args, "line", None) or _inbox_viewer(config),
         unacked=args.unacked,
     )
     if args.format == "json":
@@ -5325,6 +5347,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     line_inbox.add_argument("--format", choices=("text", "json"), default="text")
     line_inbox.set_defaults(func=cmd_line_inbox)
+    line_retire = line_sub.add_parser(
+        "retire", help="保全 HEAD 后逐仓退役；中断后只向前恢复，不推送"
+    )
+    line_retire.add_argument("id", metavar="LINE")
+    line_retire.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
+    line_retire.add_argument("--keep-branch", action="store_true", default=None)
+    line_retire.add_argument("--force", action="store_true", default=None,
+                             help="仅允许删除未集成的独占分支；不放宽所有权或脏树检查")
+    line_retire.add_argument("--integration-ref", default=None)
+    line_retire.add_argument("--missing-ok", action="store_true", default=None)
+    line_retire.add_argument("--recover", nargs="?", const="", default=None, metavar="OP_ID")
+    line_retire.add_argument("--yes", action="store_true")
+    line_retire.set_defaults(func=cmd_line_retire)
+    line_inbox.add_argument("--line", help="查看指定线的频道历史；退役线从墓碑读取")
     line_ack = line_sub.add_parser("ack", help="将一条家族信号标为人类已读")
     line_ack.add_argument("id", help="频道行 id，例如 msg_1")
     line_ack.add_argument(

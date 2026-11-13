@@ -277,7 +277,13 @@ def load_task(config: Config, task_id: str) -> Task:
     ]
     if unknown:
         raise ValidationError(f"任务 {task.id} 引用了未配置仓库：{', '.join(unknown)}")
-    get_line(config, task.line)
+    try:
+        get_line(config, task.line)
+    except DyroError:
+        from .line_retire import load_retired_line
+
+        if status(config, task) != "done" or load_retired_line(config, task.line) is None:
+            raise
     return task
 
 
@@ -370,6 +376,7 @@ def load_task_bounded(
         directory,
         content,
         known_line_ids=known_line_ids,
+        budget=budget,
     )
 
 
@@ -380,6 +387,8 @@ def _validate_bounded_task(
     content: bytes,
     *,
     known_line_ids: frozenset[str],
+    budget: ReadBudget,
+    current_status: str | None = None,
 ) -> Task:
     task = _parse_task_content(directory, content)
     if task.id != task_id:
@@ -392,7 +401,11 @@ def _validate_bounded_task(
     if unknown:
         raise ValidationError(f"任务 {task.id} 引用了未配置仓库：{', '.join(unknown)}")
     if task.line not in known_line_ids:
-        raise ValidationError(f"任务 {task.id} 引用了未登记开发线：{task.line}")
+        from .line_retire import load_retired_line
+
+        current = current_status if current_status is not None else status_bounded(config, task, budget)
+        if current != "done" or load_retired_line(config, task.line, read_budget=budget) is None:
+            raise ValidationError(f"任务 {task.id} 引用了未登记开发线：{task.line}")
     return task
 
 
@@ -461,17 +474,19 @@ def _load_task_observation_details_bounded(
                 status_content = b"backlog"
     except FileNotFoundError as exc:
         raise ValidationError(f"任务不存在：{task_id}") from exc
+    try:
+        current = status_content.decode("utf-8").strip()
+    except UnicodeError as exc:
+        raise ValidationError(f"任务 {task_id} 状态不是 UTF-8") from exc
     task = _validate_bounded_task(
         config,
         task_id,
         directory,
         content,
         known_line_ids=known_line_ids,
+        budget=budget,
+        current_status=current,
     )
-    try:
-        current = status_content.decode("utf-8").strip()
-    except UnicodeError as exc:
-        raise ValidationError(f"任务 {task.id} 状态不是 UTF-8") from exc
     if current not in STATUSES:
         raise ValidationError(f"任务 {task.id} 状态非法")
     return task, current, content

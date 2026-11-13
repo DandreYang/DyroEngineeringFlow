@@ -338,6 +338,11 @@ def post_channel_message(
     """Append one channel row and its ``signal`` event under the overlay lock."""
     sender = _member_id(sender, "发送者")
     recipient = _member_id(recipient, "接收者", allow_empty=True)
+    from .line_retire import load_retired_line
+
+    if any(value and value != OPERATOR_ID and load_retired_line(config, value) is not None
+           for value in (sender, recipient, family)):
+        raise FamilyChannelError("FAMILY_RETIRED_READ_ONLY")
     if kind not in CHANNEL_KINDS:
         raise FamilyChannelError("CHANNEL_KIND_INVALID")
     if sender == OPERATOR_ID and kind not in OPERATOR_POST_KINDS:
@@ -427,6 +432,18 @@ def list_inbox(
     unacked: bool = False,
 ) -> dict[str, object]:
     lines = line_records(config)
+    # Tombstones supply identity only to this read path, never to writers.
+    from .line_retire import load_retired_line
+
+    for line_id in (viewer, family):
+        if line_id and line_id != OPERATOR_ID:
+            retired = load_retired_line(config, line_id)
+            if retired is not None:
+                lines.append({"id": retired.id, "parent": retired.parent})
+                if retired.parent and retired.parent not in {item["id"] for item in lines}:
+                    parent = load_retired_line(config, retired.parent)
+                    if parent is not None:
+                        lines.append({"id": parent.id, "parent": parent.parent})
     parent_id, resolved_viewer = _inbox_scope(lines, family=family, viewer=viewer)
     posts = read_visible_channel(config, parent_id, viewer=resolved_viewer)
     acked = read_acks(config, parent_id)
