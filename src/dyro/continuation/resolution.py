@@ -373,3 +373,51 @@ def resolve_objective(
         _interactive() if interactive is None else interactive,
     )
     return get_objective(config, selected)
+
+
+def next_directory_location(config, start, budget, *, line=None, explicit_workspace=False):
+    """Bounded next-only resolution; retain completed matches on every limit."""
+    from ..tasks import list_task_ids_bounded, load_task_bounded
+    location = start.expanduser().resolve()
+    matches = set()
+    lines = []
+    phase = 'line'
+    limited = None
+    try:
+        snapshot = getattr(budget, '_doctor_lines', None)
+        lines = snapshot if snapshot is not None else list_lines(config, read_budget=budget)
+        for candidate in lines:
+            budget.check_deadline()
+            try:
+                location.relative_to(line_root(config, candidate).resolve())
+            except ValueError:
+                continue
+            matches.add(candidate.id)
+        phase = 'task'
+        known = frozenset(x.id for x in lines)
+        for task_id in list_task_ids_bounded(config, budget):
+            try:
+                task = load_task_bounded(config, task_id, budget, known_line_ids=known)
+            except ValidationError:
+                continue
+            try:
+                location.relative_to(worktree_root(config, task).resolve())
+            except ValueError:
+                continue
+            matches.add(task.line)
+    except ReadLimitError as exc:
+        limited = exc.code
+    reason = 'line_resolution_limited' if limited and phase == 'line' else 'task_scan_incomplete' if limited else 'line_flag' if line else 'line_directory' if len(matches) == 1 else 'ambiguous' if matches else 'cwd_not_in_line'
+    if not limited and not matches and explicit_workspace and not line:
+        try:
+            location.relative_to(config.root.resolve())
+        except ValueError:
+            reason = 'cwd_outside_selected_workspace'
+    target = None if limited else next((x for x in lines if x.id == line), None) if line else next((x for x in lines if x.id in matches), None) if len(matches) == 1 else None
+    if line and not limited and target is None:
+        raise DyroError(f'未登记的开发线：{line}')
+    payload = dict(cwd_lines=sorted(matches), targeted_line=target.id if target else None,
+                   disagree=bool(line and matches and matches != {line}), reason=reason)
+    if limited and phase == 'task':
+        payload['task_scan'] = 'partial'
+    return payload, target, lines, limited

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -14,6 +14,7 @@ from .errors import DyroError, ValidationError
 from .process import git, git_read, require_ok
 from .read_limits import (
     ReadBudget,
+    ObservationLimits,
     ReadLimitCode,
     ReadLimitError,
     apply_control_plane_fanout,
@@ -23,7 +24,7 @@ from .state import atomic_write_text, exclusive_lock
 
 
 STORAGE_MODES = frozenset({"linked-worktree", "anchor-reference"})
-LINE_MANIFEST_SCHEMAS = frozenset({1, 2, 3})
+LINE_MANIFEST_SCHEMAS = frozenset({1, 2, 3, 4})
 MERGE_LOCK_TIMEOUT_SECONDS = 1800.0
 OBSERVATION_DEADLINE_FINDING = (
     "FAIL observation: deadline exceeded before every worktree was inspected"
@@ -45,6 +46,7 @@ class Line:
     repository_bases: Mapping[str, str] = field(default_factory=dict)
     storage_modes: Mapping[str, str] = field(default_factory=dict)
     parent: str = ""
+    remote_anchors: Mapping[str, str] = field(default_factory=dict)
 
     def base_for(self, repo_id: str) -> str:
         return self.repository_bases.get(repo_id, self.base)
@@ -78,7 +80,7 @@ def _write_line(config: Config, line: Line, *, dry_run: bool = False) -> None:
     repo_items = ", ".join(_toml_string(repo_id) for repo_id in line.repositories)
     bases = tuple((repo_id, line.base_for(repo_id)) for repo_id in line.repositories if line.base_for(repo_id) != line.base)
     storage = tuple((repo_id, line.storage_for(repo_id)) for repo_id in line.repositories if line.storage_for(repo_id) != "linked-worktree")
-    schema_version = 3 if line.parent else 2
+    schema_version = 4 if line.remote_anchors else (3 if line.parent else 2)
     chunks = [
         f"schema_version = {schema_version}",
         f"id = {_toml_string(line.id)}",
@@ -95,6 +97,9 @@ def _write_line(config: Config, line: Line, *, dry_run: bool = False) -> None:
     if storage:
         chunks.extend(("", "[storage_modes]"))
         chunks.extend(f"{_toml_key(repo_id)} = {_toml_string(mode)}" for repo_id, mode in storage)
+    if line.remote_anchors:
+        chunks.extend(("", "[remote_anchors]"))
+        chunks.extend(f"{_toml_key(k)} = {_toml_string(v)}" for k, v in sorted(line.remote_anchors.items()))
     chunks.append("")
     atomic_write_text(path, "\n".join(chunks))
 
@@ -135,9 +140,14 @@ def _parse_line_content(path: Path, content: bytes) -> Line:
         if value not in STORAGE_MODES:
             raise ValidationError(f"开发线清单存储方式无效：{repo_id}={value!r}")
         storage_modes[str(repo_id)] = value
+    anchors = raw.get("remote_anchors", {})
+    if ("remote_anchors" in raw and raw["schema_version"] != 4) or not isinstance(anchors, dict):
+        raise ValidationError("remote_anchors requires schema_version 4")
+    if set(anchors) - set(repositories) or any(not isinstance(v, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", v) for v in anchors.values()):
+        raise ValidationError("invalid remote_anchors")
     parent = _parse_parent_field(raw.get("parent", ""), line_id, path)
     return Line(
-        line_id, kind, branch, base, repositories, repository_bases, storage_modes, parent
+        line_id, kind, branch, base, repositories, repository_bases, storage_modes, parent, anchors
     )
 
 
@@ -1034,6 +1044,7 @@ def _merge_line_repositories_locked(
                     f"\n{result.stdout.strip()}"
                 )
             pushed.append(plan.repository)
+            target = record_remote_anchor(config, target, plan.repository, plan.target)
 
     changeset_id = ""
     if not dry_run:
@@ -1056,6 +1067,15 @@ def _merge_line_repositories_locked(
             changeset_id=changeset_id,
             **fields,
         )
+
+
+def record_remote_anchor(config: Config, line: Line, repo_id: str, path: Path) -> Line:
+    if line.storage_for(repo_id) != "linked-worktree":
+        return line
+    head = require_ok(git_read(path, "rev-parse", "HEAD"), "读取已推送 HEAD").stdout.strip()
+    updated = replace(line, remote_anchors={**line.remote_anchors, repo_id: head})
+    _write_line(config, updated)
+    return updated
 
 
 def merge_line(
@@ -1284,7 +1304,7 @@ def stashed_observation_rows(
 def _scale_control_plane_budget(
     config: Config, read_budget: ReadBudget | None
 ) -> None:
-    if read_budget is None:
+    if read_budget is None or read_budget.limits.deadline_seconds != 5.0:
         return
     apply_control_plane_fanout(
         read_budget,
@@ -1307,7 +1327,10 @@ def status_rows(
                 rows.append(("anchor", repo_id, branch, head, upstream, dirty))
             else:
                 rows.append(("anchor", repo_id, "MISSING", "-", "-", -1))
-        for line in list_lines(config, read_budget=read_budget):
+        lines = list_lines(config, read_budget=read_budget)
+        if read_budget is not None:
+            read_budget._status_lines = lines
+        for line in lines:
             for repo_id in line.repositories:
                 path = line_repository_path(config, line, repo_id)
                 if _is_git_repo(path, read_budget=read_budget):
@@ -1427,8 +1450,9 @@ def _ref_inventory(
 def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str]:
     """Return diagnostics.  Callers decide whether any FAIL means non-zero."""
     findings: list[str] = []
+    lines = None
+    observed = {}
     try:
-        _scale_control_plane_budget(config, read_budget)
         from .host.doctor import integration_avatar_warnings
 
         findings.extend(integration_avatar_warnings(read_budget=read_budget))
@@ -1441,6 +1465,10 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
         overlay_warning = overlay_instruction_warning(config.root)
         if overlay_warning:
             findings.append(overlay_warning)
+        findings.extend(overlay_template_warnings(config, read_budget=read_budget))
+        overlay_budget = read_budget or ReadBudget(ObservationLimits())
+        line_overlays = _read_line_overlays(config, overlay_budget)
+        _scale_control_plane_budget(config, read_budget)
         for repo_id in sorted(config.repositories):
             anchor = repository_path(config, repo_id)
             if _is_git_repo(anchor, read_budget=read_budget):
@@ -1448,7 +1476,9 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
             else:
                 findings.append(f"FAIL repository {repo_id}: missing or not Git: {anchor}")
         lines = list_lines(config, read_budget=read_budget)
-        observed: dict[str, tuple[dict[Path, tuple[str, str]], dict[str, str], dict[str, str]]] = {}
+        from .instructions import render_line_persona
+        for line in lines:
+            findings.extend(_overlay_warnings(line_root(config, line), render_line_persona(line_id=line.id, branch=line.branch), f'line {line.id}', overlay_budget, contents=line_overlays))
         for repo_id in sorted(
             {repo for line in lines for repo in line.repositories}
             & set(config.repositories)
@@ -1519,11 +1549,13 @@ def doctor(config: Config, *, read_budget: ReadBudget | None = None) -> list[str
                         f"expected upstream {expected_remote}, found {upstream or '-'}"
                     )
     except ReadLimitError as exc:
+        stash_doctor_snapshot(read_budget, lines, observed, False)
         if read_budget is None or exc.code is not ReadLimitCode.DEADLINE_EXCEEDED:
             stash_observation_findings(read_budget, findings)
             raise
         if not any(is_observation_deadline_finding(item) for item in findings):
             findings.append(OBSERVATION_DEADLINE_FINDING)
+    stash_doctor_snapshot(read_budget, lines, observed, not any(is_observation_deadline_finding(x) for x in findings))
     stash_observation_findings(read_budget, findings)
     return findings
 
@@ -1551,3 +1583,123 @@ def is_missing_origin_finding(finding: str) -> bool:
     so a missing-origin WARN is ready.
     """
     return _MISSING_ORIGIN_FINDING.fullmatch(finding) is not None
+
+
+def stash_doctor_snapshot(budget, lines, observed, complete):
+    if budget is not None:
+        budget._doctor_lines = lines
+        budget._doctor_observed = dict(observed)
+        budget._doctor_complete = complete
+
+
+def overlay_template_warnings(config, *, read_budget=None):
+    from .instructions import render_workspace_overlay
+    budget = read_budget or ReadBudget(ObservationLimits())
+    return _overlay_warnings(config.root, render_workspace_overlay(), 'workspace', budget)
+
+
+def _read_line_overlays(config, budget):
+    """Read overlay bytes before manifests; template comparison needs their branches."""
+    from .instructions import INSTRUCTION_NAMES
+    contents = {}
+    for relative in (config.layout.lines, config.layout.hotfixes):
+        parent = config.root / relative
+        with budget.open_safe_directory_chain(config.root, parent, allow_missing=True) as fd:
+            if fd is None:
+                continue
+            names = bounded_directory_names(fd, budget, maximum_records=budget.limits.line_records, label='Line overlay')
+        for name in sorted(names):
+            for instruction in INSTRUCTION_NAMES:
+                path = parent / name / instruction
+                if not path.exists() and not path.is_symlink():
+                    continue
+                try:
+                    contents[path] = budget.read_regular_bytes(path, maximum_bytes=budget.limits.line_manifest_bytes, label='overlay')
+                    contents[path].decode('utf-8')
+                except ReadLimitError as exc:
+                    if exc.code not in (ReadLimitCode.FILE_TOO_LARGE, ReadLimitCode.UNSAFE_FILE):
+                        raise
+                    contents[path] = exc
+                except (OSError, UnicodeError) as exc:
+                    contents[path] = exc
+    return contents
+
+
+def _overlay_warnings(directory, body, label, budget, *, contents=None):
+    from .instructions import INSTRUCTION_NAMES
+    findings = []
+    expected = (body if body.endswith('\n') else body + '\n').encode('utf-8')
+    for name in INSTRUCTION_NAMES:
+        path = directory / name
+        if not path.exists() and not path.is_symlink():
+            continue
+        prefix = f'WARN overlay {label} {name}'
+        try:
+            if contents is None:
+                content = budget.read_regular_bytes(path, maximum_bytes=budget.limits.line_manifest_bytes, label='overlay')
+            else:
+                if path not in contents:
+                    continue
+                content = contents[path]
+                if isinstance(content, Exception):
+                    raise content
+            content.decode('utf-8')
+        except ReadLimitError as exc:
+            if exc.code not in (ReadLimitCode.FILE_TOO_LARGE, ReadLimitCode.UNSAFE_FILE):
+                raise
+            findings.append(prefix + ' 无法核对；运行 dyro host seed --force')
+        except (OSError, UnicodeError):
+            findings.append(prefix + ' 无法核对；运行 dyro host seed --force')
+        else:
+            if content != expected:
+                findings.append(prefix + ' 与当前模板不一致；运行 dyro host seed --force')
+    return findings
+
+
+def next_line_context(config, line, lines, budget):
+    observed = getattr(budget, '_doctor_observed', {})
+    repositories = []
+    states = []
+    calls = 0
+    limited = None
+    for repo_id in line.repositories:
+        storage = line.storage_for(repo_id)
+        expected = f'origin/{line.branch}'
+        trees, upstreams, objects = observed.get(repo_id, ({}, {}, {}))
+        head = trees.get(line_repository_path(config, line, repo_id).resolve(), ('', ''))[0]
+        remote = objects.get(f'refs/remotes/{expected}')
+        upstream = upstreams.get(line.branch, '')
+        state = ('not_applicable' if storage == 'anchor-reference' else
+                 'unknown' if repo_id not in observed else
+                 'missing' if remote is None else
+                 'unknown' if not head or not remote else
+                 'ok' if upstream == expected else
+                 'mismatch' if upstream else
+                 'same_sha_unconfigured' if head == remote else 'unconfigured')
+        item = dict(id=repo_id, storage=storage, expected_upstream=expected,
+                    upstream=upstream, upstream_state=state, ahead=None, behind=None,
+                    unpushed_commits=None)
+        if storage == 'linked-worktree':
+            states.append(state)
+            if head and remote and limited is None:
+                if head == remote:
+                    item.update(ahead=0, behind=0, unpushed_commits=0)
+                elif calls >= 4:
+                    item['counts_omitted'] = True
+                elif budget is not None:
+                    try:
+                        if budget.remaining_seconds() >= 1:
+                            calls += 1
+                            result = git_read(repository_path(config, repo_id), 'rev-list', '--left-right', '--count', f'{remote}...{head}', read_budget=budget)
+                            if result.code == 0:
+                                behind, ahead = map(int, result.stdout.split())
+                                item.update(ahead=ahead, behind=behind, unpushed_commits=ahead)
+                    except ReadLimitError as exc:
+                        limited = exc.code
+                    except ValueError:
+                        pass
+        repositories.append(item)
+    ready = None if not states or 'unknown' in states or not getattr(budget, '_doctor_complete', False) else all(x in ('ok', 'same_sha_unconfigured') for x in states)
+    return dict(id=line.id, kind=line.kind, branch=line.branch, parent=line.parent,
+                children=[x.id for x in lines if x.parent == line.id],
+                push_ready=ready, repositories=repositories), limited

@@ -142,13 +142,13 @@ class ConfigTests(WorkspaceCase):
         self.assertTrue(updated.policy.allow_unattended_review)
         self.assertTrue(updated.policy.allow_unattended_merge)
 
-    def test_push_disclosure_only_when_allow_push_is_false(self) -> None:
+    def test_push_disclosure_includes_contract_for_both_policies(self) -> None:
         config = load(self.root)
         self.assertFalse(config.policy.allow_push)
         self.assertEqual(push_disclosure(config.policy), PUSH_DISABLED_NOTE)
         self.assertEqual(
             push_policy_fields(config.policy),
-            {"allow_push": False, "push_note": PUSH_DISABLED_NOTE},
+            {"allow_push": False, "push_note": PUSH_DISABLED_NOTE, "push_contract_version": 1},
         )
         config_path = self.root / "dyro.toml"
         config_path.write_text(
@@ -159,5 +159,5 @@ class ConfigTests(WorkspaceCase):
         )
         enabled = load(self.root)
         self.assertTrue(enabled.policy.allow_push)
-        self.assertEqual(push_disclosure(enabled.policy), "")
-        self.assertEqual(push_policy_fields(enabled.policy), {"allow_push": True})
+        self.assertEqual(push_disclosure(enabled.policy), PUSH_DISABLED_NOTE)
+        self.assertEqual(push_policy_fields(enabled.policy), {"allow_push": True, "push_note": PUSH_DISABLED_NOTE, "push_contract_version": 1})

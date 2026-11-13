@@ -1391,6 +1391,10 @@ class ObjectiveCliTests(WorkspaceCase):
 
     def test_control_plane_next_only_offers_applicable_bootstrap(self) -> None:
         (self.config.lines_state_dir / "alpha.toml").unlink()
+        # Keep this bootstrap fixture free of orphan Task manifests: next now
+        # validates every bounded directory-resolution Task against known lines.
+        import shutil
+        shutil.rmtree(self.config.task_specs_dir / "TASK-A")
         self.anchor.rename(self.root / "api-missing")
         unavailable = self._read_json("next")
         self.assertFalse(unavailable["mutation_available"])
@@ -1424,6 +1428,10 @@ class ObjectiveCliTests(WorkspaceCase):
         self,
     ) -> None:
         (self.config.lines_state_dir / "alpha.toml").unlink()
+        # Keep this bootstrap fixture free of orphan Task manifests: next now
+        # validates every bounded directory-resolution Task against known lines.
+        import shutil
+        shutil.rmtree(self.config.task_specs_dir / "TASK-A")
         self.anchor.rename(self.root / "api-missing")
         outside = self.root.parent / f"{self.root.name}-outside"
         outside.mkdir()
