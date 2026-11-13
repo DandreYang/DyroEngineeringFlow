@@ -239,7 +239,7 @@ class LineNextContractTests(WorkspaceCase):
         from io import StringIO
         from dyro.cli import main
         from dyro.workspace import create_line
-        line = create_line(self.config, line_id='core', branch='feat/core', base='main')
+        create_line(self.config, line_id='core', branch='feat/core', base='main')
         class TtyOutput(StringIO):
             def isatty(self):
                 return True
