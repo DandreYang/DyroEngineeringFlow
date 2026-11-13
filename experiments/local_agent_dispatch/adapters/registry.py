@@ -73,11 +73,16 @@ def adapter_is_authenticated(adapter: BackendAdapter) -> bool:
     authenticated = getattr(adapter, "authenticated", None)
     if callable(authenticated):
         for _ in range(2):
+            adapter._probe_retryable = False
             try:
                 if authenticated():
                     return True
+            except OSError:
+                adapter._probe_retryable = True
             except DispatchValidationError:
-                pass
+                return False
+            if getattr(adapter, "_probe_retryable", False) is not True:
+                return False
         return False
     # Preserve the original adapter-test/extension compatibility contract:
     # adapters predating the explicit auth probe use availability as the probe.
@@ -183,8 +188,7 @@ def probe_backends(*, passive: bool = False) -> list[dict[str, object]]:
             "authentication_probe": "not_run" if passive else "completed",
         }
         if not available and adapter.id != "echo":
-            reason = getattr(adapter, "readiness_reason", None)
-            row["reason"] = reason() if callable(reason) else "command not installed"
+            row["reason"] = "command not installed"
         elif passive and available and adapter.id != "echo":
             row["reason"] = "authentication probe not run in dry-run mode"
         elif available and adapter.id != "echo" and not authenticated:
@@ -192,7 +196,5 @@ def probe_backends(*, passive: bool = False) -> list[dict[str, object]]:
             row["reason"] = (
                 reason() if callable(reason) else "authentication probe failed"
             )
-        if adapter.id == "kimi":
-            row["reason"] = adapter.readiness_reason()
         rows.append(row)
     return rows

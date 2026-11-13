@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -509,8 +510,8 @@ class AdapterRepairTests(unittest.TestCase):
         adapter = Mock(id='grok', command='grok', strict_isolation=False)
         adapter.available.return_value = True
         adapter.authenticated.side_effect = [False, True]
-        self.assertTrue(registry_module.adapter_is_authenticated(adapter))
-        self.assertEqual(adapter.authenticated.call_count, 2)
+        self.assertFalse(registry_module.adapter_is_authenticated(adapter))
+        self.assertEqual(adapter.authenticated.call_count, 1)
         adapter.authenticated.side_effect = [False, False]
         adapter.readiness_reason.return_value = 'local probe failed'
         with patch.object(registry_module, '_all', return_value={'grok': adapter}):
@@ -560,5 +561,72 @@ class AdapterRepairTests(unittest.TestCase):
         failed = BoundedCompletedProcess(args=('fake',), returncode=1, stdout='', stderr='login expired')
         with patch.object(adapter, 'available', return_value=True), patch.object(module, 'run_bounded', return_value=failed) as bounded:
             self.assertFalse(registry_module.adapter_is_authenticated(adapter))
-            self.assertEqual(bounded.call_count, 2)
+            self.assertEqual(bounded.call_count, 1)
             self.assertEqual(adapter.readiness_reason(), 'login expired')
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    completed = AdapterRepairTests.completed
+    def test_incomplete_probes_retry_but_normal_negative_does_not(self):
+        import experiments.local_agent_dispatch.adapters.subprocess_cli as module
+        for failure in (None, self.completed(timed_out=True), self.completed(output_limited=True), OSError("probe unavailable")):
+            adapter = module.codex_adapter()
+            with patch.object(adapter, 'available', return_value=True), patch.object(module, 'run_bounded', side_effect=[failure, self.completed()]) as run:
+                self.assertTrue(registry_module.adapter_is_authenticated(adapter))
+                self.assertEqual(run.call_count, 2)
+        adapter = module.cursor_adapter()
+        with patch.dict(os.environ, {'CURSOR_API_KEY': 'test-placeholder'}), patch.object(adapter, 'available', return_value=True), patch.object(module, 'run_bounded', return_value=self.completed('Not logged in')) as run:
+            self.assertFalse(registry_module.adapter_is_authenticated(adapter))
+            self.assertEqual(run.call_count, 1)
+
+    def test_kimi_ready_passive_missing_and_negative_reasons(self):
+        import experiments.local_agent_dispatch.adapters.subprocess_cli as module
+        adapter = module.kimi_adapter()
+        with patch.dict(os.environ, {}, clear=True), patch.object(adapter, 'available', return_value=True), patch.object(module, 'run_bounded', return_value=self.completed('configured provider')), patch.object(registry_module, '_all', return_value={'kimi': adapter}):
+            self.assertNotIn('reason', probe_backends()[0])
+            self.assertEqual(adapter.readiness_reason(), '')
+            self.assertEqual(probe_backends(passive=True)[0]['reason'], 'authentication probe not run in dry-run mode')
+        with patch.dict(os.environ, {}, clear=True), patch.object(adapter, 'available', return_value=True), patch.object(module, 'run_bounded', return_value=self.completed('No providers configured')):
+            self.assertFalse(adapter.authenticated())
+            self.assertIn('no local Kimi', adapter.readiness_reason())
+        with patch.object(adapter, 'available', return_value=False), patch.object(registry_module, '_all', return_value={'kimi': adapter}):
+            self.assertEqual(probe_backends(passive=True)[0]['reason'], 'command not installed')
+
+    def test_protocol_tail_scans_full_output(self):
+        from experiments.local_agent_dispatch.adapters.subprocess_cli import _completed_to_result
+        for secret in ('sk-' + 'a' * 2200, 'xai-' + 'b' * 40, 'gsk_' + 'c' * 40, 'Authorization: Bearer ' + 'd' * 40):
+            result = _completed_to_result(self.completed('invalid output ' + secret), backend='fake')
+            self.assertEqual(result.error_code, 'protocol_error')
+            self.assertIn('withheld', result.warnings[1])
+            self.assertIn('withheld', result.raw_preview)
+        result = _completed_to_result(self.completed('a' * 2500 + ' benign tail'), backend='fake')
+        self.assertTrue(result.warnings[1].endswith(' benign tail'))
+        self.assertEqual(len(result.warnings[1]), 2000)
+
+    def test_batch_unavailable_does_not_use_unprobed_reason(self):
+        from unittest.mock import Mock
+        from experiments.local_agent_dispatch.orchestration import _select_backend
+        adapter = Mock()
+        for available, message in ((False, 'batch backend is not installed: cursor-agent'), (True, 'batch backend unavailable: cursor-agent')):
+            adapter.available.return_value = available
+            with patch('experiments.local_agent_dispatch.orchestration.get_adapter', return_value=adapter):
+                with self.assertRaises(DispatchValidationError) as caught:
+                    _select_backend('cursor-agent', ready=(), counts={}, mode='read-only', strict=False)
+                self.assertEqual(str(caught.exception), message)
+        adapter.readiness_reason.assert_not_called()
+        adapter.authenticated.assert_not_called()
+
+    def test_batch_start_reason_comes_from_failed_probe_instance(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from experiments.local_agent_dispatch.orchestration import start_batch
+        adapter = Mock()
+        adapter.available.return_value = True
+        adapter.authenticated.return_value = False
+        adapter.readiness_reason.return_value = 'local session expired'
+        plan = SimpleNamespace(plan_sha256='digest', members=[SimpleNamespace(resolved_backend='codex')])
+        with patch('experiments.local_agent_dispatch.orchestration.plan_batch', return_value=plan), patch('experiments.local_agent_dispatch.orchestration.get_adapter', return_value=adapter):
+            with self.assertRaisesRegex(DispatchValidationError, 'codex: local session expired'):
+                start_batch({}, expected_plan_sha256='digest', project_root=Path('.'))
+        adapter.authenticated.assert_called_once()
+        adapter.readiness_reason.assert_called_once()

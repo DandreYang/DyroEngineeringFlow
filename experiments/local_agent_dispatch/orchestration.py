@@ -54,8 +54,9 @@ def _select_backend(
     candidates = ready if requested == "auto" else (requested,)
     if requested != "auto" and requested not in ready:
         adapter = get_adapter(requested)
-        reason = getattr(adapter, "readiness_reason", lambda: "unavailable")()
-        raise DispatchValidationError(f"batch backend unavailable: {requested}: {reason}")
+        if not adapter.available():
+            raise DispatchValidationError(f"batch backend is not installed: {requested}")
+        raise DispatchValidationError(f"batch backend unavailable: {requested}")
     for backend in sorted(
         candidates,
         key=lambda item: (counts.get(item, 0), ready.index(item)),
@@ -201,9 +202,12 @@ def start_batch(
         member.resolved_backend for member in plan.members
     ):
         adapter = get_adapter(backend)
-        if not adapter.available() or not adapter_is_authenticated(adapter):
+        if not adapter.available():
+            raise DispatchValidationError(f"batch backend is not installed: {backend}")
+        if not adapter_is_authenticated(adapter):
+            reason = getattr(adapter, "readiness_reason", lambda: "authentication probe failed")()
             raise DispatchValidationError(
-                f"batch backend is not ready and authenticated: {backend}"
+                f"batch backend is not ready and authenticated: {backend}: {reason}"
             )
     for member in plan.members:
         adapter = get_adapter(member.resolved_backend)

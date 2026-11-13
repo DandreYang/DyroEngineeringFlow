@@ -16,7 +16,7 @@ import tomllib
 from typing import Callable, Iterator, Mapping, Sequence
 
 from ..bounded_process import BoundedCompletedProcess, run_bounded
-from ..context_guard import assert_content_allowed, safe_error_text
+from ..context_guard import assert_content_allowed, check_content, safe_error_text
 from ..errors import DispatchValidationError
 from ..process_identity import identity_for_pid
 from ..task_contract import TaskContract
@@ -1073,6 +1073,13 @@ def _parse_wrapped_model_json(text: str, *, backend: str) -> dict[str, object]:
     )
 
 
+def _safe_output_tail(text: str, *, fallback: str = "dispatch failure") -> str:
+    # Scan before slicing so a credential anchor outside the tail still withholds it.
+    if not check_content(text).allowed:
+        return "dispatch failure detail withheld because secret-like content was detected"
+    return safe_error_text(text[-2000:], fallback=fallback)
+
+
 def _completed_to_result(
     completed: BoundedCompletedProcess,
     *,
@@ -1115,7 +1122,7 @@ def _completed_to_result(
             confidence="low",
             error_code="output_limit",
             usage={"partial": True, "backend": backend},
-            raw_preview=safe_error_text(completed.stdout[-2000:]),
+            raw_preview=_safe_output_tail(completed.stdout),
             warnings=["partial result: backend output exceeded the byte limit and was terminated"],
         )
     if completed.returncode != 0:
@@ -1133,10 +1140,10 @@ def _completed_to_result(
             summary="",
             error_code="protocol_error",
             warnings=[safe_error_text(exc, fallback="backend result failed validation"),
-                      safe_error_text(completed.stderr if not completed.stdout.strip()
-                                      else completed.stdout[-2000:],
+                      _safe_output_tail(completed.stderr if not completed.stdout.strip()
+                                      else completed.stdout,
                                       fallback="backend returned empty stdout")],
-            raw_preview=safe_error_text(completed.stdout[-2000:]),
+            raw_preview=_safe_output_tail(completed.stdout),
         )
     return AdapterResult(
         status="ok",
@@ -1372,6 +1379,7 @@ class SubprocessCliAdapter:
         timeout_seconds: float = 5.0,
         environment_overrides: Mapping[str, str] | None = None,
     ):
+        self._probe_retryable = False
         if not self.available():
             return None
         try:
@@ -1386,9 +1394,15 @@ class SubprocessCliAdapter:
                 max_output_bytes=64 * 1024,
             )
         except OSError as exc:
+            self._probe_retryable = True
             self._probe_failure_reason = safe_error_text(exc)
             return None
+        if completed is None:
+            self._probe_retryable = True
+            self._probe_failure_reason = "authentication probe returned no result"
+            return None
         if completed.returncode != 0 or completed.timed_out or completed.output_limited:
+            self._probe_retryable = completed.timed_out or completed.output_limited
             self._probe_failure_reason = safe_error_text(
                 completed.stderr or f"{self.id} auth probe exit={completed.returncode}, timeout={completed.timed_out}, output_limit={completed.output_limited}"
             )
@@ -2161,18 +2175,25 @@ def _kimi_agent_markdown(*, edit_mode: bool, prompt: str) -> str:
 
 class KimiAdapter(SubprocessCliAdapter):
     def readiness_reason(self) -> str:
-        return "no configured Kimi provider passed the local readiness probe"
+        if not self.available():
+            return "command not installed"
+        return getattr(self, "_probe_failure_reason", "")
 
     def authenticated(self) -> bool:
+        self._probe_failure_reason = ""
         try:
             if _kimi_env_route(os.environ) is not None:
                 return self.available()
         except DispatchValidationError:
+            self._probe_failure_reason = "Kimi local route configuration is invalid"
             return False
         completed = self._probe(["kimi", "provider", "list"])
         if completed is None:
             return False
-        return "No providers configured" not in completed.stdout
+        ready = "No providers configured" not in completed.stdout
+        if not ready:
+            self._probe_failure_reason = "no local Kimi provider route is configured"
+        return ready
 
     def run(
         self,
