@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import sys
 import tempfile
 import tomllib
 from typing import Callable, Iterator, Mapping, Sequence
@@ -54,7 +55,8 @@ _BACKEND_ENV_ALLOWLIST = {
         }
     ),
     "cursor-agent": frozenset(
-        {"CURSOR_API_KEY", "CURSOR_API_ENDPOINT", "XDG_CONFIG_HOME"}
+        {"CURSOR_API_KEY", "CURSOR_API_ENDPOINT", "XDG_CONFIG_HOME",
+         "AGENT_CLI_CREDENTIAL_STORE"}
     ),
     "opencode": frozenset(
         {
@@ -583,7 +585,7 @@ def _configured_model(backend: str) -> tuple[str, str] | None:
         model = payload.get("model")
         return ("anthropic", model) if isinstance(model, str) and model else None
     if backend == "cursor-agent":
-        return ("cursor", os.environ.get("DYRO_CURSOR_MODEL", "gpt-5"))
+        return ("cursor", os.environ.get("DYRO_CURSOR_MODEL", "auto"))
     if backend == "opencode":
         root = Path(
             environment.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
@@ -755,6 +757,30 @@ def _create_worker_home(path: Path) -> None:
     if path.is_symlink() or not path.is_dir():
         raise DispatchValidationError("isolated async worker home is unsafe")
     path.chmod(0o700)
+
+
+def _cursor_auth_file(environment: Mapping[str, str]) -> Path:
+    # Cursor 2026.11.11 cli-credentials/dist/index.js: getAuthFilePath.
+    home = Path(environment.get("HOME", str(Path.home())))
+    if sys.platform == "darwin":
+        return home / ".cursor" / "auth.json"
+    return Path(environment.get("XDG_CONFIG_HOME", str(home / ".config"))) / "cursor" / "auth.json"
+
+
+def _cursor_isolated_environment(source: Mapping[str, str], home: Path) -> dict[str, str] | None:
+    environment = {
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / "config"),
+        "AGENT_CLI_CREDENTIAL_STORE": "file",
+    }
+    if source.get("CURSOR_API_KEY"):
+        return environment
+    destination = _cursor_auth_file(environment)
+    destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if not _copy_private_file(_cursor_auth_file(source), destination, require_private=True):
+        return None
+    # Do not copy cli-config.json: it contains permissions and plugin settings.
+    return environment
 
 
 def _materialize_basic_worker_home(
@@ -1601,22 +1627,17 @@ class ClaudeAdapter(SubprocessCliAdapter):
 
 
 class CursorAdapter(SubprocessCliAdapter):
-    supported_modes = frozenset({"read-only"})
-
-    def readiness_reason(self) -> str:
-        return getattr(
-            self,
-            "_probe_failure_reason",
-            "CURSOR_API_KEY is required so dispatch can isolate Cursor from "
-            "user MCP and plugin processes",
-        )
+    def worker_environment(self, *, isolated_home: Path | None = None) -> dict[str, str]:
+        environment = _backend_environment(self.id)
+        if isolated_home is not None:
+            _create_worker_home(isolated_home)
+            isolated = _cursor_isolated_environment(environment, isolated_home)
+            if isolated is not None:
+                environment.update(isolated)
+        # With keychain credentials, retain HOME until run() checks the contract.
+        return environment
 
     def authenticated(self) -> bool:
-        # Browser OAuth shares the user's full Cursor home, including MCP and
-        # plugin startup. Dyro only routes Cursor when an API key lets the run
-        # use an empty, ephemeral HOME.
-        if not os.environ.get("CURSOR_API_KEY"):
-            return False
         completed = self._probe(
             ["cursor-agent", "status"], timeout_seconds=15.0
         )
@@ -1638,22 +1659,18 @@ class CursorAdapter(SubprocessCliAdapter):
     ) -> AdapterResult:
         if not self.available():
             return _not_installed(self.id, self.command)
-        if contract.mode == "edit":
-            return AdapterResult(
-                status="error",
-                summary="",
-                error_code="backend_mode_unsupported",
-                warnings=[
-                    "Cursor edit dispatch is disabled because its sandbox "
-                    "lifecycle cannot yet be proven"
-                ],
-                usage={"backend": self.id},
-            )
         prompt = _build_prompt(contract, context_files)
         with (
             _temporary_text_file(cwd, suffix=".md", content=prompt) as task_file,
             tempfile.TemporaryDirectory(prefix="dyro-cursor-home-") as cursor_home,
         ):
+            environment = _cursor_isolated_environment(
+                _backend_environment(self.id), Path(cursor_home)
+            )
+            fallback = environment is None
+            if fallback and not contract.allow_unconfined_provider:
+                return AdapterResult(status="error", summary="",
+                                     error_code="unconfined_provider_refused")
             argv = [
                 "cursor-agent",
                 "--print",
@@ -1662,7 +1679,7 @@ class CursorAdapter(SubprocessCliAdapter):
                 # Cursor's sandbox helper currently daemonizes after the CLI
                 # exits, which breaks Dyro's prove-before-release process-group
                 # contract. The task still runs only after the caller accepts
-                # best-effort unconfined read-only execution in a projection.
+                # unconfined execution in a projection or scratch edit worktree.
                 "--sandbox",
                 "disabled",
                 "--workspace",
@@ -1671,11 +1688,11 @@ class CursorAdapter(SubprocessCliAdapter):
                 self._execution_value("model"),
                 "--trust",
             ]
-            argv.extend(["--mode", "ask"])
+            argv.extend(["--force"] if contract.mode == "edit" else ["--mode", "ask"])
             argv.append(
                 f"Read and follow the complete task in @{task_file.name}."
             )
-            return self._run(
+            result = self._run(
                 argv,
                 cwd=cwd,
                 prompt="",
@@ -1683,8 +1700,13 @@ class CursorAdapter(SubprocessCliAdapter):
                 parser=lambda text: _parse_wrapped_model_json(
                     text, backend=self.id
                 ),
-                environment_overrides={"HOME": cursor_home},
+                environment_overrides=environment,
             )
+            if fallback:
+                result.warnings.append(
+                    "Cursor uses real HOME for CLI login; user MCP servers and plugins may load"
+                )
+            return result
 
 
 def _opencode_permissions(*, edit_mode: bool) -> str:

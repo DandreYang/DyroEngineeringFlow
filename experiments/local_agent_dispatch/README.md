@@ -91,11 +91,27 @@ Providers in a deterministic preference order and fails closed when none are rea
 Integrated Provider IDs are `codex`, `claude`,
 `cursor-agent`, `opencode`, `grok`, `hermes`, `kimi`, `dsh`, and `pi`. A Provider
 is routable only when its backend-specific authentication probe succeeds. Cursor
-uses `--mode ask --output-format json` for read-only dispatch. With
-`CURSOR_API_KEY` set, it runs with an ephemeral home; without the key Cursor is
-not routable, because browser login would load the user's full Cursor home
-(MCP servers and plugins). Empty output is a failure. Cursor edit mode remains
-unsupported.
+supports read-only and edit dispatch via its own CLI login (`cursor-agent status`)
+or `CURSOR_API_KEY`. Read-only adds `--mode ask`; edit adds `--force`.
+Both use `--print --output-format json --sandbox disabled --workspace <cwd>
+--model <model> --trust` and a temporary task-file prompt, with cwd pinned to the
+projection or scratch edit worktree. Empty output is a failure.
+
+Credential evidence: installed Cursor 2026.11.11-b912975 `index.js`, modules
+`cli-credentials/dist/index.js` and `src/credential-manager.ts`, select keychain
+by default on macOS, file storage elsewhere, and accept
+`AGENT_CLI_CREDENTIAL_STORE=file`. `getAuthFilePath` uses `~/.cursor/auth.json`
+on macOS and `$XDG_CONFIG_HOME/cursor/auth.json` (default `~/.config/cursor`)
+on Linux. This machine has `~/.cursor/cli-config.json` but no file auth;
+its default login uses the macOS keychain. No keychain secrets are exported.
+File-backed login copies only private `auth.json` into a per-run HOME with an
+isolated XDG config directory and forces file storage. No CLI config is needed
+with the explicit flags; `cli-config.json`, MCP configuration and plugins are
+not copied. API-key runs use an empty isolated home. If file credentials cannot
+be copied, real HOME is used only with `allow_unconfined_provider=true`, and a
+warning names user MCP servers and plugins that may load. Project-local Cursor
+configuration can still load; these are unconfined Provider executions.
+
 AGY (`agy`) has a read-only print/plan/JSON runner with a print timeout and a
 no-shell prompt, but automatic routing remains disabled: its help exposes no
 non-generating authentication-status command. AGY edit mode is unsupported.

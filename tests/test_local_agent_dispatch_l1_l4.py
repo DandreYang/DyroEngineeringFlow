@@ -542,6 +542,47 @@ class AdapterRepairTests(unittest.TestCase):
         self.assertEqual(result.summary, 'bounded answer')
         self.assertTrue(result.usage['partial'])
 
+    def test_cursor_home_copy_and_argv(self):
+        import experiments.local_agent_dispatch.adapters.subprocess_cli as module
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'source'
+            source.mkdir()
+            env = {'HOME': str(source), 'XDG_CONFIG_HOME': str(source / 'config')}
+            auth = module._cursor_auth_file(env)
+            auth.parent.mkdir(parents=True)
+            auth.write_text('{"accessToken":"fake-fixture"}')
+            auth.chmod(0o600)
+            (auth.parent / 'mcp.json').write_text('{}')
+            (auth.parent / 'cli-config.json').write_text('{"plugins":{}}')
+            home = Path(tmp) / 'worker'
+            adapter = module.cursor_adapter()
+            with patch.dict(os.environ, env, clear=True):
+                isolated = adapter.worker_environment(isolated_home=home)
+                copied = module._cursor_auth_file(isolated)
+                self.assertEqual(copied.read_bytes(), auth.read_bytes())
+                self.assertEqual(copied.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(list(copied.parent.iterdir()), [copied])
+                for mode in ('read-only', 'edit'):
+                    with patch.object(adapter, 'available', return_value=True), patch.object(adapter, '_execution_value', return_value='fake-model'), patch.object(module, '_build_prompt', return_value='task'), patch.object(adapter, '_run', return_value=module.AdapterResult(status='ok', summary='fake')) as run:
+                        adapter.run(contract=SimpleNamespace(mode=mode, allow_unconfined_provider=True), cwd=Path(tmp), context_files={}, timeout_seconds=10)
+                        argv = run.call_args.args[0]
+                        self.assertEqual(argv[:4], ['cursor-agent', '--print', '--output-format', 'json'])
+                        self.assertEqual(argv[argv.index('--workspace') + 1], tmp)
+                        self.assertEqual(run.call_args.kwargs['cwd'], Path(tmp))
+                        self.assertEqual('--force' in argv, mode == 'edit')
+                        self.assertEqual('--mode' in argv, mode == 'read-only')
+
+    def test_cursor_fallback_warning_and_empty_output(self):
+        import experiments.local_agent_dispatch.adapters.subprocess_cli as module
+        from types import SimpleNamespace
+        adapter = module.cursor_adapter()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(adapter, 'available', return_value=True), patch.object(adapter, '_execution_value', return_value='fake-model'), patch.object(module, '_build_prompt', return_value='task'), patch.object(module, '_cursor_isolated_environment', return_value=None), patch.object(module, 'run_bounded', return_value=self.completed()) as run:
+            result = adapter.run(contract=SimpleNamespace(mode='edit', allow_unconfined_provider=True), cwd=Path(tmp), context_files={}, timeout_seconds=10)
+            self.assertEqual(result.error_code, 'protocol_error')
+            self.assertTrue(any('MCP servers and plugins may load' in warning for warning in result.warnings))
+            self.assertEqual(run.call_args.kwargs['env']['HOME'], str(Path.home()))
+
     def test_grok_argv_from_help(self):
         import experiments.local_agent_dispatch.adapters.subprocess_cli as module
         from types import SimpleNamespace

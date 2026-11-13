@@ -1340,6 +1340,7 @@ class ProcessAndLifecycleTests(unittest.TestCase):
             {
                 **_payload(),
                 "backend": "fake",
+                "allow_unconfined_provider": True,
             }
         )
         provider_payload = json.dumps(
@@ -2076,7 +2077,8 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 for value in required:
                     self.assertIn(value, argv)
 
-    def test_cursor_edit_fails_closed_before_spawn(self) -> None:
+    @patch("experiments.local_agent_dispatch.adapters.subprocess_cli._cursor_isolated_environment", return_value=None)
+    def test_cursor_fallback_requires_acknowledgement(self, isolated) -> None:
         contract = parse_task_contract(
             {
                 **_payload(mode="edit"),
@@ -2098,7 +2100,7 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 context_files={"app.py": "safe = True\n"},
                 timeout_seconds=10.0,
             )
-        self.assertEqual(result.error_code, "backend_mode_unsupported")
+        self.assertEqual(result.error_code, "unconfined_provider_refused")
         bounded.assert_not_called()
 
     def test_provider_credentials_are_selected_not_shared(self) -> None:
@@ -2151,39 +2153,18 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 ):
                     pass
 
-    def test_cursor_dispatch_auth_requires_api_key_and_positive_status(self) -> None:
+    def test_cursor_dispatch_auth_uses_cli_login_and_positive_status(self) -> None:
         adapter = cursor_adapter()
-        with (
-            patch.dict("os.environ", {}, clear=True),
-            patch(
-                "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
-                return_value="/usr/local/bin/cursor-agent",
-            ),
-            patch(
-                "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded"
-            ) as bounded,
-        ):
-            self.assertFalse(adapter.authenticated())
-        bounded.assert_not_called()
-
-        completed = BoundedCompletedProcess(
-            args=("cursor-agent",),
-            returncode=0,
-            stdout="Not logged in",
-            stderr="",
-        )
-        with (
-            patch.dict("os.environ", {"CURSOR_API_KEY": "test-key"}, clear=True),
-            patch(
-                "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
-                return_value="/usr/local/bin/cursor-agent",
-            ),
-            patch(
-                "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
-                return_value=completed,
-            ),
-        ):
-            self.assertFalse(adapter.authenticated())
+        for message, expected in (("Logged in", True), ("Not logged in", False), ("", False)):
+            with (
+                patch.dict("os.environ", {}, clear=True),
+                patch.object(adapter, "available", return_value=True),
+                patch("experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
+                      return_value=BoundedCompletedProcess(args=("cursor-agent",), returncode=0,
+                                                          stdout=message, stderr="")) as bounded,
+            ):
+                self.assertEqual(adapter.authenticated(), expected)
+                self.assertEqual(bounded.call_args.args[0], ["cursor-agent", "status"])
 
     def test_grok_auth_rejects_unauthenticated_model_listing(self) -> None:
         completed = BoundedCompletedProcess(

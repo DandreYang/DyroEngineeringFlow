@@ -39,8 +39,9 @@ Treat `dyro dispatch` as an outbound harness, separate from the read-only
    `supported=true`, `available=true`, and `execution_kind=provider` only as
    planning candidates. Supported Provider IDs are `codex`, `claude`,
    `cursor-agent`, `opencode`, `grok`, `hermes`, `kimi`, `dsh`, and `pi`; an
-   installed command may still be unready. Cursor requires `CURSOR_API_KEY`
-   and supports read-only work. Kimi file OAuth is isolated per run; keyring
+   installed command may still be unready. Cursor supports read-only and edit work via its own CLI login or
+   `CURSOR_API_KEY`. File credentials use an isolated home; keychain login
+   requires unconfined acknowledgement and may load user MCP/plugins. Kimi file OAuth is isolated per run; keyring
    OAuth fails closed. DSH uses `deepseek-official/deepseek-v4-flash`.
 
 2. Choose the smallest useful strategy:
@@ -57,7 +58,6 @@ Treat `dyro dispatch` as an outbound harness, separate from the read-only
    - One delegated scratch task: use one asynchronous `run`.
    - Review of finished work is the Core task `reviewer` phase on frozen HEADs,
      or a later independent `run`. It is not a sibling watching a live writer.
-   - Cursor cannot join a write wave; its edit path stays fail-closed.
    - Keep advisory fan-out at two or three runs and never exceed the dispatch
      global limit.
 
