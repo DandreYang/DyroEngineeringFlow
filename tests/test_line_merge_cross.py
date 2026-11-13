@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import io
 import json
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 import subprocess
 from unittest.mock import patch
@@ -472,3 +472,315 @@ class CrossLineMergeTests(WorkspaceCase):
         self.assertEqual(second.outcomes["api"], "not_started")
         self.assertEqual(line_ops.load_op(config, op["op_id"])["phase"], "aborted")
         merge_line_from(config, alpha.id, beta.id)
+
+    def test_locked_heads_are_journaled_and_rollback_preserves_intervening_commit(self) -> None:
+        config, alpha, beta = self._sibling_lines()
+        target = line_repository_path(config, alpha, "api")
+        source = line_repository_path(config, beta, "api")
+        _commit_text(line_repository_path(config, beta, "web"), "web.txt", "web", "web")
+
+        heads = {}
+
+        @contextmanager
+        def advance_under_lock(*args, **kwargs):
+            with line_ops.anchor_locks(*args, **kwargs):
+                heads["target"] = _commit_text(target, "late-target.txt", "t", "late target")
+                heads["source"] = _commit_text(source, "late-source.txt", "s", "late source")
+                yield
+
+        original_git = workspace.git
+
+        def fail_last_commit(repo, *args, **kwargs):
+            if repo == line_repository_path(config, alpha, "web") and args[0] == "commit":
+                return Result(("git", *args), 1, "injected commit failure")
+            return original_git(repo, *args, **kwargs)
+
+        with patch.object(workspace, "anchor_locks", side_effect=advance_under_lock):
+            with patch.object(workspace, "git", side_effect=fail_last_commit):
+                with self.assertRaisesRegex(DyroError, "提交 web 合并"):
+                    merge_line_from(config, alpha.id, beta.id)
+        op = line_ops.load_op(config, next((self.root / ".dyro/ops").glob("*.json")).stem)
+        snapshot = op["repositories"]["api"]["snapshot"]
+        self.assertEqual(snapshot["original_head"], heads["target"])
+        self.assertEqual(snapshot["source_head"], heads["source"])
+        self.assertEqual(_stdout("git", "rev-parse", "HEAD", cwd=target), heads["target"])
+        self.assertEqual(op["repositories"]["api"]["outcome"], "rolled_back")
+
+    def test_merge_rechecks_clean_branch_and_git_operation_under_locks(self) -> None:
+        config, alpha, beta = self._sibling_lines()
+
+        for into_base in (False, True):
+            for drift in ("dirty", "target_branch", "source_branch", "merge_head"):
+                with self.subTest(into_base=into_base, drift=drift):
+                    target = self.anchor if into_base else line_repository_path(config, alpha, "api")
+                    source = line_repository_path(config, beta, "api")
+                    target_branch = "main" if into_base else alpha.branch
+                    marker = target / "dirty.txt"
+                    git_dir = Path(_stdout("git", "rev-parse", "--absolute-git-dir", cwd=target))
+
+                    @contextmanager
+                    def drift_under_lock(*args, **kwargs):
+                        with line_ops.anchor_locks(*args, **kwargs):
+                            if drift == "dirty":
+                                marker.write_text("dirty")
+                            elif drift == "target_branch":
+                                shell("git", "switch", "--detach", cwd=target)
+                            elif drift == "source_branch":
+                                shell("git", "switch", "--detach", cwd=source)
+                            else:
+                                (git_dir / "MERGE_HEAD").write_text(_stdout("git", "rev-parse", "HEAD", cwd=target))
+                            yield
+
+                    try:
+                        with patch.object(workspace, "anchor_locks", side_effect=drift_under_lock):
+                            with patch.object(workspace, "_probe_line_merge_plans") as probe:
+                                with self.assertRaises(DyroError):
+                                    if into_base:
+                                        merge_line_into_base(config, beta.id)
+                                    else:
+                                        merge_line_from(config, alpha.id, beta.id)
+                                probe.assert_not_called()
+                        self.assertFalse(list((self.root / ".dyro/ops").glob("*.json")))
+                    finally:
+                        marker.unlink(missing_ok=True)
+                        (git_dir / "MERGE_HEAD").unlink(missing_ok=True)
+                        shell("git", "switch", target_branch, cwd=target)
+                        shell("git", "switch", beta.branch, cwd=source)
+
+    def test_base_merge_journals_heads_read_under_locks(self) -> None:
+        config = load(self.root)
+        line = create_line(config, line_id="ship", branch="feat/ship", base="main")
+        source = line_repository_path(config, line, "api")
+
+        heads = {}
+
+        @contextmanager
+        def advance_under_lock(*args, **kwargs):
+            with line_ops.anchor_locks(*args, **kwargs):
+                heads["target"] = _commit_text(self.anchor, "late-base.txt", "base", "base")
+                heads["source"] = _commit_text(source, "late-source.txt", "source", "source")
+                yield
+
+        with patch.object(workspace, "anchor_locks", side_effect=advance_under_lock):
+            result = merge_line_into_base(config, line.id)
+        snapshot = line_ops.load_op(config, result.op_id)["repositories"]["api"]["snapshot"]
+        self.assertEqual(snapshot["original_head"], heads["target"])
+        self.assertEqual(snapshot["source_head"], heads["source"])
+
+    def test_commit_without_written_result_stays_unknown_and_open(self) -> None:
+        config, alpha, beta = self._sibling_lines()
+        target = line_repository_path(config, alpha, "api")
+        _commit_text(line_repository_path(config, beta, "api"), "new.txt", "new", "new")
+        record = workspace.record_repo_result
+
+        def fail_result(*args, **kwargs):
+            if kwargs.get("outcome") == "committed":
+                raise DyroError("injected result write failure")
+            return record(*args, **kwargs)
+
+        with patch.object(workspace, "record_repo_result", side_effect=fail_result):
+            with self.assertRaisesRegex(DyroError, "result write failure"):
+                merge_line_from(config, alpha.id, beta.id)
+        op = line_ops.find_unfinished_op(config, alpha.id)
+        self.assertIsNotNone(op)
+        repo = op["repositories"]["api"]
+        self.assertEqual(repo["outcome"], "unknown")
+        self.assertNotIn("result", repo["steps"]["merge"])
+        self.assertNotEqual(_stdout("git", "rev-parse", "HEAD", cwd=target), repo["snapshot"]["original_head"])
+        with redirect_stdout(io.StringIO()):
+            result = recover_line_merge(config, alpha.id, op_id=op["op_id"])
+        self.assertEqual(result.outcomes["api"], "unknown")
+        with self.assertRaisesRegex(DyroError, "未完成操作"):
+            merge_line_from(config, alpha.id, beta.id)
+
+    def test_dry_run_recover_writes_nothing(self) -> None:
+        config, alpha, beta = self._sibling_lines()
+        actions = (
+            ("merge", alpha.id, lambda: merge_line_from(config, alpha.id, beta.id)),
+            ("merge-into-base", beta.id, lambda: merge_line_into_base(config, beta.id)),
+        )
+        for command, subject, action in actions:
+            with self.subTest(command=command):
+                with patch.object(workspace, "_probe_line_merge_plans", side_effect=SystemExit):
+                    with self.assertRaises(SystemExit):
+                        action()
+                op = line_ops.find_unfinished_op(config, subject)
+                before = {p: p.read_bytes() for p in (self.root / ".dyro").rglob("*") if p.is_file()}
+                for global_flag in (True, False):
+                    args = ["--root", str(self.root)]
+                    if global_flag:
+                        args.append("--dry-run")
+                    args += ["line", command, subject, "--recover", op["op_id"]]
+                    if not global_flag:
+                        args.append("--dry-run")
+                    with patch("dyro.cli.recover_line_merge", side_effect=AssertionError("recovery write")):
+                        with redirect_stdout(io.StringIO()):
+                            main(args)
+                    after = {p: p.read_bytes() for p in (self.root / ".dyro").rglob("*") if p.is_file()}
+                    self.assertEqual(after, before)
+
+    def test_terminal_recover_backfills_ledger_and_event_without_journal_changes(self) -> None:
+        config, alpha, beta = self._sibling_lines()
+        _commit_text(line_repository_path(config, beta, "api"), "new.txt", "new", "new")
+        with patch.object(workspace, "_append_merge_event_if_needed", side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                merge_line_from(config, alpha.id, beta.id)
+        op_path = next((self.root / ".dyro/ops").glob("*.json"))
+        before = op_path.read_bytes()
+        op = line_ops.load_op(config, op_path.stem)
+        self.assertEqual(op["phase"], "completed")
+        # Simulate a lost ledger tail as well as the M4 crash.
+        config.ledger_file.unlink()
+        for _ in range(2):
+            with redirect_stdout(io.StringIO()):
+                recover_line_merge(config, alpha.id, op_id=op["op_id"])
+            self.assertEqual(op_path.read_bytes(), before)
+        rows = [json.loads(line) for line in config.ledger_file.read_text().splitlines()]
+        self.assertEqual(len([row for row in rows if row.get("op_id") == op["op_id"]]), 2)
+        events = read_events_fail_closed(config)
+        self.assertEqual(len([e for e in events if e.get("facts", {}).get("op_id") == op["op_id"]]), 1)
+
+    def test_already_included_ledger_recheck_failure_keeps_op_open(self) -> None:
+        config, alpha, beta = self._sibling_lines()
+        ledger = workspace._ledger_successful_merge_repos
+
+        def fail_ledger_check(*args, **kwargs):
+            with patch.object(workspace, "_is_ancestor", return_value=False):
+                return ledger(*args, **kwargs)
+
+        with patch.object(workspace, "_ledger_successful_merge_repos", side_effect=fail_ledger_check):
+            with self.assertRaisesRegex(DyroError, "already_included 核验失败"):
+                merge_line_from(config, alpha.id, beta.id)
+        op = line_ops.find_unfinished_op(config, alpha.id)
+        self.assertIsNotNone(op)
+        self.assertEqual(op["repositories"]["api"]["outcome"], "unknown")
+        self.assertFalse(workspace._ledger_has_op_repo(config, op_id=op["op_id"], repository="api"))
+        with redirect_stdout(io.StringIO()):
+            recover_line_merge(config, alpha.id, op_id=op["op_id"])
+        self.assertEqual(line_ops.load_op(config, op["op_id"])["phase"], "completed")
+
+    def test_unfinished_merge_blocks_dry_run_and_sync_before_git_writes(self) -> None:
+        config = load(self.root)
+        publish_origin_branch(self.anchor, "feat/alpha")
+        parent = create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        child = workspace.spawn_line(config, parent.id, "child")
+        _commit_text(line_repository_path(config, child, "api"), "child.txt", "child", "child")
+        target = line_repository_path(config, parent, "api")
+        probe = workspace._probe_line_merge_plans
+
+        def leave_merge_head(plans):
+            probe(plans)
+            raise SystemExit("crash after probe")
+
+        with patch.object(workspace, "_probe_line_merge_plans", side_effect=leave_merge_head):
+            with self.assertRaises(SystemExit):
+                merge_line_from(config, parent.id, child.id)
+        self.assertTrue(workspace._has_merge_head(target))
+        with patch.object(workspace, "_probe_line_merge_plans", side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                merge_line_from(config, child.id, parent.id)
+        actions = [lambda: workspace.merge_line(config, child.id, parent.id, dry_run=True),
+                   lambda: merge_line_from(config, parent.id, child.id, dry_run=True)]
+        for dry_run in (False, True):
+            actions.append(lambda dry_run=dry_run: workspace.sync_line(config, child.id, dry_run=dry_run))
+        original_git = workspace.git
+
+        def no_git_write(repo, *args, **kwargs):
+            self.assertNotIn(args[0], {"merge", "commit", "reset", "push"})
+            return original_git(repo, *args, **kwargs)
+
+        with patch.object(workspace, "git", side_effect=no_git_write):
+            for action in actions:
+                with self.assertRaisesRegex(DyroError, "未完成操作"):
+                    action()
+        self.assertTrue(workspace._has_merge_head(target))
+
+    def test_recover_uses_frozen_per_repo_base_refs_and_rejects_conflicting_options(self) -> None:
+        config, _ = self._enable_web()
+        web = self.root / "repositories/web"
+        shell("git", "checkout", "-b", "release", cwd=self.anchor)
+        shell("git", "checkout", "-b", "stable", cwd=web)
+        line = create_line(config, line_id="ship", branch="feat/ship", base="release",
+                           repository_bases={"web": "stable"})
+        with patch.object(workspace, "_ledger_successful_merge_repos", side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                merge_line_into_base(config, line.id)
+        op = line_ops.find_unfinished_op(config, line.id)
+        before = line_ops.op_path(config, op["op_id"]).read_bytes()
+        for flags in (["--base-ref", "main"], ["--policy-default"], ["--repo", "api"]):
+            with self.subTest(flags=flags):
+                with redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit) as caught:
+                        main(["--root", str(self.root), "line", "merge-into-base", line.id,
+                              "--recover", op["op_id"], *flags])
+                self.assertEqual(caught.exception.code, 2)
+                self.assertEqual(line_ops.op_path(config, op["op_id"]).read_bytes(), before)
+        with redirect_stdout(io.StringIO()):
+            main(["--root", str(self.root), "line", "merge-into-base", line.id,
+                  "--recover", op["op_id"], "--repo", "web", "--repo", "api"])
+        rows = [json.loads(row) for row in config.ledger_file.read_text().splitlines()]
+        self.assertEqual({row["repository"]: row["branch"] for row in rows if row.get("op_id") == op["op_id"]},
+                         {"api": "release", "web": "stable"})
+
+    def test_into_uses_journaled_engine_and_report_only_recover(self) -> None:
+        config = load(self.root)
+        publish_origin_branch(self.anchor, "feat/alpha")
+        parent = create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        child = workspace.spawn_line(config, parent.id, "child")
+        _commit_text(line_repository_path(config, child, "api"), "child.txt", "child", "child")
+        probe = workspace._probe_line_merge_plans
+
+        def crash_after_probe(plans):
+            probe(plans)
+            raise SystemExit("power loss")
+
+        with patch.object(workspace, "_merge_line_repositories", side_effect=AssertionError("legacy engine")), \
+                patch.object(workspace, "_probe_line_merge_plans", side_effect=crash_after_probe):
+            with self.assertRaises(SystemExit):
+                workspace.merge_line(config, child.id, parent.id)
+        op = line_ops.find_unfinished_op(config, parent.id)
+        self.assertEqual(op["effective_options"]["integration"], "into")
+        with redirect_stdout(io.StringIO()):
+            result = recover_line_merge(config, parent.id, op_id=op["op_id"])
+        self.assertEqual(result.outcomes["api"], "unknown")
+        target = line_repository_path(config, parent, "api")
+        self.assertTrue(workspace._has_merge_head(target))
+        shell("git", "merge", "--abort", cwd=target)
+        with redirect_stdout(io.StringIO()):
+            recover_line_merge(config, parent.id, op_id=op["op_id"])
+        workspace.merge_line(config, child.id, parent.id)
+        events = read_events_fail_closed(config)
+        self.assertTrue(any(e["kind"] == "merge" and e["facts"].get("op_id") for e in events))
+
+    def test_merge_into_base_has_no_allow_partial_option_or_help(self) -> None:
+        from dyro.cli import build_parser
+
+        parser = build_parser()
+        with redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(SystemExit) as caught:
+                parser.parse_args(["line", "merge-into-base", "ship", "--help"])
+        self.assertEqual(caught.exception.code, 0)
+        self.assertNotIn("--allow-partial", output.getvalue())
+        self.assertNotIn("partial", output.getvalue())
+        with self.assertRaises(SystemExit) as caught:
+            parser.parse_args(["line", "merge-into-base", "ship", "--allow-partial"])
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_recover_cli_exits_nonzero_while_any_repo_is_unknown(self) -> None:
+        config, alpha, beta = self._sibling_lines()
+        for command, subject, action in (
+            ("merge", alpha.id, lambda: merge_line_from(config, alpha.id, beta.id)),
+            ("merge-into-base", beta.id, lambda: merge_line_into_base(config, beta.id)),
+        ):
+            with patch.object(workspace, "_probe_line_merge_plans", side_effect=SystemExit):
+                with self.assertRaises(SystemExit):
+                    action()
+            op = line_ops.find_unfinished_op(config, subject)
+            snapshot = op["repositories"]["api"]["snapshot"]
+            _commit_text(Path(snapshot["path"]), "drift.txt", "drift", "drift")
+            with redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as caught:
+                    main(["--root", str(self.root), "line", command, subject, "--recover", op["op_id"]])
+            self.assertEqual(caught.exception.code, 2)
+            self.assertEqual(line_ops.load_op(config, op["op_id"])["repositories"]["api"]["outcome"], "unknown")
+            self.assertIsNotNone(line_ops.find_unfinished_op(config, subject))

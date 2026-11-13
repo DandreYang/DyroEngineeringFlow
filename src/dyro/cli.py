@@ -3085,6 +3085,9 @@ def cmd_line_merge(args: argparse.Namespace) -> None:
     if getattr(args, "recover", None) is not None:
         if args.source or args.parent:
             raise DyroError("--recover 不能与 --into / --from 同时使用")
+        if args.dry_run:
+            print("DRY RUN: 跳过 merge --recover 对账写入")
+            return
         result = recover_line_merge(
             config,
             args.child,
@@ -3096,6 +3099,8 @@ def cmd_line_merge(args: argparse.Namespace) -> None:
             f"已对账 merge {result.op_id}："
             + ", ".join(f"{repo}={outcome}" for repo, outcome in result.outcomes.items())
         )
+        if "unknown" in result.outcomes.values():
+            raise DyroError("仍有 unknown 仓；操作保持打开并继续拦截")
         return
     if args.source:
         _require_yes(args, "跨线合并")
@@ -3149,17 +3154,24 @@ def cmd_line_merge(args: argparse.Namespace) -> None:
 def cmd_line_merge_into_base(args: argparse.Namespace) -> None:
     config = _config(args)
     if getattr(args, "recover", None) is not None:
+        if args.dry_run:
+            print("DRY RUN: 跳过 merge-into-base --recover 对账写入")
+            return
         result = recover_line_merge(
             config,
             args.line,
             op_id=args.recover or None,
-            allow_partial=True if args.allow_partial else None,
+            base_ref=args.base_ref,
+            policy_default=True if args.policy_default else None,
+            repositories=args.repo,
             kinds=("merge_into_base",),
         )
         print(
             f"已对账 merge-into-base {result.op_id}："
             + ", ".join(f"{repo}={outcome}" for repo, outcome in result.outcomes.items())
         )
+        if "unknown" in result.outcomes.values():
+            raise DyroError("仍有 unknown 仓；操作保持打开并继续拦截")
         return
     _require_yes(args, "合入基线")
     repos = tuple(args.repo) if args.repo else None
@@ -3169,7 +3181,6 @@ def cmd_line_merge_into_base(args: argparse.Namespace) -> None:
         base_ref=args.base_ref,
         policy_default=args.policy_default,
         repositories=repos,
-        allow_partial=args.allow_partial,
         push=args.push,
         dry_run=args.dry_run,
     )
@@ -5409,11 +5420,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="只合入指定仓库；可重复",
     )
     line_merge_into_base.add_argument(
-        "--allow-partial",
-        action="store_true",
-        help="与 merge --from 相同的 partial 退出码语义",
-    )
-    line_merge_into_base.add_argument(
         "--recover",
         nargs="?",
         const="",
@@ -5435,7 +5441,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     line_merge_into_base.add_argument("--yes", action="store_true")
     line_merge_into_base.set_defaults(
-        func=cmd_line_merge_into_base, allow_partial=False, policy_default=False
+        func=cmd_line_merge_into_base, policy_default=False
     )
     line_sync = line_sub.add_parser(
         "sync", help="将父线提交 --no-ff 合并进子线；无线父线则拒绝"

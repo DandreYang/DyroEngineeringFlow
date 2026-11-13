@@ -256,9 +256,13 @@ def _delete_branch(config: Config, op: dict, line: Line, repo_id: str, snapshot:
         outcome = "skipped_unowned"
     else:
         if not op["effective_options"]["force"]:
-            included = git_read(anchor, "merge-base", "--is-ancestor", sha, snapshot["integration_sha"])
-            if included.code != 0:
-                raise DyroError(f"R3 冻结集成目标不包含保全 SHA：{repo_id}")
+            try:
+                included = git_read(anchor, "merge-base", "--is-ancestor", sha, snapshot["integration_sha"]).code == 0
+            except (DyroError, OSError):
+                included = False
+            if not included:
+                _result(config, op, repo_id, "r3", "skipped_not_included", sha)
+                return
         require_ok(git(anchor, "update-ref", "-d", ref, sha), "删除本线独占分支")
         outcome = "ok"
     _result(config, op, repo_id, "r3", outcome, sha)

@@ -12,7 +12,7 @@ from dyro import events, families, line_ops, line_retire, tasks, workspace
 from dyro.cli import build_parser, cmd_line_inbox, cmd_line_retire
 from dyro.config import load
 from dyro.errors import DyroError
-from dyro.process import git, require_ok
+from dyro.process import Result, git, require_ok
 from dyro.read_limits import ObservationLimits, ReadBudget
 from dyro.state import exclusive_lock
 
@@ -464,6 +464,42 @@ class LineRetireTests(WorkspaceCase):
         self.assertIn("DRY RUN", out.getvalue())
         self.assertIn("保留分支", out.getvalue())
         self.assertIn("集成目标 main", out.getvalue())
+
+
+    def test_r3_failed_ancestor_check_skips_delete_and_recovery_can_finish(self) -> None:
+        # R2 has removed the worktree, while the frozen force option is false.
+        checkpoint = self._crash("r2")
+        original = line_retire.git_read
+        mutate = line_retire.git
+        for failure in (1, 128, "timeout"):
+            with self.subTest(failure=failure):
+                line_ops.op_path(self.config, checkpoint["op_id"]).write_text(json.dumps(checkpoint))
+
+                def failed_check(repo, *args, **kwargs):
+                    if args[:2] == ("merge-base", "--is-ancestor"):
+                        if failure == "timeout":
+                            raise DyroError("ancestor check timed out")
+                        return Result(("git", *args), failure, "ancestor check failed")
+                    return original(repo, *args, **kwargs)
+
+                def no_delete(repo, *args, **kwargs):
+                    self.assertNotEqual(args[:2], ("update-ref", "-d"))
+                    return mutate(repo, *args, **kwargs)
+
+                with patch.object(line_retire, "git_read", side_effect=failed_check):
+                    with patch.object(line_retire, "git", side_effect=no_delete):
+                        if failure != "timeout":
+                            with patch.object(line_retire, "_archive", side_effect=SystemExit):
+                                with self.assertRaises(SystemExit):
+                                    self._recover()
+                            op = self._open()
+                        else:
+                            op = self._recover()
+                self.assertFalse(op["effective_options"]["force"])
+                self.assertEqual(op["repositories"]["api"]["steps"]["r3"]["result"]["outcome"], "skipped_not_included")
+                self.assertEqual(self._head(self.anchor, "feat/alpha"), self.sha)
+        self.assertEqual(op["phase"], "completed")
+        self.assertTrue(line_retire.retired_path(self.config, "alpha").exists())
 
 
 if __name__ == "__main__":
