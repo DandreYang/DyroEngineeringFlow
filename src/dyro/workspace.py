@@ -945,9 +945,15 @@ def _require_push_allowed(config: Config, *, push: bool) -> None:
 
 
 def _require_line_worktrees(
-    config: Config, line: Line, *, clean: bool, label: str
+    config: Config,
+    line: Line,
+    *,
+    clean: bool,
+    label: str,
+    repositories: Iterable[str] | None = None,
 ) -> None:
-    for repo_id in line.repositories:
+    selected = line.repositories if repositories is None else tuple(repositories)
+    for repo_id in selected:
         target = line_repository_path(config, line, repo_id)
         inside = git(target, "rev-parse", "--is-inside-work-tree")
         if inside.code != 0 or inside.stdout.strip() != "true":
@@ -1255,14 +1261,97 @@ def _merge_line_repositories_locked(
         )
 
 
-def record_remote_anchor(config: Config, line: Line, repo_id: str, path: Path) -> Line:
+def record_remote_anchor(
+    config: Config, line: Line, repo_id: str, path: Path, *, sha: str | None = None
+) -> Line:
     if line.storage_for(repo_id) != "linked-worktree":
         return line
-    head = require_ok(git_read(path, "rev-parse", "HEAD"), "读取已推送 HEAD").stdout.strip()
+    head = sha or require_ok(git_read(path, "rev-parse", "HEAD"), "读取已推送 HEAD").stdout.strip()
     updated = replace(line, remote_anchors={**line.remote_anchors, repo_id: head})
     _write_line(config, updated)
     return updated
 
+
+def push_line(
+    config: Config, line_id: str, *, dry_run: bool = False
+) -> tuple[Line, list[str], list[str]]:
+    """Push one line branch to origin and record linked-worktree anchors.
+
+    Holds L1 then L2 like ``line merge --push``. Every linked worktree is
+    preflighted before any push. Repositories are not atomic: a later failure
+    keeps anchors already recorded. Anchor-reference repositories are skipped.
+    Only committed history is pushed.
+    """
+    _require_push_allowed(config, push=True)
+    with exclusive_lock(
+        merge_lock_path(config, line_id),
+        timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS,
+    ):
+        line = get_line(config, line_id)
+        require_no_unfinished_op(config, line.id)
+        linked = [r for r in line.repositories if line.storage_for(r) == "linked-worktree"]
+        skipped = [r for r in line.repositories if r not in linked]
+        if not linked:
+            raise DyroError(f"开发线 {line.id} 没有可推送的 linked-worktree 仓库")
+        with anchor_locks(config, linked):
+            _require_line_worktrees(
+                config, line, clean=False, label="开发线", repositories=linked
+            )
+            for repo_id in linked:
+                path = line_repository_path(config, line, repo_id)
+                if _git_in_progress(path):
+                    raise DyroError(f"{repo_id} 有进行中的 Git 操作，拒绝推送")
+                require_ok(
+                    git(path, "push", "--dry-run", "origin", f"refs/heads/{line.branch}:refs/heads/{line.branch}"),
+                    f"预检推送 {repo_id}",
+                )
+            if dry_run:
+                return line, [], skipped
+            pushed: list[str] = []
+            for repo_id in linked:
+                path = line_repository_path(config, line, repo_id)
+                branch_ref = f"refs/heads/{line.branch}"
+                tip = require_ok(
+                    git_read(path, "rev-parse", "--verify", branch_ref), f"读取 {repo_id} 分支"
+                ).stdout.strip()
+                # Explicit same-name refspec: push.default=upstream must not redirect
+                # the destination. Never --force, --force-with-lease, or a "+" refspec.
+                result = git(path, "push", "-u", "origin", f"{branch_ref}:{branch_ref}")
+                if result.code != 0:
+                    _line_ledger(
+                        config,
+                        line.id,
+                        "line_push_failed",
+                        repository=repo_id,
+                        branch=line.branch,
+                        pushed_repositories=pushed,
+                        error=result.stdout.strip(),
+                    )
+                    raise DyroError(
+                        f"推送 {repo_id} 失败；已推送仓库：{', '.join(pushed) or '-'}"
+                        f"\n{result.stdout.strip()}"
+                    )
+                pushed.append(repo_id)
+                try:
+                    # Anchor the branch tip Git pushed, not HEAD (the worktree may
+                    # have moved) and not the tracking ref (a narrow fetch refspec
+                    # leaves it stale). A tip that moved during push is ambiguous.
+                    after = require_ok(
+                        git_read(path, "rev-parse", "--verify", branch_ref), f"读取 {repo_id} 分支"
+                    ).stdout.strip()
+                    if after != tip:
+                        raise DyroError(f"推送期间 {line.branch} 从 {tip[:12]} 移动到 {after[:12]}")
+                    line = record_remote_anchor(config, line, repo_id, path, sha=tip)
+                    _line_ledger(
+                        config, line.id, "line_push",
+                        repository=repo_id, branch=line.branch, head=tip,
+                    )
+                except Exception as exc:
+                    raise DyroError(
+                        f"推送 {repo_id} 已发生，但远端锚点或 ledger 未记录完整：{exc}；"
+                        f"已推送仓库：{', '.join(pushed)}"
+                    ) from exc
+            return line, pushed, skipped
 
 def merge_line(
     config: Config,

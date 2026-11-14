@@ -262,6 +262,7 @@ from .workspace import (
     merge_line,
     merge_line_from,
     merge_line_into_base,
+    push_line,
     observation_timeout_row,
     recover_line_merge,
     spawn_line,
@@ -3142,6 +3143,25 @@ def cmd_line_add_repo(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_line_push(args: argparse.Namespace) -> None:
+    config = _config(args)
+    _require_yes(args, "推送开发线分支")
+    line, pushed, skipped = push_line(config, args.line, dry_run=args.dry_run)
+    if args.dry_run:
+        linked = ", ".join(
+            repo_id
+            for repo_id in line.repositories
+            if line.storage_for(repo_id) == "linked-worktree"
+        )
+        print(f"DRY RUN: 将推送 {line.kind} {line.id} 分支 {line.branch}：{linked}")
+    else:
+        for repo_id in pushed:
+            sha = line.remote_anchors[repo_id][:12]
+            print(f"已推送 {line.kind} {line.id} 仓库 {repo_id}：{sha}（{line.branch}）")
+    if skipped:
+        print(f"跳过 anchor-reference 仓库：{', '.join(skipped)}")
+
+
 def cmd_line_merge(args: argparse.Namespace) -> None:
     config = _config(args)
     if getattr(args, "recover", None) is not None:
@@ -5438,6 +5458,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     line_add_repo.add_argument("--yes", action="store_true")
     line_add_repo.set_defaults(func=cmd_line_add_repo)
+    line_push = line_sub.add_parser(
+        "push",
+        help="把开发线分支推到 origin 并设置上游（只推已提交内容；需 policy.allow_push）",
+    )
+    line_push.add_argument("line", help="开发线 ID")
+    line_push.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只预检推送，不推送、不改清单（兼容全局 --dry-run）",
+    )
+    line_push.add_argument("--yes", action="store_true")
+    line_push.set_defaults(func=cmd_line_push)
     line_merge = line_sub.add_parser(
         "merge",
         help="子线合入父线（--into）、跨线合入（--from）或 --recover 对账",

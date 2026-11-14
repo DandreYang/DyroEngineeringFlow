@@ -20,7 +20,7 @@ CHANGESETS_DIR = ".dyro/changes"
 OBJECTIVES_DIR = ".dyro/objectives"
 
 SAFE_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$")
-PUSH_DISABLED_NOTE = 'Dyro 默认不执行 push。只有命令显式带 `--push` 且 `policy.allow_push = true` 时，Dyro 才会在本地合并成功之后逐仓执行 `git push origin <分支>`；多仓 push 不是原子操作。\n开发线的期望上游是 `origin/<line.branch>`。本地还没有这条远端分支时，doctor 给出 WARN，工作区仍可打开；这不表示可以推送。\n普通 `git push` 仍然能改远端，但不会写入 Dyro 的远端锚点，也不算通过门禁。'
+PUSH_DISABLED_NOTE = 'Dyro 默认不执行 push。只有 `policy.allow_push = true` 时才推送：`dyro line push` 推开发线分支；显式带 `--push` 的命令在本地合并成功后逐仓执行 `git push origin <分支>`。多仓 push 不是原子操作。\n开发线的期望上游是 `origin/<line.branch>`。本地还没有这条远端分支时，doctor 给出 WARN，工作区仍可打开；这不表示可以推送。\n普通 `git push` 仍然能改远端，但不会写入 Dyro 的远端锚点，也不算通过门禁。'
 
 
 @dataclass(frozen=True)

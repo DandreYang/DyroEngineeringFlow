@@ -3,6 +3,7 @@
 ## Unreleased
 
 - 新增 `dyro line add-repo`：把一个已经登记的仓库加入现有开发线。已有子线保持不变；子线只能加入父线里已经有的仓库。
+- 新增 `dyro line push`：把开发线分支推到 origin 并设置上游。只推已提交内容，需 `policy.allow_push`；`anchor-reference` 仓库会跳过。推送说明（`next` 的 `push_note`、工作区和开发线说明、控制面技能）同步提到这条命令；已 seed 的工作区 doctor 会报模板不一致，运行一次 `dyro host seed --force` 即可。
 - 修复 `dyro line create` / `dyro line spawn` 中途失败回滚时留下本次新建分支的问题：之前用另一个基线重试会静默复用旧分支；现在回滚会删除本次新建的分支，原本就有的分支保持不动。
 
 ## 0.7.18 - 2026-11-14

@@ -1,5 +1,6 @@
 """First-wave line observations and push contract regression coverage."""
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 from dyro.config import load, Policy, push_policy_fields, PUSH_DISABLED_NOTE
@@ -27,6 +28,8 @@ class LineNextContractTests(WorkspaceCase):
             self.assertEqual(fields['push_contract_version'], 1)
         for body in (render_workspace_overlay(), render_line_persona(line_id='core', branch='feat/core')):
             self.assertIn(PUSH_DISABLED_NOTE, body)
+        skill = Path(__file__).resolve().parents[1] / 'src/dyro/integrations/assets/dyro-control-plane/SKILL.md'
+        self.assertIn(PUSH_DISABLED_NOTE, skill.read_text(encoding='utf-8'))
 
     def test_manifest_anchors_roundtrip_and_old_schema_rejection(self):
         for parent in ('', 'parent'):
