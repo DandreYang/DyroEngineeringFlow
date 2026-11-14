@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.7.19 - 2026-11-15
+
+对使用者的影响：修复 `line merge` / `line sync` / `task merge` 的 `--push` 在 `push.default=upstream` 且分支上游指向别的远端分支时，会把合并结果推到那个分支（例如 `main`）的问题；新增 `dyro line add-repo`、`dyro line push` 与 `line merge --abort`。推送说明有改动，已 seed 的工作区升级后运行一次 `dyro host seed --force`。
 
 - 新增 `dyro line merge --abort` 与 `dyro line merge-into-base --abort`：放弃未完成的合并操作，清理遗留 `MERGE_HEAD`，并在未推送时用 `reset --keep` 撤回本地合并提交。`--recover` 仍只对账、不改 Git；遇到未确认的回滚意图时，不再把该仓记成合并成功。
 - 新增 `dyro line add-repo`：把一个已经登记的仓库加入现有开发线。已有子线保持不变；子线只能加入父线里已经有的仓库。
