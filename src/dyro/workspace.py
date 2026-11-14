@@ -434,8 +434,17 @@ def _linked_worktree_command(
     )
 
 
-def _remove_line_worktree(config: Config, line: Line, repo_id: str, destination: Path) -> str | None:
-    """Best-effort cleanup for one worktree or anchor-reference created during line setup."""
+def _remove_line_worktree(
+    config: Config, line: Line, repo_id: str, destination: Path, *, new_branch: bool = False
+) -> str | None:
+    """Best-effort cleanup for one worktree or anchor-reference created during line setup.
+
+    ``new_branch`` means this setup created ``line.branch`` with ``-b``; delete it too,
+    otherwise a retry with another base would silently reuse the leftover branch.
+    The delete is attempted even after a path-cleanup failure; Git refuses it while
+    the branch is still checked out, and both failures are reported.
+    """
+    failure: str | None = None
     try:
         if line.storage_for(repo_id) == "anchor-reference" or destination.is_symlink():
             if destination.is_symlink() or destination.exists():
@@ -452,18 +461,29 @@ def _remove_line_worktree(config: Config, line: Line, repo_id: str, destination:
                     shutil.rmtree(destination)
                     prune = git(anchor, "worktree", "prune", timeout=60)
                     if prune.code != 0:
-                        return f"{repo_id}: worktree remove failed: {result.stdout.strip() or 'unknown error'}"
-            return None
+                        failure = f"{repo_id}: worktree remove failed: {result.stdout.strip() or 'unknown error'}"
     except OSError as exc:
-        return f"{repo_id}: {exc}"
-    return None
+        failure = f"{repo_id}: {exc}"
+    if new_branch:
+        deleted = git(repository_path(config, repo_id), "branch", "-D", line.branch, timeout=60)
+        if deleted.code != 0:
+            note = (
+                f"{repo_id}: 删除本次新建分支 {line.branch} 失败："
+                f"{deleted.stdout.strip() or 'unknown error'}"
+            )
+            failure = f"{failure}; {note}" if failure else note
+    return failure
 
 
-def _rollback_line_creations(config: Config, line: Line, created: list[str]) -> list[str]:
+def _rollback_line_creations(
+    config: Config, line: Line, created: list[tuple[str, bool]]
+) -> list[str]:
     failures: list[str] = []
-    for repo_id in reversed(created):
+    for repo_id, new_branch in reversed(created):
         destination = line_repository_path(config, line, repo_id)
-        failure = _remove_line_worktree(config, line, repo_id, destination)
+        failure = _remove_line_worktree(
+            config, line, repo_id, destination, new_branch=new_branch
+        )
         if failure:
             failures.append(failure)
     target_root = line_root(config, line)
@@ -478,6 +498,20 @@ def _rollback_line_creations(config: Config, line: Line, created: list[str]) -> 
         except OSError:
             pass
     return failures
+
+
+def _remove_empty_parents(destination: Path, stop: Path) -> str | None:
+    """Remove empty ancestors of destination, stopping before stop itself."""
+    current = destination.parent
+    try:
+        while current != stop and stop in current.parents:
+            if not current.is_dir() or any(current.iterdir()):
+                return None
+            current.rmdir()
+            current = current.parent
+    except OSError as exc:
+        return str(exc)
+    return None
 
 
 def _build_line(
@@ -527,6 +561,37 @@ def _build_line(
     )
 
 
+def _plan_repository_creation(
+    config: Config, line: Line, repo_id: str
+) -> tuple[str, Path, tuple[str, ...]]:
+    """Validate one repository and return its worktree destination and Git command."""
+    anchor = repository_path(config, repo_id)
+    destination = line_repository_path(config, line, repo_id)
+    if not _is_git_repo(anchor):
+        raise DyroError(f"仓库 anchor 不存在或不是 Git 仓库：{anchor}")
+    _ensure_clean(anchor)
+    repo_base = line.base_for(repo_id)
+    require_ok(
+        git_read(anchor, "rev-parse", "--verify", f"{repo_base}^{{commit}}"),
+        f"校验 {repo_id} 基线 {repo_base}",
+    )
+    if destination.exists() or destination.is_symlink():
+        raise DyroError(f"worktree 目标已存在：{destination}")
+    if line.storage_for(repo_id) == "anchor-reference":
+        anchor_branch = require_ok(
+            git_read(anchor, "branch", "--show-current"),
+            f"读取 {repo_id} anchor 分支",
+        ).stdout.strip()
+        if anchor_branch != line.branch:
+            raise DyroError(
+                f"{repo_id} 的 anchor-reference 要求 anchor 正位于 {line.branch}，"
+                f"当前为 {anchor_branch or 'DETACHED'}"
+            )
+        return (repo_id, destination, ())
+    command = _linked_worktree_command(anchor, repo_id, line, repo_base, destination)
+    return (repo_id, destination, command)
+
+
 def _plan_line_creation(
     config: Config, line: Line
 ) -> list[tuple[str, Path, tuple[str, ...]]]:
@@ -536,37 +601,9 @@ def _plan_line_creation(
         raise DyroError(f"目标工作区已存在且非空：{target_root}")
 
     # Validate every repository before mutating any worktree so partial creates are rare.
-    planned: list[tuple[str, Path, tuple[str, ...]]] = []
-    for repo_id in line.repositories:
-        anchor = repository_path(config, repo_id)
-        destination = line_repository_path(config, line, repo_id)
-        if not _is_git_repo(anchor):
-            raise DyroError(f"仓库 anchor 不存在或不是 Git 仓库：{anchor}")
-        _ensure_clean(anchor)
-        repo_base = line.base_for(repo_id)
-        require_ok(
-            git_read(anchor, "rev-parse", "--verify", f"{repo_base}^{{commit}}"),
-            f"校验 {repo_id} 基线 {repo_base}",
-        )
-        if destination.exists() or destination.is_symlink():
-            raise DyroError(f"worktree 目标已存在：{destination}")
-        if line.storage_for(repo_id) == "anchor-reference":
-            anchor_branch = require_ok(
-                git_read(anchor, "branch", "--show-current"),
-                f"读取 {repo_id} anchor 分支",
-            ).stdout.strip()
-            if anchor_branch != line.branch:
-                raise DyroError(
-                    f"{repo_id} 的 anchor-reference 要求 anchor 正位于 {line.branch}，"
-                    f"当前为 {anchor_branch or 'DETACHED'}"
-                )
-            planned.append((repo_id, destination, ()))
-            continue
-        command = _linked_worktree_command(
-            anchor, repo_id, line, repo_base, destination
-        )
-        planned.append((repo_id, destination, command))
-    return planned
+    return [
+        _plan_repository_creation(config, line, repo_id) for repo_id in line.repositories
+    ]
 
 
 def preflight_line(
@@ -632,27 +669,42 @@ def create_line(
             return _create_line_worktrees(config, line, dry_run=dry_run)
 
 
+def _create_repository_worktree(
+    config: Config,
+    line: Line,
+    repo_id: str,
+    destination: Path,
+    command: tuple[str, ...],
+    *,
+    dry_run: bool,
+) -> bool:
+    """Create one worktree. Return whether a path was actually created."""
+    if line.storage_for(repo_id) == "anchor-reference":
+        if dry_run:
+            return False
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.symlink_to(repository_path(config, repo_id), target_is_directory=True)
+        return True
+    if not dry_run:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    require_ok(
+        git(repository_path(config, repo_id), *command, dry_run=dry_run, timeout=300),
+        f"创建 {repo_id} worktree",
+    )
+    return not dry_run
+
+
 def _create_line_worktrees(config: Config, line: Line, *, dry_run: bool) -> Line:
     """Create and roll back only while the caller holds L0 and every L2."""
     planned = _plan_line_creation(config, line)
 
-    created: list[str] = []
+    created: list[tuple[str, bool]] = []
     try:
         for repo_id, destination, command in planned:
-            if line.storage_for(repo_id) == "anchor-reference":
-                if not dry_run:
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    destination.symlink_to(repository_path(config, repo_id), target_is_directory=True)
-                    created.append(repo_id)
-                continue
-            if not dry_run:
-                destination.parent.mkdir(parents=True, exist_ok=True)
-            require_ok(
-                git(repository_path(config, repo_id), *command, dry_run=dry_run, timeout=300),
-                f"创建 {repo_id} worktree",
-            )
-            if not dry_run:
-                created.append(repo_id)
+            if _create_repository_worktree(
+                config, line, repo_id, destination, command, dry_run=dry_run
+            ):
+                created.append((repo_id, "-b" in command))
         _write_line(config, line, dry_run=dry_run)
     except Exception as exc:
         if created:
@@ -772,6 +824,103 @@ def spawn_line(
             facts={"parent": parent.id, "child": line.id},
         )
     return line
+
+
+def add_line_repository(
+    config: Config,
+    line_id: str,
+    repo_id: str,
+    *,
+    base: str | None = None,
+    storage: str | None = None,
+    dry_run: bool = False,
+) -> Line:
+    """Add one already-registered repository to one existing line.
+
+    Child lines of this line are not modified. The worktree is created before
+    the manifest rewrite; a later failure removes only that new destination.
+    """
+    with line_identity_lock(config):
+        with exclusive_lock(
+            merge_lock_path(config, line_id),
+            timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS,
+        ):
+            line = get_line(config, line_id)
+            require_no_unfinished_op(config, line.id)
+            if repo_id not in config.repositories:
+                raise ValidationError(f"未配置的仓库：{repo_id}")
+            if repo_id in line.repositories:
+                raise DyroError(f"仓库 {repo_id} 已包含在开发线 {line.id} 中")
+            if line.parent:
+                parent = get_line(config, line.parent)
+                if repo_id not in parent.repositories:
+                    raise ValidationError(
+                        f"子线仓库必须是父线 {parent.id} 仓库的子集：{repo_id}；"
+                        f"请先把该仓库加入父线 {parent.id}"
+                    )
+                if base is not None or storage is not None:
+                    raise ValidationError(
+                        f"子线 {line.id} 的仓库基线与存储方式必须从父线 {parent.id} 派生，"
+                        "不能指定 --base 或 --storage"
+                    )
+                resolved_base = _spawn_base_for(config, parent, repo_id)
+                resolved_storage = parent.storage_for(repo_id)
+            else:
+                resolved_base = (base or line.base).strip()
+                if not resolved_base:
+                    raise ValidationError(f"{repo_id} 的基线不能为空")
+                resolved_storage = storage or "linked-worktree"
+                if resolved_storage not in STORAGE_MODES:
+                    raise ValidationError(
+                        f"{repo_id} 的存储方式必须是：{', '.join(sorted(STORAGE_MODES))}"
+                    )
+            updated = replace(
+                line,
+                repositories=line.repositories + (repo_id,),
+                repository_bases=(
+                    {**line.repository_bases, repo_id: resolved_base}
+                    if resolved_base != line.base
+                    else dict(line.repository_bases)
+                ),
+                storage_modes=(
+                    {**line.storage_modes, repo_id: resolved_storage}
+                    if resolved_storage != "linked-worktree"
+                    else dict(line.storage_modes)
+                ),
+            )
+            with anchor_locks(config, [repo_id]):
+                _repo_id, destination, command = _plan_repository_creation(
+                    config, updated, repo_id
+                )
+                created = False
+                try:
+                    created = _create_repository_worktree(
+                        config,
+                        updated,
+                        repo_id,
+                        destination,
+                        command,
+                        dry_run=dry_run,
+                    )
+                    _write_line(config, updated, dry_run=dry_run)
+                except Exception as exc:
+                    if created:
+                        failures: list[str] = []
+                        failure = _remove_line_worktree(
+                            config, updated, repo_id, destination, new_branch="-b" in command
+                        )
+                        if failure:
+                            failures.append(failure)
+                        parent_failure = _remove_empty_parents(
+                            destination, line_root(config, line)
+                        )
+                        if parent_failure:
+                            failures.append(parent_failure)
+                        if failures:
+                            detail = "; ".join(failures)
+                            raise DyroError(f"{exc}\n自动清理未完全成功：{detail}") from exc
+                    raise
+            return updated
 
 
 @dataclass(frozen=True)

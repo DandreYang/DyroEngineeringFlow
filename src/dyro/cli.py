@@ -250,6 +250,7 @@ from .updates import (
 )
 from .workspace import (
     OBSERVATION_DEADLINE_FINDING,
+    add_line_repository,
     blocking_line_doctor_failures,
     create_line,
     doctor,
@@ -3124,6 +3125,23 @@ def cmd_line_spawn(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_line_add_repo(args: argparse.Namespace) -> None:
+    config = _config(args)
+    _require_yes(args, "向开发线加入仓库")
+    line = add_line_repository(
+        config,
+        args.line,
+        args.repo,
+        base=args.base,
+        storage=args.storage,
+        dry_run=args.dry_run,
+    )
+    print(
+        f"{'DRY RUN: ' if args.dry_run else ''}已为 {line.kind} {line.id} 加入仓库 {args.repo}，"
+        f"分支 {line.branch}，基线 {line.base_for(args.repo)}，存储 {line.storage_for(args.repo)}"
+    )
+
+
 def cmd_line_merge(args: argparse.Namespace) -> None:
     config = _config(args)
     if getattr(args, "recover", None) is not None:
@@ -5401,6 +5419,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     line_spawn.add_argument("--yes", action="store_true")
     line_spawn.set_defaults(func=cmd_line_spawn)
+    line_add_repo = line_sub.add_parser(
+        "add-repo", help="把一个已登记仓库加入现有开发线（不改子线）"
+    )
+    line_add_repo.add_argument("line", help="开发线 ID")
+    line_add_repo.add_argument("repo", help="已登记的仓库 ID")
+    line_add_repo.add_argument("--base", help="该仓库的基线；顶层线默认用线的 base")
+    line_add_repo.add_argument(
+        "--storage",
+        help="存储方式：linked-worktree 或 anchor-reference；默认 linked-worktree",
+    )
+    line_add_repo.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="只打印计划，不创建工作树或改清单（兼容全局 --dry-run）",
+    )
+    line_add_repo.add_argument("--yes", action="store_true")
+    line_add_repo.set_defaults(func=cmd_line_add_repo)
     line_merge = line_sub.add_parser(
         "merge",
         help="子线合入父线（--into）、跨线合入（--from）或 --recover 对账",
