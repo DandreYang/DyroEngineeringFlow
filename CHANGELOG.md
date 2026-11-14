@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `dyro dispatch backends` 在 Grok CLI 只配置了 API key、`grok models` 未打印会话登录句时，也会识别为已认证；CLI 明确表示未登录时仍视为未认证。
 - 修复 macOS 上 `/tmp` 与 `/private/tmp`（以及 `/var` 与 `/private/var`）路径写法不一致时，技能清单被误判过期、进程内状态锁重入死锁，以及蓝图加入与全局主目录路径对不齐的问题；旧版清单中的原写法仍可识别。
 
 ## 0.7.17 - 2026-11-14
