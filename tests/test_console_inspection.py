@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import queue
+import signal
 import subprocess
+import sys
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -20,8 +22,27 @@ from dyro.console.overview import (
     WORKSPACE_TIMEOUT,
 )
 from dyro.hub import WorkspaceRecord, WorkspaceRegistry, add_workspace
+from experiments.local_agent_dispatch.process_identity import (
+    process_group_has_live_members,
+)
 
 from .support import WorkspaceCase
+
+
+def _read_hung_descendant(marker: Path) -> tuple[int, int] | None:
+    """Return ``(pid, pgid)`` only after an atomic publish is complete."""
+    try:
+        text = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    parts = text.split()
+    if len(parts) != 2 or not all(part.isdecimal() for part in parts):
+        return None
+    child_pid = int(parts[0])
+    group_id = int(parts[1])
+    if child_pid <= 1 or group_id <= 1:
+        return None
+    return child_pid, group_id
 
 
 class IsolatedOverviewServiceTests(WorkspaceCase):
@@ -403,19 +424,26 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
             self.skipTest("inspect process-group kill is POSIX-only")
         marker = self.root / "hung-inspect-descendant.pid"
         wrapper = self.root / "hang-inspect-python"
+        # Direct interpreter. Publish the grandchild pid and this process's
+        # real group (getpgrp) before the hang. The pid matches that group
+        # only while production calls start_new_session; the service clock
+        # starts at spawn, so it only has to outlast publication.
         wrapper.write_text(
             "\n".join(
                 (
-                    "#!/usr/bin/env python3",
+                    f"#!{sys.executable}",
+                    "import os",
                     "import subprocess",
-                    "import sys",
                     "import time",
                     "from pathlib import Path",
                     f"marker = Path({str(marker)!r})",
-                    "child = subprocess.Popen(",
-                    "    [sys.executable, '-c', 'import time; time.sleep(60)']",
+                    "child = subprocess.Popen(['/bin/sleep', '60'])",
+                    "temporary = marker.with_name(marker.name + '.tmp')",
+                    "temporary.write_text(",
+                    "    f'{child.pid} {os.getpgrp()}',",
+                    "    encoding='utf-8',",
                     ")",
-                    "marker.write_text(str(child.pid), encoding='utf-8')",
+                    "os.replace(temporary, marker)",
                     "time.sleep(60)",
                     "",
                 )
@@ -425,29 +453,50 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         wrapper.chmod(0o755)
         service = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=0.6,
+            timeout_seconds=2.5,
             cursor_secret=b"q" * 32,
             python_executable=str(wrapper),
         )
 
-        with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_TIMEOUT"):
-            service.inspect_proofs("demo")
+        child_pid = 0
+        group_id = 0
+        try:
+            with self.assertRaisesRegex(ConsoleOverviewError, "OVERVIEW_TIMEOUT"):
+                service.inspect_proofs("demo")
 
-        deadline = time.monotonic() + 2.0
-        pid = 0
-        while time.monotonic() < deadline:
-            if marker.exists():
-                pid = int(marker.read_text(encoding="utf-8"))
-                break
-            time.sleep(0.05)
-        self.assertGreater(pid, 1, "hung inspect descendant did not start")
-        while time.monotonic() < deadline:
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                return
-            time.sleep(0.05)
-        self.fail("hung inspect descendant survived process-group kill")
+            # killpg already ran before OVERVIEW_TIMEOUT. The marker is on
+            # disk now, or the wrapper died before os.replace and it never
+            # will be. One short reread covers local filesystem visibility.
+            published = _read_hung_descendant(marker)
+            if published is None:
+                time.sleep(0.05)
+                published = _read_hung_descendant(marker)
+            self.assertIsNotNone(published, "hung inspect descendant did not start")
+            assert published is not None
+            child_pid, group_id = published
+            self.assertGreater(child_pid, 1, "hung inspect descendant did not start")
+
+            gone_deadline = time.monotonic() + 2.0
+            while time.monotonic() < gone_deadline:
+                group_live = process_group_has_live_members(group_id)
+                if group_live is None:
+                    self.fail(
+                        "process table unavailable; hung inspect group liveness is unknown"
+                    )
+                if group_live is False:
+                    return
+                time.sleep(0.05)
+            self.fail("hung inspect descendant survived process-group kill")
+        finally:
+            if (
+                group_id > 1
+                and group_id not in {os.getpid(), os.getpgrp()}
+                and process_group_has_live_members(group_id) is True
+            ):
+                try:
+                    os.killpg(group_id, signal.SIGKILL)
+                except OSError:
+                    pass
 
     def test_invalid_worker_output_fails_closed_without_echoing_it(self) -> None:
         service = IsolatedOverviewService(registry_state_home=Path("/tmp"))
