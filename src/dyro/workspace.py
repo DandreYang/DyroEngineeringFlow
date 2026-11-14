@@ -1022,7 +1022,7 @@ def _prepare_line_merge_plans(
                     "push",
                     "--dry-run",
                     "origin",
-                    target.branch,
+                    f"refs/heads/{target.branch}:refs/heads/{target.branch}",
                 ),
                 f"预检推送 {plan.repository}",
             )
@@ -1220,7 +1220,8 @@ def _merge_line_repositories_locked(
     pushed: list[str] = []
     if push:
         for plan in plans:
-            result = git(plan.target, "push", "origin", target.branch)
+            tip = _branch_tip(plan.target, target.branch)
+            result = git(plan.target, "push", "origin", f"{tip}:refs/heads/{target.branch}")
             if result.code != 0:
                 _line_ledger(
                     config,
@@ -1236,7 +1237,9 @@ def _merge_line_repositories_locked(
                     f"\n{result.stdout.strip()}"
                 )
             pushed.append(plan.repository)
-            target = record_remote_anchor(config, target, plan.repository, plan.target)
+            target = record_remote_anchor(
+                config, target, plan.repository, plan.target, sha=tip
+            )
 
     changeset_id = ""
     if not dry_run:
@@ -1504,6 +1507,13 @@ def _is_ancestor(repo: Path, maybe_ancestor: str, head: str = "HEAD") -> bool:
 
 def _head_sha(repo: Path) -> str:
     return require_ok(git(repo, "rev-parse", "HEAD"), f"读取 {repo} HEAD").stdout.strip()
+
+
+def _branch_tip(repo: Path, branch: str) -> str:
+    return require_ok(
+        git(repo, "rev-parse", "--verify", f"refs/heads/{branch}"),
+        f"读取 {branch} 分支",
+    ).stdout.strip()
 
 
 def _has_merge_head(repo: Path) -> bool:
@@ -2088,8 +2098,15 @@ def _run_journaled_line_merge(
             )
             if push:
                 for plan in plans:
+                    branch = branches[plan.repository]
                     require_ok(
-                        git(plan.target, "push", "--dry-run", "origin", branches[plan.repository]),
+                        git(
+                            plan.target,
+                            "push",
+                            "--dry-run",
+                            "origin",
+                            f"refs/heads/{branch}:refs/heads/{branch}",
+                        ),
                         f"预检推送 {plan.repository}",
                     )
             if dry_run:
@@ -2144,26 +2161,32 @@ def _run_journaled_line_merge(
             if push:
                 pushed: list[str] = []
                 for index, plan in enumerate(plans):
-                    push_head = _head_sha(plan.target)
+                    branch = branches[plan.repository]
+                    tip = _branch_tip(plan.target, branch)
                     record_repo_intent(
                         config, op_id, plan.repository, "push",
-                        original_head=plan.original_head, target_sha=push_head,
-                        branch=branches[plan.repository], remote="origin",
+                        original_head=plan.original_head, target_sha=tip,
+                        branch=branch, remote="origin",
                     )
-                    result = git(plan.target, "push", "origin", branches[plan.repository])
+                    result = git(plan.target, "push", "origin", f"{tip}:refs/heads/{branch}")
                     if result.code == 0:
-                        target = record_remote_anchor(config, target, plan.repository, plan.target)
+                        target = record_remote_anchor(
+                            config, target, plan.repository, plan.target, sha=tip
+                        )
                     record_repo_result(
                         config, op_id, plan.repository, "push",
                         outcome="pushed" if result.code == 0 else "push_failed",
-                        new_tip=push_head if result.code == 0 else "",
+                        new_tip=tip if result.code == 0 else "",
                         error=result.stdout.strip() if result.code != 0 else "",
                     )
                     if result.code != 0:
                         for remaining in plans[index + 1:]:
                             record_repo_intent(
                                 config, op_id, remaining.repository, "push",
-                                original_head=remaining.original_head, target_sha=_head_sha(remaining.target),
+                                original_head=remaining.original_head,
+                                target_sha=_branch_tip(
+                                    remaining.target, branches[remaining.repository]
+                                ),
                                 branch=branches[remaining.repository], remote="origin",
                             )
                             record_repo_result(
@@ -2659,8 +2682,9 @@ def recover_line_merge(
                 )
                 if push_step is not None:
                     path = shlex.quote(str(repo["snapshot"]["path"]))
-                    branch = shlex.quote(str(push_step["intent"]["branch"]))
-                    report.append(f"  手动：git -C {path} push origin {branch}")
+                    ref = f"refs/heads/{push_step['intent']['branch']}"
+                    # Explicit refspec: a bare branch obeys push.default=upstream.
+                    report.append(f"  手动：git -C {path} push origin {shlex.quote(f'{ref}:{ref}')}")
         outcomes[repo_id] = (
             op["repositories"][repo_id]["outcome"] if terminal
             else _reconcile_merge_repo(config, op, repo_id, report=report)

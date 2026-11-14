@@ -6,6 +6,7 @@
 - 新增 `dyro line add-repo`：把一个已经登记的仓库加入现有开发线。已有子线保持不变；子线只能加入父线里已经有的仓库。
 - 新增 `dyro line push`：把开发线分支推到 origin 并设置上游。只推已提交内容，需 `policy.allow_push`；`anchor-reference` 仓库会跳过。推送说明（`next` 的 `push_note`、工作区和开发线说明、控制面技能）同步提到这条命令；已 seed 的工作区 doctor 会报模板不一致，运行一次 `dyro host seed --force` 即可。
 - 修复 `dyro line create` / `dyro line spawn` 中途失败回滚时留下本次新建分支的问题：之前用另一个基线重试会静默复用旧分支；现在回滚会删除本次新建的分支，原本就有的分支保持不动。
+- 修复 `line merge` / `line sync` / `task merge` 的 `--push`：推送前钉住分支 tip，用显式 refspec `git push origin <tip>:refs/heads/<branch>` 推送，并把远端锚点记成恰好这个 SHA。此前在 `push.default=upstream` 且分支上游指向别的远端分支时，会把合并结果推到那个分支上（例如 `main`）；推送后工作区被切走时，锚点也可能和实际推送的提交不一致。`--recover` 打印的手动推送命令、建线后的发布提示和推送说明也不再给出裸的 `git push origin <分支>`。
 
 ## 0.7.18 - 2026-11-14
 

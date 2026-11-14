@@ -3102,7 +3102,9 @@ def _create_line(args: argparse.Namespace, kind: str) -> None:
         f"{'DRY RUN: ' if args.dry_run else ''}已创建 {line.kind} {line.id}，分支 {line.branch}，仓库基线：{bases}"
     )
     if not args.dry_run:
-        print(f"发布此线（Dyro 不会代你执行）：git push -u origin {line.branch}")
+        ref = f"refs/heads/{line.branch}"
+        # Explicit refspec: a bare branch obeys push.default=upstream.
+        print(f"发布此线：dyro line push {line.id} --yes（需 policy.allow_push），或 git push -u origin {ref}:{ref}")
 
 
 def cmd_line_create(args: argparse.Namespace) -> None:
