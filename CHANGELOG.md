@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 修复 `dyro line merge --into --push` 提前报完成和漏记远端锚点的问题；逐仓记录推送结果，失败可重试，中断后可对账并提示手动重推。0.7.17 已完成的操作不会补修；请重跑同一条 `dyro line merge <child> --into <parent> --push`，再次推送并记录锚点。
+
 ## 0.7.17 - 2026-11-14
 
 对使用者的影响：开发线可以退役、可以在兄弟线之间合并、可以合回基线，多仓操作中断后能查明每个仓的状态；`dyro next` 认得当前所在的开发线；`dyro dispatch` 失败不再显示为成功。**兼容性注意**：成功执行带 `--push` 的 `line merge`、`line sync` 或 `task merge` 后，目标线清单升级为 schema 4（新增 `[remote_anchors]`）。0.7.16 及更早版本无法解析 schema 4 清单；由于它会扫描全部清单，同一工作区里其他开发线的 `status`、`next`、`line merge` 等命令也会失败。访问同一工作区的所有客户端须一起升级，不承诺降级兼容。新版读取旧清单不迁移、不改文件。

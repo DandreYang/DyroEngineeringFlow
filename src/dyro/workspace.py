@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 from typing import Iterable, Mapping
@@ -1653,6 +1654,12 @@ def _ledger_successful_merge_repos(
                 if op["phase"] not in TERMINAL_PHASES:
                     update_repo_phase(config, op_id, repo_id, phase="unknown", outcome="unknown")
                 raise DyroError(f"{repo_id}: already_included 核验失败；请 --recover 对账")
+        repo_extra = extra
+        if op["effective_options"].get("push"):
+            push_step = repo["steps"].get("push", {})
+            repo_extra = dict(
+                extra or {}, pushed=push_step.get("result", {}).get("outcome") == "pushed"
+            )
         _write_merge_ledger_row(
             config,
             subject_id=subject_id,
@@ -1664,7 +1671,7 @@ def _ledger_successful_merge_repos(
             previous_head=original_head,
             result_head=result_head,
             outcome=outcome,
-            extra=extra,
+            extra=repo_extra,
         )
 
 
@@ -1843,7 +1850,7 @@ def _run_journaled_line_merge(
                 source_id=source.id,
                 plans=plans,
                 target_storage=storage,
-                effective_options=effective_options,
+                effective_options=dict(effective_options, push=True) if push else effective_options,
                 event_kind=event_kind,
                 event_actor=event_actor,
                 event_subject=event_subject,
@@ -1874,29 +1881,60 @@ def _run_journaled_line_merge(
                     ledger_extra or {}, pushed=push,
                     changeset_id=_record_line_merge_changeset(config, target, repos),
                 )
-            _ledger_successful_merge_repos(
-                config,
-                op=op,
-                subject_id=ledger_subject_id,
-                branches=branches,
-                extra=ledger_extra,
-            )
-            finish_op(config, op_id, phase="completed")
             if push:
                 pushed: list[str] = []
-                for plan in plans:
+                for index, plan in enumerate(plans):
+                    push_head = _head_sha(plan.target)
+                    record_repo_intent(
+                        config, op_id, plan.repository, "push",
+                        original_head=plan.original_head, target_sha=push_head,
+                        branch=branches[plan.repository], remote="origin",
+                    )
                     result = git(plan.target, "push", "origin", branches[plan.repository])
+                    if result.code == 0:
+                        target = record_remote_anchor(config, target, plan.repository, plan.target)
+                    record_repo_result(
+                        config, op_id, plan.repository, "push",
+                        outcome="pushed" if result.code == 0 else "push_failed",
+                        new_tip=push_head if result.code == 0 else "",
+                        error=result.stdout.strip() if result.code != 0 else "",
+                    )
                     if result.code != 0:
+                        for remaining in plans[index + 1:]:
+                            record_repo_intent(
+                                config, op_id, remaining.repository, "push",
+                                original_head=remaining.original_head, target_sha=_head_sha(remaining.target),
+                                branch=branches[remaining.repository], remote="origin",
+                            )
+                            record_repo_result(
+                                config, op_id, remaining.repository, "push", outcome="not_attempted",
+                            )
                         _line_ledger(
                             config, source.id, "push_failed", repository=plan.repository,
                             pushed_repositories=pushed, error=result.stdout.strip(),
-                            **dict(ledger_extra or {}),
+                            **dict(ledger_extra or {}, pushed=False),
                         )
+                        _ledger_successful_merge_repos(
+                            config,
+                            op=load_op(config, op_id),
+                            subject_id=ledger_subject_id,
+                            branches=branches,
+                            extra=ledger_extra,
+                        )
+                        finish_op(config, op_id, phase="completed")
                         raise DyroError(
                             f"推送 {plan.repository} 失败；本地合并已保留，已推送仓库："
                             f"{', '.join(pushed) or '-'}\n{result.stdout.strip()}"
                         )
                     pushed.append(plan.repository)
+            _ledger_successful_merge_repos(
+                config,
+                op=load_op(config, op_id) if push else op,
+                subject_id=ledger_subject_id,
+                branches=branches,
+                extra=ledger_extra,
+            )
+            finish_op(config, op_id, phase="completed")
     _append_merge_event_if_needed(
         config,
         op_id=op_id,
@@ -2292,6 +2330,25 @@ def recover_line_merge(
     report = [f"对账操作 {op_id}（kind={op['kind']}）"]
     outcomes: dict[str, str] = {}
     for repo_id in op["repos_ordered"]:
+        repo = op["repositories"][repo_id]
+        push_step = repo["steps"].get("push")
+        if push_step is not None or frozen.get("push"):
+            push_outcome = push_step.get("result", {}).get("outcome", "unknown") if push_step else "not_started"
+            if push_step is not None and "result" not in push_step and not terminal:
+                # The merge is reconciled separately; an idempotent push can be
+                # left explicitly unknown and retried manually after closing.
+                record_repo_result(config, op_id, repo_id, "push", outcome="unknown")
+            report.append(f"{repo_id}: push {push_outcome}")
+            if push_outcome != "pushed":
+                report.append(
+                    "  手动：重新执行 dyro line merge "
+                    f"{shlex.quote(str(op['manifest_snapshot']['source']))} --into "
+                    f"{shlex.quote(str(op['manifest_snapshot']['target']))} --push"
+                )
+                if push_step is not None:
+                    path = shlex.quote(str(repo["snapshot"]["path"]))
+                    branch = shlex.quote(str(push_step["intent"]["branch"]))
+                    report.append(f"  手动：git -C {path} push origin {branch}")
         outcomes[repo_id] = (
             op["repositories"][repo_id]["outcome"] if terminal
             else _reconcile_merge_repo(config, op, repo_id, report=report)
