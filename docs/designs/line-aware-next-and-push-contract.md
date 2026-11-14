@@ -191,7 +191,7 @@ JSON `next` 继续使用已经跑完 `doctor` 的那只 45 秒预算。增量 Gi
 `next` 的 `push_note`、工作区 overlay、开发线 overlay、控制面技能资产使用下面三段，字节级相同。`allow_push` 为 true 时也返回这段，不再返回空串。
 
 ```text
-Dyro 默认不执行 push。只有命令显式带 `--push` 且 `policy.allow_push = true` 时，Dyro 才会在本地合并成功之后逐仓执行 `git push origin <分支>`；多仓 push 不是原子操作。
+Dyro 默认不执行 push。只有 `policy.allow_push = true` 时才推送：`dyro line push` 推开发线分支；显式带 `--push` 的命令在本地合并成功后逐仓执行 `git push origin <分支>`。多仓 push 不是原子操作。
 开发线的期望上游是 `origin/<line.branch>`。本地还没有这条远端分支时，doctor 给出 WARN，工作区仍可打开；这不表示可以推送。
 普通 `git push` 仍然能改远端，但不会写入 Dyro 的远端锚点，也不算通过门禁。
 ```
@@ -237,7 +237,7 @@ doctor 的 WARN 原文保持 `WARN <kind>:<id>/<repo>: missing origin/<branch>`�
 - 旧 Dyro 遇到版本 4 会在 `workspace.py:109-110` 拒绝解析，因此旧的 `_write_line` 不会拿到 `Line`，也不会把表抹掉。代价是：第一次写下锚点之后，旧二进制不能再加载这条线。没有锚点的线保持版本 2 或 3，旧二进制仍可读写。
 - 新的 `_write_line` 从字段写出该表。任何会持久化的 `Line(` 构造都必须带上读到的 `remote_anchors`。默认空映射只用于新建的线。漏带字段再写回，新二进制自己也会抹掉该表。
 
-不新增 `line publish`。发布姿势仍是：人在终端执行 `git push -u origin <branch>`，或在 `policy.allow_push = true` 时对已有的 `line merge` / `line sync` / `task merge` 显式加上 `--push`。`spawn` 不发布。终端里的普通 `git push` 不写 `[remote_anchors]`。
+不新增名为 `line publish` 的命令。顶层线和子线用 `dyro line push` 发布自己的分支：先确认 `policy.allow_push`，再取与 `line merge --push`、`retire` 相同的 L1 合并锁；再按仓库 ID 升序取 L2 anchor 锁；锁内重读清单，并拒绝该线任何未完成的操作（merge、merge-into-base、retire）。只推 `linked-worktree`。全部这类仓库预检通过后（工作树存在且是 Git、当前分支就是线分支、没有进行中的 Git 操作、同一 refspec 的 `git push --dry-run` 成功），才按清单顺序执行 `git push -u origin refs/heads/<branch>:refs/heads/<branch>`（显式同名 refspec，`push.default=upstream` 也不能把目标改到别的远端分支；`-u` 同时把上游纠正为 `origin/<branch>`）。不使用 `--force`、`--force-with-lease` 或 `+refspec`，也不要求工作树干净，只推已提交内容。成功一仓就为该仓写 `[remote_anchors]`，取值是推送前后各读一次、两次一致的 `refs/heads/<branch>` tip；不用事后的 HEAD（工作树可能已切走），也不用 `refs/remotes/origin/<branch>`（窄 fetch refspec 下不会更新）；推送期间分支移动则不写该仓锚点并报错；`anchor-reference` 跳过、不写锚点。跨仓不原子：后一仓失败时，已成功仓的锚点保留。锚点写入失败要报出来，因为 push 已经发生。`spawn` 不发布。终端里的普通 `git push` 不写 `[remote_anchors]`。`policy.allow_push = true` 时，`line merge` / `line sync` / `task merge` 仍可显式加 `--push`。
 
 ## 4. 延期
 
@@ -248,7 +248,7 @@ doctor 的 WARN 原文保持 `WARN <kind>:<id>/<repo>: missing origin/<branch>`�
 
 1. **旧 overlay 用 WARN，不自动刷新。** doctor 只报告与当前模板的字节差异，并指向 `dyro host seed --force`。自动覆盖会改掉操作者改过的文件，也会把写操作放进 doctor。
 2. **`next` 不做跨分支的提交图遍历。** ahead/behind 只用 doctor 已经挂到 `ReadBudget` 上的 ref。SHA 相同则写 0。不相同则最多 4 次本地 `rev-list`，否则 `null`。兄弟比较和父线提交差不进入 `next`。
-3. **不新增 `line publish`。** 见第 3 节末。`spawn` 不代跑首次发布。
+3. **发布走 `dyro line push`，不新增 `line publish`。** 见第 3 节末。`spawn` 不代跑首次发布。
 4. **有锚点表的清单升到 schema_version 4；空表不升。** 防脱落靠两件事：字段进入 `Line` 并由 `_write_line` 写出；旧客户端因版本 4 无法解析而无法走旧的整文件重写。控制面 JSON 的 `schema_version` 保持 1。
 
 第二轮的四项由第 2 节和第 3 节回答。这里不重开上面四条。
