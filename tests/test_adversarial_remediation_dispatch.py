@@ -2166,27 +2166,64 @@ class ProcessAndLifecycleTests(unittest.TestCase):
                 self.assertEqual(adapter.authenticated(), expected)
                 self.assertEqual(bounded.call_args.args[0], ["cursor-agent", "status"])
 
-    def test_grok_auth_rejects_unauthenticated_model_listing(self) -> None:
-        completed = BoundedCompletedProcess(
-            args=("grok",),
-            returncode=0,
-            stdout=(
-                "You are not authenticated.\n"
-                "Available models:\n  * grok-4.5\n"
-            ),
-            stderr="",
+    def test_grok_auth_matches_captured_models_banners(self) -> None:
+        logged_out = (
+            "You are not authenticated.\n\n"
+            "Default model: grok-4.6\n\n"
+            "Available models:\n"
+            "  * grok-4.6 (default)\n"
+            "  - grok-4.5\n"
         )
-        with (
-            patch(
-                "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
-                return_value="/usr/local/bin/grok",
+        cases = (
+            (
+                "You are logged in with a local session.\n\n"
+                "Default model: grok-4.7\n\n"
+                "Available models:\n  - grok-4.7\n",
+                True,
             ),
-            patch(
-                "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
-                return_value=completed,
+            ("\x1b[32mYou are logged in with a local session.\x1b[0m\n", True),
+            (
+                "You are using XAI_API_KEY.\n\n"
+                "Default model: grok-4.6\n\n"
+                "Available models:\n"
+                "  * grok-4.6 (default)\n"
+                "  - grok-4.5\n",
+                True,
             ),
-        ):
-            self.assertFalse(grok_adapter().authenticated())
+            (logged_out, False),
+            (
+                "You are not authenticated.\n"
+                "Available models:\n  * grok-4.5\n",
+                False,
+            ),
+            (logged_out + "You are using XAI_API_KEY.\n", False),
+            ("Available models:\n  * grok-4.5\n", False),
+        )
+        for stdout, expected in cases:
+            completed = BoundedCompletedProcess(
+                args=("grok",),
+                returncode=0,
+                stdout=stdout,
+                stderr="",
+            )
+            adapter = grok_adapter()
+            with (
+                patch(
+                    "experiments.local_agent_dispatch.adapters.subprocess_cli.shutil.which",
+                    return_value="/usr/local/bin/grok",
+                ),
+                patch(
+                    "experiments.local_agent_dispatch.adapters.subprocess_cli.run_bounded",
+                    return_value=completed,
+                ) as bounded,
+            ):
+                self.assertEqual(adapter.authenticated(), expected)
+                self.assertEqual(bounded.call_args.args[0], ["grok", "models"])
+                if not expected:
+                    self.assertEqual(
+                        adapter.readiness_reason(),
+                        "Grok models did not confirm authentication",
+                    )
 
     def test_hermes_auth_is_bound_to_selected_provider(self) -> None:
         completed = BoundedCompletedProcess(
