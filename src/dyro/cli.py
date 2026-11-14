@@ -250,6 +250,8 @@ from .updates import (
 )
 from .workspace import (
     OBSERVATION_DEADLINE_FINDING,
+    LineMergeAbortResult,
+    abort_line_merge,
     add_line_repository,
     blocking_line_doctor_failures,
     create_line,
@@ -3162,8 +3164,48 @@ def cmd_line_push(args: argparse.Namespace) -> None:
         print(f"跳过 anchor-reference 仓库：{', '.join(skipped)}")
 
 
+def _print_line_merge_abort(args: argparse.Namespace, result: LineMergeAbortResult) -> None:
+    prefix = "DRY RUN: " if args.dry_run else ""
+    for repo_id, action in result.actions.items():
+        if args.dry_run:
+            extra = ""
+            if action == "merge_abort":
+                files = result.discarded.get(repo_id) or ()
+                extra = f"；将丢弃 {', '.join(files) or '-'}"
+            elif action == "reset_keep":
+                tip = result.new_tips.get(repo_id) or ""
+                extra = f"；将从分支移除 {tip[:12] or '-'}"
+            print(f"{prefix}{repo_id}: {action}{extra}")
+        else:
+            print(f"{repo_id}: {result.outcomes[repo_id]}")
+    if not args.dry_run:
+        print("操作已 aborted")
+
+
+def _abort_line_merge_args(args: argparse.Namespace) -> None:
+    if getattr(args, "recover", None) is not None:
+        raise DyroError("--abort 不能与 --recover 同时使用")
+    if getattr(args, "source", None) or getattr(args, "parent", None):
+        raise DyroError("--abort 不能与 --into / --from 同时使用")
+    if args.push:
+        raise DyroError("--abort 不能与 --push 同时使用")
+    _require_yes(args, "放弃未完成的合并")
+
+
 def cmd_line_merge(args: argparse.Namespace) -> None:
     config = _config(args)
+    if getattr(args, "abort", None) is not None:
+        _abort_line_merge_args(args)
+        result = abort_line_merge(
+            config,
+            args.child,
+            op_id=args.abort or None,
+            kinds=("merge",),
+            dry_run=args.dry_run,
+            allow_partial=True if args.allow_partial else None,
+        )
+        _print_line_merge_abort(args, result)
+        return
     if getattr(args, "recover", None) is not None:
         if args.source or args.parent:
             raise DyroError("--recover 不能与 --into / --from 同时使用")
@@ -3214,7 +3256,7 @@ def cmd_line_merge(args: argparse.Namespace) -> None:
             )
         return
     if not args.parent:
-        raise DyroError("需要 --into <父线>、--from <源线> 或 --recover")
+        raise DyroError("需要 --into <父线>、--from <源线>、--recover 或 --abort")
     _require_yes(args, "合并子开发线")
     merge_line(
         config,
@@ -3235,6 +3277,20 @@ def cmd_line_merge(args: argparse.Namespace) -> None:
 
 def cmd_line_merge_into_base(args: argparse.Namespace) -> None:
     config = _config(args)
+    if getattr(args, "abort", None) is not None:
+        _abort_line_merge_args(args)
+        result = abort_line_merge(
+            config,
+            args.line,
+            op_id=args.abort or None,
+            kinds=("merge_into_base",),
+            dry_run=args.dry_run,
+            base_ref=args.base_ref,
+            policy_default=True if args.policy_default else None,
+            repositories=args.repo,
+        )
+        _print_line_merge_abort(args, result)
+        return
     if getattr(args, "recover", None) is not None:
         if args.dry_run:
             print("DRY RUN: 跳过 merge-into-base --recover 对账写入")
@@ -5474,10 +5530,10 @@ def build_parser() -> argparse.ArgumentParser:
     line_push.set_defaults(func=cmd_line_push)
     line_merge = line_sub.add_parser(
         "merge",
-        help="子线合入父线（--into）、跨线合入（--from）或 --recover 对账",
+        help="子线合入父线（--into）、跨线合入（--from）、--recover 对账或 --abort",
     )
     line_merge.add_argument(
-        "child", help="子线（--into）或目标线（--from / --recover）"
+        "child", help="子线（--into）或目标线（--from / --recover / --abort；--into 合并的 op 记在父线上）"
     )
     line_merge_direction = line_merge.add_mutually_exclusive_group(required=False)
     line_merge_direction.add_argument(
@@ -5504,6 +5560,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="OP_ID",
         help="只读对账未完成 merge op；可选 op_id",
+    )
+    line_merge.add_argument(
+        "--abort",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="OP_ID",
+        help="放弃未完成的 merge op：清理遗留 MERGE_HEAD，撤回未推送的本地合并提交；可选 op_id",
     )
     line_merge.add_argument(
         "--push",
@@ -5548,6 +5612,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="OP_ID",
         help="只读对账未完成 merge-into-base op；可选 op_id",
+    )
+    line_merge_into_base.add_argument(
+        "--abort",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="OP_ID",
+        help="放弃未完成的 merge op：清理遗留 MERGE_HEAD，撤回未推送的本地合并提交；可选 op_id",
     )
     line_merge_into_base.add_argument(
         "--push",

@@ -48,13 +48,15 @@
 
 | 能力 | 延期理由 |
 |------|----------|
-| per-repo merge session、`--continue`/`--abort` | 跨进程恢复需独立协议；现 `_rollback_line_merges` 仅内存 plan（`workspace.py:840-866`） |
+| per-repo merge session、`--continue` | `--abort` 已落地（见下）；`--continue` 不在计划中：冲突仍在进程内回滚，不会留下可 continue 的会话 |
 | `line add-repo`、`repo remove`/`move` | 多仓配置迁移与 anchor-reference 语义未闭合 |
 | retire `--cascade`、unarchive/adopt/reparent | 身份与子孙策略未决 |
 | manifest 持久 `degraded` | 违背定律 II（`delivery-physics.md:77-78`） |
 | Console `lineage_edges` | 纯投影可由 events 后做 |
 | `post_merge` Profile 钩子 | 授权与 A1 门边界未定义（`delivery-physics.md:8-9`） |
 | `line merge record` / 外部 merge 补登 | 审计≠集成动作；单独立案 |
+
+`--abort`（已落地）：对未终态 `merge` / `merge-into-base` op 先只读分类再突变。有 `MERGE_HEAD` 且 HEAD 仍为 `original_head` 时执行 `git merge --abort`（`--dry-run` 列出将丢弃的文件，无需 `--force`）；本地已提交、工作区干净、journal 无 push 步骤、且没有任何 `refs/remotes/origin/*` 包含合并 tip 时，用 `git reset --keep <original_head>` 撤回。已合入的文件若还有未暂存的手改，或合并删除的路径上出现了未跟踪的同名文件，`git merge --abort` 本身会失败，因此整次拒绝并列出这些文件。任一仓不满足则整次拒绝，零 Git 突变、零 journal 写入；所有仓都是 `already_included` 时没有可放弃的内容，同样拒绝并提示用 `--recover` 收口。所有 `reset --keep` 的回滚意图在第一次 Git 突变前写入：中途崩溃后，`--recover` 把还没回滚的仓判为 `unknown`，op 保持打开，可以再次 `--abort`。`--recover` 遇到未确认的回滚意图时不再判为 `committed`；对已 `aborted` 的 op 只报告，不补成功 ledger 或事件。`--recover` 仍只对账、不改 Git。`--continue` 不在计划中。
 
 ---
 

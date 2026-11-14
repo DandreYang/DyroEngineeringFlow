@@ -1473,6 +1473,26 @@ class LineMergeResult:
     dry_run: bool = False
 
 
+@dataclass(frozen=True)
+class LineMergeAbortResult:
+    op_id: str
+    actions: Mapping[str, str]
+    outcomes: Mapping[str, str]
+    discarded: Mapping[str, tuple[str, ...]]
+    new_tips: Mapping[str, str]
+    dry_run: bool = False
+
+
+@dataclass(frozen=True)
+class _LineMergeAbortPlan:
+    action: str
+    outcome: str
+    discarded: tuple[str, ...]
+    new_tip: str
+    original_head: str
+    path: Path
+
+
 def _repos_digest(repositories: Iterable[str]) -> str:
     digest = "+".join(sorted(set(repositories)))
     return digest[:80]
@@ -1490,9 +1510,11 @@ def _has_merge_head(repo: Path) -> bool:
     return git(repo, "rev-parse", "--verify", "-q", "MERGE_HEAD").code == 0
 
 
-def _git_in_progress(repo: Path) -> bool:
+def _git_in_progress(repo: Path, *, ignore: Iterable[str] = ()) -> bool:
+    ignored = frozenset(ignore)
     if any(
-        git(repo, "rev-parse", "--verify", "-q", name).code == 0
+        name not in ignored
+        and git(repo, "rev-parse", "--verify", "-q", name).code == 0
         for name in _GIT_IN_PROGRESS_NAMES
     ):
         return True
@@ -2370,6 +2392,34 @@ def _reconcile_merge_repo(
                 report.append(f"  手动：{command}")
             return "unknown"
 
+    if isinstance(rollback, dict):
+        # A rollback was intended (in-process or --abort) but not confirmed:
+        # never fall through to `committed` and invent a successful merge.
+        if head == original_head and not has_merge:
+            if not isinstance(rollback.get("result"), dict) or (
+                rollback["result"].get("outcome") == "unknown"
+            ):
+                record_repo_result(
+                    config,
+                    op["op_id"],
+                    repo_id,
+                    "rollback",
+                    outcome="rolled_back",
+                    new_tip=original_head,
+                )
+            update_repo_phase(
+                config, op["op_id"], repo_id, phase="completed", outcome="rolled_back"
+            )
+            report.append(f"{repo_id}: rolled_back（回滚意图已落地）")
+            return "rolled_back"
+        update_repo_phase(config, op["op_id"], repo_id, phase="unknown", outcome="unknown")
+        report.append(f"{repo_id}: unknown（有回滚意图但 HEAD 未回到 original_head）")
+        for command in _merge_manual_recovery_commands(
+            repo_id, target_path, original_head, has_merge_head=has_merge
+        ):
+            report.append(f"  手动：{command}")
+        return "unknown"
+
     if merge_outcome == "committed" and result_head:
         if head == result_head and not has_merge:
             update_repo_phase(
@@ -2529,27 +2579,26 @@ def _reconcile_merge_repo(
     return "unknown"
 
 
-def recover_line_merge(
+def _resolve_merge_op(
     config: Config,
     subject_line_id: str,
     *,
-    op_id: str | None = None,
-    allow_partial: bool | None = None,
-    base_ref: str | None = None,
-    policy_default: bool | None = None,
-    repositories: Iterable[str] | None = None,
-    kinds: Iterable[str] | None = None,
-) -> LineMergeResult:
-    """Report-only merge reconciliation: journal/ledger only, never Git mutation."""
-    selected_kinds = tuple(kinds) if kinds is not None else tuple(MERGE_OP_KINDS)
+    op_id: str | None,
+    kinds: tuple[str, ...],
+    allow_partial: bool | None,
+    base_ref: str | None,
+    policy_default: bool | None,
+    repositories: Iterable[str] | None,
+) -> tuple[dict, str, dict]:
+    """Pick the merge op for --recover/--abort and check supplied options against the journal."""
     if op_id:
         op = load_op(config, op_id)
         if subject_line_id not in op["subject_line_ids"]:
             raise DyroError(f"操作 {op_id} 不属于开发线 {subject_line_id}")
-        if op["kind"] not in selected_kinds:
+        if op["kind"] not in kinds:
             raise DyroError(f"操作 {op_id} 不是 merge 类操作")
     else:
-        found = find_unfinished_op(config, subject_line_id, kinds=selected_kinds)
+        found = find_unfinished_op(config, subject_line_id, kinds=kinds)
         if found is None:
             raise DyroError(f"开发线 {subject_line_id} 没有未完成的 merge 操作")
         op = found
@@ -2564,6 +2613,31 @@ def recover_line_merge(
     if repositories is not None and sorted(set(repositories)) != op["repos_ordered"]:
         raise DyroError(f"恢复选项冲突：repo；journal 冻结值为 {op['repos_ordered']!r}")
     frozen = require_compatible_options(op, supplied)
+    return op, op_id, frozen
+
+
+def recover_line_merge(
+    config: Config,
+    subject_line_id: str,
+    *,
+    op_id: str | None = None,
+    allow_partial: bool | None = None,
+    base_ref: str | None = None,
+    policy_default: bool | None = None,
+    repositories: Iterable[str] | None = None,
+    kinds: Iterable[str] | None = None,
+) -> LineMergeResult:
+    """Report-only merge reconciliation: journal/ledger only, never Git mutation."""
+    op, op_id, frozen = _resolve_merge_op(
+        config,
+        subject_line_id,
+        op_id=op_id,
+        kinds=tuple(kinds) if kinds is not None else tuple(MERGE_OP_KINDS),
+        allow_partial=allow_partial,
+        base_ref=base_ref,
+        policy_default=policy_default,
+        repositories=repositories,
+    )
     terminal = op["phase"] in TERMINAL_PHASES
     report = [f"对账操作 {op_id}（kind={op['kind']}）"]
     outcomes: dict[str, str] = {}
@@ -2599,7 +2673,10 @@ def recover_line_merge(
         ):
             report.append(f"{repo_id}: ledger 陈旧（存在 op_id 行但 journal 非成功终态）")
     success_outcomes = {"committed", "already_included"}
-    if all(outcome in success_outcomes for outcome in outcomes.values()):
+    if op["phase"] == "aborted":
+        # An aborted op (e.g. via --abort) never gains a success ledger or event.
+        report.append("操作已 aborted")
+    elif all(outcome in success_outcomes for outcome in outcomes.values()):
         manifest = op.get("manifest_snapshot") if isinstance(op.get("manifest_snapshot"), dict) else {}
         if op["kind"] == "merge":
             target = get_line(config, str(manifest.get("target") or subject_line_id))
@@ -2683,6 +2760,448 @@ def recover_line_merge(
         excluded_repositories=(),
         partial=bool(isinstance(op.get("event_facts"), dict) and op["event_facts"].get("partial")),
         outcomes=outcomes,
+    )
+
+
+def _merge_op_lock_line_id(op: Mapping[str, object], subject_line_id: str) -> str:
+    manifest = op.get("manifest_snapshot") if isinstance(op.get("manifest_snapshot"), dict) else {}
+    if op.get("kind") == "merge_into_base":
+        return str(manifest.get("source") or subject_line_id)
+    return str(manifest.get("target") or subject_line_id)
+
+
+def _origin_refs_contain(repo: Path, sha: str) -> bool | None:
+    result = git(repo, "for-each-ref", "--contains", sha, "refs/remotes/origin")
+    if result.code != 0:
+        return None
+    return bool(result.stdout.strip())
+
+
+def _classify_line_merge_abort_repo(
+    repo_id: str,
+    repo: Mapping[str, object],
+    *,
+    expected_branch: str,
+) -> _LineMergeAbortPlan | str:
+    snapshot = repo.get("snapshot") if isinstance(repo.get("snapshot"), dict) else {}
+    target_path = Path(str(snapshot.get("path") or ""))
+    original_head = str(snapshot.get("original_head") or "")
+    steps = repo.get("steps") if isinstance(repo.get("steps"), dict) else {}
+    merge_step = steps.get("merge") if isinstance(steps, dict) else None
+    merge_result = (
+        merge_step.get("result")
+        if isinstance(merge_step, dict) and isinstance(merge_step.get("result"), dict)
+        else None
+    )
+    merge_outcome = str(merge_result.get("outcome") or "") if isinstance(merge_result, dict) else ""
+    new_tip = ""
+    if isinstance(merge_result, dict):
+        tip = merge_result.get("new_tip")
+        if isinstance(tip, str):
+            new_tip = tip
+    current_outcome = str(repo.get("outcome") or "")
+    if not target_path.exists():
+        return f"{repo_id}: 工作区路径不存在"
+    inside = git(target_path, "rev-parse", "--is-inside-work-tree")
+    if inside.code != 0 or inside.stdout.strip() != "true":
+        return f"{repo_id}: 不是 Git 仓库"
+    try:
+        head = _head_sha(target_path)
+    except DyroError:
+        return f"{repo_id}: 无法读取 HEAD"
+    current = git(target_path, "branch", "--show-current")
+    if current.code != 0:
+        return f"{repo_id}: 无法读取当前分支"
+    current_branch = current.stdout.strip()
+    if current_branch != expected_branch:
+        return (
+            f"{repo_id}: 当前分支为 {current_branch or 'DETACHED'}，期望 {expected_branch}"
+        )
+    try:
+        blocking = _git_in_progress(target_path, ignore=("MERGE_HEAD",))
+    except DyroError:
+        return f"{repo_id}: 无法判断进行中的 Git 操作"
+    if blocking:
+        return f"{repo_id}: 有进行中的 Git 操作，拒绝 abort"
+    if "push" in steps:
+        return f"{repo_id}: journal 含 push 步骤，拒绝 abort"
+    if current_outcome == "rolled_back" and head != original_head:
+        return f"{repo_id}: 已标记 rolled_back 但 HEAD 已漂移"
+    has_merge = _has_merge_head(target_path)
+    if has_merge:
+        if head != original_head:
+            return f"{repo_id}: 存在 MERGE_HEAD 但 HEAD 已离开 original_head"
+        if merge_outcome == "committed":
+            return f"{repo_id}: journal 已记 committed 但仍有 MERGE_HEAD，拒绝 abort"
+        # merge --abort resets index-vs-HEAD changes (incl. unmerged paths) and
+        # keeps unrelated worktree edits; it fails on a merged path that also
+        # has unstaged edits or an untracked file sits on a path the merge
+        # deleted, so refuse those up front instead of ending unknown.
+        names: list[set[str]] = []
+        for args in (("--cached",), (), ("--diff-filter=U",), ("--cached", "--diff-filter=D")):
+            diff = git(target_path, "diff", "--name-only", *args)
+            if diff.code != 0:
+                return f"{repo_id}: 无法列出 merge --abort 将丢弃的文件"
+            names.append({line for line in diff.stdout.splitlines() if line.strip()})
+        staged, unstaged, unmerged, deleted = names
+        blocked = sorted(
+            ((staged & unstaged) - unmerged)
+            | {name for name in deleted if (target_path / name).exists()}
+        )
+        if blocked:
+            return (
+                f"{repo_id}: 这些文件有未暂存的手改或未跟踪的同名文件（{', '.join(blocked)}），"
+                "git merge --abort 会拒绝；先另存改动，或 git add 后再 abort（会被丢弃）"
+            )
+        discarded = tuple(sorted(staged))
+        return _LineMergeAbortPlan(
+            action="merge_abort",
+            outcome="not_started",
+            discarded=discarded,
+            new_tip=new_tip,
+            original_head=original_head,
+            path=target_path,
+        )
+    porcelain = git(target_path, "status", "--porcelain")
+    if porcelain.code != 0:
+        return f"{repo_id}: 无法读取工作区状态"
+    dirty = bool(porcelain.stdout.strip())
+    if (
+        merge_outcome == "committed"
+        and new_tip
+        and head == new_tip
+        and not dirty
+    ):
+        contains = _origin_refs_contain(target_path, new_tip)
+        if contains is None:
+            return f"{repo_id}: 无法检查 origin 是否包含合并提交"
+        if contains:
+            return f"{repo_id}: 远端 origin 已包含合并提交，拒绝 reset"
+        return _LineMergeAbortPlan(
+            action="reset_keep",
+            outcome="rolled_back",
+            discarded=(),
+            new_tip=new_tip,
+            original_head=original_head,
+            path=target_path,
+        )
+    if head == original_head and not dirty:
+        if current_outcome == "already_included" or merge_outcome == "already_included":
+            source_head = str(snapshot.get("source_head") or "")
+            if not (source_head and _is_ancestor(target_path, source_head, head)):
+                return f"{repo_id}: already_included 核验失败（源提交不是 HEAD 的祖先）"
+            outcome = "already_included"
+        elif merge_outcome == "committed" or current_outcome == "rolled_back":
+            outcome = "rolled_back"
+        else:
+            outcome = "not_started"
+        return _LineMergeAbortPlan(
+            action="none",
+            outcome=outcome,
+            discarded=(),
+            new_tip=new_tip,
+            original_head=original_head,
+            path=target_path,
+        )
+    if dirty:
+        return f"{repo_id}: 工作区不干净，拒绝 abort"
+    return f"{repo_id}: HEAD 既不是 original_head 也不是合并 tip，拒绝 abort"
+
+
+def _record_abort_not_started(
+    config: Config, op_id: str, repo_id: str, original_head: str
+) -> None:
+    steps = load_op(config, op_id)["repositories"][repo_id]["steps"]
+    if "merge" in steps and "result" not in steps["merge"]:
+        record_repo_result(
+            config,
+            op_id,
+            repo_id,
+            "merge",
+            outcome="not_started",
+            new_tip=original_head,
+        )
+    update_repo_phase(config, op_id, repo_id, phase="completed", outcome="not_started")
+
+
+def _record_abort_rollback(
+    config: Config,
+    op_id: str,
+    repo_id: str,
+    *,
+    original_head: str,
+    from_head: str,
+    intent_only: bool = False,
+) -> None:
+    record_repo_intent(
+        config,
+        op_id,
+        repo_id,
+        "rollback",
+        original_head=original_head,
+        target_sha=original_head,
+        from_head=from_head,
+    )
+    if intent_only:
+        return
+    record_repo_result(
+        config,
+        op_id,
+        repo_id,
+        "rollback",
+        outcome="rolled_back",
+        new_tip=original_head,
+    )
+    update_repo_phase(config, op_id, repo_id, phase="completed", outcome="rolled_back")
+
+
+def abort_line_merge(
+    config: Config,
+    subject_line_id: str,
+    *,
+    op_id: str | None = None,
+    kinds: Iterable[str],
+    dry_run: bool = False,
+    base_ref: str | None = None,
+    policy_default: bool | None = None,
+    repositories: Iterable[str] | None = None,
+    allow_partial: bool | None = None,
+) -> LineMergeAbortResult:
+    """Abort an unfinished journaled merge: Git mutation plus journal, unlike --recover."""
+    op, op_id, frozen = _resolve_merge_op(
+        config,
+        subject_line_id,
+        op_id=op_id,
+        kinds=tuple(kinds),
+        allow_partial=allow_partial,
+        base_ref=base_ref,
+        policy_default=policy_default,
+        repositories=repositories,
+    )
+    if op["phase"] in TERMINAL_PHASES:
+        raise DyroError(f"操作已 {op['phase']}，不能 abort：{op_id}")
+    lock_line_id = _merge_op_lock_line_id(op, subject_line_id)
+    with exclusive_lock(
+        merge_lock_path(config, lock_line_id),
+        timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS,
+    ):
+        with anchor_locks(
+            config, op["repos_ordered"], timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS
+        ):
+            op = load_op(config, op_id)
+            if op["phase"] in TERMINAL_PHASES:
+                raise DyroError(f"操作已 {op['phase']}，不能 abort：{op_id}")
+            refused: list[str] = []
+            expected_branches: dict[str, str] = {}
+            if op["kind"] == "merge_into_base":
+                base_refs = frozen.get("base_refs")
+                if not isinstance(base_refs, dict):
+                    refused = [
+                        f"{repo_id}: journal 缺少 base_refs"
+                        for repo_id in op["repos_ordered"]
+                    ]
+                else:
+                    for repo_id in op["repos_ordered"]:
+                        ref = base_refs.get(repo_id)
+                        if not isinstance(ref, str) or not ref:
+                            refused.append(f"{repo_id}: journal 缺少冻结基线分支")
+                        else:
+                            expected_branches[repo_id] = ref
+            else:
+                manifest = (
+                    op.get("manifest_snapshot")
+                    if isinstance(op.get("manifest_snapshot"), dict)
+                    else {}
+                )
+                try:
+                    target_line = get_line(
+                        config, str(manifest.get("target") or subject_line_id)
+                    )
+                except DyroError as exc:
+                    refused = [f"{repo_id}: {exc}" for repo_id in op["repos_ordered"]]
+                else:
+                    expected_branches = {
+                        repo_id: target_line.branch for repo_id in op["repos_ordered"]
+                    }
+            plans: dict[str, _LineMergeAbortPlan] = {}
+            for repo_id in op["repos_ordered"]:
+                if repo_id not in expected_branches:
+                    continue
+                classified = _classify_line_merge_abort_repo(
+                    repo_id,
+                    op["repositories"][repo_id],
+                    expected_branch=expected_branches[repo_id],
+                )
+                if isinstance(classified, str):
+                    refused.append(classified)
+                else:
+                    plans[repo_id] = classified
+            if refused:
+                raise DyroError("拒绝放弃未完成的合并：" + "; ".join(refused))
+            if all(plan.outcome == "already_included" for plan in plans.values()):
+                # Nothing to undo; aborting would only race --recover's success close.
+                raise DyroError(
+                    f"操作 {op_id} 的所有仓都已包含源提交（already_included），没有可放弃的内容；"
+                    "请用 --recover 收口"
+                )
+            actions = {repo_id: plans[repo_id].action for repo_id in op["repos_ordered"]}
+            discarded = {
+                repo_id: plans[repo_id].discarded for repo_id in op["repos_ordered"]
+            }
+            new_tips = {
+                repo_id: plans[repo_id].new_tip
+                for repo_id in op["repos_ordered"]
+                if plans[repo_id].new_tip
+            }
+            planned_outcomes = {
+                repo_id: plans[repo_id].outcome for repo_id in op["repos_ordered"]
+            }
+            if dry_run:
+                return LineMergeAbortResult(
+                    op_id=op_id,
+                    actions=actions,
+                    outcomes=planned_outcomes,
+                    discarded=discarded,
+                    new_tips=new_tips,
+                    dry_run=True,
+                )
+            # Pin every rollback intent before the first Git mutation: a crash
+            # mid-abort then leaves untouched repos `unknown` under --recover
+            # instead of `committed`, so the op stays open for another --abort.
+            for repo_id in op["repos_ordered"]:
+                if plans[repo_id].action == "reset_keep":
+                    _record_abort_rollback(
+                        config,
+                        op_id,
+                        repo_id,
+                        original_head=plans[repo_id].original_head,
+                        from_head=plans[repo_id].new_tip,
+                        intent_only=True,
+                    )
+            outcomes: dict[str, str] = {}
+            failures: list[str] = []
+            manual: list[str] = []
+            for repo_id in op["repos_ordered"]:
+                plan = plans[repo_id]
+                if plan.action == "none":
+                    if plan.outcome == "rolled_back":
+                        steps = load_op(config, op_id)["repositories"][repo_id]["steps"]
+                        rollback = steps.get("rollback") if isinstance(steps, dict) else None
+                        if not (
+                            isinstance(rollback, dict)
+                            and isinstance(rollback.get("result"), dict)
+                            and rollback["result"].get("outcome") == "rolled_back"
+                        ):
+                            _record_abort_rollback(
+                                config,
+                                op_id,
+                                repo_id,
+                                original_head=plan.original_head,
+                                from_head=plan.new_tip,
+                            )
+                        else:
+                            update_repo_phase(
+                                config,
+                                op_id,
+                                repo_id,
+                                phase="completed",
+                                outcome="rolled_back",
+                            )
+                    elif plan.outcome == "already_included":
+                        update_repo_phase(
+                            config,
+                            op_id,
+                            repo_id,
+                            phase="completed",
+                            outcome="already_included",
+                        )
+                    else:
+                        _record_abort_not_started(
+                            config, op_id, repo_id, plan.original_head
+                        )
+                    outcomes[repo_id] = plan.outcome
+                    continue
+                if plan.action == "reset_keep":
+                    result = git(plan.path, "reset", "--keep", plan.original_head)
+                else:
+                    result = git(plan.path, "merge", "--abort")
+                if result.code != 0:
+                    update_repo_phase(
+                        config, op_id, repo_id, phase="unknown", outcome="unknown"
+                    )
+                    outcomes[repo_id] = "unknown"
+                    failures.append(
+                        f"{repo_id}: {result.stdout.strip() or 'abort failed'}"
+                    )
+                    manual.extend(
+                        _merge_manual_recovery_commands(
+                            repo_id,
+                            plan.path,
+                            plan.original_head,
+                            has_merge_head=_has_merge_head(plan.path),
+                        )
+                    )
+                    continue
+                try:
+                    head = _head_sha(plan.path)
+                except DyroError as exc:
+                    head = ""
+                    verify_error = str(exc)
+                else:
+                    verify_error = ""
+                if verify_error or head != plan.original_head or _has_merge_head(plan.path):
+                    update_repo_phase(
+                        config, op_id, repo_id, phase="unknown", outcome="unknown"
+                    )
+                    outcomes[repo_id] = "unknown"
+                    failures.append(
+                        f"{repo_id}: {verify_error or 'abort 后 HEAD 未回到 original_head'}"
+                    )
+                    manual.extend(
+                        _merge_manual_recovery_commands(
+                            repo_id,
+                            plan.path,
+                            plan.original_head,
+                            has_merge_head=_has_merge_head(plan.path),
+                        )
+                    )
+                    continue
+                if plan.action == "reset_keep":
+                    _record_abort_rollback(
+                        config,
+                        op_id,
+                        repo_id,
+                        original_head=plan.original_head,
+                        from_head=plan.new_tip,
+                    )
+                else:
+                    _record_abort_not_started(
+                        config, op_id, repo_id, plan.original_head
+                    )
+                outcomes[repo_id] = plan.outcome
+            if failures:
+                details = "\n".join(failures)
+                commands = "\n".join(f"手动：{item}" for item in manual)
+                raise DyroError(
+                    f"放弃合并未完全成功：{op_id}\n{details}"
+                    + (f"\n{commands}" if commands else "")
+                )
+            finish_op(config, op_id, phase="aborted")
+            _line_ledger(
+                config,
+                subject_line_id,
+                "line_merge_aborted",
+                op_id=op_id,
+                repositories=list(op["repos_ordered"]),
+                actions=actions,
+            )
+    return LineMergeAbortResult(
+        op_id=op_id,
+        actions=actions,
+        outcomes=outcomes,
+        discarded=discarded,
+        new_tips=new_tips,
+        dry_run=False,
     )
 
 
