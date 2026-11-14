@@ -42,6 +42,7 @@ from dyro.hub import (
     unique_registered_alias,
     workspace_alias_retargets_root,
 )
+from dyro.read_limits import canonical_entry_path
 from dyro.tooling import (
     ToolPreferences,
     ToolState,
@@ -93,7 +94,7 @@ class RepositorySelectionParsingTests(unittest.TestCase):
 class RegistryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="dyro-hub-")
-        self.base = Path(self.tmp.name)
+        self.base = canonical_entry_path(Path(self.tmp.name))
         self.state = self.base / "state"
         self.workspace = self.base / "workspace"
         self.workspace.mkdir()
@@ -279,6 +280,20 @@ mount = "api"
         )
         with self.assertRaisesRegex(Exception, "别名"):
             load_registry()
+
+    @unittest.skipUnless(
+        Path("/tmp").is_symlink() and Path("/tmp").resolve() == Path("/private/tmp"),
+        "requires the macOS /tmp system alias",
+    )
+    def test_registry_home_rewrites_tmp_alias_spelling(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-hub-alias-", dir="/tmp") as temporary:
+            canonical = Path(temporary).resolve()
+            try:
+                alias = Path("/tmp") / canonical.relative_to("/private/tmp")
+            except ValueError:
+                self.skipTest("temporary directory is not below /private/tmp")
+            with patch.dict(os.environ, {"DYRO_HOME": str(alias)}):
+                self.assertEqual(registry_home(), canonical)
 
 
 class HubCliTests(WorkspaceCase):

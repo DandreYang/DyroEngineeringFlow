@@ -9,6 +9,7 @@ import time
 from typing import Iterator, TextIO
 
 from .errors import DyroError
+from .read_limits import canonical_entry_path
 
 
 _LOCK_CONDITION = threading.Condition()
@@ -200,7 +201,7 @@ def _unlock(handle: TextIO) -> None:
 @contextmanager
 def exclusive_lock(path: Path, *, timeout_seconds: float = 15.0) -> Iterator[None]:
     """Acquire a process-safe, thread-reentrant lock for a small state transition."""
-    resolved = path.absolute()
+    resolved = canonical_entry_path(path)
     owner = threading.get_ident()
     deadline = time.monotonic() + timeout_seconds
     reentrant = False
