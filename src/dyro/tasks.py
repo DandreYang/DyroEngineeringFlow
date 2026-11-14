@@ -3039,7 +3039,7 @@ def _prepare_merge(
                     "push",
                     "--dry-run",
                     "origin",
-                    line.branch,
+                    f"refs/heads/{line.branch}:refs/heads/{line.branch}",
                 ),
                 f"预检推送 {plan.repository}",
             )
@@ -3161,8 +3161,11 @@ def _merge_task_repositories_locked(
 
     pushed: list[str] = []
     if push:
+        from .workspace import _branch_tip, record_remote_anchor
+
         for plan in plans:
-            result = git(plan.target, "push", "origin", line.branch)
+            tip = _branch_tip(plan.target, line.branch)
+            result = git(plan.target, "push", "origin", f"{tip}:refs/heads/{line.branch}")
             if result.code != 0:
                 ledger(
                     config,
@@ -3177,8 +3180,9 @@ def _merge_task_repositories_locked(
                     f"\n{result.stdout.strip()}"
                 )
             pushed.append(plan.repository)
-            from .workspace import record_remote_anchor
-            line = record_remote_anchor(config, line, plan.repository, plan.target)
+            line = record_remote_anchor(
+                config, line, plan.repository, plan.target, sha=tip
+            )
 
     for plan in plans:
         result_head = require_ok(

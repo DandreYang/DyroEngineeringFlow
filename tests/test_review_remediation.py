@@ -79,7 +79,7 @@ class MissingOriginIsAdvisoryTests(WorkspaceCase):
         output = StringIO()
         with redirect_stdout(output):
             main(["--root", str(self.root), "line", "create", "local-only", "--yes"])
-        self.assertIn("git push -u origin feat/local-only", output.getvalue())
+        self.assertIn("git push -u origin refs/heads/feat/local-only:refs/heads/feat/local-only", output.getvalue())
 
 
 class SpawnBaseTests(WorkspaceCase):

@@ -38,6 +38,15 @@ def _stdout(*args: str, cwd: Path) -> str:
     return completed.stdout.strip()
 
 
+def _is_real_branch_push(args: tuple, branch: str) -> bool:
+    return (
+        len(args) == 3
+        and args[0] == "push"
+        and args[1] == "origin"
+        and args[2].endswith(f":refs/heads/{branch}")
+    )
+
+
 def _commit_text(worktree: Path, filename: str, content: str, message: str) -> str:
     (worktree / filename).write_text(content, encoding="utf-8")
     shell("git", "add", filename, cwd=worktree)
@@ -772,7 +781,7 @@ class CrossLineMergeTests(WorkspaceCase):
         pushed = []
 
         def observe_push(repo, *args, **kwargs):
-            if args == ("push", "origin", parent.branch):
+            if _is_real_branch_push(args, parent.branch):
                 op = line_ops.find_unfinished_op(config, parent.id)
                 self.assertIsNotNone(op)
                 repo_id = next(r for r in parent.repositories
@@ -813,9 +822,9 @@ class CrossLineMergeTests(WorkspaceCase):
         original_git = workspace.git
 
         def fail_second_push(repo, *args, **kwargs):
-            if args == ("push", "origin", parent.branch):
+            if _is_real_branch_push(args, parent.branch):
                 self.assertNotEqual(repo, line_repository_path(config, parent, "worker"))
-            if repo == line_repository_path(config, parent, "web") and args == ("push", "origin", parent.branch):
+            if repo == line_repository_path(config, parent, "web") and _is_real_branch_push(args, parent.branch):
                 return Result(("git", *args), 1, "rejected")
             return original_git(repo, *args, **kwargs)
 
@@ -853,14 +862,14 @@ class CrossLineMergeTests(WorkspaceCase):
         original_anchor = workspace.record_remote_anchor
 
         def crash_second_push(repo, *args, **kwargs):
-            if not after_anchor and repo == line_repository_path(config, parent, "web") and args == ("push", "origin", parent.branch):
+            if not after_anchor and repo == line_repository_path(config, parent, "web") and _is_real_branch_push(args, parent.branch):
                 if after_push:
                     self.assertEqual(original_git(repo, *args, **kwargs).code, 0)
                 raise SystemExit("power loss during push")
             return original_git(repo, *args, **kwargs)
 
-        def crash_second_anchor(config, line, repo_id, path):
-            updated = original_anchor(config, line, repo_id, path)
+        def crash_second_anchor(config, line, repo_id, path, sha=None):
+            updated = original_anchor(config, line, repo_id, path, sha=sha)
             if after_anchor and repo_id == "web":
                 raise SystemExit("power loss after anchor")
             return updated
@@ -890,7 +899,7 @@ class CrossLineMergeTests(WorkspaceCase):
         self.assertEqual(set(recovered.outcomes.values()), {"committed"})
         self.assertIn("web: push unknown", output.getvalue())
         self.assertIn(f"dyro line merge {child.id} --into {parent.id} --push", output.getvalue())
-        self.assertIn(f"git -C {line_repository_path(config, parent, 'web')} push origin {parent.branch}", output.getvalue())
+        self.assertIn(f"git -C {line_repository_path(config, parent, 'web')} push origin refs/heads/{parent.branch}:refs/heads/{parent.branch}", output.getvalue())
         self.assertIsNone(line_ops.find_unfinished_op(config, parent.id))
         closed = line_ops.load_op(config, op["op_id"])
         self.assertEqual(closed["phase"], "completed")

@@ -26,7 +26,7 @@
 
 推送句子今天有三套。工作区 overlay（`instructions.py:31`）禁止绕过门禁做 `git merge` / `git push`。线 overlay（`instructions.py:41-46`）要求必须跟踪 `origin/<branch>`。`PUSH_DISABLED_NOTE` 是「Dyro 不会 push；普通 `git push` 仍可用。」（`config.py:23`）。`allow_push` 为 true 时 `push_disclosure` 返回空串（`config.py:133-137`），`push_policy_fields` 不带 `push_note`（`config.py:140-143`）。
 
-会执行 `git push origin <branch>` 的位置是线 merge/sync（`workspace.py`）和 `task merge`（`tasks.py`）。都要显式 `--push`，并且 `policy.allow_push`。本地合并成功后才逐仓 push。`--push` 前已有 `git push --dry-run`（`workspace.py:825-836`）。清单不写远端 SHA。
+线 merge/sync（`workspace.py`）和 `task merge`（`tasks.py`）在显式 `--push` 且 `policy.allow_push` 时，本地合并成功后才逐仓推送。推送前把 `refs/heads/<branch>` 钉成 tip，执行 `git push origin <tip>:refs/heads/<branch>`（不用 `-u`，不用 `--force` / `--force-with-lease` / `+`）。预检是 `git push --dry-run origin refs/heads/<branch>:refs/heads/<branch>`。成功后 `[remote_anchors]` 记的是这次推送的 tip，不是事后的 HEAD。
 
 `seed_overlay_files` 在文件已存在且未 `--force` 时跳过（`instructions.py:94-96`）。`overlay_instruction_warning` 只在工作区文件缺失时发 WARN（`instructions.py:62-67`），`doctor` 调用它（`workspace.py:1439-1443`），不比较正文。
 
@@ -191,7 +191,7 @@ JSON `next` 继续使用已经跑完 `doctor` 的那只 45 秒预算。增量 Gi
 `next` 的 `push_note`、工作区 overlay、开发线 overlay、控制面技能资产使用下面三段，字节级相同。`allow_push` 为 true 时也返回这段，不再返回空串。
 
 ```text
-Dyro 默认不执行 push。只有 `policy.allow_push = true` 时才推送：`dyro line push` 推开发线分支；显式带 `--push` 的命令在本地合并成功后逐仓执行 `git push origin <分支>`。多仓 push 不是原子操作。
+Dyro 默认不执行 push。只有 `policy.allow_push = true` 时才推送：`dyro line push` 推开发线分支；显式带 `--push` 的命令在本地合并成功后逐仓推送该分支的 tip。多仓 push 不是原子操作。
 开发线的期望上游是 `origin/<line.branch>`。本地还没有这条远端分支时，doctor 给出 WARN，工作区仍可打开；这不表示可以推送。
 普通 `git push` 仍然能改远端，但不会写入 Dyro 的远端锚点，也不算通过门禁。
 ```
@@ -227,7 +227,7 @@ doctor 的 WARN 原文保持 `WARN <kind>:<id>/<repo>: missing origin/<branch>`�
 
 ### push 成功后的远端 SHA
 
-在 `workspace.py` 与 `tasks.py` 两处，每一仓 `git push` 成功后，把该仓 HEAD 的全文 SHA 写入该线的 `[remote_anchors]`。只记录 `linked-worktree`。`anchor-reference` 不写入。后一仓失败时，已成功仓的锚点保留。清单写入失败要报出来，因为 push 已经发生。
+在 `workspace.py` 与 `tasks.py` 两处，每一仓按 `git push origin <tip>:refs/heads/<branch>` 推送成功后，把这次钉住并推送的 `refs/heads/<branch>` tip 写入该线的 `[remote_anchors]`，不用事后的 HEAD。只记录 `linked-worktree`。`anchor-reference` 不写入。后一仓失败时，已成功仓的锚点保留。清单写入失败要报出来，因为 push 已经发生。
 
 持久化规则：
 
@@ -237,7 +237,7 @@ doctor 的 WARN 原文保持 `WARN <kind>:<id>/<repo>: missing origin/<branch>`�
 - 旧 Dyro 遇到版本 4 会在 `workspace.py:109-110` 拒绝解析，因此旧的 `_write_line` 不会拿到 `Line`，也不会把表抹掉。代价是：第一次写下锚点之后，旧二进制不能再加载这条线。没有锚点的线保持版本 2 或 3，旧二进制仍可读写。
 - 新的 `_write_line` 从字段写出该表。任何会持久化的 `Line(` 构造都必须带上读到的 `remote_anchors`。默认空映射只用于新建的线。漏带字段再写回，新二进制自己也会抹掉该表。
 
-不新增名为 `line publish` 的命令。顶层线和子线用 `dyro line push` 发布自己的分支：先确认 `policy.allow_push`，再取与 `line merge --push`、`retire` 相同的 L1 合并锁；再按仓库 ID 升序取 L2 anchor 锁；锁内重读清单，并拒绝该线任何未完成的操作（merge、merge-into-base、retire）。只推 `linked-worktree`。全部这类仓库预检通过后（工作树存在且是 Git、当前分支就是线分支、没有进行中的 Git 操作、同一 refspec 的 `git push --dry-run` 成功），才按清单顺序执行 `git push -u origin refs/heads/<branch>:refs/heads/<branch>`（显式同名 refspec，`push.default=upstream` 也不能把目标改到别的远端分支；`-u` 同时把上游纠正为 `origin/<branch>`）。不使用 `--force`、`--force-with-lease` 或 `+refspec`，也不要求工作树干净，只推已提交内容。成功一仓就为该仓写 `[remote_anchors]`，取值是推送前后各读一次、两次一致的 `refs/heads/<branch>` tip；不用事后的 HEAD（工作树可能已切走），也不用 `refs/remotes/origin/<branch>`（窄 fetch refspec 下不会更新）；推送期间分支移动则不写该仓锚点并报错；`anchor-reference` 跳过、不写锚点。跨仓不原子：后一仓失败时，已成功仓的锚点保留。锚点写入失败要报出来，因为 push 已经发生。`spawn` 不发布。终端里的普通 `git push` 不写 `[remote_anchors]`。`policy.allow_push = true` 时，`line merge` / `line sync` / `task merge` 仍可显式加 `--push`。
+不新增名为 `line publish` 的命令。顶层线和子线用 `dyro line push` 发布自己的分支：先确认 `policy.allow_push`，再取与 `line merge --push`、`retire` 相同的 L1 合并锁；再按仓库 ID 升序取 L2 anchor 锁；锁内重读清单，并拒绝该线任何未完成的操作（merge、merge-into-base、retire）。只推 `linked-worktree`。全部这类仓库预检通过后（工作树存在且是 Git、当前分支就是线分支、没有进行中的 Git 操作、同一 refspec 的 `git push --dry-run` 成功），才按清单顺序执行 `git push -u origin refs/heads/<branch>:refs/heads/<branch>`（显式同名 refspec，`push.default=upstream` 也不能把目标改到别的远端分支；`-u` 同时把上游纠正为 `origin/<branch>`）。不使用 `--force`、`--force-with-lease` 或 `+refspec`，也不要求工作树干净，只推已提交内容。成功一仓就为该仓写 `[remote_anchors]`，取值是推送前后各读一次、两次一致的 `refs/heads/<branch>` tip；不用事后的 HEAD（工作树可能已切走），也不用 `refs/remotes/origin/<branch>`（窄 fetch refspec 下不会更新）；推送期间分支移动则不写该仓锚点并报错；`anchor-reference` 跳过、不写锚点。跨仓不原子：后一仓失败时，已成功仓的锚点保留。锚点写入失败要报出来，因为 push 已经发生。`spawn` 不发布。终端里的普通 `git push` 不写 `[remote_anchors]`。`policy.allow_push = true` 时，`line merge` / `line sync` / `task merge` 仍可显式加 `--push`：推送前钉住 `refs/heads/<branch>` 的 tip，执行 `git push origin <tip>:refs/heads/<branch>`（不用 `-u`），并把 `[remote_anchors]` 记成这个 tip。
 
 ## 4. 延期
 
@@ -270,7 +270,7 @@ doctor 的 WARN 原文保持 `WARN <kind>:<id>/<repo>: missing origin/<branch>`�
 - doctor 对与模板不同的已有 `AGENTS.md` / `CLAUDE.md` 发 WARN；缺失文件仍是原来的缺失 WARN；doctor 不改文件。不带 `--force` 的 seed 保持原字节。
 - 已有 overlay 超过单文件上限（`FILE_TOO_LARGE`），或这一份文件为 `UNSAFE_FILE`：一条「无法核对」WARN，doctor 继续并返回其余 findings。`AGGREGATE_BYTES_EXCEEDED` 与 `DEADLINE_EXCEEDED` 不降级成这条 WARN。截止仍由 doctor 收成 partial 返回；aggregate 在保存 findings 后重新抛出，且不会继续读清单和 Git。
 - 三段口径在 `push_note` 与两套模板中逐字相同。`allow_push=true` 时 `push_note` 仍非空。
-- 线 merge `--push` 成功后，`remote_anchors` 等于该仓 HEAD，清单为 schema_version 4。第二仓失败时第一仓锚点仍在。`anchor-reference` 不出现在表里。无锚点的旧清单仍是版本 2 或 3 且能加载。版本 4 能往返 `_parse_line_content` 与 `_write_line` 而不丢表。构造 `Line` 时漏掉该字段再写回，测试要失败。
+- 线 merge `--push` 成功后，`remote_anchors` 等于这次推送钉住的 `refs/heads/<branch>` tip（`git push origin <tip>:refs/heads/<branch>`），清单为 schema_version 4。第二仓失败时第一仓锚点仍在。`anchor-reference` 不出现在表里。无锚点的旧清单仍是版本 2 或 3 且能加载。版本 4 能往返 `_parse_line_content` 与 `_write_line` 而不丢表。构造 `Line` 时漏掉该字段再写回，测试要失败。
 
 ## 7. 实现边界
 

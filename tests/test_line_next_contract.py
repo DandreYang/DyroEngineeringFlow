@@ -186,11 +186,13 @@ class LineNextContractTests(WorkspaceCase):
         target = replace(self.line, repositories=('api', 'web'))
         plans = tuple(_LineMergePlan(r, self.root / r, 'a'*40, 'b'*40) for r in target.repositories)
         def fake_git(path, *argv, **kwargs):
+            if argv[:2] == ('rev-parse', '--verify') and str(argv[-1]).startswith('refs/heads/'):
+                return Mock(code=0, stdout='c' * 40 + '\n', argv=argv)
             if argv[:2] == ('rev-parse', '--verify'):
-                return Mock(code=1, stdout='')
+                return Mock(code=1, stdout='', argv=argv)
             if argv[0] == 'push' and path.name == 'web':
-                return Mock(code=1, stdout='rejected')
-            return Mock(code=0, stdout='')
+                return Mock(code=1, stdout='rejected', argv=argv)
+            return Mock(code=0, stdout='', argv=argv)
         with patch('dyro.workspace._prepare_line_merge_plans', return_value=plans), patch('dyro.workspace.git', side_effect=fake_git), patch('dyro.workspace.git_read', return_value=Mock(code=0, stdout='c'*40)), patch('dyro.workspace._line_ledger'):
             with self.assertRaisesRegex(Exception, '推送 web 失败'):
                 _merge_line_repositories_locked(self.config, target=target, source=self.line,
