@@ -20,6 +20,7 @@ from ..read_limits import (
     ReadLimitCode,
     ReadLimitError,
     bounded_directory_names,
+    canonical_entry_path,
     trusted_system_alias_target,
 )
 from ..state import atomic_write_text, exclusive_lock, fsync_directory
@@ -217,7 +218,7 @@ def _absolute_path(value: Path, label: str) -> Path:
     expanded = value.expanduser()
     if not expanded.is_absolute():
         raise ValidationError(f"{label} 必须是绝对路径：{value}")
-    return Path(os.path.normpath(expanded))
+    return canonical_entry_path(Path(os.path.normpath(expanded)))
 
 
 def _dyro_home(override: Path | None) -> Path:
@@ -682,7 +683,12 @@ def _inspect_avatar(
             str(avatar.readlink()) if avatar.is_symlink() else str(avatar.resolve()),
         )
     if avatar.is_dir() and not avatar.is_symlink():
-        if recorded is not None and str(recorded.get("path")) == str(avatar):
+        recorded_path = recorded.get("path") if recorded is not None else None
+        if (
+            isinstance(recorded_path, str)
+            and canonical_entry_path(Path(recorded_path))
+            == canonical_entry_path(avatar)
+        ):
             return AvatarStatus(host, avatar, "drifted", "分身被替换为普通目录")
         # Owned legacy copy may still sit here before migration.
         return AvatarStatus(
@@ -723,9 +729,13 @@ def _legacy_owned_copy(
     except ValidationError:
         return None
     target = Path(str(manifest["target"]))
-    if expected_target is not None and target != expected_target:
+    if expected_target is not None and canonical_entry_path(target) != canonical_entry_path(
+        expected_target
+    ):
         return None
-    if allowed_targets is not None and target not in allowed_targets:
+    if allowed_targets is not None and canonical_entry_path(target) not in {
+        canonical_entry_path(path) for path in allowed_targets
+    }:
         return None
     if target.is_symlink() or not target.is_dir():
         return None
@@ -899,7 +909,11 @@ def integration_status(
             tuple(avatar_rows),
         )
 
-    if manifest["mirror"] != str(mirror):
+    stored_mirror = manifest["mirror"]
+    if (
+        not isinstance(stored_mirror, str)
+        or canonical_entry_path(Path(stored_mirror)) != canonical_entry_path(mirror)
+    ):
         return IntegrationStatus(
             requested,
             IntegrationState.STALE_MANIFEST,
@@ -1186,7 +1200,11 @@ def _restored_owned_installation(
         if manifest_path.read_text(encoding="utf-8") != original_manifest_text:
             return False
         manifest = _parse_manifest(manifest_path, spec)
-        if manifest["mirror"] != str(mirror):
+        stored_mirror = manifest["mirror"]
+        if (
+            not isinstance(stored_mirror, str)
+            or canonical_entry_path(Path(stored_mirror)) != canonical_entry_path(mirror)
+        ):
             return False
         if _inventory(mirror) != manifest["files"]:
             return False
@@ -1279,7 +1297,8 @@ def _install_avatars(
             if avatar.exists() or avatar.is_symlink():
                 if (
                     legacy_target is not None
-                    and avatar == legacy_target
+                    and canonical_entry_path(avatar)
+                    == canonical_entry_path(legacy_target)
                     and avatar in allowed
                     and avatar.is_dir()
                     and not avatar.is_symlink()

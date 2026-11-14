@@ -188,16 +188,26 @@ def trusted_system_alias_target(path: Path) -> Path | None:
     return None
 
 
-def _checked_absolute(path: Path, label: str) -> Path:
-    if any(part in {".", ".."} for part in path.parts):
-        raise ValidationError(f"{label} 不得包含点路径分量")
+def canonical_entry_path(path: Path) -> Path:
+    """Absolute path with trusted macOS ``/tmp`` / ``/var`` aliases rewritten.
+
+    Does not follow arbitrary symlinks. Use this when two spellings of the same
+    entry directory must compare equal (for example ``/tmp/x`` vs ``/private/tmp/x``).
+    """
     absolute = path.absolute()
-    if not absolute.is_absolute() or not absolute.anchor:
-        raise ValidationError(f"{label} 必须是绝对路径")
     if len(absolute.parts) > 1:
         target = trusted_system_alias_target(Path(*absolute.parts[:2]))
         if target is not None:
-            absolute = target.joinpath(*absolute.parts[2:])
+            return target.joinpath(*absolute.parts[2:])
+    return absolute
+
+
+def _checked_absolute(path: Path, label: str) -> Path:
+    if any(part in {".", ".."} for part in path.parts):
+        raise ValidationError(f"{label} 不得包含点路径分量")
+    absolute = canonical_entry_path(path)
+    if not absolute.is_absolute() or not absolute.anchor:
+        raise ValidationError(f"{label} 必须是绝对路径")
     return absolute
 
 
