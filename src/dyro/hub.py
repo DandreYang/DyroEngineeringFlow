@@ -9,7 +9,7 @@ from typing import Callable
 
 from .config import Config, load, validate_id
 from .errors import DyroError, ValidationError
-from .read_limits import ReadBudget, ReadLimitCode, ReadLimitError
+from .read_limits import ReadBudget, ReadLimitCode, ReadLimitError, canonical_entry_path
 from .state import atomic_write_text, exclusive_lock
 
 
@@ -179,15 +179,15 @@ def unregistered_workspace_error(name: str, names: tuple[str, ...]) -> DyroError
 def registry_home() -> Path:
     override = os.environ.get("DYRO_HOME", "").strip()
     if override:
-        return Path(override).expanduser().absolute()
+        return canonical_entry_path(Path(override).expanduser())
     if os.name == "nt":
         base = os.environ.get("APPDATA", "").strip()
         if base:
-            return Path(base).expanduser().absolute() / "Dyro"
+            return canonical_entry_path(Path(base).expanduser()) / "Dyro"
     base = os.environ.get("XDG_CONFIG_HOME", "").strip()
     if base:
-        return Path(base).expanduser().absolute() / "dyro"
-    return Path.home() / ".config" / "dyro"
+        return canonical_entry_path(Path(base).expanduser()) / "dyro"
+    return canonical_entry_path(Path.home() / ".config" / "dyro")
 
 
 def _registry_path() -> Path:

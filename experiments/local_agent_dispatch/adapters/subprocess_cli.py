@@ -1886,15 +1886,29 @@ class OpenCodeAdapter(SubprocessCliAdapter):
             )
 
 
+def _grok_models_confirms_login(stdout: str) -> bool:
+    """Accept only grok models banners captured from a logged-in CLI.
+
+    A session prints "You are logged in with". An API key with no session
+    prints "You are using XAI_API_KEY." A logged-out CLI still exits 0 and
+    prints "You are not authenticated."; that marker wins if both appear.
+    """
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", stdout)
+    if "You are not authenticated" in plain:
+        return False
+    return (
+        "You are logged in with" in plain or "You are using XAI_API_KEY" in plain
+    )
+
+
 class GrokAdapter(SubprocessCliAdapter):
     def authenticated(self) -> bool:
         completed = self._probe(["grok", "models"], timeout_seconds=10.0)
         if completed is None:
             return False
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", completed.stdout)
-        ready = "You are logged in with" in plain
+        ready = _grok_models_confirms_login(completed.stdout)
         if not ready:
-            self._probe_failure_reason = "Grok models did not confirm a logged-in session"
+            self._probe_failure_reason = "Grok models did not confirm authentication"
         return ready
 
     def run(

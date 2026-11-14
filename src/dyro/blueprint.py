@@ -19,6 +19,7 @@ from .config import CONFIG_NAME, Config, load, validate_id
 from .errors import DyroError, ValidationError
 from .onboarding import RepositoryInput, render_config
 from .process import git, require_ok, run
+from .read_limits import canonical_entry_path
 from .state import atomic_write_text, exclusive_lock
 from .workspace import STORAGE_MODES, Line, create_line, doctor, get_line, is_missing_origin_finding
 
@@ -453,7 +454,9 @@ def load_blueprint_source(
 def default_join_root(blueprint: Blueprint) -> Path:
     override = os.environ.get("DYRO_PROJECTS_HOME", "").strip()
     parent = Path(override).expanduser() if override else Path.home() / "DyroProjects"
-    return (parent / blueprint.suggested_directory).absolute()
+    # Rewrite trusted macOS /tmp|/var aliases only; keep user symlinks visible
+    # to preflight_join_plan / _reject_symlink_components.
+    return canonical_entry_path(parent / blueprint.suggested_directory)
 
 
 def build_join_plan(
@@ -472,7 +475,7 @@ def build_join_plan(
             f"蓝图中没有开发线 {selected_line}；可选：{', '.join(sorted(blueprint.lines))}"
         ) from exc
     root = (
-        Path(target).expanduser().absolute()
+        canonical_entry_path(Path(target).expanduser())
         if target is not None
         else default_join_root(blueprint)
     )

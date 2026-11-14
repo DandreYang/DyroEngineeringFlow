@@ -13,10 +13,12 @@ from dyro.blueprint import (
     build_join_plan,
     load_blueprint_source,
     parse_blueprint,
+    preflight_join_plan,
 )
 from dyro.cli import main
 from dyro.config import load
 from dyro.errors import DyroError, ValidationError
+from dyro.read_limits import canonical_entry_path
 from dyro.workspace import doctor, get_line, is_missing_origin_finding
 
 from .support import shell
@@ -410,6 +412,39 @@ class BlueprintJoinTests(unittest.TestCase):
 
         with self.assertRaisesRegex(DyroError, "不能经过符号链接"):
             load_blueprint_source(str(source), blueprint_file="config/team.toml")
+
+    @unittest.skipUnless(
+        Path("/tmp").is_symlink() and Path("/tmp").resolve() == Path("/private/tmp"),
+        "requires the macOS /tmp system alias",
+    )
+    def test_join_plan_root_resolves_tmp_alias_spelling(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-join-alias-", dir="/tmp") as temporary:
+            canonical = Path(temporary).resolve()
+            try:
+                alias = Path("/tmp") / canonical.relative_to("/private/tmp")
+            except ValueError:
+                self.skipTest("temporary directory is not below /private/tmp")
+            target = alias / "workspace"
+            document = load_blueprint_source(str(self.blueprint_file))
+            plan = build_join_plan(document, target=target, line_id=None)
+            self.assertEqual(plan.root, canonical_entry_path(target))
+            self.assertEqual(plan.root, canonical / "workspace")
+
+    def test_join_refuses_symlinked_target_root(self) -> None:
+        real = self.parent / "real-workspace"
+        real.mkdir()
+        link = self.parent / "workspace-link"
+        link.symlink_to(real, target_is_directory=True)
+        plan = build_join_plan(
+            load_blueprint_source(str(self.blueprint_file)),
+            target=link,
+            line_id=None,
+        )
+        self.assertEqual(plan.root, canonical_entry_path(link))
+        self.assertTrue(plan.root.is_symlink())
+        with self.assertRaisesRegex(DyroError, "目标工作区不能是符号链接"):
+            preflight_join_plan(plan)
+        self.assertEqual(list(real.iterdir()), [])
 
 
 if __name__ == "__main__":

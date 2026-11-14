@@ -23,6 +23,7 @@ from dyro.integrations import (
     uninstall_integration,
 )
 from dyro.integrations import manager
+from dyro.read_limits import canonical_entry_path
 
 
 def _record_protocol_section(skill: str) -> str:
@@ -59,7 +60,8 @@ def _has_test_verdict_polarity(plain: str) -> bool:
 class IntegrationManagerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="dyro-integrations-")
-        self.root = Path(self.tmp.name)
+        # Match registry_home()/_dyro_home() which rewrite macOS /var → /private/var.
+        self.root = canonical_entry_path(Path(self.tmp.name))
         self.codex_home = self.root / "codex"
         self.claude_home = self.root / "claude"
         self.dyro_home = self.root / "dyro"
@@ -1533,6 +1535,135 @@ class IntegrationManagerTests(unittest.TestCase):
         self.assertTrue(hermes_home.is_dir())
         self.assertFalse(opencode_avatar.exists() or opencode_avatar.is_symlink())
         self.assertFalse(hermes_avatar.exists() or hermes_avatar.is_symlink())
+
+
+_MACOS_TMP_ALIAS = (
+    Path("/tmp").is_symlink() and Path("/tmp").resolve() == Path("/private/tmp")
+)
+
+
+class MacOSTmpAliasIntegrationTests(unittest.TestCase):
+    @unittest.skipUnless(_MACOS_TMP_ALIAS, "requires the macOS /tmp system alias")
+    def test_manifest_mirror_tmp_alias_spelling_is_not_stale(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-int-alias-", dir="/tmp") as temporary:
+            canonical_home = Path(temporary).resolve()
+            try:
+                alias_home = Path("/tmp") / canonical_home.relative_to("/private/tmp")
+            except ValueError:
+                self.skipTest("temporary directory is not below /private/tmp")
+
+            codex_home = canonical_home / "codex"
+            fake_home = canonical_home / "home"
+            codex_home.mkdir()
+            fake_home.mkdir()
+            isolated_hosts = {
+                spec.env_var: "" for spec in manager.HOSTS if spec.env_var
+            }
+            env = {
+                **isolated_hosts,
+                "CODEX_HOME": str(codex_home),
+                "HOME": str(fake_home),
+                "DYRO_NO_UPDATE_CHECK": "1",
+            }
+            with patch.dict(os.environ, {**env, "DYRO_HOME": str(canonical_home)}):
+                installed = install_integration("skill", yes=True)
+                self.assertEqual(installed.status.state, IntegrationState.CURRENT)
+                manifest_path = canonical_home / "integrations" / "skill.json"
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                private_mirror = Path(payload["mirror"])
+                alias_mirror = Path("/tmp") / private_mirror.relative_to("/private/tmp")
+                payload["mirror"] = str(alias_mirror)
+                for meta in payload["avatars"].values():
+                    private_avatar = Path(meta["path"])
+                    meta["path"] = str(
+                        Path("/tmp") / private_avatar.relative_to("/private/tmp")
+                    )
+                manifest_path.write_text(
+                    json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+            with patch.dict(os.environ, {**env, "DYRO_HOME": str(alias_home)}):
+                status = integration_status("skill")
+                self.assertEqual(status.state, IntegrationState.CURRENT)
+                self.assertNotEqual(status.state, IntegrationState.STALE_MANIFEST)
+
+    @unittest.skipUnless(_MACOS_TMP_ALIAS, "requires the macOS /tmp system alias")
+    def test_avatar_record_tmp_alias_spelling_still_matches(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-avatar-alias-", dir="/tmp") as temporary:
+            canonical = Path(temporary).resolve()
+            try:
+                alias = Path("/tmp") / canonical.relative_to("/private/tmp")
+            except ValueError:
+                self.skipTest("temporary directory is not below /private/tmp")
+            avatar = canonical / "skills" / "dyro-control-plane"
+            avatar.mkdir(parents=True)
+            recorded = {"path": str(alias / "skills" / "dyro-control-plane"), "kind": "symlink"}
+            status = manager._inspect_avatar(
+                host="codex",
+                avatar=avatar,
+                mirror=canonical / "mirror",
+                host_home=canonical,
+                recorded=recorded,
+            )
+            self.assertEqual(status.state, "drifted")
+
+    @unittest.skipUnless(_MACOS_TMP_ALIAS, "requires the macOS /tmp system alias")
+    def test_legacy_manifest_tmp_alias_target_is_recognized(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dyro-legacy-alias-", dir="/tmp") as temporary:
+            canonical = Path(temporary).resolve()
+            try:
+                alias = Path("/tmp") / canonical.relative_to("/private/tmp")
+            except ValueError:
+                self.skipTest("temporary directory is not below /private/tmp")
+
+            codex_home = canonical / "codex"
+            fake_home = canonical / "home"
+            dyro_home = canonical / "dyro"
+            codex_home.mkdir()
+            fake_home.mkdir()
+            avatar = codex_home / "skills" / "dyro-control-plane"
+            avatar.mkdir(parents=True)
+            files = manager._asset_inventory()
+            for relative in files:
+                destination = avatar / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes((manager._asset_root() / relative).read_bytes())
+
+            alias_avatar = alias / "codex" / "skills" / "dyro-control-plane"
+            legacy = {
+                "schema_version": 1,
+                "integration": "codex",
+                "asset_version": manager.ASSET_VERSION,
+                "asset_digest": manager._asset_digest(files),
+                "target": str(alias_avatar),
+                "files": files,
+            }
+            legacy_manifest = dyro_home / "integrations" / "codex.json"
+            legacy_manifest.parent.mkdir(parents=True, exist_ok=True)
+            legacy_manifest.write_text(
+                json.dumps(legacy, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            isolated_hosts = {
+                spec.env_var: "" for spec in manager.HOSTS if spec.env_var
+            }
+            env = {
+                **isolated_hosts,
+                "CODEX_HOME": str(codex_home),
+                "DYRO_HOME": str(dyro_home),
+                "HOME": str(fake_home),
+                "DYRO_NO_UPDATE_CHECK": "1",
+            }
+            with patch.dict(os.environ, env):
+                status = integration_status("skill")
+                self.assertEqual(status.state, IntegrationState.OUTDATED)
+                migrated = install_integration("skill", yes=True)
+                self.assertEqual(migrated.status.state, IntegrationState.CURRENT)
+                self.assertTrue(avatar.is_symlink())
+                self.assertFalse(legacy_manifest.exists())
 
 
 if __name__ == "__main__":
