@@ -236,7 +236,7 @@ def update_repo_phase(
 
 
 def finish_op(config: Config, op_id: str, *, phase: str) -> None:
-    """Close only reconciled operations; unknown/pending keeps blocking."""
+    """Close reconciled operations, allowing report-only recovery of pushes."""
     if phase not in TERMINAL_PHASES:
         raise ValidationError("操作终态必须是 completed 或 aborted")
     op = load_op(config, op_id)
@@ -245,9 +245,16 @@ def finish_op(config: Config, op_id: str, *, phase: str) -> None:
             raise DyroError(f"操作已以 {op['phase']} 结束：{op_id}")
         return
     for repo_id, repo in op["repositories"].items():
+        # Recovery may acknowledge an unknown idempotent push after the merge
+        # is reconciled. A missing push result must still keep the op open.
         if repo["phase"] == "unknown" or repo["outcome"] in {"", "pending", "unknown"} or any(
-            "result" not in step or step["result"].get("outcome") in {None, "", "pending", "unknown"}
-            for step in repo["steps"].values()
+            "result" not in step or step["result"].get("outcome") in {None, "", "pending"}
+            or (step["result"].get("outcome") == "unknown" and not (
+                action == "push" and op["kind"] == "merge"
+                and op["effective_options"].get("push")
+                and repo["outcome"] in {"committed", "already_included"}
+            ))
+            for action, step in repo["steps"].items()
         ):
             raise DyroError(f"仓库尚未完成对账，不能结束操作：{op_id}/{repo_id}")
     op["phase"] = phase

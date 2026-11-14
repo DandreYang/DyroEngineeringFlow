@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import json
 from contextlib import contextmanager, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 import subprocess
 from unittest.mock import patch
@@ -45,8 +46,8 @@ def _commit_text(worktree: Path, filename: str, content: str, message: str) -> s
 
 
 class CrossLineMergeTests(WorkspaceCase):
-    def _enable_web(self):
-        web = self.root / "repositories/web"
+    def _enable_web(self, repo_id="web"):
+        web = self.root / f"repositories/{repo_id}"
         web.mkdir(parents=True)
         shell("git", "init", "-b", "main", cwd=web)
         shell("git", "config", "user.name", "Test User", cwd=web)
@@ -57,7 +58,7 @@ class CrossLineMergeTests(WorkspaceCase):
         config_path = self.root / "dyro.toml"
         config_path.write_text(
             config_path.read_text(encoding="utf-8")
-            + '\n[repositories.web]\npath = "repositories/web"\nmount = "clients/web"\n',
+            + f'\n[repositories.{repo_id}]\npath = "repositories/{repo_id}"\nmount = "clients/{repo_id}"\n',
             encoding="utf-8",
         )
         return load(self.root), web
@@ -751,6 +752,165 @@ class CrossLineMergeTests(WorkspaceCase):
         workspace.merge_line(config, child.id, parent.id)
         events = read_events_fail_closed(config)
         self.assertTrue(any(e["kind"] == "merge" and e["facts"].get("op_id") for e in events))
+
+    def _push_parent_child(self, *, three_repos=False):
+        config, _ = self._enable_web()
+        if three_repos:
+            config, _ = self._enable_web("worker")
+        for repo in config.repositories:
+            publish_origin_branch(self.root / config.repositories[repo].path, "feat/alpha")
+        parent = create_line(config, line_id="alpha", branch="feat/alpha", base="main")
+        child = workspace.spawn_line(config, parent.id, "child")
+        for repo in child.repositories:
+            _commit_text(line_repository_path(config, child, repo), "child.txt", repo, "child")
+        return replace(config, policy=replace(config.policy, allow_push=True)), parent, child
+
+    def test_into_push_journals_before_push_and_completes_after_anchors(self) -> None:
+        config, parent, child = self._push_parent_child()
+        original_git = workspace.git
+        original_finish = workspace.finish_op
+        pushed = []
+
+        def observe_push(repo, *args, **kwargs):
+            if args == ("push", "origin", parent.branch):
+                op = line_ops.find_unfinished_op(config, parent.id)
+                self.assertIsNotNone(op)
+                repo_id = next(r for r in parent.repositories
+                               if line_repository_path(config, parent, r) == repo)
+                step = op["repositories"][repo_id]["steps"]["push"]
+                self.assertEqual(step["intent"]["target_sha"], workspace._head_sha(repo))
+                self.assertNotIn("result", step)
+                self.assertEqual(set(workspace.get_line(config, parent.id).remote_anchors), set(pushed))
+                self.assertFalse(config.ledger_file.exists() and '"pushed": true' in config.ledger_file.read_text())
+                pushed.append(repo_id)
+            return original_git(repo, *args, **kwargs)
+
+        def observe_finish(config, op_id, *, phase):
+            op = line_ops.load_op(config, op_id)
+            self.assertEqual(pushed, ["api", "web"])
+            for repo_id in pushed:
+                self.assertEqual(op["repositories"][repo_id]["steps"]["push"]["result"]["outcome"], "pushed")
+            self.assertEqual(set(workspace.get_line(config, parent.id).remote_anchors), set(pushed))
+            return original_finish(config, op_id, phase=phase)
+
+        with patch.object(workspace, "git", side_effect=observe_push), \
+                patch.object(workspace, "finish_op", side_effect=observe_finish):
+            workspace.merge_line(config, child.id, parent.id, push=True)
+        op_path = next((self.root / ".dyro/ops").glob("*.json"))
+        op = line_ops.load_op(config, op_path.stem)
+        self.assertEqual(op["phase"], "completed")
+        anchors = workspace.get_line(config, parent.id).remote_anchors
+        self.assertEqual(anchors, {r: workspace._head_sha(line_repository_path(config, parent, r))
+                                   for r in parent.repositories})
+        self.assertIn("schema_version = 4", (config.lines_state_dir / "alpha.toml").read_text())
+        rows = [json.loads(row) for row in config.ledger_file.read_text().splitlines()]
+        self.assertEqual({r["repository"] for r in rows if r.get("pushed")}, {"api", "web"})
+        events = read_events_fail_closed(config)
+        self.assertEqual(len([e for e in events if e["facts"].get("op_id") == op["op_id"]]), 1)
+
+    def test_into_push_failure_keeps_anchor_and_can_rerun(self) -> None:
+        config, parent, child = self._push_parent_child(three_repos=True)
+        original_git = workspace.git
+
+        def fail_second_push(repo, *args, **kwargs):
+            if args == ("push", "origin", parent.branch):
+                self.assertNotEqual(repo, line_repository_path(config, parent, "worker"))
+            if repo == line_repository_path(config, parent, "web") and args == ("push", "origin", parent.branch):
+                return Result(("git", *args), 1, "rejected")
+            return original_git(repo, *args, **kwargs)
+
+        with patch.object(workspace, "git", side_effect=fail_second_push):
+            with self.assertRaisesRegex(DyroError, "推送 web 失败；本地合并已保留，已推送仓库：api\nrejected"):
+                workspace.merge_line(config, child.id, parent.id, push=True)
+        op_path = next((self.root / ".dyro/ops").glob("*.json"))
+        op = line_ops.load_op(config, op_path.stem)
+        self.assertEqual(op["phase"], "completed")
+        self.assertIsNone(line_ops.find_unfinished_op(config, parent.id))
+        self.assertEqual(op["repositories"]["api"]["steps"]["push"]["result"]["outcome"], "pushed")
+        self.assertEqual(op["repositories"]["web"]["steps"]["push"]["result"]["outcome"], "push_failed")
+        worker_step = op["repositories"]["worker"]["steps"]["push"]
+        self.assertEqual(worker_step["intent"]["branch"], parent.branch)
+        self.assertEqual(worker_step["intent"]["target_sha"], workspace._head_sha(line_repository_path(config, parent, "worker")))
+        self.assertEqual(worker_step["result"]["outcome"], "not_attempted")
+        self.assertEqual(set(workspace.get_line(config, parent.id).remote_anchors), {"api"})
+        rows = [json.loads(row) for row in config.ledger_file.read_text().splitlines()]
+        success_rows = [r for r in rows if r["phase"] == "line_merge" and r.get("op_id") == op["op_id"]]
+        self.assertEqual(len(success_rows), 3)
+        self.assertEqual({r["repository"]: r["pushed"] for r in success_rows},
+                         {"api": True, "web": False, "worker": False})
+        self.assertEqual({r["outcome"] for r in success_rows}, {"committed"})
+        self.assertEqual([r["pushed_repositories"] for r in rows if r["phase"] == "push_failed"], [["api"]])
+        self.assertFalse(any(e["facts"].get("op_id") == op["op_id"] for e in read_events_fail_closed(config)))
+        workspace.merge_line(config, child.id, parent.id, push=True)
+        self.assertEqual(set(workspace.get_line(config, parent.id).remote_anchors), {"api", "web", "worker"})
+        retry = next(line_ops.load_op(config, p.stem) for p in op_path.parent.glob("*.json") if p != op_path)
+        self.assertEqual(retry["phase"], "completed")
+        self.assertEqual({r["outcome"] for r in retry["repositories"].values()}, {"already_included"})
+
+    def _assert_into_push_crash_recovery(self, *, after_push: bool, after_anchor: bool = False) -> None:
+        config, parent, child = self._push_parent_child()
+        original_git = workspace.git
+        original_anchor = workspace.record_remote_anchor
+
+        def crash_second_push(repo, *args, **kwargs):
+            if not after_anchor and repo == line_repository_path(config, parent, "web") and args == ("push", "origin", parent.branch):
+                if after_push:
+                    self.assertEqual(original_git(repo, *args, **kwargs).code, 0)
+                raise SystemExit("power loss during push")
+            return original_git(repo, *args, **kwargs)
+
+        def crash_second_anchor(config, line, repo_id, path):
+            updated = original_anchor(config, line, repo_id, path)
+            if after_anchor and repo_id == "web":
+                raise SystemExit("power loss after anchor")
+            return updated
+
+        with patch.object(workspace, "git", side_effect=crash_second_push), \
+                patch.object(workspace, "record_remote_anchor", side_effect=crash_second_anchor):
+            with self.assertRaises(SystemExit):
+                workspace.merge_line(config, child.id, parent.id, push=True)
+        op = line_ops.find_unfinished_op(config, parent.id)
+        self.assertIsNotNone(op)
+        self.assertNotIn("result", op["repositories"]["web"]["steps"]["push"])
+        with self.assertRaisesRegex(DyroError, "未完成操作"):
+            workspace.merge_line(config, child.id, parent.id, push=True)
+        expected_anchors = {"api", "web"} if after_anchor else {"api"}
+        self.assertEqual(set(workspace.get_line(config, parent.id).remote_anchors), expected_anchors)
+        manifest_before = (config.lines_state_dir / "alpha.toml").read_bytes()
+
+        def read_only_git(repo, *args, **kwargs):
+            self.assertIn(args[0], {"rev-parse", "merge-base"})
+            return original_git(repo, *args, **kwargs)
+
+        output = io.StringIO()
+        with patch.object(workspace, "git", side_effect=read_only_git), \
+                patch.object(workspace, "record_remote_anchor", side_effect=AssertionError("recover wrote anchor")), \
+                redirect_stdout(output):
+            recovered = recover_line_merge(config, parent.id, op_id=op["op_id"])
+        self.assertEqual(set(recovered.outcomes.values()), {"committed"})
+        self.assertIn("web: push unknown", output.getvalue())
+        self.assertIn(f"dyro line merge {child.id} --into {parent.id} --push", output.getvalue())
+        self.assertIn(f"git -C {line_repository_path(config, parent, 'web')} push origin {parent.branch}", output.getvalue())
+        self.assertIsNone(line_ops.find_unfinished_op(config, parent.id))
+        closed = line_ops.load_op(config, op["op_id"])
+        self.assertEqual(closed["phase"], "completed")
+        self.assertEqual(closed["repositories"]["web"]["steps"]["push"]["result"]["outcome"], "unknown")
+        self.assertEqual(set(workspace.get_line(config, parent.id).remote_anchors), expected_anchors)
+        self.assertEqual((config.lines_state_dir / "alpha.toml").read_bytes(), manifest_before)
+        rows = [json.loads(row) for row in config.ledger_file.read_text().splitlines()]
+        self.assertEqual({r["repository"]: r["pushed"] for r in rows if r.get("op_id") == op["op_id"]},
+                         {"api": True, "web": False})
+        workspace.merge_line(config, child.id, parent.id, push=True)
+        self.assertEqual(set(workspace.get_line(config, parent.id).remote_anchors), {"api", "web"})
+
+    def test_into_push_intent_without_result_recovers_without_git_write(self) -> None:
+        self._assert_into_push_crash_recovery(after_push=False)
+
+    def test_into_push_death_after_git_success_still_reports_unknown(self) -> None:
+        self._assert_into_push_crash_recovery(after_push=True)
+
+    def test_into_push_death_after_anchor_still_reports_unknown(self) -> None:
+        self._assert_into_push_crash_recovery(after_push=True, after_anchor=True)
 
     def test_merge_into_base_has_no_allow_partial_option_or_help(self) -> None:
         from dyro.cli import build_parser

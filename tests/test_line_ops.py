@@ -161,6 +161,53 @@ class LineOpsTests(WorkspaceCase):
                         line_ops.record_repo_result(self.config, op_id, "api", "save", outcome=replacement, new_tip="changed")
                     self.assertEqual(line_ops.op_path(self.config, op_id).read_bytes(), before)
 
+    def test_only_reconciled_merge_can_close_acknowledged_unknown_push(self) -> None:
+        for kind, requested, outcome, can_close in (
+            ("merge", True, "committed", True),
+            ("merge", True, "already_included", True),
+            ("merge", True, "unknown", False),
+            ("merge", False, "committed", False),
+            ("retire", True, "committed", False),
+        ):
+            with self.subTest(kind=kind, requested=requested, outcome=outcome):
+                op_id = self._create_op(kind=kind, effective_options={"push": requested})["op_id"]
+                self._finish_repos(op_id, outcome=outcome)
+                line_ops.record_repo_intent(
+                    self.config, op_id, "api", "merge", original_head="old", target_sha="new"
+                )
+                line_ops.record_repo_result(self.config, op_id, "api", "merge", outcome="committed", new_tip="new")
+                line_ops.record_repo_intent(
+                    self.config, op_id, "api", "push", original_head="old", target_sha="new"
+                )
+                with self.assertRaisesRegex(DyroError, "对账"):
+                    line_ops.finish_op(self.config, op_id, phase="completed")
+                line_ops.record_repo_result(self.config, op_id, "api", "push", outcome="unknown")
+                if can_close:
+                    line_ops.finish_op(self.config, op_id, phase="completed")
+                else:
+                    with self.assertRaisesRegex(DyroError, "对账"):
+                        line_ops.finish_op(self.config, op_id, phase="completed")
+
+    def test_unknown_push_does_not_allow_unreconciled_merge_to_close(self) -> None:
+        for merge_outcome in (None, "unknown"):
+            with self.subTest(merge_outcome=merge_outcome):
+                op_id = self._create_op(kind="merge", effective_options={"push": True})["op_id"]
+                self._finish_repos(op_id, outcome="committed")
+                line_ops.record_repo_intent(
+                    self.config, op_id, "api", "push", original_head="old", target_sha="new"
+                )
+                line_ops.record_repo_result(self.config, op_id, "api", "push", outcome="unknown")
+                line_ops.record_repo_intent(
+                    self.config, op_id, "api", "merge", original_head="old", target_sha="new"
+                )
+                if merge_outcome is not None:
+                    line_ops.record_repo_result(self.config, op_id, "api", "merge", outcome=merge_outcome)
+                before = line_ops.op_path(self.config, op_id).read_bytes()
+                for phase in ("completed", "aborted"):
+                    with self.assertRaisesRegex(DyroError, "对账"):
+                        line_ops.finish_op(self.config, op_id, phase=phase)
+                    self.assertEqual(line_ops.op_path(self.config, op_id).read_bytes(), before)
+
     def test_unfinished_selection_and_block_include_subject_and_recovery(self) -> None:
         self.assertIsNone(line_ops.find_unfinished_op(self.config, "alpha"))
         first = self._create_op(op_id="first")

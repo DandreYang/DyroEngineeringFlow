@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 修复 `dyro line merge --into --push` 提前报完成和漏记远端锚点的问题；逐仓记录推送结果，失败可重试，中断后可对账并提示手动重推。0.7.17 已完成的操作不会补修；请重跑同一条 `dyro line merge <child> --into <parent> --push`，再次推送并记录锚点。
 - `dyro dispatch backends` 在 Grok CLI 只配置了 API key、`grok models` 未打印会话登录句时，也会识别为已认证；CLI 明确表示未登录时仍视为未认证。
 - 修复 macOS 上 `/tmp` 与 `/private/tmp`（以及 `/var` 与 `/private/var`）路径写法不一致时，技能清单被误判过期、进程内状态锁重入死锁，以及蓝图加入与全局主目录路径对不齐的问题；旧版清单中的原写法仍可识别。
 
