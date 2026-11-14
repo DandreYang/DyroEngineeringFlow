@@ -174,12 +174,30 @@ def _directory_flags() -> int:
     return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW
 
 
+def trusted_system_alias_target(path: Path) -> Path | None:
+    """Recognize only the conventional macOS /tmp and /var symlink targets."""
+
+    if os.name == "nt" or path.as_posix() not in {"/tmp", "/var"}:
+        return None
+    target = Path("/private") / path.name
+    try:
+        if path.is_symlink() and path.resolve(strict=True) == target:
+            return target
+    except (OSError, RuntimeError):
+        pass
+    return None
+
+
 def _checked_absolute(path: Path, label: str) -> Path:
     if any(part in {".", ".."} for part in path.parts):
         raise ValidationError(f"{label} 不得包含点路径分量")
     absolute = path.absolute()
     if not absolute.is_absolute() or not absolute.anchor:
         raise ValidationError(f"{label} 必须是绝对路径")
+    if len(absolute.parts) > 1:
+        target = trusted_system_alias_target(Path(*absolute.parts[:2]))
+        if target is not None:
+            absolute = target.joinpath(*absolute.parts[2:])
     return absolute
 
 

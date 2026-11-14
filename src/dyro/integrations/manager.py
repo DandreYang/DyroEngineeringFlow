@@ -20,6 +20,7 @@ from ..read_limits import (
     ReadLimitCode,
     ReadLimitError,
     bounded_directory_names,
+    trusted_system_alias_target,
 )
 from ..state import atomic_write_text, exclusive_lock, fsync_directory
 from .seats import (
@@ -404,23 +405,13 @@ def _asset_digest(files: Mapping[str, str]) -> str:
     return _sha256(payload.encode("utf-8"))
 
 
-def _trusted_system_symlink(path: Path) -> bool:
-    """Allow only the conventional macOS /tmp and /var compatibility aliases."""
-    if os.name == "nt" or path.as_posix() not in {"/tmp", "/var"}:
-        return False
-    try:
-        return path.resolve(strict=True).as_posix() in {"/private/tmp", "/private/var"}
-    except OSError:
-        return False
-
-
 def _symlink_component(path: Path, *, boundary: Path | None = None) -> Path | None:
     if boundary is not None and path != boundary and boundary not in path.parents:
         raise ValidationError(f"安全路径检查越界：{path}")
     current = Path(path.anchor)
     for part in path.parts[1:]:
         current /= part
-        if current.is_symlink() and not _trusted_system_symlink(current):
+        if current.is_symlink() and trusted_system_alias_target(current) is None:
             return current
         if current.exists() and not current.is_dir():
             return current
