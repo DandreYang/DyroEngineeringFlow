@@ -28,6 +28,10 @@ from experiments.local_agent_dispatch.process_identity import (
 
 from .support import WorkspaceCase
 
+# 成功路径要冷启动一个隔离子进程，高负载下会超过 5 秒。
+# 用 IsolatedOverviewService 允许的上限，避免误报 OVERVIEW_TIMEOUT。
+_SUCCESS_TIMEOUT_SECONDS = 10
+
 
 def _read_hung_descendant(marker: Path) -> tuple[int, int] | None:
     """Return ``(pid, pgid)`` only after an atomic publish is complete."""
@@ -60,7 +64,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
     def test_exec_worker_returns_overview_and_single_workspace_without_root_disclosure(self) -> None:
         service = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
         )
 
@@ -124,7 +128,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         spawn_line(config, "core_pay", "fix")
         service = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
         )
 
@@ -165,7 +169,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         self.assertEqual(raised.exception.code, "FAMILY_POST_FORBIDDEN")
         reader = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
         )
         page = reader.channel("demo", "core")
@@ -242,7 +246,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
     def test_temporary_root_is_read_without_registering_it_globally(self) -> None:
         service = IsolatedOverviewService(
             registry_state_home=self.root / "unrelated-state",
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
             target_root=self.root,
         )
@@ -280,7 +284,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         )
         service = IsolatedOverviewService(
             registry_state_home=home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
             target_root=self.root,
         )
@@ -325,7 +329,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         )
         service = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
         )
 
@@ -537,7 +541,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
     def test_parent_rejects_inspect_payload_with_procedure_or_paths(self) -> None:
         service = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
         )
         valid = service.inspect_proofs("demo")
@@ -559,7 +563,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
     def test_parent_rejects_an_inspected_summary_card(self) -> None:
         service = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
         )
         valid = service.workspace("demo")
@@ -581,7 +585,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
     def test_parent_rejects_twin_plan_or_running_unbound_from_inventory(self) -> None:
         service = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
         )
         valid = service.workspace("demo")
@@ -663,7 +667,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
     def test_parent_rejects_workspace_inventory_that_leaks_inspect(self) -> None:
         service = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
         )
         valid = service.workspace("demo")
@@ -735,7 +739,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
     def test_parent_rejects_system_tool_probe_leak(self) -> None:
         service = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
         )
         valid = service.system()
@@ -763,7 +767,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
     def test_parent_rejects_digest_consistent_events_with_path_in_facts(self) -> None:
         service = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
         )
         valid = service.events("demo")
@@ -828,7 +832,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         )
         service = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
         )
 
@@ -879,7 +883,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         create_line(load(self.root), line_id="core", branch="feat/core", base="main")
         service = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
         )
 
@@ -923,7 +927,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         self.anchor.rename(self.root / "api-missing")
         service = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
             target_root=self.root,
         )
@@ -986,7 +990,7 @@ class IsolatedOverviewServiceTests(WorkspaceCase):
         )
         service = IsolatedOverviewService(
             registry_state_home=self.home,
-            timeout_seconds=5,
+            timeout_seconds=_SUCCESS_TIMEOUT_SECONDS,
             cursor_secret=b"q" * 32,
         )
         with patch.object(service, "_run_worker", side_effect=AssertionError("worker")):
