@@ -230,7 +230,7 @@ class ConsoleArtifactPageTests(unittest.TestCase):
         from pathlib import Path
 
         metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-        self.assertEqual(metadata["project"]["version"], "0.7.19")
+        self.assertEqual(metadata["project"]["version"], "0.7.20")
 
 
 class ConsoleArtifactServiceTests(WorkspaceCase):
