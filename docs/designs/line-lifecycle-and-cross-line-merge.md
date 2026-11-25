@@ -50,7 +50,7 @@
 |------|----------|
 | per-repo merge session、`--continue` | `--abort` 已落地（见下）；`--continue` 不在计划中：冲突仍在进程内回滚，不会留下可 continue 的会话 |
 | `line add-repo`、`repo remove`/`move` | 多仓配置迁移与 anchor-reference 语义未闭合 |
-| retire `--cascade`、unarchive/adopt/reparent | 身份与子孙策略未决 |
+| retire `--cascade`、unarchive/adopt | 身份与子孙策略未决；`line reparent` 已落地（只改清单 `parent`，新父线须包含本线全部仓库且不成环） |
 | manifest 持久 `degraded` | 违背定律 II（`delivery-physics.md:77-78`） |
 | Console `lineage_edges` | 纯投影可由 events 后做 |
 | `post_merge` Profile 钩子 | 授权与 A1 门边界未定义（`delivery-physics.md:8-9`） |

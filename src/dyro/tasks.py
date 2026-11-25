@@ -63,17 +63,21 @@ STATUSES = (
     "review_pending_signoff",
     "done",
     "failed",
+    "abandoned",
 )
+# Terminal statuses that no longer block line retirement.
+FINISHED_STATUSES = frozenset({"done", "abandoned"})
 QUALITY_GATE_STATUSES = frozenset({"review", "review_pending_signoff", "done"})
 TRANSITIONS = {
-    "backlog": {"assigned"},
+    "backlog": {"assigned", "abandoned"},
     "assigned": {"in_progress", "failed"},
     "in_progress": {"waiting_answer", "review", "failed"},
     "waiting_answer": {"assigned", "in_progress", "failed"},
     "review": {"review_pending_signoff", "done", "failed"},
     "review_pending_signoff": {"done", "failed"},
-    "failed": {"assigned"},
+    "failed": {"assigned", "abandoned"},
     "done": set(),
+    "abandoned": set(),
 }
 RESULT_RE = re.compile(r"^result:\s*(DONE|BLOCKED|QUESTION)\s*$", re.IGNORECASE)
 VERDICT_RE = re.compile(r"^verdict:\s*(PASS|FAIL)\s*$", re.IGNORECASE)
@@ -282,7 +286,7 @@ def load_task(config: Config, task_id: str) -> Task:
     except DyroError:
         from .line_retire import load_retired_line
 
-        if status(config, task) != "done" or load_retired_line(config, task.line) is None:
+        if status(config, task) not in FINISHED_STATUSES or load_retired_line(config, task.line) is None:
             raise
     return task
 
@@ -404,7 +408,7 @@ def _validate_bounded_task(
         from .line_retire import load_retired_line
 
         current = current_status if current_status is not None else status_bounded(config, task, budget)
-        if current != "done" or load_retired_line(config, task.line, read_budget=budget) is None:
+        if current not in FINISHED_STATUSES or load_retired_line(config, task.line, read_budget=budget) is None:
             raise ValidationError(f"任务 {task.id} 引用了未登记开发线：{task.line}")
     return task
 
@@ -927,9 +931,12 @@ def set_status(
     force: bool = False,
     dry_run: bool = False,
     _allow_quality_gate: bool = False,
+    _allow_abandon: bool = False,
 ) -> None:
     if next_status not in STATUSES:
         raise ValidationError(f"非法状态 {next_status}，可选：{', '.join(STATUSES)}")
+    if next_status == "abandoned" and not _allow_abandon:
+        raise DyroError("放弃任务请用 dyro task abandon <id> --reason <原因>，以便记录原因")
     if next_status in QUALITY_GATE_STATUSES and not _allow_quality_gate:
         raise DyroError(
             "质量门状态只能由执行证据、独立复核或签收流程写入；"
@@ -3216,13 +3223,36 @@ def _signoff_evidence_present(task: Task) -> bool:
     return (task.directory / "signoff.json").is_file()
 
 
-def close_task(config: Config, task: Task, *, dry_run: bool = False) -> None:
+def abandon_task(config: Config, task: Task, reason: str, *, dry_run: bool = False) -> None:
+    """End a failed or never-started task for good, recording why."""
+    reason = reason.strip()
+    if not reason:
+        raise ValidationError("放弃任务必须给出原因（--reason）")
     current = status(config, task)
-    if current not in {"done", "failed"}:
-        raise DyroError(f"只能关闭 done 或 failed 任务，当前 {current}")
+    if current not in ("failed", "backlog"):
+        raise DyroError(f"只能放弃 failed 或 backlog 任务，当前 {current}")
+    set_status(config, task, "abandoned", dry_run=dry_run, _allow_abandon=True)
+    if not dry_run:
+        ledger(config, task.id, "abandoned", from_status=current, reason=reason)
+
+
+def close_task(
+    config: Config, task: Task, *, dry_run: bool = False, archive_to: Path | None = None
+) -> list[str]:
+    """Remove task worktrees and branch; returns what was archived or preserved.
+
+    Unfinished work is never dropped silently: dirty worktrees need ``archive_to``
+    and an unmerged task branch tip is kept under ``refs/dyro/closed/``.
+    """
+    from .line_retire import archive_worktree_changes
+
+    current = status(config, task)
+    if current not in {"done", "failed", "abandoned"}:
+        raise DyroError(f"只能关闭 done、failed 或 abandoned 任务，当前 {current}")
     line = get_line(config, task.line)
     branch = f"{config.policy.task_branch_prefix}{task.id}"
     root = worktree_root(config, task)
+    dirty_repos: list[tuple[str, Path]] = []
     for repo_id in task.repositories:
         destination = root / config.repositories[repo_id].mount
         anchor = repository_path(config, repo_id)
@@ -3236,6 +3266,13 @@ def close_task(config: Config, task: Task, *, dry_run: bool = False) -> None:
             ).stdout.strip()
             if dirty and current == "done":
                 raise DyroError(f"任务 worktree 不干净，拒绝关闭：{destination}")
+            if dirty and archive_to is None:
+                raise DyroError(
+                    f"任务 worktree 有未提交改动：{destination}；"
+                    f"用 --archive-to <目录> 先存档再关闭"
+                )
+            if dirty:
+                dirty_repos.append((repo_id, destination))
         if current == "done" and git(
             anchor, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"
         ).code == 0:
@@ -3244,6 +3281,16 @@ def close_task(config: Config, task: Task, *, dry_run: bool = False) -> None:
                 raise DyroError(
                     f"任务分支 {branch} 尚未合入开发线 {line.branch}，拒绝删除"
                 )
+    if archive_to is not None and archive_to.resolve().is_relative_to(root.resolve()):
+        raise DyroError(f"存档目录不能位于任务工作区内：{archive_to}")
+    preserved: list[str] = []
+    for repo_id, destination in dirty_repos:
+        target = archive_to / task.id / repo_id  # type: ignore[operator]
+        if dry_run:
+            preserved.append(f"{repo_id}: 将存档未提交改动到 {target}")
+        else:
+            saved = archive_worktree_changes(destination, target)
+            preserved.append(f"{repo_id}: 已存档 {len(saved)} 项未提交改动到 {target}")
     for repo_id in task.repositories:
         destination = root / config.repositories[repo_id].mount
         anchor = repository_path(config, repo_id)
@@ -3251,19 +3298,29 @@ def close_task(config: Config, task: Task, *, dry_run: bool = False) -> None:
             _assert_task_worktree_path(config, task, destination)
             _validate_task_worktree(config, task, repo_id, destination, branch)
             remove_args: tuple[str, ...] = ("worktree", "remove")
-            if current == "failed":
+            if current != "done":
+                # Uncommitted work was archived above; the rest is ignored files.
                 remove_args += ("--force",)
             require_ok(
                 git(anchor, *remove_args, str(destination), dry_run=dry_run),
                 f"移除 {repo_id} 任务 worktree",
             )
-        if git(anchor, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}").code == 0:
+        tip = git(anchor, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}")
+        if tip.code == 0:
+            sha = tip.stdout.strip()
+            if current != "done" and git(anchor, "merge-base", "--is-ancestor", sha, line.branch).code != 0:
+                # Keyed by tip, so re-closing after a retry never overwrites an older tip.
+                keep = f"refs/dyro/closed/{task.id}/{sha[:12]}"
+                require_ok(git(anchor, "update-ref", keep, sha, dry_run=dry_run),
+                           f"保全 {repo_id} 任务分支 {branch}")
+                preserved.append(f"{repo_id}: 未合入的任务分支{'将' if dry_run else '已'}保全为 {keep}")
             require_ok(
                 git(anchor, "branch", "-D", branch, dry_run=dry_run),
                 f"删除 {repo_id} 任务分支 {branch}",
             )
     if not dry_run:
-        ledger(config, task.id, "closed", line=line.id, branch=branch)
+        ledger(config, task.id, "closed", line=line.id, branch=branch, preserved=preserved)
+    return preserved
 
 
 def merge_task(

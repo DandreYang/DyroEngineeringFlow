@@ -425,6 +425,38 @@ class HonestyRepairTests(WorkspaceCase):
         close_task(config, task)
         self.assertFalse((root / "services/api").exists())
 
+    def test_task_close_failed_archives_dirty_work_and_keeps_unmerged_tip(self) -> None:
+        from dyro.home import _targets
+        from dyro.tasks import abandon_task, close_task, load_task, run_task, status, worktree_root
+
+        self._create_named_task()
+        config = load(self.root)
+        task = load_task(config, "T1")
+        self.assertEqual(run_task(config, task), "failed")
+        mount = worktree_root(config, task) / "services/api"
+        (mount / "work.txt").write_text("committed\n", encoding="utf-8")
+        shell("git", "add", "work.txt", cwd=mount)
+        shell("git", "commit", "-m", "task work", cwd=mount)
+        tip = shell_stdout("git", "rev-parse", "HEAD", cwd=mount)
+        (mount / "wip.txt").write_text("uncommitted\n", encoding="utf-8")
+        self.assertEqual([t.id for t in _targets(config, None) if t.kind == "task"], ["T1"])
+        with self.assertRaisesRegex(DyroError, "未提交改动.*--archive-to"):
+            close_task(config, task)
+        self.assertTrue(mount.is_dir())
+        with self.assertRaisesRegex(DyroError, "任务工作区内"):
+            close_task(config, task, archive_to=worktree_root(config, task) / "keep")
+        archive = self.root.parent / f"{self.root.name}-archive"
+        rows = close_task(config, task, archive_to=archive)
+        self.assertFalse(mount.exists())
+        self.assertEqual((archive / "T1/api/untracked/wip.txt").read_text(), "uncommitted\n")
+        anchor = repository_path(config, "api")
+        kept = f"refs/dyro/closed/T1/{tip[:12]}"
+        self.assertEqual(shell_stdout("git", "rev-parse", kept, cwd=anchor), tip)
+        self.assertTrue(any(kept in row for row in rows))
+        self.assertEqual([t.id for t in _targets(config, None) if t.kind == "task"], [])
+        abandon_task(config, task, "superseded")
+        self.assertEqual(status(config, task), "abandoned")
+
     def test_review_fail_verdict_exits_nonzero(self) -> None:
         from dyro.cli import main
         from dyro.tasks import load_task, run_task

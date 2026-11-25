@@ -826,6 +826,42 @@ def spawn_line(
     return line
 
 
+def reparent_line(config: Config, line_id: str, parent: str, *, dry_run: bool = False) -> Line:
+    """Move a line under another parent line, or detach it when ``parent`` is empty.
+
+    Only the manifest's ``parent`` changes; branch, bases and worktrees stay put.
+    """
+    from .events import append_event, validate_event_write
+
+    with line_identity_lock(config):
+        with exclusive_lock(
+            merge_lock_path(config, line_id),
+            timeout_seconds=MERGE_LOCK_TIMEOUT_SECONDS,
+        ):
+            line = get_line(config, line_id)
+            require_no_unfinished_op(config, line.id)
+            new_parent = _validate_parent_link(config, line.id, parent)
+            if new_parent == line.parent:
+                raise DyroError(f"开发线 {line.id} 的父线已是 {new_parent or '（无）'}")
+            if new_parent:
+                missing = [repo_id for repo_id in line.repositories
+                           if repo_id not in get_line(config, new_parent).repositories]
+                if missing:
+                    raise ValidationError(
+                        f"子线仓库必须是父线 {new_parent} 仓库的子集：{', '.join(missing)}"
+                    )
+            facts = {key: value for key, value in
+                     (("from_parent", line.parent), ("to_parent", new_parent)) if value}
+            event = dict(kind="reparent", actor=line.id, subject=line.id,
+                         family=new_parent or line.id, facts=facts)
+            validate_event_write(**event)
+            updated = replace(line, parent=new_parent)
+            _write_line(config, updated, dry_run=dry_run)
+    if not dry_run:
+        append_event(config, **event)
+    return updated
+
+
 def add_line_repository(
     config: Config,
     line_id: str,

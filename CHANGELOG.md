@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+对使用者的影响：失败或不再继续的任务不再永久挡住开发线退役；子线可以改挂父线；退役能自动存档脏改动和线根目录资料，并删掉退役后的空目录。**行为变化**：`dyro task close` 关闭 failed 任务时，worktree 有未提交改动会被拒绝（之前直接丢弃），需要加 `--archive-to <目录>`。新增的任务状态 `abandoned` 写入后，旧版客户端读到会报状态非法，同一工作区的客户端需要一起升级。
+
+- 新增任务终态 `abandoned` 与 `dyro task abandon <id> --reason <原因>`：只能从 failed 或 backlog 进入，原因写入 ledger；`dyro task status <id> abandoned` 会被拒绝，以免漏记原因。abandoned 和 done 一样不再阻止 `line retire`，线退役后这些任务仍可读取；`dyro start` 菜单不再列出 abandoned 任务和已经 close 的任务；目标（Objective）里有 abandoned 任务时，会像 failed 一样提示需要人处理。
+- `dyro line retire` 在本线还有任务 worktree 时拒绝退役，并提示先 `dyro task close`：线退役后 `task close` 找不到这条线，任务里的改动就没法再走存档和保全流程。
+- 新增 `dyro line reparent <线> --parent <其他线> | --detach`：只改清单里的父线，分支、基线和 worktree 不动。新父线必须包含本线的全部仓库，且不能成环；写入 `reparent` 事件。
+- `dyro line retire` 新增 `--archive-to <目录>`：退役前把各仓的未提交改动（`changes.patch` 和未跟踪文件）以及线根目录里的非仓库条目移到 `<目录>/<线>/`。补丁不受用户 diff 配置（外部 diff、textconv、颜色）影响，写入前会核对能否反向应用，完整写好后才清理原改动；遇到未跟踪的嵌套仓库直接拒绝。不能与 `--recover` 同用。`--dry-run` 会列出有脏改动的仓和这些条目。退役完成后，如果线根目录只剩 Dyro 生成且未改过的 AGENTS.md/CLAUDE.md 和空目录，就整个删掉；还有其他条目时保留，并在输出里列出。
+- `dyro line retire` 判断"本线已集成"时，不再只看父线或线的基点：依次检查父线、命名基线、`policy.default_base`、`origin/main`、`origin/master`、`origin/release`，任一包含本线 HEAD 即可。基线是固定提交 SHA 时不再拿它当目标（HEAD 不可能被自己的起点包含）。未集成时，提示写明 HEAD、已检查的目标，以及本地 `origin/<分支>` 跟踪 ref 是否与 HEAD 一致。
+- `dyro task close` 可关闭 abandoned 任务。关闭 failed/abandoned 任务时，未合入的任务分支 tip 会先保全为 `refs/dyro/closed/<任务>/<sha>` 再删分支；有未提交改动时需要 `--archive-to <目录>`，改动存到 `<目录>/<任务>/<仓>/`。
+
 ## 0.7.19 - 2026-11-15
 
 对使用者的影响：修复 `line merge` / `line sync` / `task merge` 的 `--push` 在 `push.default=upstream` 且分支上游指向别的远端分支时，会把合并结果推到那个分支（例如 `main`）的问题；新增 `dyro line add-repo`、`dyro line push` 与 `line merge --abort`。推送说明有改动，已 seed 的工作区升级后运行一次 `dyro host seed --force`。
