@@ -554,6 +554,115 @@ class LineRetireTests(WorkspaceCase):
                             families.ack_channel_message(self.config, message["id"], family="alpha", dry_run=dry_run)
             self.assertEqual(snapshot(), before)
 
+    def test_abandoned_task_unblocks_retire_and_stays_loadable(self) -> None:
+        task_path = tasks.create_task(self.config, "T1", title="gave up", line_id="alpha", repositories=["api"])
+        (task_path / "status").write_text("failed\n")
+        with self.assertRaisesRegex(DyroError, "未完成任务.*T1.*task abandon"):
+            line_retire.retire_line(self.config, "alpha", dry_run=True)
+        task = tasks.load_task(self.config, "T1")
+        with self.assertRaisesRegex(DyroError, "原因"):
+            tasks.abandon_task(self.config, task, "  ")
+        with self.assertRaisesRegex(DyroError, "task abandon"):
+            tasks.set_status(self.config, task, "abandoned", force=True)
+        tasks.abandon_task(self.config, task, "merged by hand into the line")
+        self.assertEqual(tasks.status(self.config, task), "abandoned")
+        with self.assertRaisesRegex(DyroError, "拒绝状态跳转"):
+            tasks.set_status(self.config, task, "assigned")
+        mount = tasks.worktree_root(self.config, task) / self.config.repositories["api"].mount
+        mount.mkdir(parents=True)
+        with self.assertRaisesRegex(DyroError, "任务 worktree 仍在.*T1.*task close"):
+            line_retire.retire_line(self.config, "alpha", dry_run=True)
+        mount.rmdir()
+        self.assertEqual(line_retire.retire_line(self.config, "alpha")["phase"], "completed")
+        self.assertEqual([item.id for item in tasks.list_tasks(self.config)], ["T1"])
+        ledger = self.config.ledger_file.read_text()
+        self.assertIn('"phase": "abandoned"', ledger)
+        self.assertIn("merged by hand", ledger)
+
+    def test_reparent_detach_unblocks_parent_retire(self) -> None:
+        child = workspace.spawn_line(self.config, "alpha", "child")
+        with self.assertRaisesRegex(DyroError, "直接子线.*line reparent"):
+            line_retire.retire_line(self.config, "alpha", dry_run=True)
+        with self.assertRaisesRegex(DyroError, "成环"):
+            workspace.reparent_line(self.config, "alpha", child.id)
+        with self.assertRaisesRegex(DyroError, "已是"):
+            workspace.reparent_line(self.config, child.id, "alpha")
+        workspace.create_line(self.config, line_id="beta", branch="feat/beta", base="main")
+        self.assertEqual(workspace.reparent_line(self.config, child.id, "beta").parent, "beta")
+        self.assertEqual(workspace.reparent_line(self.config, child.id, "").parent, "")
+        self.assertEqual(workspace.get_line(self.config, child.id).parent, "")
+        rows, _ = events.read_events(self.config)
+        self.assertEqual([row["facts"] for row in rows if row["kind"] == "reparent"],
+                         [{"from_parent": "alpha", "to_parent": "beta"}, {"from_parent": "beta"}])
+        self.assertEqual(line_retire.retire_line(self.config, "alpha")["phase"], "completed")
+
+    def test_pinned_base_sha_is_skipped_and_mainline_refs_prove_integration(self) -> None:
+        workspace._write_line(self.config, replace(self.line, base=self.sha))
+        head = self._commit(self.path)
+        shell("git", "update-ref", "refs/remotes/origin/feat/alpha", head, cwd=self.anchor)
+        with self.assertRaisesRegex(DyroError, rf"HEAD={head[:12]}.*已推送但未合入") as raised:
+            line_retire.retire_line(self.config, "alpha", dry_run=True)
+        self.assertNotIn(self.sha, str(raised.exception))
+        shell("git", "update-ref", "refs/remotes/origin/release", head, cwd=self.anchor)
+        plan = line_retire.retire_line(self.config, "alpha", dry_run=True)
+        self.assertEqual(plan["repositories"]["api"]["integration_ref"], "origin/release")
+
+    def test_archive_to_saves_dirty_work_and_extras_then_removes_shell(self) -> None:
+        root = workspace.line_root(self.config, self.line)
+        self.assertTrue((root / "CLAUDE.md").is_file())
+        # User diff config must not empty or colour the archived patch.
+        shell("git", "config", "diff.external", "/usr/bin/true", cwd=self.anchor)
+        shell("git", "config", "color.diff", "always", cwd=self.anchor)
+        (self.path / "README.md").write_text("edited\n")
+        (self.path / "scratch.txt").write_text("untracked\n")
+        (self.path / ".venv").symlink_to("/nonexistent/venv")
+        (root / "notes.md").write_text("keep me\n")
+        (root / "_workspace").mkdir()
+        (root / "_workspace/report.md").write_text("report\n")
+        with self.assertRaisesRegex(DyroError, "不干净.*--archive-to"):
+            line_retire.retire_line(self.config, "alpha", dry_run=True)
+        archive = self.root.parent / f"{self.root.name}-archive"
+        plan = line_retire.retire_line(self.config, "alpha", dry_run=True, archive_to=archive)
+        self.assertEqual(plan["dirty"], ["api"])
+        self.assertEqual(sorted(Path(entry).name for entry in plan["extras"]), ["_workspace", "notes.md"])
+        self.assertFalse(archive.exists())
+        with self.assertRaisesRegex(DyroError, "线根目录内"):
+            line_retire.retire_line(self.config, "alpha", archive_to=root / "archive")
+        with self.assertRaisesRegex(DyroError, "不能与 --recover"):
+            line_retire.retire_line(self.config, "alpha", recover="", archive_to=archive)
+        op = line_retire.retire_line(self.config, "alpha", archive_to=archive)
+        self.assertEqual(op["phase"], "completed")
+        self.assertEqual(op["line_root_remaining"], [])
+        self.assertFalse(root.exists())
+        saved = archive / "alpha"
+        patch_text = (saved / "uncommitted/api/changes.patch").read_text()
+        self.assertIn("+edited", patch_text)
+        self.assertNotIn("\x1b[", patch_text)
+        self.assertEqual((saved / "uncommitted/api/untracked/scratch.txt").read_text(), "untracked\n")
+        self.assertTrue((saved / "uncommitted/api/untracked/.venv").is_symlink())
+        self.assertEqual((saved / "notes.md").read_text(), "keep me\n")
+        self.assertTrue((saved / "_workspace/report.md").is_file())
+
+    def test_archive_refuses_untracked_nested_repo_without_partial_copy(self) -> None:
+        nested = self.path / "nested"
+        nested.mkdir()
+        shell("git", "init", "-q", cwd=nested)
+        (nested / "inner.txt").write_text("inner\n")
+        target = self.root.parent / f"{self.root.name}-nested-archive"
+        with self.assertRaisesRegex(DyroError, "嵌套仓库.*nested"):
+            line_retire.archive_worktree_changes(self.path, target)
+        self.assertFalse(target.exists())
+        self.assertFalse(target.with_name(target.name + ".partial").exists())
+        self.assertTrue((nested / "inner.txt").is_file())
+
+    def test_retire_without_archive_keeps_line_root_with_extras(self) -> None:
+        root = workspace.line_root(self.config, self.line)
+        (root / "notes.md").write_text("keep me\n")
+        op = line_retire.retire_line(self.config, "alpha")
+        self.assertEqual(op["line_root_remaining"], ["notes.md"])
+        self.assertEqual((root / "notes.md").read_text(), "keep me\n")
+        self.assertTrue((root / "CLAUDE.md").is_file())
+
     def test_cli_flags_and_dry_run_plan(self) -> None:
         parser = build_parser()
         args = parser.parse_args(["line", "retire", "alpha", "--dry-run", "--keep-branch"])

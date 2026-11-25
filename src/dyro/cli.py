@@ -217,6 +217,7 @@ from .tasks import (
     import_review_evidence,
     list_tasks,
     load_task,
+    abandon_task,
     close_task,
     loop_tasks,
     merge_task,
@@ -265,6 +266,7 @@ from .workspace import (
     merge_line_from,
     merge_line_into_base,
     push_line,
+    reparent_line,
     observation_timeout_row,
     recover_line_merge,
     spawn_line,
@@ -3147,6 +3149,13 @@ def cmd_line_add_repo(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_line_reparent(args: argparse.Namespace) -> None:
+    config = _config(args)
+    _require_yes(args, "修改开发线父线")
+    line = reparent_line(config, args.line, "" if args.detach else args.parent, dry_run=args.dry_run)
+    print(f"{'DRY RUN: ' if args.dry_run else ''}开发线 {line.id} 的父线 -> {line.parent or '（无）'}")
+
+
 def cmd_line_push(args: argparse.Namespace) -> None:
     config = _config(args)
     _require_yes(args, "推送开发线分支")
@@ -3353,6 +3362,7 @@ def cmd_line_retire(args: argparse.Namespace) -> None:
         keep_branch=args.keep_branch, force=args.force,
         integration_ref=args.integration_ref, missing_ok=args.missing_ok,
         recover=args.recover,
+        archive_to=Path(args.archive_to).expanduser().absolute() if args.archive_to else None,
     )
     if args.dry_run:
         options = result["effective_options"]
@@ -3361,9 +3371,19 @@ def cmd_line_retire(args: argparse.Namespace) -> None:
         )
         print(f"DRY RUN: 退役 {args.id}；只读预检，逐仓保全 → 移除 → {branch_action}")
         for repo_id, snapshot in result["repositories"].items():
-            print(f"{repo_id}: {snapshot['path']}，集成目标 {snapshot['integration_ref']}")
+            note = "，有未提交改动（将存档）" if repo_id in result["dirty"] else ""
+            print(f"{repo_id}: {snapshot['path']}，集成目标 {snapshot['integration_ref']}{note}")
+        if result["extras"]:
+            action = "将移入 --archive-to 目录" if args.archive_to else "退役后会留在原地；可加 --archive-to <目录>"
+            print(f"线根目录非仓库条目（{action}）：")
+            for entry in result["extras"]:
+                print(f"  {entry}")
     else:
+        for row in result.get("archived", []):
+            print(f"已存档 {row}")
         print(f"已退役 {args.id}；操作 {result['op_id']} ({result['phase']})")
+        if result.get("line_root_remaining"):
+            print("线根目录仍有非仓库条目，未删除：" + "、".join(result["line_root_remaining"]))
 
 
 def cmd_line_post(args: argparse.Namespace) -> None:
@@ -4113,11 +4133,20 @@ def cmd_task_merge(args: argparse.Namespace) -> None:
         print(f"已合并 {task.id}" + (" 并推送" if args.push else ""))
 
 
+def cmd_task_abandon(args: argparse.Namespace) -> None:
+    config = _config(args)
+    task = load_task(config, args.id)
+    abandon_task(config, task, args.reason, dry_run=args.dry_run)
+    print(f"{'DRY RUN: ' if args.dry_run else ''}{task.id} -> abandoned")
+
+
 def cmd_task_close(args: argparse.Namespace) -> None:
     _require_yes(args, "关闭任务")
     config = _config(args)
     task = load_task(config, args.id)
-    close_task(config, task, dry_run=args.dry_run)
+    archive_to = Path(args.archive_to).expanduser().absolute() if args.archive_to else None
+    for row in close_task(config, task, dry_run=args.dry_run, archive_to=archive_to):
+        print(row)
     print(
         f"{'DRY RUN: 将关闭' if args.dry_run else '已关闭'} {task.id} 的任务 worktree"
     )
@@ -5516,6 +5545,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     line_add_repo.add_argument("--yes", action="store_true")
     line_add_repo.set_defaults(func=cmd_line_add_repo)
+    line_reparent = line_sub.add_parser(
+        "reparent", help="把开发线改挂到另一条父线，或解除父线（只改清单，不动分支与 worktree）"
+    )
+    line_reparent.add_argument("line", help="开发线 ID")
+    target = line_reparent.add_mutually_exclusive_group(required=True)
+    target.add_argument("--parent", help="新的父线 ID")
+    target.add_argument("--detach", action="store_true", help="解除父线，成为顶层线")
+    line_reparent.add_argument("--dry-run", dest="dry_run", action="store_true",
+                               default=argparse.SUPPRESS, help="只校验，不改清单（兼容全局 --dry-run）")
+    line_reparent.add_argument("--yes", action="store_true")
+    line_reparent.set_defaults(func=cmd_line_reparent)
     line_push = line_sub.add_parser(
         "push",
         help="把开发线分支推到 origin 并设置上游（只推已提交内容；需 policy.allow_push）",
@@ -5717,6 +5757,8 @@ def build_parser() -> argparse.ArgumentParser:
     line_retire.add_argument("--integration-ref", default=None)
     line_retire.add_argument("--missing-ok", action="store_true", default=None)
     line_retire.add_argument("--recover", nargs="?", const="", default=None, metavar="OP_ID")
+    line_retire.add_argument("--archive-to", metavar="DIR", default=None,
+                             help="退役前把各仓未提交改动与线根目录非仓库条目移入 DIR/<线>/")
     line_retire.add_argument("--yes", action="store_true")
     line_retire.set_defaults(func=cmd_line_retire)
     line_inbox.add_argument("--line", help="查看指定线的频道历史；退役线从墓碑读取")
@@ -6188,9 +6230,19 @@ def build_parser() -> argparse.ArgumentParser:
     task_merge.add_argument("--yes", action="store_true")
     task_merge.add_argument("--push", action="store_true")
     task_merge.set_defaults(func=cmd_task_merge)
-    task_close = task_sub.add_parser("close", help="移除已完成或失败任务的 worktree 与任务分支")
+    task_abandon = task_sub.add_parser(
+        "abandon", help="把不再继续的 failed/backlog 任务标记为 abandoned（终态，不再阻塞线退役）"
+    )
+    task_abandon.add_argument("id")
+    task_abandon.add_argument("--reason", required=True)
+    task_abandon.set_defaults(func=cmd_task_abandon)
+    task_close = task_sub.add_parser(
+        "close", help="移除 done/failed/abandoned 任务的 worktree 与任务分支；未合入分支保全到 refs/dyro/closed/"
+    )
     task_close.add_argument("id")
     task_close.add_argument("--yes", action="store_true")
+    task_close.add_argument("--archive-to", metavar="DIR", default=None,
+                            help="先把未提交改动与未跟踪文件存档到 DIR/<任务>/<仓>/ 再移除")
     task_close.set_defaults(func=cmd_task_close)
     task_sub.add_parser("decisions").set_defaults(func=cmd_task_decisions)
     task_sub.add_parser("stats").set_defaults(func=cmd_task_stats)

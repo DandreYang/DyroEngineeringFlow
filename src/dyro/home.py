@@ -952,7 +952,12 @@ def _targets(config: Config, record: WorkspaceRecord | None) -> list[HomeTarget]
             "task", task.id, f"继续任务：{task.id} [{task_status(config, task)}]"
         )
         for task in list_tasks(config)
-        if worktree_root(config, task).is_dir()
+        # `task close` leaves the root (receipts, logs); only live repo worktrees count.
+        if any(
+            (worktree_root(config, task) / config.repositories[repo_id].mount).is_dir()
+            for repo_id in task.repositories
+        )
+        and task_status(config, task) != "abandoned"
     )
     if record and record.last_kind and record.last_target:
         for index, target in enumerate(targets):

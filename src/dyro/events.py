@@ -32,6 +32,7 @@ EVENT_KINDS = frozenset(
         "merge_cross",
         "sync",
         "retire",
+        "reparent",
         "task_status",
         "objective_wave",
         "dispatch",

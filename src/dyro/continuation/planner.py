@@ -372,10 +372,11 @@ def build_continuation_plan(snapshot: SchedulerSnapshot) -> ContinuationPlan:
                     reason=ReasonCode.ANSWER_REQUIRED,
                 )
             )
-        elif item.status == "failed":
+        elif item.status in ("failed", "abandoned"):
+            # An abandoned target can never become done: the user must re-scope the objective.
             attention.append(
                 AttentionItem(
-                    id=f"failed:{task_id}",
+                    id=f"{item.status}:{task_id}",
                     kind=AttentionKind.NEEDS_USER,
                     subject_id=task_id,
                     reason=ReasonCode.TASK_FAILED,
